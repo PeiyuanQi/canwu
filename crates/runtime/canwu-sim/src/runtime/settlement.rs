@@ -423,6 +423,7 @@ impl Simulation {
                         runtime: &self.state,
                     },
                     state_owners: &state_owners,
+                    record_schemas: &record_schemas,
                     reader: Some(&reader),
                     allowed_reads: Some(&registered.contract.reads),
                     allowed_ingress: Some(&admitted_ingress_index),

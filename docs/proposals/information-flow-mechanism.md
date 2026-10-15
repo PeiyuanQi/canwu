@@ -2037,8 +2037,12 @@ command/packet/record kind against the exact selector.
 
 The grant's `claim_path` is one to eight canonical non-empty object keys; array
 indexes, escapes, wildcards, and missing/intermediate non-object values are
-invalid. The resolver follows that path in the persisted command, ingress, or
-domain-record payload and decodes exactly `DelegationClaimV1`. It requires
+invalid. The resolver follows that path in the persisted ingress or
+domain-record payload and decodes exactly `DelegationClaimV1`. For a command
+grant, the lifecycle system follows the path when the command is admitted and
+keeps the claim in a create-only `DelegatedAuthority` record; the resolver reads
+that record, so a seal that archives the command changes nothing (0.16.0, see
+[law, information, and military correctness](law-information-military-correctness.md)). It requires
 `format_version == 1`, exact equality between claim and Interpretation
 `performed_by`/`performed_for`, a sorted unique capability list containing the
 interpretation's capability, and `interpreted_at` within the half-open interval
@@ -2245,19 +2249,29 @@ The state machine is authoritative:
 - the publication batch carries the operation record/version in audit origin;
 - the publication batch carries the canonical operation ID as its audit-only
   `producer_correlation`;
-- InformationPlugin schedules a zero-delay self-ingress for the next admission
-  cut; its next phase-7 run resolves the prior boundary's unique producer
-  correlation to a `BoundaryKnowledgeChange`, writes that change's exact global
-  IDs into `publication_result_ids`, clears continuation state, and marks the
-  operation `Completed`;
+- InformationPlugin schedules a zero-delay internal self-ingress for the next
+  admission cut naming the published chunk; its next phase-7 run finds each
+  publication's record as the newest current record of its holder, kind, and
+  subjects (`knowledge_heads`, committed state; each is published at most once
+  per boundary), writes those global IDs into `publication_result_ids`, clears
+  continuation state, and marks the operation `Completed` (0.16.0; 0.15.0 read
+  the prior boundary's `BoundaryKnowledgeChange` from retained evidence);
 - a phase-4 publication is allowed only for an operation or admitted result
   that does not depend on same-boundary phase-7 output. The first information
   extension milestone uses phase 13 for domain-backed operations.
 
 An exact retry compares the canonical input hash before any mutation. It
 returns the stored operation reference, status, domain result references, and
-available publication IDs. A conflicting retry fails with
-`IdempotencyConflict`. Retrying an in-progress operation does not schedule a
+available publication IDs. A conflicting retry is refused with an
+`IdempotencyConflict` rejection event; when one boundary admits several inputs
+for one operation ID, the input matching the persisted operation is kept, so a
+conflicting packet cannot displace the operation's own progress (0.16.0). A
+record that names a holder of a kind that holds no knowledge (organization,
+resource, route, territory) is refused when it is created, and a publication to
+a holder the engine does not accept when it is published (a dead or unknown
+person, a missing army or government, a retired or deleted domain entity) is
+left unpublished instead of failing the boundary (0.16.0, see
+[law, information, and military correctness](law-information-military-correctness.md)). Retrying an in-progress operation does not schedule a
 second continuation. A rejected operation is terminal and replayable. An
 unexpected internal failure rolls the whole boundary back; it does not persist
 a partial operation transition.

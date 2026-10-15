@@ -71,6 +71,101 @@ pub struct LegalBoundaryResult {
     pub applied_versions: Vec<String>,
     pub refreshed_effects: usize,
     pub emitted_outbox: Vec<LegalDecisionOutboxItem>,
+    /// Pending proposals rejected because their adoption guard can never hold
+    /// or their adoption would exceed a lifetime budget of the plan.
+    pub rejected_proposals: Vec<LegalProposalRejection>,
+    /// Whether work past the per-boundary budgets is still pending, so a
+    /// later boundary at the same time should settle it.
+    pub deferred: bool,
+}
+
+/// A pending proposal settlement rejected because its adoption guard can
+/// never hold or its adoption would exceed a lifetime budget of the plan.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LegalProposalRejection {
+    /// ID of the rejected proposal.
+    pub proposal: String,
+    /// Why it can never be adopted.
+    pub reason: String,
+}
+
+/// The legal work one boundary settles; see `LegalRuntime::select_boundary_work`.
+#[derive(Default)]
+struct BoundaryWork {
+    procedures: BTreeSet<String>,
+    intents: BTreeSet<String>,
+    versions: Vec<LegalRecordRef>,
+    growth: usize,
+    mutations: usize,
+    deferred: bool,
+}
+
+impl BoundaryWork {
+    fn take(&mut self, mutations: usize, growth: usize) -> Result<(), CanwuError> {
+        self.mutations = self.mutations.saturating_add(mutations);
+        self.growth = self
+            .growth
+            .checked_add(growth)
+            .ok_or_else(|| invalid("legal serialized-state accounting overflowed"))?;
+        Ok(())
+    }
+}
+
+/// Whether one unit of settlement work fits this boundary.
+enum WorkFit {
+    Take,
+    /// Past the per-boundary mutation budget: a later boundary settles it.
+    Budget,
+    /// Its serialized-state growth does not fit: it waits for freed state.
+    State,
+}
+
+/// What settling one procedure this boundary changes.
+#[derive(Default)]
+struct ProcedureProjection {
+    mutations: usize,
+    growth: usize,
+    adoption: Option<String>,
+}
+
+/// Adoptions a boundary has already chosen, for the lifetime adoption budgets.
+#[derive(Default)]
+struct AdoptionCounts {
+    adoptions: usize,
+    new_rules: BTreeSet<String>,
+}
+
+impl AdoptionCounts {
+    fn fits(&self, runtime: &LegalRuntime, plan: &CompiledLawPlan, rule_id: &str) -> bool {
+        runtime.sources.len().saturating_add(self.adoptions) < plan.budgets.max_sources
+            && runtime.law_versions.len().saturating_add(self.adoptions)
+                < plan.budgets.max_law_versions
+            && (runtime.rules.contains_key(rule_id)
+                || self.new_rules.contains(rule_id)
+                || runtime.rules.len().saturating_add(self.new_rules.len())
+                    < plan.budgets.max_rules)
+    }
+
+    fn record(&mut self, rule_id: String, new_rule: bool) {
+        self.adoptions += 1;
+        if new_rule {
+            self.new_rules.insert(rule_id);
+        }
+    }
+}
+
+/// How a passed final stage's adoption guards stand at one boundary.
+enum AdoptionGuard {
+    Ready,
+    Wait,
+    Reject(&'static str),
+}
+
+/// What advancing one procedure did.
+enum ProcedureAdvance {
+    Adopted,
+    Rejected(&'static str),
+    Other,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -226,6 +321,12 @@ pub struct LegalRuntime {
     /// compaction metadata and is validated as part of cold restore.
     #[serde(default)]
     pub storage: LegalStorageState,
+    /// The legal provider index: compiled provider packets recorded when their
+    /// boundary admitted them, by ingress ID, at most `max_provider_packets`;
+    /// the lowest ingress ID is forgotten first. Each is an identity-evidence
+    /// dependency while it is recorded.
+    #[serde(default)]
+    pub provider_packets: BTreeMap<canwu_api::IngressId, LegalProviderPacket>,
 }
 
 struct LegalPersistenceImage {
@@ -676,6 +777,7 @@ impl LegalRuntime {
             archived_dependency_versions: BTreeSet::new(),
             compacted_succession_versions: BTreeSet::new(),
             storage: LegalStorageState::default(),
+            provider_packets: BTreeMap::new(),
         };
         let initial = state.persisted_payload_len().unwrap_or(usize::MAX);
         state.reserved_state_bytes = initial.saturating_add(256);
@@ -963,6 +1065,7 @@ impl LegalRuntime {
             || self.law_versions.len() > plan.budgets.max_law_versions
             || self.pending_intents.len() > plan.budgets.max_pending_intents
             || self.outbox.len() > plan.budgets.max_outbox
+            || self.provider_packets.len() > plan.budgets.max_provider_packets
             || self.reserved_state_bytes > plan.budgets.max_state_bytes
             || self.reserved_state_bytes > plan.budgets.max_memory_bytes
         {
@@ -1049,6 +1152,7 @@ impl LegalRuntime {
             || self.outbox.len() > plan.budgets.max_outbox
             || self.pending_intents.len() > plan.budgets.max_pending_intents
             || self.law_versions.len() > plan.budgets.max_law_versions
+            || self.provider_packets.len() > plan.budgets.max_provider_packets
             || self.scheduled_wakes.len()
                 > plan
                     .budgets
@@ -2517,12 +2621,13 @@ impl LegalRuntime {
         proposal.active_procedure = Some(procedure_id.clone());
         let proposal_dependencies = Self::proposal_identity_evidence_dependencies(&proposal);
         let procedure_dependencies = instance.evidence.iter().cloned().collect();
+        let expiry = procedure_expiry_time(instance.deadline)?;
         self.reserve_state_growth(Self::encoded_growth(&(&proposal, &instance), 8)?)?;
         self.proposals.insert(proposal.id.clone(), proposal);
         self.open_procedures.insert(procedure_id.clone());
         self.dirty_procedures.insert(procedure_id.clone());
         self.procedures_by_deadline
-            .entry(procedure_expiry_time(instance.deadline)?)
+            .entry(expiry)
             .or_default()
             .insert(procedure_id.clone());
         self.procedures.insert(procedure_id, instance);
@@ -3070,11 +3175,22 @@ impl LegalRuntime {
         intent: PendingLegalIntent,
     ) -> Result<(), CanwuError> {
         validate_runtime_text_budget(&intent, self.budgets.max_text_bytes)?;
+        if self.consumed_intent_ids.contains(&intent.id) {
+            return Ok(());
+        }
         if self.pending_intents.len() >= self.budgets.max_pending_intents {
             return Err(invalid("pending legal intent budget exhausted"));
         }
-        if self.consumed_intent_ids.contains(&intent.id) {
-            return Ok(());
+        // Each pending intent settles as one participation or one outcome, so
+        // an intent is admitted only while both lifetime budgets can take every
+        // pending intent; settlement then never exceeds them.
+        let pending = self.pending_intents.len().saturating_add(1);
+        if self.participations.len().saturating_add(pending) > self.budgets.max_participations
+            || self.intent_outcomes.len().saturating_add(pending) > self.budgets.max_intent_outcomes
+        {
+            return Err(invalid(
+                "legal participation or intent-outcome budget is full",
+            ));
         }
         if self.pending_intents.contains_key(&intent.id) {
             return Err(invalid("duplicate pending legal intent"));
@@ -3397,26 +3513,33 @@ impl LegalRuntime {
     /// Consumes snapshot-visible intents, advances procedures, adopts laws, applies
     /// due versions, and refreshes sparse applicability results.
     ///
-    /// All fallible capacity and reference checks run before mutation. The hot path
-    /// visits bounded active indexes and never clones or validates historical state.
+    /// A boundary settles at most `max_mutations_per_boundary` units of work,
+    /// chosen in a fixed order: pending intents whose procedure is not worked
+    /// on, procedures due for work by ID (each with its pending intents), due
+    /// law versions by effective time and ordinal, then dirty rules by ID, whose
+    /// applicability refresh is also held to
+    /// `max_applicability_entries_per_boundary`. Work past the budget stays
+    /// pending and [`LegalBoundaryResult::deferred`] is set, so the host settles
+    /// it at a later boundary (the law plugin schedules one at once). The first
+    /// unit of each kind always settles, so every boundary makes progress, and a
+    /// boundary exceeds the budget by at most one unit of each kind. A unit
+    /// whose serialized-state growth does not fit the state budget waits
+    /// without `deferred`: only freed state (archive compaction) lets it settle.
+    ///
+    /// Lifetime budgets never fail settlement: a passed proposal whose adoption
+    /// would exceed the source, law-version, or rule budget is rejected, a
+    /// passed proposal whose adoption guard can never hold is rejected, and the
+    /// outbox stops growing while it or its ID blocks are full. All fallible
+    /// reference checks run before mutation; a failure afterwards is a broken
+    /// invariant.
     pub fn settle_boundary(
         &mut self,
         plan: &CompiledLawPlan,
         at: SimTime,
         signals: &[LegalSignal],
     ) -> Result<LegalBoundaryResult, CanwuError> {
-        let mut procedure_ids = self.procedures_due_for_work(at);
-        for signal in signals {
-            if let Some(procedure) = self
-                .proposals
-                .get(&signal.proposal_id)
-                .and_then(|proposal| proposal.active_procedure.as_ref())
-            {
-                procedure_ids.insert(procedure.clone());
-            }
-        }
-        let reserved_growth = self.preflight_boundary(plan, at, signals, &procedure_ids)?;
-        self.reserve_state_growth(reserved_growth)?;
+        let work = self.select_boundary_work(plan, at, signals)?;
+        self.reserve_state_growth(work.growth)?;
         self.boundary_index = self
             .boundary_index
             .checked_add(1)
@@ -3435,7 +3558,7 @@ impl LegalRuntime {
                 .insert(signal.kind.clone());
         }
         for (proposal_id, evidence) in evidence_by_proposal {
-            let added_dependencies = {
+            let (added_dependencies, procedure) = {
                 let proposal = self
                     .proposals
                     .get_mut(&proposal_id)
@@ -3451,25 +3574,31 @@ impl LegalRuntime {
                 proposal
                     .admitted_signal_kinds
                     .extend(kinds_by_proposal.remove(&proposal_id).unwrap_or_default());
-                if let Some(procedure) = &proposal.active_procedure {
-                    procedure_ids.insert(procedure.clone());
-                }
                 if proposal.status == ProposalStatus::Submitted {
                     proposal.status = ProposalStatus::Deliberating;
                 }
-                added
+                (added, proposal.active_procedure.clone())
             };
+            // A signalled procedure this boundary does not reach stays due.
+            if let Some(procedure) = procedure
+                && self.open_procedures.contains(&procedure)
+            {
+                self.dirty_procedures.insert(procedure);
+            }
             self.add_identity_evidence_component(added_dependencies)?;
         }
         let mut outcomes = Vec::new();
-        let intents = self.pending_intents.values().cloned().collect::<Vec<_>>();
-        for intent in intents {
+        for intent_id in &work.intents {
+            let Some(intent) = self.pending_intents.get(intent_id).cloned() else {
+                continue;
+            };
             if let Some(outcome) = self.apply_intent(plan, &intent) {
                 outcomes.push(outcome);
             }
         }
         let mut adopted = Vec::new();
-        for id in &procedure_ids {
+        let mut rejected_proposals = Vec::new();
+        for id in &work.procedures {
             let deadline = self.procedures.get(id).map(|procedure| procedure.deadline);
             if deadline.is_some_and(|deadline| at > deadline) {
                 let consultation = self
@@ -3481,22 +3610,41 @@ impl LegalRuntime {
                     .unwrap_or(false);
                 if consultation {
                     self.complete_consultation_stage(id, at)?;
-                } else {
+                } else if self
+                    .procedures
+                    .get(id)
+                    .is_some_and(|procedure| !procedure.closed)
+                {
                     self.expire_procedure(id, at)?;
                 }
                 continue;
             }
-            if self.advance_procedure(plan, id, at)? {
-                if let Some(procedure) = self.procedures.get(id) {
-                    adopted.push(procedure.proposal.id.clone());
+            match self.advance_procedure(plan, id, at)? {
+                ProcedureAdvance::Adopted => {
+                    if let Some(procedure) = self.procedures.get(id) {
+                        adopted.push(procedure.proposal.id.clone());
+                    }
                 }
+                ProcedureAdvance::Rejected(reason) => {
+                    if let Some(procedure) = self.procedures.get(id) {
+                        rejected_proposals.push(LegalProposalRejection {
+                            proposal: procedure.proposal.id.clone(),
+                            reason: reason.to_owned(),
+                        });
+                    }
+                }
+                ProcedureAdvance::Other => {}
             }
         }
-        let applied = self.apply_scheduled_versions(at)?;
-        let emitted = self.materialize_outbox(plan, at, &procedure_ids)?;
-        self.prune_staged_actor_contexts(&procedure_ids);
-        let refreshed = self.refresh_applicability(at)?;
-        for procedure in &procedure_ids {
+        let applied = self.apply_scheduled_versions(&work.versions)?;
+        let emitted = self.materialize_outbox(plan, at, &work.procedures)?;
+        self.prune_staged_actor_contexts(&work.procedures);
+        let room = plan
+            .budgets
+            .max_mutations_per_boundary
+            .saturating_sub(work.mutations);
+        let (refreshed, rules_deferred) = self.refresh_applicability(plan, at, room)?;
+        for procedure in &work.procedures {
             self.dirty_procedures.remove(procedure);
         }
         let first_outcome = self.intent_outcomes.len();
@@ -3512,16 +3660,20 @@ impl LegalRuntime {
             applied_versions: applied,
             refreshed_effects: refreshed,
             emitted_outbox: emitted,
+            rejected_proposals,
+            deferred: work.deferred || rules_deferred,
         })
     }
 
-    fn preflight_boundary(
+    /// Chooses the work [`Self::settle_boundary`] settles, without changing
+    /// anything, and the serialized-state growth it reserves for it.
+    #[allow(clippy::too_many_lines)]
+    fn select_boundary_work(
         &self,
         plan: &CompiledLawPlan,
         at: SimTime,
         signals: &[LegalSignal],
-        procedure_ids: &BTreeSet<String>,
-    ) -> Result<usize, CanwuError> {
+    ) -> Result<BoundaryWork, CanwuError> {
         if self.plan_hash != plan.content_hash {
             return Err(invalid("legal runtime plan hash mismatch"));
         }
@@ -3531,403 +3683,450 @@ impl LegalRuntime {
         self.boundary_index
             .checked_add(1)
             .ok_or_else(|| invalid("legal boundary index overflowed"))?;
-        let mut reserved_growth = if signals.is_empty() {
-            0
-        } else {
-            Self::encoded_growth(signals, 4)?
-        };
-
-        let mut evidence_counts = BTreeMap::<&str, BTreeSet<EvidenceRef>>::new();
-        validate_runtime_text_budget(signals, plan.budgets.max_text_bytes)?;
-        for signal in signals {
-            if signal.kind.is_empty() || signal.evidence.is_empty() {
-                return Err(invalid(
-                    "legal signals require a non-empty kind and exact evidence",
-                ));
+        let budget = plan.budgets.max_mutations_per_boundary;
+        let mut work = BoundaryWork::default();
+        let mut candidates = self.procedures_due_for_work(at);
+        let mut signal_kinds = BTreeMap::<&str, BTreeSet<&str>>::new();
+        if !signals.is_empty() {
+            work.growth = Self::encoded_growth(signals, 4)?;
+            let mut evidence_counts = BTreeMap::<&str, BTreeSet<EvidenceRef>>::new();
+            validate_runtime_text_budget(signals, plan.budgets.max_text_bytes)?;
+            for signal in signals {
+                if signal.kind.is_empty() || signal.evidence.is_empty() {
+                    return Err(invalid(
+                        "legal signals require a non-empty kind and exact evidence",
+                    ));
+                }
+                let proposal = self
+                    .proposals
+                    .get(&signal.proposal_id)
+                    .ok_or_else(|| invalid("legal signal references an unknown proposal"))?;
+                let values = evidence_counts
+                    .entry(signal.proposal_id.as_str())
+                    .or_insert_with(|| proposal.evidence.iter().cloned().collect());
+                values.extend(signal.evidence.iter().cloned());
+                if values.len() > plan.budgets.max_evidence_per_record {
+                    return Err(invalid("legal proposal evidence budget exhausted"));
+                }
+                signal_kinds
+                    .entry(signal.proposal_id.as_str())
+                    .or_default()
+                    .insert(signal.kind.as_str());
+                if let Some(procedure) = &proposal.active_procedure {
+                    candidates.insert(procedure.clone());
+                }
             }
-            let proposal = self
-                .proposals
-                .get(&signal.proposal_id)
-                .ok_or_else(|| invalid("legal signal references an unknown proposal"))?;
-            let values = evidence_counts
-                .entry(signal.proposal_id.as_str())
-                .or_insert_with(|| proposal.evidence.iter().cloned().collect());
-            values.extend(signal.evidence.iter().cloned());
-            if values.len() > plan.budgets.max_evidence_per_record {
-                return Err(invalid("legal proposal evidence budget exhausted"));
-            }
+            work.mutations = evidence_counts.len();
         }
-        let mut possible_adoptions = BTreeSet::new();
-        let mut possible_new_rules = BTreeSet::new();
-        let mut possible_outbox = 0usize;
-        let mut possible_procedure_mutations = 0usize;
-        let mut accepted_intents = 0usize;
-        let mut rejected_intents = 0usize;
-        let mut projected_participations = BTreeSet::<String>::new();
-        let mut accepted_by_procedure = BTreeMap::<&str, Vec<&PendingLegalIntent>>::new();
+        let mut grouped = BTreeMap::<&str, Vec<&PendingLegalIntent>>::new();
+        let mut orphans = Vec::new();
         for intent in self.pending_intents.values() {
-            reserved_growth = reserved_growth
-                .checked_add(Self::encoded_growth(intent, 8)?)
-                .ok_or_else(|| invalid("legal serialized-state accounting overflowed"))?;
-            let accepted = self.validate_intent_binding(intent).is_ok()
-                && intent.admitted_at <= at
-                && self
-                    .procedures
-                    .get(&intent.procedure.id)
-                    .is_some_and(|procedure| {
-                        let Some(stage) = procedure.stages.get(procedure.active_stage) else {
-                            return false;
-                        };
-                        let key = participation_key(
-                            &procedure.id,
-                            &stage.id,
-                            procedure.round,
-                            &intent.seat,
-                        );
-                        at <= procedure.deadline
-                            && stage.seats.contains(&intent.seat)
-                            && (stage.allow_replacement
-                                || (!self.latest_participation_by_key.contains_key(&key)
-                                    && !projected_participations.contains(&key)))
-                    });
-            if accepted {
-                let procedure = &self.procedures[&intent.procedure.id];
-                let stage = &procedure.stages[procedure.active_stage];
-                projected_participations.insert(participation_key(
-                    &procedure.id,
-                    &stage.id,
-                    procedure.round,
-                    &intent.seat,
-                ));
-                accepted_intents += 1;
-                accepted_by_procedure
+            if candidates.contains(&intent.procedure.id) {
+                grouped
                     .entry(intent.procedure.id.as_str())
                     .or_default()
                     .push(intent);
             } else {
-                rejected_intents += 1;
+                orphans.push(intent);
             }
         }
-        if self
-            .participations
-            .len()
-            .checked_add(accepted_intents)
-            .is_none_or(|count| count > plan.budgets.max_participations)
-            || self
-                .intent_outcomes
-                .len()
-                .checked_add(rejected_intents)
-                .is_none_or(|count| count > plan.budgets.max_intent_outcomes)
-        {
-            return Err(invalid("legal intent settlement budget exhausted"));
+
+        // Pending intents whose procedure is not worked on settle as outcomes.
+        let mut first = true;
+        for intent in orphans {
+            let growth = Self::encoded_growth(intent, 8)?;
+            match self.fit_work(&work, budget, 1, growth, first) {
+                WorkFit::Take => {
+                    work.take(1, growth)?;
+                    work.intents.insert(intent.id.clone());
+                    first = false;
+                }
+                WorkFit::Budget => {
+                    work.deferred = true;
+                    break;
+                }
+                WorkFit::State => break,
+            }
         }
-        for procedure_id in procedure_ids {
-            let procedure = self
-                .procedures
-                .get(procedure_id)
-                .ok_or_else(|| invalid("open legal procedure is missing"))?;
-            let stage = procedure
-                .stages
-                .get(procedure.active_stage)
-                .ok_or_else(|| invalid("procedure stage index is invalid"))?;
-            if procedure.active_stage + 1 < procedure.stages.len() {
-                at.checked_add(SimDuration::minutes(
-                    procedure.stages[procedure.active_stage + 1].deadline_minutes,
-                ))
-                .ok_or_else(|| invalid("legal procedure deadline overflowed"))?;
-            }
-            let proposal = self
-                .proposals
-                .get(&procedure.proposal.id)
-                .ok_or_else(|| invalid("procedure proposal is missing"))?;
-            let profile = plan
-                .source_profile_by_id
-                .get(&proposal.source_profile)
-                .and_then(|key| plan.source_profiles.get(key.get() as usize))
-                .ok_or_else(|| invalid("legal source profile is missing"))?;
-            if profile.procedure.as_deref() != Some(proposal.procedure_profile.as_str()) {
-                return Err(invalid(
-                    "legal source profile does not authorize the proposal procedure",
-                ));
-            }
-            canonical_hash("canwu.law.source.v1", &proposal.clauses)?;
-            if !self.procedure_has_capacity(plan, procedure)? {
-                continue;
-            }
-            if let Some(rule) = self.rules.get(&proposal.rule_id) {
-                let latest = rule
-                    .latest_adopted_version
-                    .as_ref()
-                    .ok_or_else(|| invalid("legal rule has no latest adopted version"))?;
-                self.law_versions
-                    .get(&latest.id)
-                    .ok_or_else(|| invalid("latest adopted law version is missing"))?
-                    .legal_ordinal
-                    .checked_add(1)
-                    .ok_or_else(|| invalid("legal version ordinal overflowed"))?;
-            }
-            let mut projected_ballots = BTreeMap::<&str, Ballot>::new();
-            for seat in &stage.seats {
-                let key = participation_key(&procedure.id, &stage.id, procedure.round, seat);
-                if let Some(ballot) = self
-                    .latest_participation_by_key
-                    .get(&key)
-                    .and_then(|index| self.participations.get(*index))
-                    .map(|participation| participation.ballot)
-                {
-                    projected_ballots.insert(seat, ballot);
-                }
-            }
-            for intent in accepted_by_procedure
-                .get(procedure.id.as_str())
-                .into_iter()
-                .flatten()
-            {
-                if stage.allow_replacement {
-                    projected_ballots
-                        .insert(&intent.seat, ballot_for_option(&intent.selected_option));
-                } else {
-                    projected_ballots
-                        .entry(&intent.seat)
-                        .or_insert_with(|| ballot_for_option(&intent.selected_option));
-                }
-            }
-            let StageTally { vetoed, passed } = tally_stage(
-                stage,
-                &compiled_procedure(plan, &procedure.profile)?.deterministic_tie_break,
-                &projected_ballots,
-            );
-            // A consultation completes when its deadline passes, whatever its ballots.
-            let consultation_completes = consultation_deadline_passed(procedure, at);
-            let (projected_stage, projected_round, closes) = if vetoed {
-                possible_procedure_mutations += 1;
-                reserved_growth = reserved_growth
-                    .checked_add(Self::encoded_growth(&(&procedure, proposal), 8)?)
-                    .ok_or_else(|| invalid("legal serialized-state accounting overflowed"))?;
-                (procedure.active_stage, procedure.round, true)
-            } else if passed && procedure.active_stage + 1 == procedure.stages.len() {
-                self.validate_adoption_guards(plan, proposal, at)?;
-                possible_procedure_mutations += 1;
-                reserved_growth = reserved_growth
-                    .checked_add(Self::encoded_growth(&(&procedure, proposal), 24)?)
-                    .ok_or_else(|| invalid("legal serialized-state accounting overflowed"))?;
-                if self.validate_proposal_rule_transition(proposal).is_ok() {
-                    possible_adoptions.insert(procedure.id.as_str());
-                    if !self.rules.contains_key(&proposal.rule_id) {
-                        possible_new_rules.insert(proposal.rule_id.as_str());
+
+        // Procedures due for work, each with its pending intents.
+        let mut adoptions = AdoptionCounts::default();
+        first = true;
+        for procedure_id in &candidates {
+            let intents = grouped
+                .get(procedure_id.as_str())
+                .map_or(&[][..], Vec::as_slice);
+            let projection =
+                self.project_procedure(plan, at, procedure_id, intents, &signal_kinds, &adoptions)?;
+            match self.fit_work(
+                &work,
+                budget,
+                projection.mutations,
+                projection.growth,
+                first,
+            ) {
+                WorkFit::Take => {
+                    work.take(projection.mutations, projection.growth)?;
+                    work.procedures.insert(procedure_id.clone());
+                    work.intents
+                        .extend(intents.iter().map(|intent| intent.id.clone()));
+                    if let Some(rule) = projection.adoption {
+                        let new_rule = !self.rules.contains_key(&rule);
+                        adoptions.record(rule, new_rule);
+                    }
+                    if projection.mutations > 0 {
+                        first = false;
                     }
                 }
-                (procedure.active_stage, procedure.round, true)
-            } else if passed || consultation_completes {
-                possible_procedure_mutations += 1;
-                reserved_growth = reserved_growth
-                    .checked_add(Self::encoded_growth(procedure, 8)?)
-                    .ok_or_else(|| invalid("legal serialized-state accounting overflowed"))?;
-                (
-                    procedure.active_stage + 1,
-                    procedure.round.saturating_add(1),
-                    false,
-                )
-            } else if at > procedure.deadline {
-                possible_procedure_mutations += 1;
-                reserved_growth = reserved_growth
-                    .checked_add(Self::encoded_growth(&(&procedure, proposal), 8)?)
-                    .ok_or_else(|| invalid("legal serialized-state accounting overflowed"))?;
-                (procedure.active_stage, procedure.round, true)
-            } else {
-                (procedure.active_stage, procedure.round, false)
-            };
-            // `materialize_outbox` emits through the deadline minute inclusive.
-            if !closes && at <= procedure.deadline {
-                let projected = &procedure.stages[projected_stage];
-                let missing = projected
-                    .seats
-                    .iter()
-                    .filter(|seat| {
-                        let has_projected_ballot = projected_stage == procedure.active_stage
-                            && projected_ballots.contains_key(seat.as_str());
-                        let key = outbox_key(&procedure.id, projected_stage, projected_round, seat);
-                        !has_projected_ballot
-                            && !self.outbox_keys.contains(&key)
-                            && self.staged_actor_contexts.contains_key(&key)
-                    })
-                    .count();
-                possible_outbox = possible_outbox
-                    .checked_add(missing)
-                    .ok_or_else(|| invalid("legal outbox preflight overflowed"))?;
-                if missing > 0 {
-                    reserved_growth = reserved_growth
-                        .checked_add(
-                            Self::encoded_growth(&(&procedure, proposal), 12)?
-                                .checked_mul(missing)
-                                .ok_or_else(|| {
-                                    invalid("legal serialized-state accounting overflowed")
-                                })?,
-                        )
-                        .ok_or_else(|| invalid("legal serialized-state accounting overflowed"))?;
+                WorkFit::Budget => {
+                    work.deferred = true;
+                    break;
                 }
+                WorkFit::State => break,
             }
         }
-        if self
-            .sources
-            .len()
-            .checked_add(possible_adoptions.len())
-            .is_none_or(|count| count > plan.budgets.max_sources)
-            || self
-                .law_versions
-                .len()
-                .checked_add(possible_adoptions.len())
-                .is_none_or(|count| count > plan.budgets.max_law_versions)
-            || self
-                .rules
-                .len()
-                .checked_add(possible_new_rules.len())
-                .is_none_or(|count| count > plan.budgets.max_rules)
-        {
-            return Err(invalid("legal adoption budget exhausted"));
-        }
-        self.next_source_ordinal
-            .checked_add(possible_adoptions.len() as u64)
-            .ok_or_else(|| invalid("legal source ordinal overflowed"))?;
-        if self
-            .outbox
-            .len()
-            .checked_add(possible_outbox)
-            .is_none_or(|count| count > plan.budgets.max_outbox)
-        {
-            return Err(invalid("legal decision outbox budget exhausted"));
-        }
-        if possible_outbox > 0 {
-            let final_sequence = self
-                .next_outbox_sequence
-                .checked_add(possible_outbox as u64 - 1)
-                .ok_or_else(|| invalid("legal outbox sequence overflowed"))?;
-            allocate_outbox_ids(plan, final_sequence)?;
-        }
-        let due_count = self
-            .scheduled_versions_by_time
-            .range(..=at)
-            .try_fold(0usize, |count, (_, references)| {
-                count.checked_add(references.len())
-            })
-            .ok_or_else(|| invalid("legal due-version count overflowed"))?;
-        let mut projected_applicability_entries = 0usize;
-        let mut applicability_deletion_rules = BTreeSet::new();
-        for procedure_id in &possible_adoptions {
-            let proposal = &self.proposals[&self.procedures[*procedure_id].proposal.id];
-            applicability_deletion_rules.insert(proposal.rule_id.clone());
-            projected_applicability_entries = projected_applicability_entries
-                .checked_add(
-                    proposal
-                        .clauses
-                        .len()
-                        .checked_mul(proposal.jurisdictions.len())
-                        .ok_or_else(|| invalid("legal applicability projection overflowed"))?,
-                )
-                .ok_or_else(|| invalid("legal applicability projection overflowed"))?;
-        }
-        for (effective_at, references) in self.scheduled_versions_by_time.range(..=at) {
-            for reference in references {
-                let version = self
-                    .law_versions
-                    .get(&reference.id)
-                    .ok_or_else(|| invalid("scheduled law version is missing"))?;
+
+        // Due law versions, by effective time, ordinal, and ID.
+        first = true;
+        'versions: for (effective_at, references) in self.scheduled_versions_by_time.range(..=at) {
+            let mut ordered = references
+                .iter()
+                .map(|reference| {
+                    self.law_versions
+                        .get(&reference.id)
+                        .map(|version| (version, reference))
+                        .ok_or_else(|| invalid("scheduled law version is missing"))
+                })
+                .collect::<Result<Vec<_>, CanwuError>>()?;
+            ordered.sort_by(|left, right| {
+                (left.0.legal_ordinal, &left.0.id).cmp(&(right.0.legal_ordinal, &right.0.id))
+            });
+            for (version, reference) in ordered {
                 let rule = self
                     .rules
                     .get(&version.rule)
                     .ok_or_else(|| invalid("scheduled law version has no rule"))?;
-                applicability_deletion_rules.insert(version.rule.clone());
                 if version.effective_at != *effective_at
                     || rule.scheduled_versions.binary_search(reference).is_err()
                 {
                     return Err(invalid("legal effective-time index is inconsistent"));
                 }
-                reserved_growth = reserved_growth
-                    .checked_add(Self::encoded_growth(version, 8)?)
-                    .ok_or_else(|| invalid("legal serialized-state accounting overflowed"))?;
-                reserved_growth = reserved_growth
-                    .checked_add(
-                        version
-                            .deltas
-                            .len()
-                            .checked_mul(version.jurisdictions.len())
-                            .and_then(|count| count.checked_mul(2_048))
-                            .ok_or_else(|| {
-                                invalid("legal serialized-state accounting overflowed")
-                            })?,
-                    )
-                    .ok_or_else(|| invalid("legal serialized-state accounting overflowed"))?;
-                projected_applicability_entries = projected_applicability_entries
-                    .checked_add(
-                        version
-                            .deltas
-                            .len()
-                            .checked_mul(version.jurisdictions.len())
-                            .ok_or_else(|| invalid("legal applicability projection overflowed"))?,
-                    )
-                    .ok_or_else(|| invalid("legal applicability projection overflowed"))?;
+                let growth = Self::encoded_growth(version, 8)?;
+                match self.fit_work(&work, budget, 1, growth, first) {
+                    WorkFit::Take => {
+                        work.take(1, growth)?;
+                        work.versions.push(reference.clone());
+                        first = false;
+                    }
+                    WorkFit::Budget => {
+                        work.deferred = true;
+                        break 'versions;
+                    }
+                    WorkFit::State => break 'versions,
+                }
             }
         }
-        for rule_id in &self.dirty_rules {
-            applicability_deletion_rules.insert(rule_id.clone());
-            let rule = self
-                .rules
-                .get(rule_id)
-                .ok_or_else(|| invalid("dirty legal rule is missing"))?;
-            reserved_growth = reserved_growth
-                .checked_add(Self::encoded_growth(rule, 8)?)
-                .ok_or_else(|| invalid("legal serialized-state accounting overflowed"))?;
-            if let Some(reference) = &rule.operative_version {
-                let version = self
-                    .law_versions
-                    .get(&reference.id)
-                    .ok_or_else(|| invalid("operative law version is missing"))?;
-                let projection_count = version
-                    .deltas
-                    .len()
-                    .checked_mul(version.jurisdictions.len())
-                    .ok_or_else(|| invalid("legal applicability projection overflowed"))?;
-                projected_applicability_entries = projected_applicability_entries
-                    .checked_add(projection_count)
-                    .ok_or_else(|| invalid("legal applicability projection overflowed"))?;
-                reserved_growth =
-                    reserved_growth
-                        .checked_add(projection_count.checked_mul(2_048).ok_or_else(|| {
-                            invalid("legal serialized-state accounting overflowed")
-                        })?)
-                        .ok_or_else(|| invalid("legal serialized-state accounting overflowed"))?;
-            }
-        }
-        let projected_applicability_deletions = applicability_deletion_rules
-            .iter()
-            .try_fold(0usize, |count, rule_id| {
-                count.checked_add(
-                    self.applicability_by_rule
-                        .get(rule_id)
-                        .map_or(0, BTreeSet::len),
-                )
-            })
-            .ok_or_else(|| invalid("legal applicability deletion budget overflowed"))?;
-        let projected_applicability_operations = projected_applicability_entries
-            .checked_add(projected_applicability_deletions)
-            .ok_or_else(|| invalid("legal applicability work budget overflowed"))?;
-        if projected_applicability_operations > plan.budgets.max_applicability_entries_per_boundary
+        Ok(work)
+    }
+
+    /// Whether one unit of work fits what the boundary has already chosen.
+    fn fit_work(
+        &self,
+        work: &BoundaryWork,
+        budget: usize,
+        mutations: usize,
+        growth: usize,
+        first: bool,
+    ) -> WorkFit {
+        if growth > 0
+            && work
+                .growth
+                .checked_add(growth)
+                .is_none_or(|total| self.ensure_state_growth(total).is_err())
         {
-            return Err(invalid("legal applicability projection budget exhausted"));
+            return WorkFit::State;
         }
-        let mutations = evidence_counts
-            .len()
-            .checked_add(self.pending_intents.len())
-            .and_then(|count| count.checked_add(possible_procedure_mutations))
-            .and_then(|count| count.checked_add(due_count))
-            .and_then(|count| count.checked_add(projected_applicability_operations))
-            .and_then(|count| count.checked_add(possible_outbox))
-            .ok_or_else(|| invalid("legal boundary mutation count overflowed"))?;
-        if mutations > plan.budgets.max_mutations_per_boundary {
-            return Err(invalid("legal boundary mutation budget exhausted"));
+        if mutations == 0 || first || work.mutations.saturating_add(mutations) <= budget {
+            WorkFit::Take
+        } else {
+            WorkFit::Budget
         }
-        self.ensure_state_growth(reserved_growth)?;
-        Ok(reserved_growth)
+    }
+
+    /// What settling one procedure this boundary would change: its mutation
+    /// count (its pending intents, its own change, and new outbox items), its
+    /// serialized-state growth, and the rule it would adopt a version for.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn project_procedure(
+        &self,
+        plan: &CompiledLawPlan,
+        at: SimTime,
+        procedure_id: &str,
+        intents: &[&PendingLegalIntent],
+        signal_kinds: &BTreeMap<&str, BTreeSet<&str>>,
+        adoptions: &AdoptionCounts,
+    ) -> Result<ProcedureProjection, CanwuError> {
+        let add = |left: usize, right: usize| {
+            left.checked_add(right)
+                .ok_or_else(|| invalid("legal serialized-state accounting overflowed"))
+        };
+        let mut projection = ProcedureProjection {
+            mutations: intents.len(),
+            ..ProcedureProjection::default()
+        };
+        for intent in intents {
+            projection.growth = add(projection.growth, Self::encoded_growth(*intent, 8)?)?;
+        }
+        let procedure = self
+            .procedures
+            .get(procedure_id)
+            .ok_or_else(|| invalid("open legal procedure is missing"))?;
+        if procedure.closed {
+            return Ok(projection);
+        }
+        let stage = procedure
+            .stages
+            .get(procedure.active_stage)
+            .ok_or_else(|| invalid("procedure stage index is invalid"))?;
+        if procedure.active_stage + 1 < procedure.stages.len() {
+            at.checked_add(SimDuration::minutes(
+                procedure.stages[procedure.active_stage + 1].deadline_minutes,
+            ))
+            .ok_or_else(|| invalid("legal procedure deadline overflowed"))?;
+        }
+        let proposal = self
+            .proposals
+            .get(&procedure.proposal.id)
+            .ok_or_else(|| invalid("procedure proposal is missing"))?;
+        let profile = plan
+            .source_profile_by_id
+            .get(&proposal.source_profile)
+            .and_then(|key| plan.source_profiles.get(key.get() as usize))
+            .ok_or_else(|| invalid("legal source profile is missing"))?;
+        if profile.procedure.as_deref() != Some(proposal.procedure_profile.as_str()) {
+            return Err(invalid(
+                "legal source profile does not authorize the proposal procedure",
+            ));
+        }
+        canonical_hash("canwu.law.source.v1", &proposal.clauses)?;
+        if at > procedure.deadline {
+            // Settlement expires the procedure or completes its consultation;
+            // a consultation's next stage has no staged seat context yet.
+            projection.mutations += 1;
+            let growth = if consultation_deadline_passed(procedure, at)
+                && self.procedure_has_capacity(plan, procedure)?
+            {
+                Self::encoded_growth(procedure, 8)?
+            } else {
+                Self::encoded_growth(&(&procedure, proposal), 8)?
+            };
+            projection.growth = add(projection.growth, growth)?;
+            return Ok(projection);
+        }
+        if !self.procedure_has_capacity(plan, procedure)? {
+            return Ok(projection);
+        }
+        if let Some(rule) = self.rules.get(&proposal.rule_id) {
+            let latest = rule
+                .latest_adopted_version
+                .as_ref()
+                .ok_or_else(|| invalid("legal rule has no latest adopted version"))?;
+            self.law_versions
+                .get(&latest.id)
+                .ok_or_else(|| invalid("latest adopted law version is missing"))?
+                .legal_ordinal
+                .checked_add(1)
+                .ok_or_else(|| invalid("legal version ordinal overflowed"))?;
+        }
+        let mut projected_participations = BTreeSet::<String>::new();
+        let mut accepted = Vec::new();
+        for intent in intents {
+            let key = participation_key(&procedure.id, &stage.id, procedure.round, &intent.seat);
+            if self.validate_intent_binding(intent).is_ok()
+                && intent.admitted_at <= at
+                && stage.seats.contains(&intent.seat)
+                && (stage.allow_replacement
+                    || (!self.latest_participation_by_key.contains_key(&key)
+                        && !projected_participations.contains(&key)))
+            {
+                projected_participations.insert(key);
+                accepted.push(*intent);
+            }
+        }
+        let mut projected_ballots = BTreeMap::<&str, Ballot>::new();
+        for seat in &stage.seats {
+            let key = participation_key(&procedure.id, &stage.id, procedure.round, seat);
+            if let Some(ballot) = self
+                .latest_participation_by_key
+                .get(&key)
+                .and_then(|index| self.participations.get(*index))
+                .map(|participation| participation.ballot)
+            {
+                projected_ballots.insert(seat, ballot);
+            }
+        }
+        for intent in accepted {
+            if stage.allow_replacement {
+                projected_ballots.insert(&intent.seat, ballot_for_option(&intent.selected_option));
+            } else {
+                projected_ballots
+                    .entry(&intent.seat)
+                    .or_insert_with(|| ballot_for_option(&intent.selected_option));
+            }
+        }
+        let StageTally { vetoed, passed } = tally_stage(
+            stage,
+            &compiled_procedure(plan, &procedure.profile)?.deterministic_tie_break,
+            &projected_ballots,
+        );
+        let closing_growth = Self::encoded_growth(&(&procedure, proposal), 8)?;
+        let (projected_stage, projected_round, closes) = if vetoed {
+            projection.mutations += 1;
+            projection.growth = add(projection.growth, closing_growth)?;
+            (procedure.active_stage, procedure.round, true)
+        } else if passed && procedure.active_stage + 1 == procedure.stages.len() {
+            let signals_ready = profile.required_signal_kinds.iter().all(|kind| {
+                proposal.admitted_signal_kinds.contains(kind)
+                    || signal_kinds
+                        .get(proposal.id.as_str())
+                        .is_some_and(|kinds| kinds.contains(kind.as_str()))
+            });
+            if signals_ready {
+                match self.adoption_guard(plan, proposal, at)? {
+                    AdoptionGuard::Wait => (procedure.active_stage, procedure.round, false),
+                    AdoptionGuard::Reject(_) => {
+                        projection.mutations += 1;
+                        projection.growth = add(projection.growth, closing_growth)?;
+                        (procedure.active_stage, procedure.round, true)
+                    }
+                    AdoptionGuard::Ready => {
+                        projection.mutations += 1;
+                        if self.validate_proposal_rule_transition(proposal).is_ok()
+                            && adoptions.fits(self, plan, &proposal.rule_id)
+                        {
+                            projection.growth = add(
+                                projection.growth,
+                                Self::encoded_growth(&(&procedure, proposal), 24)?,
+                            )?;
+                            projection.adoption = Some(proposal.rule_id.clone());
+                        } else {
+                            projection.growth = add(projection.growth, closing_growth)?;
+                        }
+                        (procedure.active_stage, procedure.round, true)
+                    }
+                }
+            } else {
+                (procedure.active_stage, procedure.round, false)
+            }
+        } else if passed {
+            projection.mutations += 1;
+            projection.growth = add(projection.growth, Self::encoded_growth(procedure, 8)?)?;
+            (
+                procedure.active_stage + 1,
+                procedure.round.saturating_add(1),
+                false,
+            )
+        } else {
+            (procedure.active_stage, procedure.round, false)
+        };
+        if !closes {
+            let projected = &procedure.stages[projected_stage];
+            let missing = projected
+                .seats
+                .iter()
+                .filter(|seat| {
+                    let has_projected_ballot = projected_stage == procedure.active_stage
+                        && projected_ballots.contains_key(seat.as_str());
+                    let key = outbox_key(&procedure.id, projected_stage, projected_round, seat);
+                    !has_projected_ballot
+                        && !self.outbox_keys.contains(&key)
+                        && self.staged_actor_contexts.contains_key(&key)
+                })
+                .count();
+            if missing > 0 {
+                projection.mutations += missing;
+                projection.growth = add(
+                    projection.growth,
+                    Self::encoded_growth(&(&procedure, proposal), 12)?
+                        .checked_mul(missing)
+                        .ok_or_else(|| invalid("legal serialized-state accounting overflowed"))?,
+                )?;
+            }
+        }
+        Ok(projection)
+    }
+
+    /// How a passed final stage's adoption guards stand at `at`: ready, waiting
+    /// for something that can still change (validity publicity not yet
+    /// recorded), or failing for good (publicity after the effective time, a
+    /// publicity the profile does not admit, an effective time that has passed
+    /// without an authorized retrospective date, or an unauthorized
+    /// retrospective date). Mirrors [`Self::validate_adoption_guards`].
+    fn adoption_guard(
+        &self,
+        plan: &CompiledLawPlan,
+        proposal: &LegalProposal,
+        at: SimTime,
+    ) -> Result<AdoptionGuard, CanwuError> {
+        let profile = plan
+            .source_profile_by_id
+            .get(&proposal.source_profile)
+            .and_then(|key| plan.source_profiles.get(key.get() as usize))
+            .ok_or_else(|| invalid("legal source profile is missing"))?;
+        let publicity = proposal
+            .publicity
+            .as_ref()
+            .map(|reference| {
+                self.publicity_events
+                    .get(&reference.id)
+                    .filter(|event| {
+                        reference == &local_ref("publicity", &event.id)
+                            && event.proposal == local_ref("proposal", &proposal.id)
+                    })
+                    .ok_or_else(|| invalid("legal proposal publicity event is not exact"))
+            })
+            .transpose()?;
+        // Failures that time cannot cure reject the proposal first; only a
+        // missing or later validity publicity waits.
+        match profile.publicity_policy {
+            PublicityPolicy::EffectivenessCondition
+                if publicity.is_some_and(|event| event.at > proposal.effective_at) =>
+            {
+                return Ok(AdoptionGuard::Reject(
+                    "its publicity falls after its effective time",
+                ));
+            }
+            PublicityPolicy::NotRequired if publicity.is_some() => {
+                return Ok(AdoptionGuard::Reject(
+                    "its source profile admits no publicity event",
+                ));
+            }
+            _ => {}
+        }
+        if proposal.effective_at < at {
+            if !profile.allow_retroactive
+                || proposal
+                    .retrospective_from
+                    .is_none_or(|from| from > proposal.effective_at)
+            {
+                return Ok(AdoptionGuard::Reject(
+                    "its effective time passed without an authorized retrospective date",
+                ));
+            }
+        } else if proposal
+            .retrospective_from
+            .is_some_and(|from| !profile.allow_retroactive || from > proposal.effective_at)
+        {
+            return Ok(AdoptionGuard::Reject(
+                "its retrospective date is not authorized",
+            ));
+        }
+        if profile.publicity_policy == PublicityPolicy::ValidityCondition
+            && publicity.is_none_or(|event| event.at > at)
+        {
+            return Ok(AdoptionGuard::Wait);
+        }
+        Ok(AdoptionGuard::Ready)
     }
 
     fn apply_intent(
@@ -4075,13 +4274,22 @@ impl LegalRuntime {
         procedures
     }
 
-    pub(crate) fn next_due_time(&self) -> Option<SimTime> {
+    /// The earliest procedure deadline or law-version effective time after
+    /// `at`. Due work at or before `at` that a boundary did not settle is
+    /// deferred or waiting for state, and does not hide later due work.
+    pub(crate) fn next_due_time_after(&self, at: SimTime) -> Option<SimTime> {
+        let after = (std::ops::Bound::Excluded(at), std::ops::Bound::Unbounded);
         self.procedures_by_deadline
-            .keys()
+            .range(after)
             .next()
-            .copied()
+            .map(|(due_at, _)| *due_at)
             .into_iter()
-            .chain(self.scheduled_versions_by_time.keys().next().copied())
+            .chain(
+                self.scheduled_versions_by_time
+                    .range(after)
+                    .next()
+                    .map(|(due_at, _)| *due_at),
+            )
             .min()
     }
 
@@ -4122,6 +4330,214 @@ impl LegalRuntime {
             .entry(next)
             .or_default()
             .insert(id.to_owned());
+        Ok(())
+    }
+
+    /// Admits one live provider signal for a deliberating proposal: its
+    /// evidence joins the proposal, its kind joins the proposal's admitted
+    /// signal kinds, and the proposal's procedure is marked for settlement.
+    ///
+    /// Every check runs, and the serialized-state growth is reserved, before
+    /// the first change, so a refused signal changes nothing.
+    pub(crate) fn admit_signal_within_boundary(
+        &mut self,
+        plan: &CompiledLawPlan,
+        signal: LegalSignal,
+    ) -> Result<(), CanwuError> {
+        validate_runtime_text_budget(&signal, plan.budgets.max_text_bytes)?;
+        if signal.kind.is_empty() || signal.evidence.is_empty() {
+            return Err(invalid(
+                "legal signals require a non-empty kind and exact evidence",
+            ));
+        }
+        let proposal = self
+            .proposals
+            .get(&signal.proposal_id)
+            .ok_or_else(|| invalid("legal signal references an unknown proposal"))?;
+        let procedure = proposal
+            .active_procedure
+            .clone()
+            .filter(|procedure| self.open_procedures.contains(procedure))
+            .filter(|_| {
+                matches!(
+                    proposal.status,
+                    ProposalStatus::Submitted | ProposalStatus::Deliberating
+                )
+            })
+            .ok_or_else(|| {
+                invalid("legal signal targets a proposal that is no longer deliberating")
+            })?;
+        let added = signal
+            .evidence
+            .iter()
+            .filter(|reference| !proposal.evidence.contains(reference))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if proposal.evidence.len().saturating_add(added.len())
+            > plan.budgets.max_evidence_per_record
+        {
+            return Err(invalid("legal proposal evidence budget exhausted"));
+        }
+        if added.iter().any(|reference| {
+            self.retained_evidence_dependency_counts
+                .get(reference)
+                .is_some_and(|count| *count == usize::MAX)
+        }) {
+            return Err(invalid("legal evidence dependency count overflowed"));
+        }
+        self.reserve_state_growth(Self::encoded_growth(&signal, 4)?)?;
+        let proposal = self
+            .proposals
+            .get_mut(&signal.proposal_id)
+            .ok_or_else(|| invalid("checked legal signal proposal disappeared"))?;
+        proposal.evidence.extend(added.iter().cloned());
+        proposal.evidence.sort();
+        proposal.evidence.dedup();
+        proposal.admitted_signal_kinds.insert(signal.kind);
+        if proposal.status == ProposalStatus::Submitted {
+            proposal.status = ProposalStatus::Deliberating;
+        }
+        self.dirty_procedures.insert(procedure);
+        self.add_identity_evidence_component(added)
+    }
+
+    /// The shards that hold the work settlement at `at` will visit: dirty and
+    /// due procedures, the procedures of pending intents, due law versions,
+    /// and dirty rules. A scoped boundary must load them all, because work a
+    /// boundary deferred stays pending in the coordinator while its records
+    /// live in their own shards.
+    pub(crate) fn pending_work_routes(&self, at: SimTime) -> BTreeSet<crate::LegalShardKey> {
+        let routes = &self.storage.directory.object_routes;
+        let procedures = self
+            .procedures_due_for_work(at)
+            .into_iter()
+            .chain(
+                self.pending_intents
+                    .values()
+                    .map(|intent| intent.procedure.id.clone()),
+            )
+            .collect::<BTreeSet<_>>();
+        let versions = self
+            .scheduled_versions_by_time
+            .range(..=at)
+            .flat_map(|(_, references)| references.iter().map(|reference| reference.id.clone()));
+        procedures
+            .into_iter()
+            .chain(versions)
+            .chain(self.dirty_rules.iter().cloned())
+            .filter_map(|id| routes.get(&id).cloned())
+            .collect()
+    }
+
+    /// Records a provider packet its boundary admitted, forgetting the
+    /// recorded packet with the lowest ingress ID when `max_provider_packets`
+    /// are kept. Returns whether it recorded the packet: `false` when it was
+    /// already recorded or its record does not fit the state budget.
+    pub(crate) fn record_provider_packet(
+        &mut self,
+        id: canwu_api::IngressId,
+        packet: LegalProviderPacket,
+    ) -> Result<bool, CanwuError> {
+        if self.provider_packets.contains_key(&id) {
+            return Ok(false);
+        }
+        let Ok(reserved) = self.ensure_state_growth(Self::encoded_growth(&(&id, &packet), 4)?)
+        else {
+            return Ok(false);
+        };
+        self.reserved_state_bytes = reserved;
+        while self.provider_packets.len() >= self.budgets.max_provider_packets {
+            let Some((forgotten, _)) = self.provider_packets.pop_first() else {
+                break;
+            };
+            self.remove_identity_evidence_component(BTreeSet::from([EvidenceRef::Ingress(
+                forgotten,
+            )]))?;
+        }
+        // The record keeps the packet's receipt retained under receipt-based
+        // sealing, so a citation decides alike in sealed and unsealed runs.
+        self.add_identity_evidence_component(BTreeSet::from([EvidenceRef::Ingress(id)]))?;
+        self.provider_packets.insert(id, packet);
+        Ok(true)
+    }
+
+    /// Whether every member of an archive batch is already archived under
+    /// the batch's own receipt.
+    fn archive_batch_is_applied(&self, verified: &crate::VerifiedLegalArchiveCommit) -> bool {
+        verified.receipts.iter().all(|receipt| {
+            self.storage.membership.values().any(|membership| {
+                matches!(
+                    &membership.location,
+                    crate::LegalVersionLocation::Archived { receipt: existing }
+                        if existing.as_ref() == receipt
+                )
+            })
+        })
+    }
+
+    /// Records the terminal outcome of an archive commit this boundary
+    /// refused for a reason other than staleness, as a `RejectedStale`
+    /// terminal whose reason names the refusal, so the host finalizes the
+    /// retention handle (`finalize_legal_archive_retention` releases the store
+    /// lease) instead of being left without a terminal.
+    ///
+    /// A batch already applied, or a handle that already holds a terminal,
+    /// records nothing: its lease is not released.
+    pub(crate) fn record_refused_archive_commit(
+        &mut self,
+        verified: &crate::VerifiedLegalArchiveCommit,
+        reason: String,
+    ) -> Result<(), CanwuError> {
+        if self
+            .archive_retention_terminals
+            .contains_key(&verified.retention_handle_id)
+            || self.archive_batch_is_applied(verified)
+        {
+            return Err(invalid(
+                "a refused legal archive batch that is applied or terminal records no terminal",
+            ));
+        }
+        let observed_source_root = self
+            .storage
+            .source_membership_root_for_shard(&verified.compaction.shard)?;
+        self.reserve_state_growth(Self::encoded_growth(
+            &(
+                &verified.retention_handle_id,
+                &reason,
+                &observed_source_root,
+            ),
+            8,
+        )?)?;
+        self.append_archive_terminal(LegalArchiveTerminalDraft {
+            retention_handle_id: verified.retention_handle_id.clone(),
+            token: verified.compaction.token.clone(),
+            directory_root: verified.pending_reachability.directory_root.clone(),
+            disposition: LegalArchiveMaintenanceDisposition::RejectedStale,
+            expected_source_root: verified.compaction.source_membership_root.clone(),
+            observed_source_root: observed_source_root.clone(),
+            target_root: observed_source_root,
+            reason: Some(reason),
+        })
+    }
+
+    /// Rejects the proposal of one open procedure and closes the procedure,
+    /// as a failed head compare-and-set does at adoption. Its open seat work
+    /// expires, its staged actor contexts are dropped, and a seat response
+    /// still pending settles as a rejected intent outcome.
+    pub(crate) fn reject_open_procedure(&mut self, id: &str) -> Result<(), CanwuError> {
+        let proposal_id = self
+            .procedures
+            .get(id)
+            .filter(|procedure| !procedure.closed)
+            .ok_or_else(|| invalid("rejected legal procedure is not open"))?
+            .proposal
+            .id
+            .clone();
+        if let Some(proposal) = self.proposals.get_mut(&proposal_id) {
+            proposal.status = ProposalStatus::Rejected;
+        }
+        self.close_procedure(id)?;
+        self.prune_staged_actor_contexts(&BTreeSet::from([id.to_owned()]));
         Ok(())
     }
 
@@ -4276,15 +4692,15 @@ impl LegalRuntime {
         plan: &CompiledLawPlan,
         id: &str,
         at: SimTime,
-    ) -> Result<bool, CanwuError> {
+    ) -> Result<ProcedureAdvance, CanwuError> {
         let Some(procedure) = self.procedures.get(id).cloned() else {
-            return Ok(false);
+            return Ok(ProcedureAdvance::Other);
         };
         if procedure.closed {
-            return Ok(false);
+            return Ok(ProcedureAdvance::Other);
         }
         if !self.procedure_has_capacity(plan, &procedure)? {
-            return Ok(false);
+            return Ok(ProcedureAdvance::Other);
         }
         let stage = procedure
             .stages
@@ -4312,14 +4728,14 @@ impl LegalRuntime {
                 proposal.status = ProposalStatus::Rejected;
             }
             self.close_procedure(id)?;
-            return Ok(false);
+            return Ok(ProcedureAdvance::Other);
         }
         if !tally.passed {
-            return Ok(false);
+            return Ok(ProcedureAdvance::Other);
         }
         if procedure.active_stage + 1 < procedure.stages.len() {
             self.open_next_stage(id, &procedure, at)?;
-            return Ok(false);
+            return Ok(ProcedureAdvance::Other);
         }
         let proposal = self
             .proposals
@@ -4335,17 +4751,41 @@ impl LegalRuntime {
             .iter()
             .any(|kind| !proposal.admitted_signal_kinds.contains(kind))
         {
-            return Ok(false);
+            return Ok(ProcedureAdvance::Other);
+        }
+        // A missing validity publicity keeps the passed procedure waiting, like
+        // a missing required signal: publicity recorded later makes it
+        // adoptable, and its deadline expires it otherwise. A guard that can
+        // never hold rejects the proposal at once.
+        match self.adoption_guard(plan, proposal, at)? {
+            AdoptionGuard::Ready => {}
+            AdoptionGuard::Wait => return Ok(ProcedureAdvance::Other),
+            AdoptionGuard::Reject(reason) => {
+                self.reject_open_procedure(id)?;
+                return Ok(ProcedureAdvance::Rejected(reason));
+            }
         }
         if self.validate_proposal_rule_transition(proposal).is_err() {
             if let Some(proposal) = self.proposals.get_mut(&procedure.proposal.id) {
                 proposal.status = ProposalStatus::Rejected;
             }
             self.close_procedure(id)?;
-            return Ok(false);
+            return Ok(ProcedureAdvance::Other);
+        }
+        // Lifetime adoption budgets: an adoption that does not fit rejects the
+        // proposal instead of failing settlement.
+        if self.sources.len() >= plan.budgets.max_sources
+            || self.law_versions.len() >= plan.budgets.max_law_versions
+            || (!self.rules.contains_key(&proposal.rule_id)
+                && self.rules.len() >= plan.budgets.max_rules)
+        {
+            self.reject_open_procedure(id)?;
+            return Ok(ProcedureAdvance::Rejected(
+                "the source, law-version, or rule budget of the plan is full",
+            ));
         }
         self.adopt_proposal(plan, &procedure, at)?;
-        Ok(true)
+        Ok(ProcedureAdvance::Adopted)
     }
 
     fn adopt_proposal(
@@ -4665,86 +5105,89 @@ impl LegalRuntime {
         Ok(())
     }
 
-    fn apply_scheduled_versions(&mut self, at: SimTime) -> Result<Vec<String>, CanwuError> {
+    /// Makes the chosen due versions operative, in the order chosen; due
+    /// versions this boundary did not choose stay scheduled.
+    fn apply_scheduled_versions(
+        &mut self,
+        selected: &[LegalRecordRef],
+    ) -> Result<Vec<String>, CanwuError> {
         let mut applied = Vec::new();
-        let due_times = self
-            .scheduled_versions_by_time
-            .range(..=at)
-            .map(|(effective_at, _)| *effective_at)
-            .collect::<Vec<_>>();
-        for effective_at in due_times {
-            let Some(mut references) = self.scheduled_versions_by_time.remove(&effective_at) else {
+        for reference in selected.iter().cloned() {
+            let version = self
+                .law_versions
+                .get(&reference.id)
+                .cloned()
+                .ok_or_else(|| invalid("scheduled law version is missing"))?;
+            let effective_at = version.effective_at;
+            let scheduled = self
+                .scheduled_versions_by_time
+                .get_mut(&effective_at)
+                .ok_or_else(|| {
+                    invalid("scheduled law version index is missing its due-time entry")
+                })?;
+            let position = scheduled
+                .iter()
+                .position(|candidate| *candidate == reference)
+                .ok_or_else(|| invalid("scheduled law version has the wrong effective time"))?;
+            scheduled.remove(position);
+            if scheduled.is_empty() {
+                self.scheduled_versions_by_time.remove(&effective_at);
+            }
+            if version.cultural_dependencies.iter().any(|dependency| {
+                dependency.kind == CulturalDependencyKind::LiveLevel
+                    && self.retired_cultural_targets.contains(&dependency.target)
+            }) {
                 return Err(invalid(
-                    "scheduled law version index is missing its due-time entry",
+                    "scheduled law version depends on a retired culture generation",
                 ));
-            };
-            references.sort_by(|left, right| {
-                let left = &self.law_versions[&left.id];
-                let right = &self.law_versions[&right.id];
-                (left.legal_ordinal, &left.id).cmp(&(right.legal_ordinal, &right.id))
-            });
-            for reference in references {
-                let version = self
-                    .law_versions
-                    .get(&reference.id)
-                    .cloned()
-                    .ok_or_else(|| invalid("scheduled law version is missing"))?;
-                if version.effective_at != effective_at {
-                    return Err(invalid(
-                        "scheduled law version has the wrong effective time",
-                    ));
-                }
-                if version.cultural_dependencies.iter().any(|dependency| {
-                    dependency.kind == CulturalDependencyKind::LiveLevel
-                        && self.retired_cultural_targets.contains(&dependency.target)
-                }) {
-                    return Err(invalid(
-                        "scheduled law version depends on a retired culture generation",
-                    ));
-                }
-                for dependency in &version.cultural_dependencies {
-                    if dependency.kind == CulturalDependencyKind::LiveLevel
-                        && let Some(indexed) =
-                            self.scheduled_live_dependencies.get_mut(&dependency.target)
-                    {
-                        indexed.remove(&reference);
-                        if indexed.is_empty() {
-                            self.scheduled_live_dependencies.remove(&dependency.target);
-                        }
+            }
+            for dependency in &version.cultural_dependencies {
+                if dependency.kind == CulturalDependencyKind::LiveLevel
+                    && let Some(indexed) =
+                        self.scheduled_live_dependencies.get_mut(&dependency.target)
+                {
+                    indexed.remove(&reference);
+                    if indexed.is_empty() {
+                        self.scheduled_live_dependencies.remove(&dependency.target);
                     }
                 }
-                let replaced_operative_dependencies = self
-                    .rules
-                    .get(&version.rule)
-                    .filter(|rule| !rule.retired)
-                    .and_then(|rule| rule.operative_version.as_ref())
-                    .map(|operative| self.law_version_identity_evidence_dependencies(operative));
-                let rule = self
-                    .rules
-                    .get_mut(&version.rule)
-                    .ok_or_else(|| invalid("scheduled law version has no rule"))?;
-                rule.operative_version = Some(reference.clone());
-                rule.effects.clone_from(&version.deltas);
-                rule.retired = retires_rule(version.operation);
-                let position = rule
-                    .scheduled_versions
-                    .binary_search(&reference)
-                    .map_err(|_| invalid("rule effective-time index is inconsistent"))?;
-                rule.scheduled_versions.remove(position);
-                self.dirty_rules.insert(version.rule.clone());
-                if let Some(dependencies) = replaced_operative_dependencies {
-                    self.remove_identity_evidence_component(dependencies)?;
-                }
-                if retires_rule(version.operation) {
-                    let dependencies = self.law_version_identity_evidence_dependencies(&reference);
-                    self.remove_identity_evidence_component(dependencies)?;
-                }
-                applied.push(version.id.clone());
             }
+            let replaced_operative_dependencies = self
+                .rules
+                .get(&version.rule)
+                .filter(|rule| !rule.retired)
+                .and_then(|rule| rule.operative_version.as_ref())
+                .map(|operative| self.law_version_identity_evidence_dependencies(operative));
+            let rule = self
+                .rules
+                .get_mut(&version.rule)
+                .ok_or_else(|| invalid("scheduled law version has no rule"))?;
+            rule.operative_version = Some(reference.clone());
+            rule.effects.clone_from(&version.deltas);
+            rule.retired = retires_rule(version.operation);
+            let position = rule
+                .scheduled_versions
+                .binary_search(&reference)
+                .map_err(|_| invalid("rule effective-time index is inconsistent"))?;
+            rule.scheduled_versions.remove(position);
+            self.dirty_rules.insert(version.rule.clone());
+            if let Some(dependencies) = replaced_operative_dependencies {
+                self.remove_identity_evidence_component(dependencies)?;
+            }
+            if retires_rule(version.operation) {
+                let dependencies = self.law_version_identity_evidence_dependencies(&reference);
+                self.remove_identity_evidence_component(dependencies)?;
+            }
+            applied.push(version.id.clone());
         }
         Ok(applied)
     }
 
+    /// Emits seat tickets for the procedures this boundary worked on.
+    ///
+    /// The outbox and its ID blocks are lifetime budgets of the plan: when
+    /// either is full, emission stops and the seat contexts stay staged, so the
+    /// boundary settles instead of failing.
     fn materialize_outbox(
         &mut self,
         plan: &CompiledLawPlan,
@@ -4752,7 +5195,7 @@ impl LegalRuntime {
         procedure_ids: &BTreeSet<String>,
     ) -> Result<Vec<LegalDecisionOutboxItem>, CanwuError> {
         let mut emitted = Vec::new();
-        for procedure_id in procedure_ids {
+        'procedures: for procedure_id in procedure_ids {
             let procedure = self
                 .procedures
                 .get(procedure_id)
@@ -4786,17 +5229,23 @@ impl LegalRuntime {
                 }
                 let staged_key =
                     outbox_key(&procedure.id, procedure.active_stage, procedure.round, seat);
+                if !self.staged_actor_contexts.contains_key(&staged_key) {
+                    continue;
+                }
+                let sequence = self.next_outbox_sequence;
+                let Some(next_sequence) = sequence.checked_add(1) else {
+                    break 'procedures;
+                };
+                let Ok(ids) = allocate_outbox_ids(plan, sequence) else {
+                    break 'procedures;
+                };
+                if self.outbox.len() >= plan.budgets.max_outbox {
+                    break 'procedures;
+                }
                 let Some(actor_context) = self.staged_actor_contexts.remove(&staged_key) else {
                     continue;
                 };
-                if self.outbox.len() >= plan.budgets.max_outbox {
-                    return Err(invalid("legal decision outbox budget exhausted"));
-                }
-                let sequence = self.next_outbox_sequence;
-                self.next_outbox_sequence = self
-                    .next_outbox_sequence
-                    .checked_add(1)
-                    .ok_or_else(|| invalid("legal outbox sequence overflowed"))?;
+                self.next_outbox_sequence = next_sequence;
                 let authority = procedure
                     .seat_authorities
                     .get(seat)
@@ -4804,7 +5253,6 @@ impl LegalRuntime {
                 let controller = authority.holder.clone();
                 let permission_profile_id = authority.permission_profile_id.clone();
                 let decision_controller_id = authority.decision_controller_id.clone();
-                let ids = allocate_outbox_ids(plan, sequence)?;
                 if actor_context.holder != controller
                     || actor_context.context_hash != actor_context_hash(&actor_context)?
                 {
@@ -4898,10 +5346,76 @@ impl LegalRuntime {
         });
     }
 
-    fn refresh_applicability(&mut self, at: SimTime) -> Result<usize, CanwuError> {
-        let mut count = 0;
-        let dirty_rules = std::mem::take(&mut self.dirty_rules);
-        for rule_id in dirty_rules {
+    /// Rebuilds the applicability projection of dirty rules in ID order.
+    ///
+    /// A rule's refresh costs the entries it removes and adds; refreshes stop
+    /// once the next one would exceed `room` (what is left of the boundary's
+    /// mutation budget) or `max_applicability_entries_per_boundary`, leaving
+    /// the rest dirty and returning `true`. The first dirty rule is always
+    /// refreshed, so every boundary makes progress. Each refresh reserves its
+    /// serialized-state growth first; one that does not fit waits for freed
+    /// state without asking for another boundary.
+    fn refresh_applicability(
+        &mut self,
+        plan: &CompiledLawPlan,
+        at: SimTime,
+        room: usize,
+    ) -> Result<(usize, bool), CanwuError> {
+        let mut count = 0usize;
+        let mut deferred = false;
+        let dirty_rules = self.dirty_rules.iter().cloned().collect::<Vec<_>>();
+        for (index, rule_id) in dirty_rules.into_iter().enumerate() {
+            let rule = self
+                .rules
+                .get(&rule_id)
+                .ok_or_else(|| invalid("dirty legal rule is missing"))?;
+            let projections = if rule.retired {
+                0
+            } else {
+                rule.operative_version
+                    .as_ref()
+                    .map(|reference| {
+                        self.law_versions
+                            .get(&reference.id)
+                            .ok_or_else(|| invalid("operative law version is missing"))
+                            .and_then(|version| {
+                                version
+                                    .deltas
+                                    .len()
+                                    .checked_mul(version.jurisdictions.len())
+                                    .ok_or_else(|| {
+                                        invalid("legal applicability projection overflowed")
+                                    })
+                            })
+                    })
+                    .transpose()?
+                    .unwrap_or(0)
+            };
+            let cost = self
+                .applicability_by_rule
+                .get(&rule_id)
+                .map_or(0, BTreeSet::len)
+                .checked_add(projections)
+                .ok_or_else(|| invalid("legal applicability work budget overflowed"))?;
+            let growth = Self::encoded_growth(rule, 8)?
+                .checked_add(
+                    projections
+                        .checked_mul(2_048)
+                        .ok_or_else(|| invalid("legal serialized-state accounting overflowed"))?,
+                )
+                .ok_or_else(|| invalid("legal serialized-state accounting overflowed"))?;
+            if self.ensure_state_growth(growth).is_err() {
+                break;
+            }
+            let total = count.saturating_add(cost);
+            if index > 0
+                && (total > room || total > plan.budgets.max_applicability_entries_per_boundary)
+            {
+                deferred = true;
+                break;
+            }
+            self.reserve_state_growth(growth)?;
+            self.dirty_rules.remove(&rule_id);
             if let Some(stale) = self.applicability_by_rule.remove(&rule_id) {
                 for key in stale {
                     if self.applicability.remove(&key).is_some() {
@@ -4949,7 +5463,7 @@ impl LegalRuntime {
                 self.applicability_by_rule.insert(rule_id, keys);
             }
         }
-        Ok(count)
+        Ok((count, deferred))
     }
 
     /// Resolves applicability with the compiled profile's explicit candidate budget.
@@ -5915,7 +6429,15 @@ impl LegalRuntime {
             .get_mut(&proposal_id)
             .ok_or_else(|| invalid("validated publicity proposal disappeared"))?;
         proposal.publicity = Some(event_ref);
+        let procedure = proposal.active_procedure.clone();
         self.add_identity_evidence_component(evidence)?;
+        // A passed procedure may be waiting for this publicity; the next
+        // settlement looks at it again.
+        if let Some(procedure) = procedure
+            && self.open_procedures.contains(&procedure)
+        {
+            self.dirty_procedures.insert(procedure);
+        }
         Ok(())
     }
     pub fn record_finding(
@@ -6666,6 +7188,9 @@ impl LegalRuntime {
         }
         for event in self.publicity_events.values() {
             increment_dependency_counts(&mut counts, event.evidence.iter().cloned().collect());
+        }
+        for id in self.provider_packets.keys() {
+            increment_dependency_counts(&mut counts, BTreeSet::from([EvidenceRef::Ingress(*id)]));
         }
         for procedure_id in &self.open_procedures {
             if let Some(procedure) = self.procedures.get(procedure_id) {
@@ -7446,15 +7971,7 @@ impl LegalRuntime {
         verified: &crate::VerifiedLegalArchiveCommit,
     ) -> Result<LegalArchiveMaintenanceDisposition, CanwuError> {
         verified.validate()?;
-        if verified.receipts.iter().all(|receipt| {
-            self.storage.membership.values().any(|membership| {
-                matches!(
-                    &membership.location,
-                    crate::LegalVersionLocation::Archived { receipt: existing }
-                        if existing.as_ref() == receipt
-                )
-            })
-        }) {
+        if self.archive_batch_is_applied(verified) {
             if self.storage.archive_heads.get(&verified.compaction.shard)
                 != Some(&verified.archive_head)
             {
@@ -7464,13 +7981,9 @@ impl LegalRuntime {
             }
             return Ok(LegalArchiveMaintenanceDisposition::Applied);
         }
-        if verified.compaction.candidates.iter().any(|candidate| {
-            self.storage.compaction_candidates.get(&candidate.version) != Some(candidate)
-        }) {
-            return Err(invalid(
-                "verified legal archive is not backed by the persisted candidate index",
-            ));
-        }
+        // A batch prepared against a source root that has since changed is
+        // stale, whatever else it disagrees with: it settles as a recorded
+        // `RejectedStale` terminal the host can finalize, not as an error.
         let reserved_state_bytes = self.ensure_state_growth(Self::encoded_growth(verified, 2)?)?;
         let observed_source_root = self
             .storage
@@ -7491,6 +8004,13 @@ impl LegalRuntime {
             self.reserved_state_bytes = reserved_state_bytes;
             self.validate_live_plan_binding(&self.plan.clone())?;
             return Ok(LegalArchiveMaintenanceDisposition::RejectedStale);
+        }
+        if verified.compaction.candidates.iter().any(|candidate| {
+            self.storage.compaction_candidates.get(&candidate.version) != Some(candidate)
+        }) {
+            return Err(invalid(
+                "verified legal archive is not backed by the persisted candidate index",
+            ));
         }
         let expected = self
             .prepare_legal_archive(

@@ -251,6 +251,71 @@ fn rejected_military_input_is_recorded_without_blocking_the_queue()
     Ok(())
 }
 
+/// Reconnaissance resolves its uncertainty with an operation-keyed draw whose
+/// operation evidence is the admitted packet that carries the command, which
+/// exists in every run; the draw and the accepted outcome replay exactly.
+#[test]
+fn reconnaissance_draws_from_its_admitted_command_and_replays_exactly()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (scenario, ids) = demo_scenario();
+    let military = military_plugin();
+    let mut canwu = Canwu::new_with_plugins(35, scenario, &[&military])?;
+    let force = ForceId::new("canwu.military:test:scouts")?;
+    let west = MilitaryNodeId::new(format!("canwu.military:node:{}", ids.western_territory))?;
+    let east = MilitaryNodeId::new(format!("canwu.military:node:{}", ids.eastern_territory))?;
+    submit(
+        &mut canwu,
+        1,
+        Issuer::Actor(ids.commander),
+        create_force("create", &force, ids.commander, &west)?,
+    )?;
+    let draws_before = canwu.random_draws().len();
+    submit(
+        &mut canwu,
+        2,
+        Issuer::Actor(ids.commander),
+        MilitaryCommand::Recon {
+            operation: key("recon")?,
+            force: force.clone(),
+            target_force: None,
+            node: east,
+            expected_force_revision: 1,
+        },
+    )?;
+    let outcome = ledger(&canwu)?
+        .outcomes
+        .get(&key("recon")?)
+        .cloned()
+        .ok_or("reconnaissance outcome is missing")?;
+    assert_eq!(outcome.disposition, OutcomeDisposition::Accepted);
+    assert!(!canwu.events().iter().any(|event| {
+        event.kind.plugin_identity() == Some((PLUGIN_NAME, MILITARY_REJECTION_EVENT))
+    }));
+    let draws = &canwu.random_draws()[draws_before..];
+    assert_eq!(draws.len(), 1);
+    let carrier = canwu
+        .ingress_log()
+        .iter()
+        .rev()
+        .find(|record| {
+            matches!(
+                &record.payload,
+                canwu_api::IngressPayload::Plugin { plugin, packet_type, .. }
+                    if plugin == PLUGIN_NAME && packet_type == MILITARY_COMMAND_INGRESS
+            )
+        })
+        .ok_or("the admitted reconnaissance packet is missing")?;
+    assert_eq!(
+        draws[0].operation_evidence,
+        Some(canwu_api::EvidenceRef::Ingress(carrier.id))
+    );
+
+    let replayed = Canwu::replay_from_journal(&[&military], &canwu.replay_journal())?;
+    assert_eq!(replayed.random_draws(), canwu.random_draws());
+    assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
+    Ok(())
+}
+
 #[test]
 fn special_operations_settle_on_success_and_failure() -> Result<(), Box<dyn std::error::Error>> {
     let military = military_plugin();

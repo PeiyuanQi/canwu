@@ -424,6 +424,7 @@ pub fn validate_definition(definition: &LegalDefinition) -> Result<(), CanwuErro
         || definition.budgets.max_applicability_entries_per_boundary == 0
         || definition.budgets.max_applicability_query_work == 0
         || definition.budgets.max_retirement_dependency_records == 0
+        || definition.budgets.max_provider_packets == 0
         || definition.budgets.max_text_bytes == 0
         || definition.budgets.max_state_bytes == 0
         || definition.budgets.max_memory_bytes == 0

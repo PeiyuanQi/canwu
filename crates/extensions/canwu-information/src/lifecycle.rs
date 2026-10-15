@@ -1252,6 +1252,12 @@ fn validate_dispatch_shape(
             if holders.is_empty() || holders.len() > limits.max_addressed_recipients as usize {
                 return Err("addressed dispatch recipient count is outside limits".to_owned());
             }
+            if !holders.iter().all(holder_kind_can_hold_knowledge) {
+                return Err(
+                    "addressed dispatch recipient names an entity kind that holds no knowledge"
+                        .to_owned(),
+                );
+            }
             if !is_sorted_unique(holders) {
                 return Err("addressed dispatch recipients must be sorted and unique".to_owned());
             }
@@ -1407,6 +1413,9 @@ fn validate_audience(
         .cloned()
         .map(holder_from_target)
         .collect::<Vec<_>>();
+    if !member_holders.iter().all(holder_kind_can_hold_knowledge) {
+        return Err("audience member names an entity kind that holds no knowledge".to_owned());
+    }
     let groups = role_targets(&binding.references, "group");
     match payload.membership {
         AudienceMembership::ExplicitMembers => {
@@ -1766,7 +1775,29 @@ fn single_holder_role(
             "information record requires exactly one {role} holder reference"
         ));
     };
-    Ok(holder_from_target(value))
+    let holder = holder_from_target(value);
+    if !holder_kind_can_hold_knowledge(&holder) {
+        return Err(format!(
+            "information {role} holder names an entity kind that holds no knowledge"
+        ));
+    }
+    Ok(holder)
+}
+
+/// Whether a holder's kind can hold knowledge at all: a person, an army, a
+/// government, or a domain entity. Organizations, resources, routes, and
+/// territories never do, so a record that names one as a holder is refused
+/// when it is created instead of failing a later publication. Whether a
+/// holder of an eligible kind exists and accepts knowledge when its
+/// publication comes is checked then.
+fn holder_kind_can_hold_knowledge(holder: &KnowledgeHolderRef) -> bool {
+    matches!(
+        holder,
+        KnowledgeHolderRef::Person(_)
+            | KnowledgeHolderRef::Entity(
+                EntityRef::Army(_) | EntityRef::Government(_) | EntityRef::Domain(_)
+            )
+    )
 }
 
 fn holder_from_target(target: DomainReferenceTarget) -> KnowledgeHolderRef {
@@ -2006,8 +2037,36 @@ mod tests {
         assert!(validate_audience(&explicit, &binding, limits).is_ok());
         let mismatched = AudiencePayload {
             membership_root: "f".repeat(64),
-            ..explicit
+            ..explicit.clone()
         };
         assert!(validate_audience(&mismatched, &binding, limits).is_err());
+
+        // A territory holds no knowledge, so an audience naming one is
+        // refused when it is created.
+        let mut with_territory = holders.to_vec();
+        with_territory.push(KnowledgeHolderRef::Entity(EntityRef::Territory(
+            canwu_api::TerritoryId::new(1),
+        )));
+        with_territory.sort();
+        let territory_binding = RecordBinding::new(
+            TypedDomainRecordRef::<Audience>::new("explicit-members-with-territory"),
+            with_territory
+                .iter()
+                .map(|holder| DomainReference {
+                    role: "member".to_owned(),
+                    target: DomainReferenceTarget::Core(holder_entity(holder)),
+                })
+                .collect(),
+        );
+        let territory_audience = AudiencePayload {
+            member_count: with_territory.len() as u64,
+            membership_root: audience_membership_root_v1(&with_territory, limits)
+                .expect("membership root"),
+            ..explicit
+        };
+        assert_eq!(
+            validate_audience(&territory_audience, &territory_binding, limits),
+            Err("audience member names an entity kind that holds no knowledge".to_owned())
+        );
     }
 }

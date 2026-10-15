@@ -31,16 +31,17 @@ pub use compiler::{compile_law, validate_compiled_law_plan, validate_definition}
 pub use model::*;
 pub use plugin::{
     LAW_ACTOR_CONTEXT_INGRESS, LAW_ARCHIVE_COMMIT_INGRESS, LAW_ARCHIVE_HEAD_STATE,
-    LAW_ARCHIVE_RETENTION_ACK_INGRESS, LAW_COMMAND, LAW_DIRECTORY_STATE, LAW_INTENT_INGRESS,
-    LAW_MUTATION_INGRESS, LAW_OUTBOX_ACK_INGRESS, LAW_OUTBOX_PREPARE_INGRESS, LAW_PLAN_STATE,
-    LAW_RUNTIME_STATE, LAW_SHARD_STATE, LAW_WAKE_INGRESS, LawPlugin, LegalArchiveIngressReceipt,
+    LAW_ARCHIVE_RETENTION_ACK_INGRESS, LAW_COMMAND, LAW_DIRECTORY_STATE,
+    LAW_INGRESS_REJECTED_EVENT, LAW_INTENT_INGRESS, LAW_MUTATION_INGRESS, LAW_OUTBOX_ACK_INGRESS,
+    LAW_OUTBOX_PREPARE_INGRESS, LAW_PLAN_STATE, LAW_PROPOSAL_REJECTED_EVENT, LAW_RUNTIME_STATE,
+    LAW_SHARD_STATE, LAW_WAKE_INGRESS, LawPlugin, LegalArchiveIngressReceipt,
     enqueue_legal_archive, enqueue_legal_mutation, enqueue_legal_mutation_at,
     finalize_legal_archive_retention, law_command_descriptor, law_record_schemas,
     load_law_state_for_plan, load_legal_runtime,
 };
 pub use runtime::{
     LegalArchiveMaintenanceDisposition, LegalArchiveTerminalRecord, LegalBoundaryResult,
-    LegalCanwuBoundaryScaleMetrics, LegalMutation, LegalRuntime,
+    LegalCanwuBoundaryScaleMetrics, LegalMutation, LegalProposalRejection, LegalRuntime,
     LegalRuntimeCompactionScaleMetrics, LegalSignal, decision_controller_id,
 };
 pub use storage::*;
@@ -51,6 +52,8 @@ pub const PLUGIN_NAMESPACE: &str = "canwu.law";
 /// Stable semantic identity for the registered legal record and command contract.
 ///
 /// It changes whenever procedure tallying or persisted legal semantics change,
-/// such as weighted and unit-block stages and the advisory consultation kind.
+/// such as weighted and unit-block stages and the advisory consultation kind,
+/// or, in 0.16.0, recorded ingress refusals, current-version compare-and-set,
+/// same-boundary provider provenance, and adoption guards that wait.
 pub const LAW_SEMANTIC_HASH: &str =
-    "ee7f4b5e9992ed3612c9c7e52e4f1470e4b843146edf8137bf63ad5d725712c0";
+    "d157b5d07a8f46f7f326deb93b374e43d2b71b5e4a8e9d96b4eda5d8c4723bb6";

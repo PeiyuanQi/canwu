@@ -950,6 +950,7 @@ impl Simulation {
         SimulationView {
             state: SimulationViewState::Runtime(&self.state),
             state_owners: &self.plugins.state_owners,
+            record_schemas: &self.plugins.record_schemas,
             reader: Some(reader),
             allowed_reads: Some(reads),
             allowed_ingress: None,

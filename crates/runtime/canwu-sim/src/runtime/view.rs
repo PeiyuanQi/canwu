@@ -56,6 +56,8 @@ impl SimulationViewState<'_> {
 pub struct SimulationView<'a> {
     pub(super) state: SimulationViewState<'a>,
     pub(super) state_owners: &'a BTreeMap<StateKey, String>,
+    /// Registered domain record schemas, for the knowledge-holder rule.
+    pub(super) record_schemas: &'a records::DomainRecordSchemas,
     pub(super) reader: Option<&'a str>,
     pub(super) allowed_reads: Option<&'a [StateKey]>,
     pub(super) allowed_ingress: Option<&'a HashSet<IngressId>>,
@@ -113,6 +115,36 @@ impl SimulationView<'_> {
     pub fn person(&self, id: PersonId) -> Result<Option<&Person>, CanwuError> {
         self.require_read(&StateKey::core_people())?;
         Ok(self.state.current().people.get(&id))
+    }
+
+    /// Whether a boundary's knowledge publication to `holder` would be
+    /// accepted at this view's state: the holder rule the engine validates a
+    /// `PublishKnowledge` directive with (an existing person who is not dead,
+    /// an existing army or government, or an active, undeleted domain entity
+    /// whose schema allows knowledge holders; no other core entity kind).
+    ///
+    /// A system that publishes to holders its records name checks this first
+    /// and leaves an ineligible holder unpublished instead of failing its
+    /// boundary.
+    ///
+    /// It reads person and entity state (the entity registry, people, armies,
+    /// governments, person availability, and domain records with their
+    /// schemas) without a read declaration. That is safe because the answer is
+    /// exactly the holder check the engine applies, against the same state, to
+    /// any `PublishKnowledge` directive the system proposes: a system that may
+    /// publish already depends on that state through the validation of its
+    /// own output, and the read reveals one yes or no for a holder the caller
+    /// names, nothing it could not learn by proposing the publication.
+    pub fn knowledge_holder_accepts_publication(
+        &self,
+        holder: &KnowledgeHolderRef,
+    ) -> Result<bool, CanwuError> {
+        Ok(super::knowledge::validate_holder_for_publication(
+            holder,
+            self.state.current(),
+            self.record_schemas,
+        )
+        .is_ok())
     }
 
     /// Returns committed core availability for a person after an explicit
@@ -694,6 +726,36 @@ impl SimulationView<'_> {
                 .iter()
                 .any(|generation| generation.ingress == id && generation.plugin == plugin)
         }))
+    }
+
+    /// Returns `canonical_hash(domain, &(due_at, payload))` of an admitted,
+    /// boundary-generated plugin packet, without exposing the payload, when
+    /// [`Self::plugin_ingress_matches`] matches it to `plugin` and
+    /// `packet_type`; `None` when it does not or its record is not retained.
+    ///
+    /// A reader that will later need to recognize the packet's exact content
+    /// keeps the hash in its own state and compares it with
+    /// `canonical_hash(domain, &(expected_due_at, &expected_payload))`, so the
+    /// later check reads no retained evidence. A reader whose decision must not
+    /// depend on sealing takes the hash only of packets its boundary admits,
+    /// which every run holds.
+    pub fn plugin_ingress_payload_hash(
+        &self,
+        id: IngressId,
+        plugin: &str,
+        packet_type: &str,
+        domain: &str,
+    ) -> Result<Option<String>, CanwuError> {
+        if !self.plugin_ingress_matches(id, plugin, packet_type)? {
+            return Ok(None);
+        }
+        let Some(record) = self.state.evidence().retained_ingress(id) else {
+            return Ok(None);
+        };
+        let IngressPayload::Plugin { payload, .. } = &record.payload else {
+            return Ok(None);
+        };
+        super::canonical_hash(domain, &(record.due_at, payload)).map(Some)
     }
 
     /// Returns the retained outcome for one exact decision request.

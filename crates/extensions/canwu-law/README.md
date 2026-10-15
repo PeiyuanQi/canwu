@@ -87,15 +87,27 @@ they deliberately do not claim kernel-issued domain-record version provenance.
 Only the aggregate runtime record is registered and persisted. Host-owned
 `expected_versions` remain genuine Canwu version references, while
 `expected_rule_head` provides the law-local compare-and-set guard for rule
-changes. Budgets, exact immutable references, and derived indexes are validated
+changes. A host version must be its record's current version, read from the
+committed provenance index: a proposal admitted after its host record changed
+is refused, and a pending proposal whose host record changed is rejected and
+its procedure closed at the next boundary that works on the procedure.
+Budgets, exact immutable references, and derived indexes are validated
 before a plan or persisted ledger is accepted. Every procedure seat compiles to
 one unambiguous institution/holder/permission/controller binding. Every legal
-signal kind compiles to an exact provider plugin and packet type; live admission
-matches retained ingress metadata and its kernel-committed producing boundary.
-Direct host injection into that namespace is not provider evidence. Admission
-never trusts caller-declared signal kinds; publicity events additionally require
-an exact retained provider payload envelope bound to proposal, time, medium, and
-scope. Ordinary
+signal kind compiles to an exact provider plugin and packet type. When a
+boundary admits a packet that the engine matches to a compiled provider's
+metadata and kernel-committed producing boundary, the admission system records
+it, with a hash of its due time and payload, in the bounded legal provider
+index (`max_provider_packets`, lowest ingress ID forgotten first). A legal
+mutation at that or any later boundary cites provider evidence by naming a
+recorded packet: every run records the same packets, sealed or not, so a sealed
+run, an unsealed run, and exact replay decide alike, and a recorded packet is
+an identity-evidence dependency, so a seal keeps its receipt. A packet the
+index never recorded or has forgotten is refused. Direct host injection into
+that namespace is not provider evidence. Admission never trusts
+caller-declared signal kinds; publicity events additionally require the
+recorded hash of the exact provider payload envelope bound to proposal, time,
+medium, and scope. Ordinary
 settlement reserves a conservative serialized-state growth charge and visits
 only pending intents, dirty or due procedures, staged contexts, due-time
 versions, pending outbox work, and dirty rules; it does not rescan historical
@@ -122,7 +134,14 @@ default-deny across order, jurisdiction, subject matter, source mode, operation,
 procedure, forum, and adjudicative power. Required publicity is a separate
 immutable event bound to a compiled signal provider and the canonical host
 ingress time; future publication plans are not accepted as occurred events.
-Validity-condition publicity is checked atomically before adoption.
+Validity-condition publicity is checked before adoption: a final stage that
+passes without it keeps its ballots and waits, and recording the publicity
+makes the procedure adoptable at that boundary; its deadline expires it
+otherwise. A guard that can never hold (an effective time passed without an
+authorized retrospective date, an unauthorized retrospective date, a publicity
+the profile does not admit, an effectiveness publicity after the effective
+time) rejects the proposal at once, as does an adoption past the source,
+law-version, or rule budget.
 Effectiveness-condition publicity may follow adoption, but the adopted version
 remains inert and inapplicable until the immutable publicity event exists, and
 that event must occur no later than the effective time. Source and law-version
@@ -175,6 +194,35 @@ selection, root-only restart, GC reachability, and a real Canwu boundary with a
 selector stress fixture is 2.49 GB and deliberately exceeds the production
 128-MiB legal state/memory ceilings; it proves selector work shape, not live-save
 admissibility.
+
+Expected refusals and full budgets never fail a boundary. A law packet that
+does not decode, exceeds the boundary's legal ingress budget (wakes do not
+count), conflicts with another packet for the same outbox sequence or retention
+handle, cites evidence or provider packets the rules above do not accept,
+targets a proposal that is no longer deliberating, would exceed a lifetime
+budget, or that the legal runtime refuses, changes nothing and is recorded as a
+`canwu.law.ingress_rejected.v1` event; the boundary settles the other packets.
+A refusal found before the runtime changed costs no reload or copy; only a
+failure after a change (an archive commit, a non-procedural adoption that
+fails after its reservation, or a broken invariant) restarts the
+pass from a copy taken once after loading. A pending proposal whose host
+compare-and-set no longer holds, whose culture dependency was retired, whose
+adoption guard can never hold, or whose adoption would exceed a lifetime budget
+is rejected with a `canwu.law.proposal_rejected.v1` event. A refused archive
+commit records a `RejectedStale` retention terminal whose reason names the
+refusal, so the host finalizes the handle as for a stale batch. An exact record
+version cited as evidence must be its record's current, initial-scenario, or
+same-boundary proposed version.
+
+Settlement takes at most `max_mutations_per_boundary` units of work (plus at
+most the first unit of each kind) in a fixed order; work past it stays pending
+and the plugin schedules a zero-delay continuation wake, so the next boundary
+at the same time settles the next slice, and `advance_canonical` settles them
+all before time advances. Work whose state growth does not fit waits for state
+an archive compaction frees. What can still fail a boundary: an invalid or
+missing persisted legal record, a broken runtime invariant or counter
+overflow, and a read of evidence outside what every run holds
+(`EvidenceContentUnavailable`), which is an engine-rule violation.
 
 This crate is experimental and intentionally does not implement natural
 language interpretation, universal moral judgment, or a dense person-by-rule

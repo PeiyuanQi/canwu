@@ -210,16 +210,22 @@ pressure, communication reach, or public practice. These inputs dirty bounded
 proceedings or source evaluations. None directly mutates legal state or serves
 as a universal cross-period causal formula.
 
-The compiled binding is authoritative. Live admission accepts a signal kind only
-when one of its exact `EvidenceRef::Ingress` values still exposes matching core
-metadata `(provider_plugin, packet_type)` and a kernel-committed
-`BoundaryIngressGeneration` naming that plugin as the producer. Direct host
-injection into the same namespace is not provider evidence. The law plugin does
-not inspect the provider payload, and a caller cannot establish provenance by
-pre-filling an `admitted_signal_kinds` field. If the ingress or producer boundary
-metadata was archived before first admission, admission fails closed; after
-admission, the immutable legal source keeps its own evidence reference and does
-not depend on re-reading that payload.
+The compiled binding is authoritative. When a boundary admits a packet with
+matching core metadata `(provider_plugin, packet_type)` and a kernel-committed
+`BoundaryIngressGeneration` naming that plugin as the producer, the law
+admission system records it in the bounded legal provider index with a hash of
+its due time and payload. Live admission accepts a signal kind only when one of
+its exact `EvidenceRef::Ingress` values names a recorded packet of the kind's
+provider, at that boundary or any later one. Every run records the packets its
+boundaries admit, so a sealed run and its exact replay decide alike; a packet
+the index never recorded or has forgotten (it keeps `max_provider_packets`) is
+refused as provider evidence (0.16.0, see
+[law, information, and military correctness](law-information-military-correctness.md)).
+Direct host injection into the same namespace is not provider evidence. The law
+plugin does not read the provider payload beyond its hash, and a caller cannot
+establish provenance by pre-filling an `admitted_signal_kinds` field. After
+admission, the immutable legal source keeps its own evidence reference and
+does not depend on re-reading that payload.
 
 ## Authoritative records and components
 
@@ -502,9 +508,10 @@ The first slice uses only existing shared evidence identities:
 The aggregate schema declares sorted identity-only dependencies for unresolved
 proposals and for sources of operative or scheduled law versions. Evidence
 sealing therefore keeps only the relevant Merkle receipt. For generated plugin
-ingress that receipt binds `(plugin, packet_type, producer_boundary)` and lets
-the legal provider check continue after compaction without loading the archived
-payload. Closed proceedings and no-longer-live legal versions fall out of the
+ingress that receipt binds `(plugin, packet_type, producer_boundary)`. Since
+0.16.0 the provider check reads the legal provider index instead, and each
+recorded provider packet is declared while it is recorded, so a cited packet's
+receipt survives a seal. Closed proceedings and no-longer-live legal versions fall out of the
 declaration and their receipts become collectible at the next seal.
 
 The runtime maintains this dependency declaration and an ordered reference-count

@@ -29,12 +29,12 @@ pub use model::{
     AudienceMembershipProofV1, AudiencePayload, AuthenticityFinding, AuthorityAssignmentPayload,
     ChannelCapability, ChannelPayload, ClaimedSourceRef, ContentDerivation, ContentDigest,
     ContentPayload, ContentRelation, ContentSourceEdge, ContentSourceRole,
-    DelegationAuthorityGrant, DelegationClaimV1, DelegationEvidenceSelector,
-    DeliveryAttemptPayload, DeliveryAttemptStatus, DigestAlgorithm, DispatchPayload,
-    DispatchStatus, DispatchTarget, InformationBody, InformationLimitsV1, InstancePayload,
-    InstanceStatus, InterpretationAuthority, InterpretationPayload, InterpretationStatus,
-    MAX_AUTHENTICITY_BASIS_BYTES, ReleasePayload, ReleaseScope, ReleaseStatus,
-    RepresentationPayload, RepresentationSourceEdge,
+    DelegatedAuthorityPayload, DelegationAuthorityGrant, DelegationClaimV1,
+    DelegationEvidenceSelector, DeliveryAttemptPayload, DeliveryAttemptStatus, DigestAlgorithm,
+    DispatchPayload, DispatchStatus, DispatchTarget, InformationBody, InformationLimitsV1,
+    InstancePayload, InstanceStatus, InterpretationAuthority, InterpretationPayload,
+    InterpretationStatus, MAX_AUTHENTICITY_BASIS_BYTES, ReleasePayload, ReleaseScope,
+    ReleaseStatus, RepresentationPayload, RepresentationSourceEdge,
 };
 pub use operation::{
     InformationAdmissionRef, InformationContinuation, InformationOperation,
@@ -47,13 +47,14 @@ pub use operation::{
 };
 pub use plugin::{
     AUTHORITY_COMMAND_PRODUCER, AUTHORITY_COMMAND_TYPE, DELEGATED_AUTHORITY_GRANT,
-    INFORMATION_COMMAND, INFORMATION_INGRESS, INSTITUTIONAL_AUTHORITY_GRANT, InformationPlugin,
-    PLUGIN_NAME, PLUGIN_NAMESPACE, information_authority_grants,
+    INFORMATION_COMMAND, INFORMATION_INGRESS, INFORMATION_REJECTION_EVENT,
+    INSTITUTIONAL_AUTHORITY_GRANT, InformationPlugin, PLUGIN_NAME, PLUGIN_NAMESPACE,
+    delegated_authority_reference, information_authority_grants,
 };
 pub use query::{InformationQuery, InformationRecordSet};
 pub use schema::{
-    Access, Audience, AuthorityAssignment, Channel, Content, DeliveryAttempt, Dispatch,
-    InformationOperationRecord, Instance, Interpretation, NeutralKnowledgeSchema, Release,
-    Representation, information_knowledge_schemas, information_record_schemas,
+    Access, Audience, AuthorityAssignment, Channel, Content, DelegatedAuthority, DeliveryAttempt,
+    Dispatch, InformationOperationRecord, Instance, Interpretation, NeutralKnowledgeSchema,
+    Release, Representation, information_knowledge_schemas, information_record_schemas,
     information_semantic_identity, neutral_knowledge_schemas,
 };

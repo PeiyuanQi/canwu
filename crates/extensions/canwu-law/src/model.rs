@@ -62,6 +62,12 @@ pub struct LawBudgets {
     pub max_text_bytes: usize,
     pub max_state_bytes: usize,
     pub max_memory_bytes: usize,
+    /// Provider packets the legal provider index keeps, so a later legal
+    /// mutation can cite one that an earlier boundary admitted. The packet with
+    /// the lowest ingress ID is forgotten first; citing a forgotten packet is
+    /// refused.
+    #[serde(default = "default_provider_packets")]
+    pub max_provider_packets: usize,
 }
 
 impl LawBudgets {
@@ -98,6 +104,7 @@ impl LawBudgets {
             max_text_bytes: 8 * 1024,
             max_state_bytes: MAX_LEGAL_STATE_BYTES,
             max_memory_bytes: MAX_LEGAL_MEMORY_BYTES,
+            max_provider_packets: 4_096,
         }
     }
 }
@@ -105,6 +112,32 @@ impl LawBudgets {
 const fn default_retirement_dependency_records() -> usize {
     4_096
 }
+
+const fn default_provider_packets() -> usize {
+    4_096
+}
+
+/// A compiled signal provider's packet that the law admission system
+/// recorded when its boundary admitted it.
+///
+/// Every run holds the packets its boundary admits, so the record is the same
+/// in a sealed run, an unsealed run, and exact replay, and a later legal
+/// mutation that cites the packet is checked against it instead of against
+/// retained evidence.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegalProviderPacket {
+    /// The compiled provider plugin that generated the packet.
+    pub plugin: String,
+    /// The provider's packet type.
+    pub packet_type: String,
+    /// `canonical_hash(LEGAL_PROVIDER_PAYLOAD_DOMAIN, &(due_at, payload))` of
+    /// the packet, as `SimulationView::plugin_ingress_payload_hash` returns it.
+    pub payload_hash: String,
+}
+
+/// Hash domain of [`LegalProviderPacket::payload_hash`].
+pub const LEGAL_PROVIDER_PAYLOAD_DOMAIN: &str = "canwu.law.provider-payload.v1";
 
 impl Default for LawBudgets {
     fn default() -> Self {

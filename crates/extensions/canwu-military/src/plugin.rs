@@ -5,9 +5,9 @@ use canwu_api::{
     Canwu, CanwuError, Command, CommandContext, CommandIngress, DomainRecord, DomainRecordClass,
     DomainRecordDraft, DomainRecordKind, DomainRecordLifecycle, DomainRecordMutation,
     DomainRecordRef, DomainRecordSchema, DomainRecordType, EntityRef, ErrorCode, EvidenceRef,
-    IngressClass, IngressPayload, Issuer, KnowledgeHolderRef, KnowledgeLimitsV1, KnowledgeOrigin,
-    KnowledgeRecordDraft, KnowledgeRecordKind, KnowledgeSchemaId, KnowledgeSubject,
-    KnowledgeSubjectSchema, KnowledgeSubjectTarget, KnowledgeSubjectTargetKind,
+    IngressClass, IngressId, IngressPayload, Issuer, KnowledgeHolderRef, KnowledgeLimitsV1,
+    KnowledgeOrigin, KnowledgeRecordDraft, KnowledgeRecordKind, KnowledgeSchemaId,
+    KnowledgeSubject, KnowledgeSubjectSchema, KnowledgeSubjectTarget, KnowledgeSubjectTargetKind,
     KnowledgeWriteGrant, LifeState, PayloadSchema, PersonId, PluginActionDescriptor,
     PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar, RandomOperationTarget,
     RandomStreamKey, SimDuration, SimTime, SimulationPlugin, SimulationView, StateKey,
@@ -25,7 +25,7 @@ pub const MILITARY_REPORT_KNOWLEDGE: &str = "military_report";
 /// acknowledgement instead of failing the boundary.
 pub const MILITARY_REJECTION_EVENT: &str = "canwu.military.ingress_rejected.v1";
 const VERSION: &str = "0.1.0";
-const SEMANTIC_HASH: &str = "b8c3f8a2a95ff7becd1d61190fdb0e168700120c6de911a325c28084265cc765";
+const SEMANTIC_HASH: &str = "f07c44f9baf066e87137f1f64c4a754b04e999525dcd64ebd4951ff173e38810";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct AdmittedCommand {
@@ -621,11 +621,11 @@ fn apply_ingress(
             // A plugin-scheduled tick that fails is a broken invariant, so it
             // still fails the boundary.
             if matches!(command, MilitaryCommand::AdvanceTick { .. }) {
-                apply_command(&mut staging, context, command)?;
+                apply_command(&mut staging, context, *id, command)?;
                 continue;
             }
             let checkpoint = staging.checkpoint();
-            if let Err(error) = apply_command(&mut staging, context, command) {
+            if let Err(error) = apply_command(&mut staging, context, *id, command) {
                 staging.restore(checkpoint);
                 reject_command(&mut staging, context, command, &error)?;
             }
@@ -707,9 +707,15 @@ fn check_force_revision(
     Ok(())
 }
 
+/// Applies one admitted command or plugin tick. `ingress` is the admitted
+/// packet that carries it: every operation-keyed draw the command makes cites
+/// that packet as its operation evidence, which exists in every run, sealed or
+/// not, so the draw is accepted alike in a live run, a sealed run, and exact
+/// replay.
 fn apply_command(
     staging: &mut Staging<'_, '_>,
     context: &BoundaryContext,
+    ingress: IngressId,
     command: &MilitaryCommand,
 ) -> Result<(), CanwuError> {
     let at = context.at;
@@ -1050,7 +1056,13 @@ fn apply_command(
             operation,
             occupation,
             ..
-        } => advance_tick(staging, context, operation.as_ref(), occupation.as_ref())?,
+        } => advance_tick(
+            staging,
+            context,
+            ingress,
+            operation.as_ref(),
+            occupation.as_ref(),
+        )?,
         MilitaryCommand::PrepareAmbush {
             force,
             node,
@@ -1124,7 +1136,7 @@ fn apply_command(
         MilitaryCommand::Recon { .. } => {
             let _ = staging.view.random_range_for_operation(
                 &military_random_stream(),
-                EvidenceRef::Boundary(context.boundary_id),
+                EvidenceRef::Ingress(ingress),
                 "military_command",
                 command_operation(command).as_str(),
                 RandomOperationTarget::CanonicalKey(command_operation(command).to_string()),
@@ -1499,11 +1511,12 @@ fn schedule_tick(
 fn advance_tick(
     staging: &mut Staging<'_, '_>,
     context: &BoundaryContext,
+    ingress: IngressId,
     operation: Option<&OperationId>,
     occupation: Option<&OccupationId>,
 ) -> Result<(), CanwuError> {
     if let Some(operation) = operation {
-        advance_operation(staging, context, operation)?;
+        advance_operation(staging, context, ingress, operation)?;
     }
     if let Some(occupation) = occupation {
         advance_occupation_state(staging, context, occupation)?;
@@ -1514,6 +1527,7 @@ fn advance_tick(
 fn advance_operation(
     staging: &mut Staging<'_, '_>,
     context: &BoundaryContext,
+    ingress: IngressId,
     id: &OperationId,
 ) -> Result<(), CanwuError> {
     let reference = operation_reference(id);
@@ -1556,12 +1570,7 @@ fn advance_operation(
         if operation.phase != OperationPhase::Failed && operation.kind == "special" {
             let success = staging.view.random_range_for_operation(
                 &military_random_stream(),
-                context
-                    .admitted_ingress
-                    .first()
-                    .copied()
-                    .map(EvidenceRef::Ingress)
-                    .unwrap_or(EvidenceRef::Boundary(context.boundary_id)),
+                EvidenceRef::Ingress(ingress),
                 "special-operation",
                 operation.key.as_str(),
                 RandomOperationTarget::CanonicalKey(operation.id.to_string()),
@@ -1672,7 +1681,7 @@ fn advance_operation(
             )?;
         }
     } else if operation.phase == OperationPhase::Engaged {
-        resolve_combat_round(staging, context, &mut operation)?;
+        resolve_combat_round(staging, context, ingress, &mut operation)?;
     }
     if force_changed {
         force.meta.revision = force_record.version + 1;
@@ -1691,6 +1700,7 @@ fn advance_operation(
 fn resolve_combat_round(
     staging: &mut Staging<'_, '_>,
     context: &BoundaryContext,
+    ingress: IngressId,
     operation: &mut OperationState,
 ) -> Result<(), CanwuError> {
     let combat_id = combat_id(&operation.id)?;
@@ -1709,12 +1719,7 @@ fn resolve_combat_round(
     let mut defender = defender_record.decode_payload::<ForceStateRecord>()?;
     let sample = staging.view.random_range_for_operation(
         &military_random_stream(),
-        context
-            .admitted_ingress
-            .first()
-            .copied()
-            .map(EvidenceRef::Ingress)
-            .unwrap_or(EvidenceRef::Boundary(context.boundary_id)),
+        EvidenceRef::Ingress(ingress),
         "combat-round",
         operation.key.as_str(),
         RandomOperationTarget::DomainRecord {

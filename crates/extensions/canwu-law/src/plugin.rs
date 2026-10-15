@@ -39,6 +39,14 @@ pub const LAW_MUTATION_INGRESS: &str = "legal_mutation";
 pub const LAW_WAKE_INGRESS: &str = "legal_due_work";
 pub const LAW_ARCHIVE_COMMIT_INGRESS: &str = "legal_archive_commit";
 pub const LAW_ARCHIVE_RETENTION_ACK_INGRESS: &str = "legal_archive_retention_ack";
+/// Event the law admission system records when it refuses one admitted law
+/// packet instead of failing the boundary. Its summary names the packet type,
+/// the ingress ID, and the reason; the packet changes nothing else.
+pub const LAW_INGRESS_REJECTED_EVENT: &str = "canwu.law.ingress_rejected.v1";
+/// Event the law admission system records when it rejects a pending proposal
+/// whose host compare-and-set no longer holds or that depends on a retired
+/// culture generation. The proposal is `Rejected` and its procedure closed.
+pub const LAW_PROPOSAL_REJECTED_EVENT: &str = "canwu.law.proposal_rejected.v1";
 const LAW_ADMISSION_SYSTEM: &str = "admit_legal_ingress";
 static LAW_ARCHIVE_INGRESS_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static LAW_ARCHIVE_RETENTION_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
@@ -206,6 +214,10 @@ impl SimulationPlugin for LawPlugin {
         admission.reads.extend(persisted_states.iter().cloned());
         admission.writes = persisted_states;
         admission.visibility = StateVisibility::SameBoundary;
+        admission.emits = vec![
+            LAW_INGRESS_REJECTED_EVENT.to_owned(),
+            LAW_PROPOSAL_REJECTED_EVENT.to_owned(),
+        ];
         registrar.register_boundary_system(admission, admit_legal_ingress)
     }
 }
@@ -555,528 +567,368 @@ fn submit_pending_intent(
     }])
 }
 
+/// The law packet types the admission system settles, in no particular order.
+const LAW_PACKET_TYPES: [&str; 8] = [
+    LAW_INTENT_INGRESS,
+    LAW_ACTOR_CONTEXT_INGRESS,
+    LAW_MUTATION_INGRESS,
+    LAW_WAKE_INGRESS,
+    LAW_OUTBOX_PREPARE_INGRESS,
+    LAW_OUTBOX_ACK_INGRESS,
+    LAW_ARCHIVE_COMMIT_INGRESS,
+    LAW_ARCHIVE_RETENTION_ACK_INGRESS,
+];
+
+/// One admitted law packet, decoded and checked on its own.
+enum LawPacket {
+    ArchiveCommit(Box<VerifiedLegalArchiveCommit>),
+    RetentionAck {
+        handle: String,
+        acknowledgement: ArchiveRetentionAcknowledgementAdmission,
+    },
+    Intent(Box<crate::PendingLegalIntent>),
+    ActorContext {
+        requirement: Box<crate::LegalActorContextRequirement>,
+        query: Box<canwu_api::KnowledgeQuery>,
+    },
+    Mutation(Box<crate::LegalMutation>),
+    Wake(canwu_api::SimTime),
+    Prepare {
+        sequence: u64,
+        expected_revision: u64,
+    },
+    Ack {
+        sequence: u64,
+        acknowledgement: OutboxAcknowledgementAdmission,
+    },
+}
+
+/// One unit of legal work this boundary applies: one packet, or the packets
+/// that agree on one wake time, outbox sequence, or retention handle. A
+/// refused unit refuses all its packets.
+struct LawUnit {
+    packets: Vec<(canwu_api::IngressId, &'static str)>,
+    work: LawWork,
+}
+
+enum LawWork {
+    ArchiveCommit(Box<VerifiedLegalArchiveCommit>),
+    RetentionAck {
+        handle: String,
+        acknowledgement: ArchiveRetentionAcknowledgementAdmission,
+    },
+    Wake(canwu_api::SimTime),
+    Mutation {
+        ingress: canwu_api::IngressId,
+        mutation: Box<crate::LegalMutation>,
+    },
+    ActorContext {
+        requirement: Box<crate::LegalActorContextRequirement>,
+        query: Box<canwu_api::KnowledgeQuery>,
+    },
+    Prepare {
+        sequence: u64,
+        expected_revision: u64,
+    },
+    Ack {
+        sequence: u64,
+        acknowledgement: OutboxAcknowledgementAdmission,
+    },
+    Intent(Box<crate::PendingLegalIntent>),
+}
+
+/// Why a unit failed. A failure found before the unit changed the working
+/// runtime needs no rollback; one raised after a runtime operation changed it
+/// sends the pass back to the runtime as it was before the first unit.
+struct UnitFailure {
+    error: CanwuError,
+    changed_runtime: bool,
+}
+
+impl UnitFailure {
+    fn checked(error: CanwuError) -> Self {
+        Self {
+            error,
+            changed_runtime: false,
+        }
+    }
+
+    fn applied(error: CanwuError) -> Self {
+        Self {
+            error,
+            changed_runtime: true,
+        }
+    }
+}
+
+/// Runs one legal runtime operation and classifies its failure.
+///
+/// Every runtime operation run here checks its input and reserves its
+/// serialized-state growth (always positive) before its first change. A
+/// failure that left the reservation where it was therefore changed nothing
+/// and is `checked`. A failure after the reservation (a non-procedural source
+/// whose adoption fails, or a broken invariant) is `applied` and restarts the
+/// pass. Archive commits do not run here: they may change the runtime before
+/// they fail, so their failure is always `applied`.
+fn run_runtime_op(
+    runtime: &mut LegalRuntime,
+    op: impl FnOnce(&mut LegalRuntime) -> Result<(), CanwuError>,
+) -> Result<(), UnitFailure> {
+    let reserved = runtime.reserved_state_bytes;
+    op(runtime).map_err(|error| {
+        if runtime.reserved_state_bytes == reserved {
+            UnitFailure::checked(error)
+        } else {
+            UnitFailure::applied(error)
+        }
+    })
+}
+
+/// One refused packet, recorded with [`LAW_INGRESS_REJECTED_EVENT`].
+struct Refusal {
+    ingress: canwu_api::IngressId,
+    packet_type: &'static str,
+    error: CanwuError,
+}
+
+/// Settles every law packet this boundary admits and records the compiled
+/// provider packets it admits in the legal provider index.
+///
+/// A packet whose content is refused (it does not decode, exceeds the
+/// boundary's legal ingress budget, conflicts with another packet, fails a
+/// compare-and-set, cites evidence or a provider packet the rule does not
+/// accept, would exceed a lifetime budget, or is refused by the legal runtime)
+/// changes nothing and is recorded with a [`LAW_INGRESS_REJECTED_EVENT`]; the
+/// boundary settles the other packets. A refused archive commit also records a
+/// `RejectedStale` terminal naming the refusal, so the host finalizes its
+/// retention handle. A pending proposal whose host compare-and-set no longer
+/// holds, whose culture dependency was retired, whose adoption guard can never
+/// hold, or whose adoption would exceed a lifetime budget is rejected and its
+/// procedure closed, recorded with a [`LAW_PROPOSAL_REJECTED_EVENT`]. Work past
+/// the per-boundary budgets waits for a continuation wake at the same time.
+///
+/// Every decision reads committed state (the provider index among it), this
+/// boundary's admitted packets and the commands that caused them, and the
+/// engine's existence answer for cited ordinal evidence; never another
+/// retained payload, provenance, or record version body. A sealed run
+/// therefore decides as its unsealed replay does, as far as the engine
+/// answers ordinal existence alike in both.
+///
+/// The runtime is loaded once. A refusal found before a unit changed the
+/// working runtime costs nothing more; one found after it restarts the pass
+/// from a copy taken after loading, without the refused unit.
+#[allow(clippy::too_many_lines)]
 fn admit_legal_ingress(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
-    let mut intents = Vec::new();
-    let mut acknowledgements = BTreeMap::<u64, OutboxAcknowledgementAdmission>::new();
-    let mut preparations = BTreeMap::<u64, u64>::new();
-    let mut actor_context_queries = Vec::new();
-    let mut mutations = Vec::new();
-    let mut wake_requested = Vec::new();
-    let mut archive_commits = Vec::new();
-    let mut archive_retention_acknowledgements =
-        BTreeMap::<String, ArchiveRetentionAcknowledgementAdmission>::new();
-    let mut header = None;
-    let mut selected_shards = BTreeSet::new();
-    let mut collected_mutations = 0;
+    let mut refusals = Vec::new();
+    let mut decoded = Vec::new();
+    let mut plugin_packets = Vec::new();
     for ingress_id in &context.admitted_ingress {
+        // The view shows a law system only law packets; any other admitted
+        // packet may be a compiled provider packet.
         let Some(ingress) = view.ingress(*ingress_id)? else {
+            plugin_packets.push(*ingress_id);
             continue;
         };
-        let IngressPayload::Plugin {
-            plugin,
-            packet_type,
-            payload,
-            archive_retention,
-            ..
-        } = &ingress.payload
+        let IngressPayload::Plugin { packet_type, .. } = &ingress.payload else {
+            continue;
+        };
+        let Some(packet_type) = LAW_PACKET_TYPES
+            .iter()
+            .copied()
+            .find(|known| *known == packet_type.as_str())
         else {
             continue;
         };
-        if plugin != PLUGIN_NAME {
-            continue;
-        }
-        if ![
-            LAW_INTENT_INGRESS,
-            LAW_ACTOR_CONTEXT_INGRESS,
-            LAW_MUTATION_INGRESS,
-            LAW_WAKE_INGRESS,
-            LAW_OUTBOX_PREPARE_INGRESS,
-            LAW_OUTBOX_ACK_INGRESS,
-            LAW_ARCHIVE_COMMIT_INGRESS,
-            LAW_ARCHIVE_RETENTION_ACK_INGRESS,
-        ]
-        .contains(&packet_type.as_str())
-        {
-            continue;
-        }
-        if header.is_none() {
-            header = Some(load_legal_header_from_view(view)?);
-        }
-        let (_, _, _, directory, plan) = header.as_ref().ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::InvalidDomainRecord,
-                "legal persistence header could not be loaded for admitted legal ingress",
-            )
-        })?;
-        selected_shards.insert(LegalShardKey::coordinator(plan.definition_id.clone()));
-        let mutation_budget = plan.budgets.max_mutations_per_boundary;
-        if packet_type == LAW_ARCHIVE_COMMIT_INGRESS {
-            let commit = serde_json::from_value::<VerifiedLegalArchiveCommit>(
-                payload.get("commit").cloned().ok_or_else(|| {
-                    CanwuError::new(
-                        ErrorCode::InvalidPayload,
-                        "legal archive ingress requires a verified commit",
-                    )
-                })?,
-            )
-            .map_err(|error| {
-                CanwuError::new(
-                    ErrorCode::InvalidPayload,
-                    format!("invalid verified legal archive commit: {error}"),
-                )
-            })?;
-            commit.validate()?;
-            if archive_retention.as_slice() != legal_archive_ingress_retention(&commit).as_slice() {
-                return Err(CanwuError::new(
-                    ErrorCode::InvalidPayload,
-                    "legal archive ingress retention is not bound to its committed directory root",
-                ));
-            }
-            reserve_collected_mutation(&mut collected_mutations, mutation_budget)?;
-            selected_shards.insert(commit.compaction.shard.clone());
-            archive_commits.push(commit);
-        } else if packet_type == LAW_ARCHIVE_RETENTION_ACK_INGRESS {
-            let retention_handle_id = payload
-                .get("retention_handle_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    CanwuError::new(
-                        ErrorCode::InvalidPayload,
-                        "legal archive retention acknowledgement requires a handle ID",
-                    )
-                })?
-                .to_owned();
-            let acknowledgement = ArchiveRetentionAcknowledgementAdmission {
-                compaction_token: payload
-                    .get("compaction_token")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        CanwuError::new(
-                            ErrorCode::InvalidPayload,
-                            "legal archive retention acknowledgement requires a compaction token",
-                        )
-                    })?
-                    .to_owned(),
-                directory_root: payload
-                    .get("directory_root")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        CanwuError::new(
-                            ErrorCode::InvalidPayload,
-                            "legal archive retention acknowledgement requires a directory root",
-                        )
-                    })?
-                    .to_owned(),
-                disposition: serde_json::from_value(
-                    payload.get("disposition").cloned().ok_or_else(|| {
-                        CanwuError::new(
-                            ErrorCode::InvalidPayload,
-                            "legal archive retention acknowledgement requires a disposition",
-                        )
-                    })?,
-                )
-                .map_err(|error| {
-                    CanwuError::new(
-                        ErrorCode::InvalidPayload,
-                        format!("invalid legal archive retention disposition: {error}"),
-                    )
-                })?,
-                chain_root: payload
-                    .get("chain_root")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        CanwuError::new(
-                            ErrorCode::InvalidPayload,
-                            "legal archive retention acknowledgement requires a chain root",
-                        )
-                    })?
-                    .to_owned(),
-            };
-            reserve_collected_mutation(&mut collected_mutations, mutation_budget)?;
-            if let Some(existing) = archive_retention_acknowledgements
-                .insert(retention_handle_id, acknowledgement.clone())
-                && existing != acknowledgement
-            {
-                return Err(CanwuError::new(
-                    ErrorCode::IdempotencyConflict,
-                    "conflicting legal archive retention acknowledgements share one handle",
-                ));
-            }
-        } else if packet_type == LAW_INTENT_INGRESS {
-            let intent = serde_json::from_value::<crate::PendingLegalIntent>(payload.clone())
-                .map_err(|error| {
-                    CanwuError::new(
-                        ErrorCode::InvalidPayload,
-                        format!("invalid admitted legal intent: {error}"),
-                    )
-                })?;
-            verify_intent_command(view, ingress.cause.as_ref(), &intent)?;
-            reserve_collected_mutation(&mut collected_mutations, mutation_budget)?;
-            // A procedure whose history was archived has no hot route; its late
-            // seat response settles in the coordinator as a rejected outcome.
-            if directory
-                .directory
-                .object_routes
-                .contains_key(&intent.procedure.id)
-            {
-                select_object_route(directory, &intent.procedure.id, &mut selected_shards)?;
-            }
-            intents.push(intent);
-        } else if packet_type == LAW_ACTOR_CONTEXT_INGRESS {
-            let requirement = serde_json::from_value::<crate::LegalActorContextRequirement>(
-                payload.get("requirement").cloned().ok_or_else(|| {
-                    CanwuError::new(
-                        ErrorCode::InvalidPayload,
-                        "legal actor context requires a seat requirement",
-                    )
-                })?,
-            )
-            .map_err(|error| {
-                CanwuError::new(
-                    ErrorCode::InvalidPayload,
-                    format!("invalid legal actor context requirement: {error}"),
-                )
-            })?;
-            let query = serde_json::from_value::<canwu_api::KnowledgeQuery>(
-                payload.get("query").cloned().ok_or_else(|| {
-                    CanwuError::new(
-                        ErrorCode::InvalidPayload,
-                        "legal actor context requires a knowledge query",
-                    )
-                })?,
-            )
-            .map_err(|error| {
-                CanwuError::new(
-                    ErrorCode::InvalidPayload,
-                    format!("invalid legal actor knowledge query: {error}"),
-                )
-            })?;
-            reserve_collected_mutation(&mut collected_mutations, mutation_budget)?;
-            select_object_route(directory, &requirement.procedure, &mut selected_shards)?;
-            actor_context_queries.push((requirement, query));
-        } else if packet_type == LAW_MUTATION_INGRESS {
-            let mutation = serde_json::from_value::<crate::LegalMutation>(
-                payload.get("mutation").cloned().ok_or_else(|| {
-                    CanwuError::new(
-                        ErrorCode::InvalidPayload,
-                        "legal mutation ingress requires a mutation",
-                    )
-                })?,
-            )
-            .map_err(|error| {
-                CanwuError::new(
-                    ErrorCode::InvalidPayload,
-                    format!("invalid legal mutation: {error}"),
-                )
-            })?;
-            reserve_collected_mutation(&mut collected_mutations, mutation_budget)?;
-            select_mutation_scope(&mutation, plan, directory, &mut selected_shards)?;
-            mutations.push((ingress.id, mutation));
-        } else if packet_type == LAW_WAKE_INGRESS {
-            let due_at = payload
-                .get("due_at")
-                .and_then(Value::as_i64)
-                .map(canwu_api::SimTime::from_minutes)
-                .ok_or_else(|| {
-                    CanwuError::new(
-                        ErrorCode::InvalidPayload,
-                        "legal wake ingress requires due_at",
-                    )
-                })?;
-            if due_at > context.at {
-                return Err(CanwuError::new(
-                    ErrorCode::InvalidPayload,
-                    "legal wake cannot be admitted before its due time",
-                ));
-            }
-            reserve_collected_mutation(&mut collected_mutations, mutation_budget)?;
-            let due_routes =
-                directory.directory.due_shards.get(&due_at).ok_or_else(|| {
-                    invalid_record("legal wake has no persisted bounded shard route")
-                })?;
-            selected_shards.extend(due_routes.iter().cloned());
-            wake_requested.push(due_at);
-        } else if packet_type == LAW_OUTBOX_PREPARE_INGRESS {
-            let sequence = payload_u64(payload, "sequence", "legal outbox preparation")?;
-            let expected_revision =
-                payload_u64(payload, "expected_revision", "legal outbox preparation")?;
-            match preparations.entry(sequence) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    reserve_collected_mutation(&mut collected_mutations, mutation_budget)?;
-                    entry.insert(expected_revision);
-                }
-                std::collections::btree_map::Entry::Occupied(entry) => {
-                    if *entry.get() != expected_revision {
-                        return Err(CanwuError::new(
-                            ErrorCode::IdempotencyConflict,
-                            "conflicting legal outbox preparations share one sequence",
-                        ));
-                    }
-                }
-            }
-        } else if packet_type == LAW_OUTBOX_ACK_INGRESS {
-            let (sequence, expected_revision) =
-                sequence_and_revision(payload, "legal outbox acknowledgement")?;
-            let candidate = OutboxAcknowledgementAdmission {
-                expected_revision,
-                ingress_id: ingress.id,
-                controller_request_id: payload_optional_u64(
-                    payload,
-                    "controller_request_id",
-                    "legal outbox acknowledgement",
-                )?,
-                create_request_id: payload_u64(
-                    payload,
-                    "create_request_id",
-                    "legal outbox acknowledgement",
-                )?,
-                ticket_id: payload_u64(payload, "ticket_id", "legal outbox acknowledgement")?,
-                draft_hash: payload
-                    .get("draft_hash")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        CanwuError::new(
-                            ErrorCode::InvalidPayload,
-                            "legal outbox acknowledgement requires a draft hash",
-                        )
-                    })?
-                    .to_owned(),
-                outcome_commitment: payload
-                    .get("outcome_commitment")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        CanwuError::new(
-                            ErrorCode::InvalidPayload,
-                            "legal outbox acknowledgement requires an outcome commitment",
-                        )
-                    })?
-                    .to_owned(),
-            };
-            match acknowledgements.entry(sequence) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    reserve_collected_mutation(&mut collected_mutations, mutation_budget)?;
-                    entry.insert(candidate);
-                }
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    if !entry.get().semantically_matches(&candidate) {
-                        return Err(CanwuError::new(
-                            ErrorCode::IdempotencyConflict,
-                            "conflicting legal outbox acknowledgements share one sequence",
-                        ));
-                    }
-                    if candidate.ingress_id < entry.get().ingress_id {
-                        entry.get_mut().ingress_id = candidate.ingress_id;
-                    }
-                }
-            }
+        match decode_law_packet(view, context, ingress, packet_type) {
+            Ok(packet) => decoded.push((ingress.id, packet_type, packet)),
+            Err(error) => refuse(&mut refusals, ingress.id, packet_type, error)?,
         }
     }
-    if intents.is_empty()
-        && acknowledgements.is_empty()
-        && preparations.is_empty()
-        && actor_context_queries.is_empty()
-        && mutations.is_empty()
-        && wake_requested.is_empty()
-        && archive_commits.is_empty()
-        && archive_retention_acknowledgements.is_empty()
-    {
-        return Ok(BoundaryProposal::default());
-    }
-    intents.sort_by(|left, right| left.id.cmp(&right.id));
-    actor_context_queries.sort_by(|left, right| {
-        (&left.0.procedure, left.0.stage, left.0.round, &left.0.seat).cmp(&(
-            &right.0.procedure,
-            right.0.stage,
-            right.0.round,
-            &right.0.seat,
-        ))
-    });
-    let (plan_record, plan_state, directory_record, directory, plan) = header.ok_or_else(|| {
-        CanwuError::new(
-            ErrorCode::InvalidDomainRecord,
-            "legal persistence header could not be loaded for admitted legal ingress",
-        )
-    })?;
-    let mut runtime = load_legal_runtime_from_view_scope(
-        view,
-        plan_record,
-        plan_state,
-        directory_record,
-        directory,
-        &plan,
-        &selected_shards,
-        true,
-    )?;
-    runtime.validate_live_plan_binding(&plan)?;
-    archive_commits.sort_by(|left, right| left.compaction.token.cmp(&right.compaction.token));
-    for commit in archive_commits {
-        runtime.commit_verified_legal_archive(&commit)?;
-    }
-    for (retention_handle_id, acknowledgement) in archive_retention_acknowledgements {
-        runtime.acknowledge_archive_retention_terminal(
-            &retention_handle_id,
-            &acknowledgement.compaction_token,
-            &acknowledgement.directory_root,
-            acknowledgement.disposition,
-            &acknowledgement.chain_root,
-        )?;
-    }
-    wake_requested.sort();
-    wake_requested.dedup();
-    for due_at in wake_requested {
-        runtime.consume_wake(due_at)?;
-    }
-    let mut signals = Vec::new();
-    for (ingress_id, mutation) in mutations {
-        verify_legal_mutation(view, &plan, &mutation)?;
-        match mutation {
-            crate::LegalMutation::SubmitProposal { proposal } => {
-                runtime.submit_proposal_within_boundary(&plan, proposal)?;
-            }
-            crate::LegalMutation::AdmitNonProceduralSource { proposal } => {
-                let admitted_signal_kinds = verified_required_signal_kinds(view, &plan, &proposal)?;
-                runtime.admit_non_procedural_source_within_boundary(
-                    &plan,
-                    proposal,
-                    &admitted_signal_kinds,
-                    context.at,
-                )?;
-            }
-            crate::LegalMutation::Signal { signal } => {
-                let proposal = runtime.proposals.get(&signal.proposal_id).ok_or_else(|| {
-                    CanwuError::new(
-                        ErrorCode::InvalidDomainRecord,
-                        "legal signal references an unknown proposal",
-                    )
-                })?;
-                verify_proposal_inputs(view, proposal)?;
-                let active_procedure = proposal.active_procedure.clone();
-                if let Some(procedure) = active_procedure {
-                    runtime.dirty_procedures.insert(procedure);
-                }
-                signals.push(signal);
-            }
-            crate::LegalMutation::RetireCulturalTarget { target, reason } => runtime
-                .retire_cultural_target_from_ingress(
-                    &plan,
-                    &target,
-                    context.at,
-                    reason,
-                    EvidenceRef::Ingress(ingress_id),
-                )?,
-            crate::LegalMutation::RecordCase { case } => runtime.record_case(&plan, case)?,
-            crate::LegalMutation::RecordFinding { finding } => {
-                runtime.record_finding(&plan, finding)?;
-            }
-            crate::LegalMutation::RecordRuling { ruling } => {
-                runtime.record_ruling(&plan, ruling)?;
-            }
-            crate::LegalMutation::RecordConflict { conflict } => {
-                runtime.record_conflict(&plan, conflict)?;
-            }
-            crate::LegalMutation::RecordPublicity { publicity } => {
-                runtime.record_publicity_at(&plan, publicity, context.at)?;
-            }
-            crate::LegalMutation::RecordSuccession { succession } => {
-                runtime.record_succession_for_plan(&plan, succession)?;
-            }
-            crate::LegalMutation::AdmitCapacity { allocation } => {
-                runtime.admit_capacity_allocation(&plan, allocation)?;
-            }
-        }
-    }
-    for (requirement, query) in actor_context_queries {
-        if query.after.is_some()
-            || query.limit == 0
-            || usize::try_from(query.limit)
-                .ok()
-                .is_none_or(|limit| limit > runtime.budgets.max_evidence_per_record)
-        {
-            return Err(CanwuError::new(
-                ErrorCode::KnowledgeLimitExceeded,
-                "legal actor context requires one bounded, unpaginated knowledge query",
-            ));
-        }
-        let result = view.knowledge_records(requirement.holder.clone(), &query)?;
-        if result.next.is_some() || result.holder != requirement.holder {
-            return Err(CanwuError::new(
-                ErrorCode::KnowledgeLimitExceeded,
-                "legal actor context query must fit in one holder-bound page",
-            ));
-        }
-        let actor_context = crate::runtime::actor_context_from_query_result(&result)?;
-        runtime.stage_actor_context(&requirement, actor_context)?;
-    }
-    // Seat work that expired with its stage or procedure is terminal; a
-    // preparation or acknowledgement that arrives for it afterwards is a no-op.
-    let expired = |runtime: &LegalRuntime, sequence: u64| {
-        runtime
-            .outbox
-            .get(&sequence)
-            .is_some_and(|item| item.dispatch == crate::DispatchState::Expired)
-    };
-    for (sequence, expected_revision) in preparations {
-        if expired(&runtime, sequence) {
-            continue;
-        }
-        if runtime
-            .outbox
-            .get(&sequence)
-            .and_then(|item| item.enqueue_expected_revision)
-            .is_some_and(|existing| existing != expected_revision)
-        {
-            verify_outbox_can_reprepare(view, &runtime, sequence)?;
-        }
-        runtime.stage_outbox_expected_revision(sequence, expected_revision)?;
-    }
-    for (sequence, acknowledgement) in acknowledgements {
-        if expired(&runtime, sequence) {
-            continue;
-        }
-        verify_outbox_enqueue(
-            view,
-            &runtime,
-            sequence,
-            acknowledgement.expected_revision,
-            acknowledgement.controller_request_id,
-            acknowledgement.create_request_id,
-            acknowledgement.ticket_id,
-            &acknowledgement.draft_hash,
-            &acknowledgement.outcome_commitment,
-        )?;
-        runtime.mark_outbox_enqueued(
-            sequence,
-            acknowledgement.expected_revision,
-            EvidenceRef::Ingress(acknowledgement.ingress_id),
-            acknowledgement.outcome_commitment,
-        )?;
-    }
-    for intent in intents {
-        runtime.queue_authorized_pending_intent(intent)?;
-    }
-    verify_pending_adoption_guards(view, &runtime)?;
-    runtime.settle_boundary(&plan, context.at, &signals)?;
     let mut directives = Vec::new();
-    if let Some(due_at) = runtime.next_due_time()
-        && !runtime.scheduled_wakes.contains(&due_at)
-    {
-        let after = due_at.checked_sub(context.at).ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::InvalidBoundary,
-                "legal due time precedes this boundary",
-            )
-        })?;
-        runtime.mark_wake_scheduled(due_at)?;
-        directives.push(BoundaryDirective::ScheduleIngress {
-            after,
-            packet_type: LAW_WAKE_INGRESS.to_owned(),
-            priority: 0,
-            payload: serde_json::json!({ "due_at": due_at.as_minutes() }),
-            affected: Vec::new(),
+    let Some(installed_plan) = view.typed_domain_record(&legal_plan_state_reference())? else {
+        // Without an installed legal plan there is no legal work: every law
+        // packet is refused and no provider packet is recorded.
+        for (ingress, packet_type, _) in decoded {
+            refuse(
+                &mut refusals,
+                ingress,
+                packet_type,
+                invalid_record("no legal plan is installed in this run"),
+            )?;
+        }
+        push_refusal_events(&mut directives, refusals);
+        return Ok(BoundaryProposal {
+            directives,
+            ..BoundaryProposal::default()
         });
+    };
+    let provider_packets = admitted_provider_packets(view, installed_plan, plugin_packets)?;
+    if decoded.is_empty() && provider_packets.is_empty() {
+        push_refusal_events(&mut directives, refusals);
+        return Ok(BoundaryProposal {
+            directives,
+            ..BoundaryProposal::default()
+        });
+    }
+    let (plan_record, plan_state, directory_record, directory, plan) =
+        load_legal_header_from_view(view)?;
+    let units = group_law_units(
+        decoded,
+        plan.budgets.max_mutations_per_boundary,
+        &mut refusals,
+    )?;
+    let mut selected_shards =
+        BTreeSet::from([LegalShardKey::coordinator(plan.definition_id.clone())]);
+    let mut selected_units = Vec::new();
+    for unit in units {
+        let mut scope = BTreeSet::new();
+        match select_unit_scope(&unit.work, &plan, &directory, &mut scope)
+            .and_then(|()| require_held_shards(&directory, &scope))
+        {
+            Ok(()) => {
+                selected_shards.extend(scope);
+                selected_units.push(unit);
+            }
+            Err(error) => refuse_unit(&mut refusals, &unit, &error)?,
+        }
+    }
+    if selected_units.is_empty() && provider_packets.is_empty() {
+        push_refusal_events(&mut directives, refusals);
+        return Ok(BoundaryProposal {
+            directives,
+            ..BoundaryProposal::default()
+        });
+    }
+    let load = |shards: &BTreeSet<LegalShardKey>| -> Result<LegalRuntime, CanwuError> {
+        let runtime = load_legal_runtime_from_view_scope(
+            view,
+            plan_record.clone(),
+            plan_state.clone(),
+            directory_record.clone(),
+            directory.clone(),
+            &plan,
+            shards,
+            true,
+        )?;
+        runtime.validate_live_plan_binding(&plan)?;
+        Ok(runtime)
+    };
+    let mut runtime = load(&selected_shards)?;
+    if !selected_units.is_empty() {
+        // Work an earlier boundary deferred stays pending in the coordinator
+        // while its records live in their own shards; a boundary that may
+        // settle loads them too, at most once more.
+        let pending = runtime.pending_work_routes(context.at);
+        if !pending.is_subset(&selected_shards) {
+            require_held_shards(&directory, &pending)?;
+            selected_shards.extend(pending);
+            runtime = load(&selected_shards)?;
+        }
+    }
+    let mut changed = false;
+    for (id, packet) in provider_packets {
+        changed |= runtime.record_provider_packet(id, packet)?;
+    }
+    // Apply the units in their canonical order. A unit that fails is refused
+    // and dropped. A failure found before the unit changed the working
+    // runtime leaves it as it was; one found after starts the pass again from
+    // the copy taken here, without the refused unit, so a refused unit leaves
+    // nothing behind. A refused archive commit records its terminal in place
+    // of its work. Each restart drops one more unit.
+    let loaded = runtime.clone();
+    let mut refused_units = BTreeMap::<usize, String>::new();
+    let mut unrecorded_terminals = BTreeSet::new();
+    loop {
+        let mut restart = false;
+        for (index, unit) in selected_units.iter().enumerate() {
+            if let Some(reason) = refused_units.get(&index) {
+                if let LawWork::ArchiveCommit(commit) = &unit.work
+                    && !unrecorded_terminals.contains(&index)
+                    && let Err(failure) = run_runtime_op(&mut runtime, |runtime| {
+                        runtime.record_refused_archive_commit(commit, reason.clone())
+                    })
+                {
+                    unrecorded_terminals.insert(index);
+                    if failure.changed_runtime {
+                        restart = true;
+                        break;
+                    }
+                }
+                continue;
+            }
+            if let Err(failure) = apply_law_unit(view, context, &plan, &mut runtime, &unit.work) {
+                refuse_unit(&mut refusals, unit, &failure.error)?;
+                refused_units.insert(index, failure.error.message.clone());
+                if failure.changed_runtime {
+                    restart = true;
+                    break;
+                }
+            }
+        }
+        if !restart {
+            break;
+        }
+        runtime = loaded.clone();
+    }
+    let settles = refused_units.len() < selected_units.len();
+    changed |= settles
+        || selected_units.iter().enumerate().any(|(index, unit)| {
+            matches!(unit.work, LawWork::ArchiveCommit(_))
+                && refused_units.contains_key(&index)
+                && !unrecorded_terminals.contains(&index)
+        });
+    if !changed {
+        push_refusal_events(&mut directives, refusals);
+        return Ok(BoundaryProposal {
+            directives,
+            ..BoundaryProposal::default()
+        });
+    }
+    let mut rejected_proposals = Vec::new();
+    if settles {
+        rejected_proposals = reject_stale_pending_proposals(view, &mut runtime)?;
+        let result = runtime.settle_boundary(&plan, context.at, &[])?;
+        rejected_proposals.extend(
+            result
+                .rejected_proposals
+                .into_iter()
+                .map(|rejection| (rejection.proposal, rejection.reason)),
+        );
+        // Deferred work continues at a boundary at this same time; due work
+        // wakes at its own time. A wake whose tracking does not fit the state
+        // budget is not scheduled: its work settles at the next boundary that
+        // settles law work.
+        let mut wakes = BTreeSet::new();
+        if result.deferred {
+            wakes.insert(context.at);
+        }
+        if let Some(due_at) = runtime.next_due_time_after(context.at) {
+            wakes.insert(due_at);
+        }
+        for due_at in wakes {
+            if runtime.scheduled_wakes.contains(&due_at) {
+                continue;
+            }
+            let after = due_at.checked_sub(context.at).ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::InvalidBoundary,
+                    "legal due time precedes this boundary",
+                )
+            })?;
+            if runtime.mark_wake_scheduled(due_at).is_err() {
+                continue;
+            }
+            directives.push(BoundaryDirective::ScheduleIngress {
+                after,
+                packet_type: LAW_WAKE_INGRESS.to_owned(),
+                priority: 0,
+                payload: serde_json::json!({ "due_at": due_at.as_minutes() }),
+                affected: Vec::new(),
+            });
+        }
     }
     let mut state_directives = Vec::new();
     let mut selected_records = BTreeSet::from([
@@ -1112,21 +964,799 @@ fn admit_legal_ingress(
     }
     state_directives.extend(directives);
     directives = state_directives;
+    push_refusal_events(&mut directives, refusals);
+    for (proposal, reason) in rejected_proposals {
+        directives.push(BoundaryDirective::Emit {
+            event_type: LAW_PROPOSAL_REJECTED_EVENT.to_owned(),
+            summary: format!("legal proposal {proposal} rejected: {reason}"),
+            affected: Vec::new(),
+        });
+    }
     Ok(BoundaryProposal {
         directives,
         ..BoundaryProposal::default()
     })
 }
 
-fn reserve_collected_mutation(count: &mut usize, budget: usize) -> Result<(), CanwuError> {
-    if *count >= budget {
-        return Err(CanwuError::new(
-            ErrorCode::ValueOutOfRange,
-            "legal ingress mutation budget exhausted",
-        ));
+/// The compiled provider packets this boundary admits, each with the payload
+/// hash the legal provider index records for it.
+///
+/// The provider pairs are read from the installed plan record without
+/// decoding the plan, so a boundary that admits no other packet pays nothing
+/// and one that does pays one record lookup and one engine match per packet
+/// and provider. Only a packet the engine matches to its provider plugin's own
+/// boundary output is recorded, as the provider rule always required.
+fn admitted_provider_packets(
+    view: &SimulationView<'_>,
+    installed_plan: &DomainRecord,
+    candidates: Vec<canwu_api::IngressId>,
+) -> Result<Vec<(canwu_api::IngressId, crate::LegalProviderPacket)>, CanwuError> {
+    if candidates.is_empty() {
+        return Ok(Vec::new());
     }
-    *count += 1;
+    let providers = installed_plan
+        .payload
+        .pointer("/fields/plan/signal_provider_by_kind")
+        .and_then(Value::as_object)
+        .map(|providers| {
+            providers
+                .values()
+                .filter_map(|provider| {
+                    Some((
+                        provider.get("plugin")?.as_str()?,
+                        provider.get("packet_type")?.as_str()?,
+                    ))
+                })
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let mut packets = Vec::new();
+    for id in candidates {
+        for (plugin, packet_type) in &providers {
+            if let Some(payload_hash) = view.plugin_ingress_payload_hash(
+                id,
+                plugin,
+                packet_type,
+                crate::LEGAL_PROVIDER_PAYLOAD_DOMAIN,
+            )? {
+                packets.push((
+                    id,
+                    crate::LegalProviderPacket {
+                        plugin: (*plugin).to_owned(),
+                        packet_type: (*packet_type).to_owned(),
+                        payload_hash,
+                    },
+                ));
+                break;
+            }
+        }
+    }
+    Ok(packets)
+}
+
+/// Records a refusal. A payload read outside what every run holds is an
+/// engine-rule violation, not a refusal, so it still fails the boundary.
+fn refuse(
+    refusals: &mut Vec<Refusal>,
+    ingress: canwu_api::IngressId,
+    packet_type: &'static str,
+    error: CanwuError,
+) -> Result<(), CanwuError> {
+    if error.code == ErrorCode::EvidenceContentUnavailable {
+        return Err(error);
+    }
+    refusals.push(Refusal {
+        ingress,
+        packet_type,
+        error,
+    });
     Ok(())
+}
+
+fn refuse_unit(
+    refusals: &mut Vec<Refusal>,
+    unit: &LawUnit,
+    error: &CanwuError,
+) -> Result<(), CanwuError> {
+    for (ingress, packet_type) in &unit.packets {
+        refuse(refusals, *ingress, packet_type, error.clone())?;
+    }
+    Ok(())
+}
+
+fn push_refusal_events(directives: &mut Vec<BoundaryDirective>, mut refusals: Vec<Refusal>) {
+    refusals.sort_by_key(|refusal| refusal.ingress);
+    for refusal in refusals {
+        directives.push(BoundaryDirective::Emit {
+            event_type: LAW_INGRESS_REJECTED_EVENT.to_owned(),
+            summary: format!(
+                "legal {} ingress {} rejected: {}",
+                refusal.packet_type, refusal.ingress, refusal.error
+            ),
+            affected: Vec::new(),
+        });
+    }
+}
+
+fn required_field<'a>(
+    payload: &'a Value,
+    field: &str,
+    context: &str,
+) -> Result<&'a Value, CanwuError> {
+    payload.get(field).ok_or_else(|| {
+        CanwuError::new(
+            ErrorCode::InvalidPayload,
+            format!("{context} requires {field}"),
+        )
+    })
+}
+
+fn required_text(payload: &Value, field: &str, context: &str) -> Result<String, CanwuError> {
+    required_field(payload, field, context)?
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::InvalidPayload,
+                format!("{context} requires {field} as text"),
+            )
+        })
+}
+
+fn decode_field<T: DeserializeOwned>(
+    payload: &Value,
+    field: &str,
+    context: &str,
+) -> Result<T, CanwuError> {
+    serde_json::from_value(required_field(payload, field, context)?.clone()).map_err(|error| {
+        CanwuError::new(
+            ErrorCode::InvalidPayload,
+            format!("{context} has an invalid {field}: {error}"),
+        )
+    })
+}
+
+/// Decodes and checks one admitted law packet on its own.
+fn decode_law_packet(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    ingress: &canwu_api::IngressRecord,
+    packet_type: &'static str,
+) -> Result<LawPacket, CanwuError> {
+    let IngressPayload::Plugin {
+        payload,
+        archive_retention,
+        ..
+    } = &ingress.payload
+    else {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPayload,
+            "legal ingress is not a plugin packet",
+        ));
+    };
+    match packet_type {
+        LAW_ARCHIVE_COMMIT_INGRESS => {
+            let commit: VerifiedLegalArchiveCommit =
+                decode_field(payload, "commit", "legal archive ingress")?;
+            commit.validate()?;
+            if archive_retention.as_slice() != legal_archive_ingress_retention(&commit).as_slice() {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidPayload,
+                    "legal archive ingress retention is not bound to its committed directory root",
+                ));
+            }
+            Ok(LawPacket::ArchiveCommit(Box::new(commit)))
+        }
+        LAW_ARCHIVE_RETENTION_ACK_INGRESS => {
+            let label = "legal archive retention acknowledgement";
+            Ok(LawPacket::RetentionAck {
+                handle: required_text(payload, "retention_handle_id", label)?,
+                acknowledgement: ArchiveRetentionAcknowledgementAdmission {
+                    compaction_token: required_text(payload, "compaction_token", label)?,
+                    directory_root: required_text(payload, "directory_root", label)?,
+                    disposition: decode_field(payload, "disposition", label)?,
+                    chain_root: required_text(payload, "chain_root", label)?,
+                },
+            })
+        }
+        LAW_INTENT_INGRESS => {
+            let intent = serde_json::from_value::<crate::PendingLegalIntent>(payload.clone())
+                .map_err(|error| {
+                    CanwuError::new(
+                        ErrorCode::InvalidPayload,
+                        format!("invalid admitted legal intent: {error}"),
+                    )
+                })?;
+            verify_intent_command(view, ingress.cause.as_ref(), &intent)?;
+            Ok(LawPacket::Intent(Box::new(intent)))
+        }
+        LAW_ACTOR_CONTEXT_INGRESS => {
+            let label = "legal actor context";
+            Ok(LawPacket::ActorContext {
+                requirement: Box::new(decode_field(payload, "requirement", label)?),
+                query: Box::new(decode_field(payload, "query", label)?),
+            })
+        }
+        LAW_MUTATION_INGRESS => Ok(LawPacket::Mutation(Box::new(decode_field(
+            payload,
+            "mutation",
+            "legal mutation ingress",
+        )?))),
+        LAW_WAKE_INGRESS => {
+            let due_at = payload
+                .get("due_at")
+                .and_then(Value::as_i64)
+                .map(canwu_api::SimTime::from_minutes)
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::InvalidPayload,
+                        "legal wake ingress requires due_at",
+                    )
+                })?;
+            if due_at > context.at {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidPayload,
+                    "legal wake cannot be admitted before its due time",
+                ));
+            }
+            Ok(LawPacket::Wake(due_at))
+        }
+        LAW_OUTBOX_PREPARE_INGRESS => {
+            let (sequence, expected_revision) =
+                sequence_and_revision(payload, "legal outbox preparation")?;
+            Ok(LawPacket::Prepare {
+                sequence,
+                expected_revision,
+            })
+        }
+        LAW_OUTBOX_ACK_INGRESS => {
+            let label = "legal outbox acknowledgement";
+            let (sequence, expected_revision) = sequence_and_revision(payload, label)?;
+            Ok(LawPacket::Ack {
+                sequence,
+                acknowledgement: OutboxAcknowledgementAdmission {
+                    expected_revision,
+                    ingress_id: ingress.id,
+                    controller_request_id: payload_optional_u64(
+                        payload,
+                        "controller_request_id",
+                        label,
+                    )?,
+                    create_request_id: payload_u64(payload, "create_request_id", label)?,
+                    ticket_id: payload_u64(payload, "ticket_id", label)?,
+                    draft_hash: required_text(payload, "draft_hash", label)?,
+                    outcome_commitment: required_text(payload, "outcome_commitment", label)?,
+                },
+            })
+        }
+        _ => Err(CanwuError::new(
+            ErrorCode::InvalidPayload,
+            "unknown legal ingress packet type",
+        )),
+    }
+}
+
+/// Groups decoded packets into units in their canonical order: archive
+/// commits by token, retention acknowledgements by handle, wakes by due time,
+/// mutations in admission order, actor contexts by seat, outbox preparations
+/// and acknowledgements by sequence, intents by ID.
+///
+/// Packets count against the boundary's legal ingress budget in admission
+/// order; one beyond it is refused. A wake carries no input of its own and
+/// does not count. A packet that repeats an outbox sequence or retention
+/// handle joins its unit, and one that conflicts with it is refused.
+#[allow(clippy::too_many_lines)]
+fn group_law_units(
+    decoded: Vec<(canwu_api::IngressId, &'static str, LawPacket)>,
+    budget: usize,
+    refusals: &mut Vec<Refusal>,
+) -> Result<Vec<LawUnit>, CanwuError> {
+    let mut counted = 0_usize;
+    let mut within_budget = |refusals: &mut Vec<Refusal>,
+                             ingress: canwu_api::IngressId,
+                             packet_type: &'static str|
+     -> Result<bool, CanwuError> {
+        if counted >= budget {
+            refuse(
+                refusals,
+                ingress,
+                packet_type,
+                CanwuError::new(
+                    ErrorCode::ValueOutOfRange,
+                    "legal ingress mutation budget exhausted",
+                ),
+            )?;
+            return Ok(false);
+        }
+        counted += 1;
+        Ok(true)
+    };
+    let mut commits = Vec::new();
+    let mut retention_acks = BTreeMap::<
+        String,
+        (
+            Vec<canwu_api::IngressId>,
+            ArchiveRetentionAcknowledgementAdmission,
+        ),
+    >::new();
+    let mut wakes = BTreeMap::<canwu_api::SimTime, Vec<canwu_api::IngressId>>::new();
+    let mut mutations = Vec::new();
+    let mut contexts = Vec::new();
+    let mut preparations = BTreeMap::<u64, (Vec<canwu_api::IngressId>, u64)>::new();
+    let mut acknowledgements =
+        BTreeMap::<u64, (Vec<canwu_api::IngressId>, OutboxAcknowledgementAdmission)>::new();
+    let mut intents = Vec::new();
+    for (ingress, packet_type, packet) in decoded {
+        match packet {
+            LawPacket::Wake(due_at) => wakes.entry(due_at).or_default().push(ingress),
+            LawPacket::RetentionAck {
+                handle,
+                acknowledgement,
+            } => match retention_acks.get_mut(&handle) {
+                Some((packets, existing)) if *existing == acknowledgement => packets.push(ingress),
+                Some(_) => refuse(
+                    refusals,
+                    ingress,
+                    packet_type,
+                    CanwuError::new(
+                        ErrorCode::IdempotencyConflict,
+                        "conflicting legal archive retention acknowledgements share one handle",
+                    ),
+                )?,
+                None => {
+                    if within_budget(refusals, ingress, packet_type)? {
+                        retention_acks.insert(handle, (vec![ingress], acknowledgement));
+                    }
+                }
+            },
+            LawPacket::Prepare {
+                sequence,
+                expected_revision,
+            } => match preparations.get_mut(&sequence) {
+                Some((packets, existing)) if *existing == expected_revision => {
+                    packets.push(ingress);
+                }
+                Some(_) => refuse(
+                    refusals,
+                    ingress,
+                    packet_type,
+                    CanwuError::new(
+                        ErrorCode::IdempotencyConflict,
+                        "conflicting legal outbox preparations share one sequence",
+                    ),
+                )?,
+                None => {
+                    if within_budget(refusals, ingress, packet_type)? {
+                        preparations.insert(sequence, (vec![ingress], expected_revision));
+                    }
+                }
+            },
+            LawPacket::Ack {
+                sequence,
+                acknowledgement,
+            } => match acknowledgements.get_mut(&sequence) {
+                Some((packets, existing)) if existing.semantically_matches(&acknowledgement) => {
+                    packets.push(ingress);
+                    if acknowledgement.ingress_id < existing.ingress_id {
+                        existing.ingress_id = acknowledgement.ingress_id;
+                    }
+                }
+                Some(_) => refuse(
+                    refusals,
+                    ingress,
+                    packet_type,
+                    CanwuError::new(
+                        ErrorCode::IdempotencyConflict,
+                        "conflicting legal outbox acknowledgements share one sequence",
+                    ),
+                )?,
+                None => {
+                    if within_budget(refusals, ingress, packet_type)? {
+                        acknowledgements.insert(sequence, (vec![ingress], acknowledgement));
+                    }
+                }
+            },
+            packet => {
+                if !within_budget(refusals, ingress, packet_type)? {
+                    continue;
+                }
+                match packet {
+                    LawPacket::ArchiveCommit(commit) => commits.push((ingress, commit)),
+                    LawPacket::Mutation(mutation) => mutations.push((ingress, mutation)),
+                    LawPacket::ActorContext { requirement, query } => {
+                        contexts.push((ingress, requirement, query));
+                    }
+                    LawPacket::Intent(intent) => intents.push((ingress, intent)),
+                    LawPacket::Wake(_)
+                    | LawPacket::RetentionAck { .. }
+                    | LawPacket::Prepare { .. }
+                    | LawPacket::Ack { .. } => {
+                        unreachable!("grouped packet kinds are handled above")
+                    }
+                }
+            }
+        }
+    }
+    commits.sort_by(|left, right| left.1.compaction.token.cmp(&right.1.compaction.token));
+    contexts.sort_by(|left, right| {
+        (
+            &left.1.procedure,
+            left.1.stage,
+            left.1.round,
+            &left.1.seat,
+            left.0,
+        )
+            .cmp(&(
+                &right.1.procedure,
+                right.1.stage,
+                right.1.round,
+                &right.1.seat,
+                right.0,
+            ))
+    });
+    intents.sort_by(|left, right| (&left.1.id, left.0).cmp(&(&right.1.id, right.0)));
+    let mut units = Vec::new();
+    units.extend(commits.into_iter().map(|(ingress, commit)| LawUnit {
+        packets: vec![(ingress, LAW_ARCHIVE_COMMIT_INGRESS)],
+        work: LawWork::ArchiveCommit(commit),
+    }));
+    units.extend(
+        retention_acks
+            .into_iter()
+            .map(|(handle, (packets, acknowledgement))| LawUnit {
+                packets: packets
+                    .into_iter()
+                    .map(|ingress| (ingress, LAW_ARCHIVE_RETENTION_ACK_INGRESS))
+                    .collect(),
+                work: LawWork::RetentionAck {
+                    handle,
+                    acknowledgement,
+                },
+            }),
+    );
+    units.extend(wakes.into_iter().map(|(due_at, packets)| {
+        LawUnit {
+            packets: packets
+                .into_iter()
+                .map(|ingress| (ingress, LAW_WAKE_INGRESS))
+                .collect(),
+            work: LawWork::Wake(due_at),
+        }
+    }));
+    units.extend(mutations.into_iter().map(|(ingress, mutation)| LawUnit {
+        packets: vec![(ingress, LAW_MUTATION_INGRESS)],
+        work: LawWork::Mutation { ingress, mutation },
+    }));
+    units.extend(
+        contexts
+            .into_iter()
+            .map(|(ingress, requirement, query)| LawUnit {
+                packets: vec![(ingress, LAW_ACTOR_CONTEXT_INGRESS)],
+                work: LawWork::ActorContext { requirement, query },
+            }),
+    );
+    units.extend(
+        preparations
+            .into_iter()
+            .map(|(sequence, (packets, expected_revision))| LawUnit {
+                packets: packets
+                    .into_iter()
+                    .map(|ingress| (ingress, LAW_OUTBOX_PREPARE_INGRESS))
+                    .collect(),
+                work: LawWork::Prepare {
+                    sequence,
+                    expected_revision,
+                },
+            }),
+    );
+    units.extend(
+        acknowledgements
+            .into_iter()
+            .map(|(sequence, (packets, acknowledgement))| LawUnit {
+                packets: packets
+                    .into_iter()
+                    .map(|ingress| (ingress, LAW_OUTBOX_ACK_INGRESS))
+                    .collect(),
+                work: LawWork::Ack {
+                    sequence,
+                    acknowledgement,
+                },
+            }),
+    );
+    units.extend(intents.into_iter().map(|(ingress, intent)| LawUnit {
+        packets: vec![(ingress, LAW_INTENT_INGRESS)],
+        work: LawWork::Intent(intent),
+    }));
+    Ok(units)
+}
+
+/// Refuses a working set that names a shard the legal directory does not
+/// hold, such as one of an order or jurisdiction the plan does not compile;
+/// loading it would fail the whole boundary.
+fn require_held_shards(
+    directory: &crate::LegalDirectoryState,
+    scope: &BTreeSet<LegalShardKey>,
+) -> Result<(), CanwuError> {
+    for shard in scope {
+        if !directory.directory.active_shards.contains(shard)
+            && !directory.directory.archive_only_shards.contains(shard)
+        {
+            return Err(invalid_record(
+                "legal ingress names a shard the legal directory does not hold",
+            ));
+        }
+        legal_shard_state_reference(shard)?;
+        legal_archive_head_state_reference(shard)?;
+    }
+    Ok(())
+}
+
+/// Adds the shards one unit needs to the working set.
+fn select_unit_scope(
+    work: &LawWork,
+    plan: &crate::CompiledLawPlan,
+    directory: &crate::LegalDirectoryState,
+    scope: &mut BTreeSet<LegalShardKey>,
+) -> Result<(), CanwuError> {
+    match work {
+        LawWork::ArchiveCommit(commit) => {
+            scope.insert(commit.compaction.shard.clone());
+        }
+        LawWork::Wake(due_at) => {
+            // A continuation wake has no due-time route of its own; the work
+            // it continues is loaded with the boundary's pending work routes.
+            if let Some(due_routes) = directory.directory.due_shards.get(due_at) {
+                scope.extend(due_routes.iter().cloned());
+            }
+        }
+        LawWork::Mutation { mutation, .. } => {
+            select_mutation_scope(mutation, plan, directory, scope)?;
+        }
+        LawWork::ActorContext { requirement, .. } => {
+            select_object_route(directory, &requirement.procedure, scope)?;
+        }
+        LawWork::Intent(intent) => {
+            // A procedure whose history was archived has no hot route; its late
+            // seat response settles in the coordinator as a rejected outcome.
+            if directory
+                .directory
+                .object_routes
+                .contains_key(&intent.procedure.id)
+            {
+                select_object_route(directory, &intent.procedure.id, scope)?;
+            }
+        }
+        LawWork::RetentionAck { .. } | LawWork::Prepare { .. } | LawWork::Ack { .. } => {}
+    }
+    Ok(())
+}
+
+/// Applies one unit to the working runtime, or says why it is refused.
+#[allow(clippy::too_many_lines)]
+fn apply_law_unit(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    plan: &crate::CompiledLawPlan,
+    runtime: &mut LegalRuntime,
+    work: &LawWork,
+) -> Result<(), UnitFailure> {
+    // Seat work that expired with its stage or procedure is terminal; a
+    // preparation or acknowledgement that arrives for it afterwards is a no-op.
+    let expired = |runtime: &LegalRuntime, sequence: u64| {
+        runtime
+            .outbox
+            .get(&sequence)
+            .is_some_and(|item| item.dispatch == crate::DispatchState::Expired)
+    };
+    match work {
+        // An archive commit may change the runtime before it fails, so its
+        // failure always restarts the pass; the refusal names the retention
+        // handle and records a terminal the host finalizes.
+        LawWork::ArchiveCommit(commit) => runtime
+            .commit_verified_legal_archive(commit)
+            .map(|_| ())
+            .map_err(|error| {
+                UnitFailure::applied(CanwuError::new(
+                    error.code.clone(),
+                    format!(
+                        "legal archive retention handle {} was not committed: {}",
+                        commit.retention_handle_id, error.message
+                    ),
+                ))
+            }),
+        LawWork::RetentionAck {
+            handle,
+            acknowledgement,
+        } => run_runtime_op(runtime, |runtime| {
+            runtime.acknowledge_archive_retention_terminal(
+                handle,
+                &acknowledgement.compaction_token,
+                &acknowledgement.directory_root,
+                acknowledgement.disposition,
+                &acknowledgement.chain_root,
+            )
+        }),
+        LawWork::Wake(due_at) => run_runtime_op(runtime, |runtime| runtime.consume_wake(*due_at)),
+        LawWork::Mutation { ingress, mutation } => {
+            let admitted_signal_kinds = check_legal_mutation(view, plan, runtime, mutation)
+                .map_err(UnitFailure::checked)?;
+            run_runtime_op(runtime, |runtime| {
+                apply_legal_mutation(
+                    context,
+                    plan,
+                    runtime,
+                    *ingress,
+                    mutation,
+                    &admitted_signal_kinds,
+                )
+            })
+        }
+        LawWork::ActorContext { requirement, query } => {
+            if query.after.is_some()
+                || query.limit == 0
+                || usize::try_from(query.limit)
+                    .ok()
+                    .is_none_or(|limit| limit > runtime.budgets.max_evidence_per_record)
+            {
+                return Err(UnitFailure::checked(CanwuError::new(
+                    ErrorCode::KnowledgeLimitExceeded,
+                    "legal actor context requires one bounded, unpaginated knowledge query",
+                )));
+            }
+            let result = view
+                .knowledge_records(requirement.holder.clone(), query)
+                .map_err(UnitFailure::checked)?;
+            if result.next.is_some() || result.holder != requirement.holder {
+                return Err(UnitFailure::checked(CanwuError::new(
+                    ErrorCode::KnowledgeLimitExceeded,
+                    "legal actor context query must fit in one holder-bound page",
+                )));
+            }
+            let actor_context = crate::runtime::actor_context_from_query_result(&result)
+                .map_err(UnitFailure::checked)?;
+            run_runtime_op(runtime, |runtime| {
+                runtime.stage_actor_context(requirement, actor_context)
+            })
+        }
+        LawWork::Prepare {
+            sequence,
+            expected_revision,
+        } => {
+            if expired(runtime, *sequence) {
+                return Ok(());
+            }
+            if runtime
+                .outbox
+                .get(sequence)
+                .and_then(|item| item.enqueue_expected_revision)
+                .is_some_and(|existing| existing != *expected_revision)
+            {
+                verify_outbox_can_reprepare(view, runtime, *sequence)
+                    .map_err(UnitFailure::checked)?;
+            }
+            run_runtime_op(runtime, |runtime| {
+                runtime.stage_outbox_expected_revision(*sequence, *expected_revision)
+            })
+        }
+        LawWork::Ack {
+            sequence,
+            acknowledgement,
+        } => {
+            if expired(runtime, *sequence) {
+                return Ok(());
+            }
+            verify_outbox_enqueue(
+                view,
+                runtime,
+                *sequence,
+                acknowledgement.expected_revision,
+                acknowledgement.controller_request_id,
+                acknowledgement.create_request_id,
+                acknowledgement.ticket_id,
+                &acknowledgement.draft_hash,
+                &acknowledgement.outcome_commitment,
+            )
+            .map_err(UnitFailure::checked)?;
+            run_runtime_op(runtime, |runtime| {
+                runtime.mark_outbox_enqueued(
+                    *sequence,
+                    acknowledgement.expected_revision,
+                    EvidenceRef::Ingress(acknowledgement.ingress_id),
+                    acknowledgement.outcome_commitment.clone(),
+                )
+            })
+        }
+        LawWork::Intent(intent) => run_runtime_op(runtime, |runtime| {
+            runtime.queue_authorized_pending_intent((**intent).clone())
+        }),
+    }
+}
+
+/// Checks one legal mutation against the view and the working runtime
+/// without changing either. Returns the provider signal kinds a non-procedural
+/// source is admitted with.
+fn check_legal_mutation(
+    view: &SimulationView<'_>,
+    plan: &crate::CompiledLawPlan,
+    runtime: &LegalRuntime,
+    mutation: &crate::LegalMutation,
+) -> Result<Vec<String>, CanwuError> {
+    match mutation {
+        crate::LegalMutation::AdmitNonProceduralSource { proposal } => {
+            let kinds = verified_required_signal_kinds(plan, runtime, proposal)?;
+            verify_proposal_inputs(view, proposal)?;
+            Ok(kinds)
+        }
+        crate::LegalMutation::Signal { signal } => {
+            verify_legal_mutation(view, plan, runtime, mutation)?;
+            let proposal = runtime.proposals.get(&signal.proposal_id).ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::InvalidDomainRecord,
+                    "legal signal references an unknown proposal",
+                )
+            })?;
+            if !host_versions_are_current(view, &proposal.expected_versions)? {
+                return Err(CanwuError::new(
+                    ErrorCode::DomainRecordVersionConflict,
+                    "legal signal targets a proposal whose host compare-and-set no longer holds",
+                ));
+            }
+            Ok(Vec::new())
+        }
+        _ => {
+            verify_legal_mutation(view, plan, runtime, mutation)?;
+            Ok(Vec::new())
+        }
+    }
+}
+
+/// Applies one checked legal mutation to the working runtime.
+fn apply_legal_mutation(
+    context: &BoundaryContext,
+    plan: &crate::CompiledLawPlan,
+    runtime: &mut LegalRuntime,
+    ingress: canwu_api::IngressId,
+    mutation: &crate::LegalMutation,
+    admitted_signal_kinds: &[String],
+) -> Result<(), CanwuError> {
+    match mutation.clone() {
+        crate::LegalMutation::SubmitProposal { proposal } => {
+            runtime.submit_proposal_within_boundary(plan, proposal)
+        }
+        crate::LegalMutation::AdmitNonProceduralSource { proposal } => runtime
+            .admit_non_procedural_source_within_boundary(
+                plan,
+                proposal,
+                admitted_signal_kinds,
+                context.at,
+            ),
+        crate::LegalMutation::Signal { signal } => {
+            runtime.admit_signal_within_boundary(plan, signal)
+        }
+        crate::LegalMutation::RetireCulturalTarget { target, reason } => runtime
+            .retire_cultural_target_from_ingress(
+                plan,
+                &target,
+                context.at,
+                reason,
+                EvidenceRef::Ingress(ingress),
+            ),
+        crate::LegalMutation::RecordCase { case } => runtime.record_case(plan, case),
+        crate::LegalMutation::RecordFinding { finding } => runtime.record_finding(plan, finding),
+        crate::LegalMutation::RecordRuling { ruling } => runtime.record_ruling(plan, ruling),
+        crate::LegalMutation::RecordConflict { conflict } => {
+            runtime.record_conflict(plan, conflict)
+        }
+        crate::LegalMutation::RecordPublicity { publicity } => {
+            runtime.record_publicity_at(plan, publicity, context.at)
+        }
+        crate::LegalMutation::RecordSuccession { succession } => {
+            runtime.record_succession_for_plan(plan, succession)
+        }
+        crate::LegalMutation::AdmitCapacity { allocation } => {
+            runtime.admit_capacity_allocation(plan, allocation)
+        }
+    }
 }
 
 fn select_object_route(
@@ -1239,12 +1869,27 @@ fn payload_optional_u64(
     }
 }
 
+/// Checks that every cited evidence reference exists at this boundary's cut.
+///
+/// An exact domain-record version counts only when
+/// `replay_stable_domain_record_version` resolves it: its record's committed
+/// current version, a version proposed earlier in this boundary, or an
+/// initial-scenario version. Whether a sealed run still knows any other
+/// version depends on what its seals kept, so such a citation is refused in
+/// every run. An event, command, attempt, ingress record, boundary, or draw is
+/// answered by the engine's existence rule for ordinal evidence.
 fn verify_evidence(
     view: &SimulationView<'_>,
     evidence: impl IntoIterator<Item = EvidenceRef>,
 ) -> Result<(), CanwuError> {
     for reference in evidence {
-        if !view.evidence_exists(&reference)? {
+        let exists = match &reference {
+            EvidenceRef::DomainRecordVersion(version) => {
+                view.replay_stable_domain_record_version(version)?.is_some()
+            }
+            _ => view.evidence_exists(&reference)?,
+        };
+        if !exists {
             return Err(CanwuError::new(
                 ErrorCode::InvalidAuthority,
                 "legal mutation references unavailable evidence",
@@ -1254,26 +1899,38 @@ fn verify_evidence(
     Ok(())
 }
 
-fn verify_expected_versions(
+/// Whether each host record version a proposal compare-and-sets is still its
+/// record's current version at this boundary's cut.
+///
+/// The current version comes from this boundary's proposals or the committed
+/// provenance index, never from retained evidence, so a sealed run answers as
+/// its unsealed replay does.
+fn host_versions_are_current(
     view: &SimulationView<'_>,
     versions: &[canwu_api::DomainRecordVersionRef],
-) -> Result<(), CanwuError> {
+) -> Result<bool, CanwuError> {
     for version in versions {
-        if !view.domain_record_version_is_current(version)? {
-            return Err(CanwuError::new(
-                ErrorCode::InvalidAuthority,
-                "legal proposal host record compare-and-set failed",
-            ));
+        if view
+            .current_domain_record_version(&version.record)?
+            .as_ref()
+            != Some(version)
+        {
+            return Ok(false);
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 fn verify_proposal_inputs(
     view: &SimulationView<'_>,
     proposal: &crate::LegalProposal,
 ) -> Result<(), CanwuError> {
-    verify_expected_versions(view, &proposal.expected_versions)?;
+    if !host_versions_are_current(view, &proposal.expected_versions)? {
+        return Err(CanwuError::new(
+            ErrorCode::DomainRecordVersionConflict,
+            "legal proposal host record compare-and-set failed",
+        ));
+    }
     verify_evidence(view, proposal.evidence.iter().cloned())?;
     if proposal
         .cultural_dependencies
@@ -1291,6 +1948,7 @@ fn verify_proposal_inputs(
 fn verify_legal_mutation(
     view: &SimulationView<'_>,
     plan: &crate::CompiledLawPlan,
+    runtime: &LegalRuntime,
     mutation: &crate::LegalMutation,
 ) -> Result<(), CanwuError> {
     match mutation {
@@ -1299,8 +1957,8 @@ fn verify_legal_mutation(
             verify_proposal_inputs(view, proposal)
         }
         crate::LegalMutation::Signal { signal } => {
-            verify_evidence(view, signal.evidence.iter().cloned())?;
-            verify_signal_provenance(view, plan, &signal.kind, &signal.evidence)
+            verify_signal_provenance(plan, runtime, &signal.kind, &signal.evidence)?;
+            verify_evidence(view, signal.evidence.iter().cloned())
         }
         crate::LegalMutation::RetireCulturalTarget { .. }
         | crate::LegalMutation::RecordConflict { .. } => Ok(()),
@@ -1314,8 +1972,8 @@ fn verify_legal_mutation(
             verify_evidence(view, ruling.evidence.iter().cloned())
         }
         crate::LegalMutation::RecordPublicity { publicity } => {
-            verify_evidence(view, publicity.evidence.iter().cloned())?;
-            verify_publicity_provenance(view, plan, publicity)
+            verify_publicity_provenance(plan, runtime, publicity)?;
+            verify_evidence(view, publicity.evidence.iter().cloned())
         }
         crate::LegalMutation::RecordSuccession { succession } => {
             verify_evidence(view, succession.evidence.iter().cloned())
@@ -1327,8 +1985,8 @@ fn verify_legal_mutation(
 }
 
 fn verified_required_signal_kinds(
-    view: &SimulationView<'_>,
     plan: &crate::CompiledLawPlan,
+    runtime: &LegalRuntime,
     proposal: &crate::LegalProposal,
 ) -> Result<Vec<String>, CanwuError> {
     let profile = plan
@@ -1342,56 +2000,67 @@ fn verified_required_signal_kinds(
             )
         })?;
     for kind in &profile.required_signal_kinds {
-        verify_signal_provenance(view, plan, kind, &proposal.evidence)?;
+        verify_signal_provenance(plan, runtime, kind, &proposal.evidence)?;
     }
     Ok(profile.required_signal_kinds.clone())
 }
 
-fn verify_signal_provenance(
-    view: &SimulationView<'_>,
-    plan: &crate::CompiledLawPlan,
+/// The compiled provider of one signal kind.
+fn signal_provider<'a>(
+    plan: &'a crate::CompiledLawPlan,
     kind: &str,
-    evidence: &[EvidenceRef],
-) -> Result<(), CanwuError> {
-    let provider = plan.signal_provider_by_kind.get(kind).ok_or_else(|| {
+) -> Result<&'a crate::LegalSignalProviderDefinition, CanwuError> {
+    plan.signal_provider_by_kind.get(kind).ok_or_else(|| {
         CanwuError::new(
             ErrorCode::InvalidAuthority,
             format!("legal signal kind {kind} has no compiled provider"),
         )
-    })?;
-    for evidence in evidence {
-        if let EvidenceRef::Ingress(id) = evidence
-            && view.plugin_ingress_matches(*id, &provider.plugin, &provider.packet_type)?
-        {
-            return Ok(());
-        }
+    })
+}
+
+/// Checks that the evidence cites a packet of the signal kind's provider.
+///
+/// The check reads the legal provider index: the provider packets the
+/// admission system recorded when their boundary admitted them. Every run
+/// records the same packets, so a citation decides alike in a sealed run, an
+/// unsealed run, and exact replay, whichever boundary admitted the packet. A
+/// packet the index never recorded (admitted before the plan was installed,
+/// or when its record did not fit the state budget) or has forgotten (it keeps
+/// `max_provider_packets`, forgetting the lowest ingress ID first) is refused.
+fn verify_signal_provenance(
+    plan: &crate::CompiledLawPlan,
+    runtime: &LegalRuntime,
+    kind: &str,
+    evidence: &[EvidenceRef],
+) -> Result<(), CanwuError> {
+    let provider = signal_provider(plan, kind)?;
+    if evidence.iter().any(|evidence| {
+        matches!(evidence, EvidenceRef::Ingress(id) if runtime
+            .provider_packets
+            .get(id)
+            .is_some_and(|packet| packet.plugin == provider.plugin
+                && packet.packet_type == provider.packet_type))
+    }) {
+        return Ok(());
     }
     Err(CanwuError::new(
         ErrorCode::InvalidAuthority,
         format!(
-            "legal signal kind {kind} lacks ingress from provider {}:{}",
+            "legal signal kind {kind} cites no packet of provider {}:{} in the legal provider index",
             provider.plugin, provider.packet_type
         ),
     ))
 }
 
+/// Checks that a publicity event cites the exact provider packet it records:
+/// the provider index holds the packet with the payload hash of the event's
+/// time and content.
 fn verify_publicity_provenance(
-    view: &SimulationView<'_>,
     plan: &crate::CompiledLawPlan,
+    runtime: &LegalRuntime,
     publicity: &crate::LegalPublicityEvent,
 ) -> Result<(), CanwuError> {
-    let provider = plan
-        .signal_provider_by_kind
-        .get(&publicity.signal_kind)
-        .ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::InvalidAuthority,
-                format!(
-                    "legal publicity signal kind {} has no compiled provider",
-                    publicity.signal_kind
-                ),
-            )
-        })?;
+    let provider = signal_provider(plan, &publicity.signal_kind)?;
     let expected_payload = serde_json::json!({
         "proposal": publicity.proposal.id,
         "at": publicity.at.as_minutes(),
@@ -1399,53 +2068,66 @@ fn verify_publicity_provenance(
         "medium": publicity.medium,
         "scope": publicity.scope,
     });
-    for evidence in &publicity.evidence {
-        if let EvidenceRef::Ingress(id) = evidence
-            && view.plugin_ingress_payload_matches(
-                *id,
-                &provider.plugin,
-                &provider.packet_type,
-                publicity.at,
-                &expected_payload,
-            )?
-        {
-            return Ok(());
-        }
+    let expected_hash = canonical_hash(
+        crate::LEGAL_PROVIDER_PAYLOAD_DOMAIN,
+        &(publicity.at, &expected_payload),
+    )?;
+    if publicity.evidence.iter().any(|evidence| {
+        matches!(evidence, EvidenceRef::Ingress(id) if runtime
+            .provider_packets
+            .get(id)
+            .is_some_and(|packet| packet.plugin == provider.plugin
+                && packet.packet_type == provider.packet_type
+                && packet.payload_hash == expected_hash))
+    }) {
+        return Ok(());
     }
     Err(CanwuError::new(
         ErrorCode::InvalidAuthority,
         format!(
-            "legal publicity {} lacks an exact retained provider payload from {}:{}",
+            "legal publicity {} cites no exact payload of provider {}:{} in the legal provider index",
             publicity.id, provider.plugin, provider.packet_type
         ),
     ))
 }
 
-fn verify_pending_adoption_guards(
+/// Rejects every pending proposal this boundary will work on whose host
+/// compare-and-set no longer holds or that depends on a retired culture
+/// generation, and closes its procedure, before the boundary settles.
+///
+/// Such a proposal can never be adopted. Rejecting it, as a failed law-local
+/// head compare-and-set already is at adoption, keeps it from failing every
+/// boundary that touches it. Returns each rejected proposal with the reason.
+fn reject_stale_pending_proposals(
     view: &SimulationView<'_>,
-    runtime: &LegalRuntime,
-) -> Result<(), CanwuError> {
-    for procedure_id in &runtime.dirty_procedures {
+    runtime: &mut LegalRuntime,
+) -> Result<Vec<(String, String)>, CanwuError> {
+    let mut rejected = Vec::new();
+    for procedure_id in runtime.dirty_procedures.clone() {
         let Some(proposal) = runtime
             .procedures
-            .get(procedure_id)
+            .get(&procedure_id)
+            .filter(|procedure| !procedure.closed)
             .and_then(|procedure| runtime.proposals.get(&procedure.proposal.id))
         else {
             continue;
         };
-        verify_proposal_inputs(view, proposal)?;
-        if proposal.cultural_dependencies.iter().any(|dependency| {
+        let reason = if !host_versions_are_current(view, &proposal.expected_versions)? {
+            "a host record version it compare-and-sets is no longer current"
+        } else if proposal.cultural_dependencies.iter().any(|dependency| {
             runtime
                 .retired_cultural_targets
                 .contains(&dependency.target)
         }) {
-            return Err(CanwuError::new(
-                ErrorCode::InvalidAuthority,
-                "legal adoption depends on a retired culture generation",
-            ));
-        }
+            "it depends on a retired culture generation"
+        } else {
+            continue;
+        };
+        let proposal_id = proposal.id.clone();
+        runtime.reject_open_procedure(&procedure_id)?;
+        rejected.push((proposal_id, reason.to_owned()));
     }
-    Ok(())
+    Ok(rejected)
 }
 
 fn verify_outbox_can_reprepare(

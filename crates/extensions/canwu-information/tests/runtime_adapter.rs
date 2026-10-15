@@ -1,27 +1,33 @@
 #![allow(clippy::too_many_lines)]
 
 use canwu_api::{
-    BoundaryId, BoundaryRequest, Canwu, Command, CommandAttemptOutcome, CommandEnvelope,
-    CommandRequest, CommandRequestId, CompactedCanwu, DomainRecord, DomainRecordClass,
-    DomainRecordDraft, DomainRecordLifecycle, DomainRecordVersionRef, DomainRecordVersionSource,
-    EntityRef, ErrorCode, EvidenceRef, Government, GovernmentId, IngressId, Issuer,
-    KnowledgeHolderRef, KnowledgeQuery, KnowledgeSnapshot, MapPoint, PayloadSchema, Person,
-    PersonId, PluginActionDescriptor, PluginRegistrar, Scenario, SimTime, SimulationPlugin,
-    SimulationView, SystemDirective, Territory, TerritoryId, TypedDomainRecordRef, WorldSnapshot,
+    BoundaryContext, BoundaryDirective, BoundaryId, BoundaryPhase, BoundaryProposal,
+    BoundaryRequest, BoundarySystemContract, Canwu, Command, CommandAttemptOutcome,
+    CommandEnvelope, CommandRequest, CommandRequestId, CompactedCanwu, CustodyState, DomainRecord,
+    DomainRecordClass, DomainRecordDraft, DomainRecordLifecycle, DomainRecordVersionRef,
+    DomainRecordVersionSource, EntityRef, ErrorCode, EvidenceRef, Government, GovernmentId,
+    IngressClass, IngressId, IngressPayload, Issuer, KnowledgeHolderRef, KnowledgeQuery,
+    KnowledgeSnapshot, LifeState, MapPoint, PayloadSchema, Person, PersonAvailability, PersonId,
+    PluginActionDescriptor, PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar,
+    Scenario, SimTime, SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence,
+    SystemDirective, Territory, TerritoryId, TypedDomainRecordRef, WorldSnapshot,
 };
 use canwu_api::{DomainReference, DomainReferenceTarget};
 use canwu_information::{
     AUTHORITY_COMMAND_PRODUCER, AUTHORITY_COMMAND_TYPE, Access, AccessPayload, Audience,
     AudienceAccessEvidence, AudienceMembership, AudiencePayload, AuthorityAssignment,
-    AuthorityAssignmentPayload, ClaimedSourceRef, Content, ContentPayload, ContentRelation,
-    DELEGATED_AUTHORITY_GRANT, DelegationClaimV1, INFORMATION_COMMAND,
-    INSTITUTIONAL_AUTHORITY_GRANT, InformationBody, InformationLimitsV1, InformationOperation,
-    InformationOperationEnvelope, InformationOperationId, InformationOperationPayload,
-    InformationOperationRecord, InformationOperationStatus, InformationOutputKind,
-    InformationOutputSlot, InformationPlugin, Interpretation, InterpretationAuthority,
-    InterpretationPayload, InterpretationStatus, LifecycleRequest, PLUGIN_NAME, RecordBinding,
-    Release, ReleasePayload, ReleaseScope, ReleaseStatus, Representation, RepresentationPayload,
-    audience_membership_root_v1, derive_operation_record_ref, derive_output_record_ref,
+    AuthorityAssignmentPayload, Channel, ChannelCapability, ChannelPayload, ClaimedSourceRef,
+    Content, ContentPayload, ContentRelation, DELEGATED_AUTHORITY_GRANT, DelegatedAuthority,
+    DelegationClaimV1, DeliveryAttempt, DeliveryAttemptPayload, DeliveryAttemptStatus, Dispatch,
+    DispatchPayload, DispatchStatus, DispatchTarget, INFORMATION_COMMAND, INFORMATION_INGRESS,
+    INFORMATION_REJECTION_EVENT, INSTITUTIONAL_AUTHORITY_GRANT, InformationBody,
+    InformationLimitsV1, InformationOperation, InformationOperationEnvelope,
+    InformationOperationId, InformationOperationPayload, InformationOperationRecord,
+    InformationOperationStatus, InformationOutputKind, InformationOutputSlot, InformationPlugin,
+    Interpretation, InterpretationAuthority, InterpretationPayload, InterpretationStatus,
+    LifecycleRequest, PLUGIN_NAME, RecordBinding, Release, ReleasePayload, ReleaseScope,
+    ReleaseStatus, Representation, RepresentationPayload, audience_membership_root_v1,
+    delegated_authority_reference, derive_operation_record_ref, derive_output_record_ref,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -203,6 +209,16 @@ struct ReleaseFixture {
 }
 
 fn release_scenario(holder_count: u64) -> ReleaseFixture {
+    release_scenario_with_members(holder_count, (1..=holder_count).map(holder).collect())
+}
+
+/// A release fixture whose audience lists `members`, in a world of
+/// `holder_count` persons.
+fn release_scenario_with_members(
+    holder_count: u64,
+    mut member_holders: Vec<KnowledgeHolderRef>,
+) -> ReleaseFixture {
+    member_holders.sort();
     let content = TypedDomainRecordRef::<Content>::new("seed-content");
     let representation = TypedDomainRecordRef::<Representation>::new("seed-representation");
     let audience = TypedDomainRecordRef::<Audience>::new("seed-audience");
@@ -235,7 +251,6 @@ fn release_scenario(holder_count: u64) -> ReleaseFixture {
         },
         vec![DomainReference::from_typed("content", content)],
     );
-    let member_holders = (1..=holder_count).map(holder).collect::<Vec<_>>();
     let members = member_holders
         .iter()
         .map(|member| holder_reference("member", member))
@@ -250,7 +265,7 @@ fn release_scenario(holder_count: u64) -> ReleaseFixture {
             resolved_at: SimTime::EPOCH,
             resolution_version: 1,
             resolved_boundary: None,
-            member_count: holder_count,
+            member_count: member_holders.len() as u64,
             membership_root,
         },
         members,
@@ -910,6 +925,177 @@ fn release_publication_uses_unique_correlations_prefix_finalization_and_exact_ev
     }
 }
 
+const LIFE_PLUGIN: &str = "fixture-life";
+
+/// Marks a person dead for every `die` packet it admits.
+fn record_deaths(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+) -> Result<BoundaryProposal, canwu_api::CanwuError> {
+    let mut directives = Vec::new();
+    for ingress_id in &context.admitted_ingress {
+        if let Some(ingress) = view.ingress(*ingress_id)?
+            && let IngressPayload::Plugin {
+                plugin, payload, ..
+            } = &ingress.payload
+            && plugin == LIFE_PLUGIN
+        {
+            directives.push(BoundaryDirective::SetPersonAvailability {
+                person: PersonId::new(payload["person"].as_u64().expect("person")),
+                availability: PersonAvailability::new(
+                    LifeState::Dead,
+                    CustodyState::Free,
+                    view.time(),
+                ),
+                summary: "A person dies".to_owned(),
+            });
+        }
+    }
+    Ok(BoundaryProposal {
+        directives,
+        ..BoundaryProposal::default()
+    })
+}
+
+struct LifePlugin;
+
+impl SimulationPlugin for LifePlugin {
+    fn name(&self) -> &'static str {
+        LIFE_PLUGIN
+    }
+
+    fn version(&self) -> &'static str {
+        "1"
+    }
+
+    fn semantic_hash(&self) -> &'static str {
+        "0000000000000000000000000000000000000000000000000000000000000c03"
+    }
+
+    fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), canwu_api::CanwuError> {
+        registrar.register_ingress(PluginIngressDescriptor {
+            name: "die".to_owned(),
+            description: "A person dies".to_owned(),
+            class: IngressClass::Information,
+            payload_schema: PayloadSchema::Any,
+        })?;
+        let mut contract = BoundarySystemContract::new(
+            "record-deaths",
+            BoundaryPhase::DomainDeltaProposal,
+            SystemCadence::EventDriven,
+        );
+        contract.reads = vec![StateKey::core_ingress()];
+        contract.writes = vec![StateKey::core_person_availability()];
+        contract.visibility = StateVisibility::SameBoundary;
+        registrar.register_boundary_system(contract, record_deaths)
+    }
+}
+
+/// A dead person's ledger accepts no knowledge: a release to an audience
+/// with a dead member publishes to the living members only, the operation
+/// completes with their records, and the boundary never fails.
+#[test]
+fn a_release_to_an_audience_with_a_dead_member_publishes_to_the_living() {
+    let fixture = release_scenario(3);
+    let plugin = InformationPlugin;
+    let plugins: [&dyn SimulationPlugin; 2] = [&LifePlugin, &plugin];
+    let mut canwu = Canwu::new_with_plugins(43, fixture.scenario.clone(), &plugins)
+        .expect("release fixture should initialize");
+    canwu
+        .enqueue_plugin_ingress(PluginIngressRequest::new(
+            LIFE_PLUGIN,
+            "die",
+            canwu.time(),
+            json!({"person": 2}),
+        ))
+        .expect("queue death");
+    settle(&mut canwu);
+    let envelope = activate_release_operation(fixture.release.clone(), "with-dead-member");
+    settle_to_terminal(&mut canwu, &envelope, 1);
+    let completed = operation_payload(&canwu, &envelope.id);
+    assert_eq!(completed.status, InformationOperationStatus::Completed);
+    assert_eq!(completed.publication_result_ids.len(), 2);
+    assert_eq!(
+        knowledge_schema_names(&canwu, 1),
+        vec!["release_available".to_owned()]
+    );
+    assert!(knowledge_schema_names(&canwu, 2).is_empty());
+    assert_eq!(
+        knowledge_schema_names(&canwu, 3),
+        vec!["release_available".to_owned()]
+    );
+    let replayed = Canwu::replay_from_journal(&plugins, &canwu.replay_journal())
+        .expect("the run replays exactly");
+    assert_eq!(replayed.snapshot(), canwu.snapshot());
+}
+
+/// Host-authored operation packets that a boundary cannot use are refused
+/// with a recorded event, and two operations whose plans change the same
+/// record in one boundary do not make it invalid: the later one, in
+/// operation-ID order, is planned again at the next boundary, against the
+/// record the first one changed.
+#[test]
+fn unusable_or_conflicting_operations_in_one_boundary_do_not_fail_it() {
+    let fixture = release_scenario(1);
+    let plugin = InformationPlugin;
+    let mut canwu = Canwu::new_with_plugins(44, fixture.scenario.clone(), &[&plugin])
+        .expect("release fixture should initialize");
+    let first = activate_release_operation(fixture.release.clone(), "first");
+    let second = activate_release_operation(fixture.release.clone(), "second");
+    let mut invalid = activate_release_operation(fixture.release.clone(), "invalid");
+    invalid.operation_version = 2;
+    let mut conflicting = first.clone();
+    conflicting.operation = transition_release_operation(
+        fixture.release.clone(),
+        "first",
+        1,
+        ReleaseStatus::Withdrawn,
+    )
+    .operation;
+    for envelope in [&first, &second, &invalid, &conflicting] {
+        canwu
+            .enqueue_plugin_ingress(PluginIngressRequest::new(
+                PLUGIN_NAME,
+                INFORMATION_INGRESS,
+                canwu.time(),
+                serde_json::to_value(envelope).expect("operation envelope should encode"),
+            ))
+            .expect("queue information operation");
+    }
+    for _ in 0..6 {
+        settle(&mut canwu);
+    }
+    let rejections = canwu
+        .events()
+        .iter()
+        .filter(|event| {
+            event.kind.plugin_identity() == Some((PLUGIN_NAME, INFORMATION_REJECTION_EVENT))
+        })
+        .map(|event| event.summary.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(rejections.len(), 2, "{rejections:?}");
+    assert!(
+        rejections[0].contains("version must equal one"),
+        "{rejections:?}"
+    );
+    assert!(rejections[1].contains("conflicting"), "{rejections:?}");
+    assert!(
+        canwu
+            .typed_domain_record(&derive_operation_record_ref(&invalid.id))
+            .is_none()
+    );
+    assert_eq!(
+        operation_payload(&canwu, &first.id).status,
+        InformationOperationStatus::Completed
+    );
+    let second = operation_payload(&canwu, &second.id);
+    assert_eq!(second.status, InformationOperationStatus::Rejected);
+    assert_eq!(second.rejection_code.as_deref(), Some("invalid_lifecycle"));
+    let replayed = Canwu::replay_from_journal(&[&plugin], &canwu.replay_journal())
+        .expect("the run replays exactly");
+    assert_eq!(replayed.snapshot(), canwu.snapshot());
+}
+
 #[test]
 fn expired_release_retains_prior_access_and_knowledge_without_republication() {
     let fixture = release_scenario(2);
@@ -1231,6 +1417,125 @@ fn delegated_interpretation_publishes_only_to_holder_and_replays_without_externa
     );
 }
 
+/// Queues one information operation command and settles enough boundaries to
+/// finish it, on a full or a compact run.
+macro_rules! settle_operation {
+    ($run:expr, $request_id:expr, $envelope:expr) => {{
+        let at = $run.time();
+        let revision = $run.revision();
+        $run.enqueue_command(
+            at,
+            0,
+            CommandRequest::new(
+                CommandRequestId::new($request_id),
+                revision,
+                plugin_command($envelope),
+            ),
+        )
+        .expect("information command should enter canonical ingress");
+        for _ in 0..5 {
+            $run.settle_boundary(BoundaryRequest::at(at))
+                .expect("information boundary should settle");
+        }
+    }};
+}
+
+/// A delegation is checked against the record the information plugin made
+/// when the delegation command was admitted, never against the command, so an
+/// interpretation citing a delegation whose command a seal removed is decided
+/// as an unsealed fork, a restore from the sealed segments, and exact replay
+/// decide it.
+#[test]
+fn delegated_interpretation_decides_alike_after_its_delegation_is_sealed() {
+    let (scenario, access, representation, result_content) = interpretation_scenario();
+    let plugin = InformationPlugin;
+    let plugins: [&dyn SimulationPlugin; 2] = [&AUTHORITY_PLUGIN, &plugin];
+    let mut base = Canwu::new_with_plugins(46, scenario, &plugins)
+        .expect("interpretation fixture should initialize");
+    let authority_command = queue_authority_command(
+        &mut base,
+        1,
+        AUTHORITY_COMMAND_PRODUCER,
+        json!({"claim": authority_claim()}),
+    );
+    let recorded = base
+        .typed_domain_record(&delegated_authority_reference(
+            DELEGATED_AUTHORITY_GRANT,
+            authority_command,
+        ))
+        .expect("the admitted delegation is recorded")
+        .decode_payload::<DelegatedAuthority>()
+        .expect("recorded delegation decodes");
+    assert_eq!(recorded.claim, authority_claim());
+    assert_eq!(recorded.command, authority_command);
+    settle(&mut base);
+
+    let mut unsealed = base.fork();
+    let mut sealed = base
+        .into_compacted()
+        .expect("interpretation case should enter compact mode");
+    let segment = sealed
+        .seal_evidence()
+        .expect("the settled history seals")
+        .expect("the settled history holds evidence");
+    assert!(
+        segment
+            .commands
+            .iter()
+            .any(|command| command.id == authority_command),
+        "the seal removes the delegation command"
+    );
+    let mut restored = CompactedCanwu::from_checkpoint_and_journal_with_plugins(
+        sealed.checkpoint().expect("compact checkpoint"),
+        vec![segment.clone()],
+        &plugins,
+    )
+    .expect("the sealed segments restore the compact run");
+
+    let envelope = record_interpretation_operation(
+        access,
+        representation,
+        result_content,
+        "delegated-after-seal",
+        InterpretationAuthority::Delegated {
+            evidence: EvidenceRef::Command(authority_command),
+            authority_grant: DELEGATED_AUTHORITY_GRANT.to_owned(),
+        },
+    );
+    settle_operation!(unsealed, 2, &envelope);
+    settle_operation!(sealed, 2, &envelope);
+    settle_operation!(restored, 2, &envelope);
+
+    let completed = operation_payload(&unsealed, &envelope.id);
+    assert_eq!(completed.status, InformationOperationStatus::Completed);
+    assert!(completed.authority_claim_hash.is_some());
+    assert_eq!(completed.publication_result_ids.len(), 1);
+    for run in [&sealed, &restored] {
+        assert_eq!(
+            run.typed_domain_record(&derive_operation_record_ref(&envelope.id))
+                .expect("operation record")
+                .decode_payload::<InformationOperationRecord>()
+                .expect("operation payload"),
+            completed
+        );
+    }
+    assert_eq!(sealed.checkpoint_hash(), unsealed.checkpoint_hash());
+    assert_eq!(restored.checkpoint_hash(), unsealed.checkpoint_hash());
+
+    let journal = sealed
+        .replay_journal_with_segments(vec![segment.clone()])
+        .expect("the sealed run produces an exact replay journal");
+    let replayed =
+        Canwu::replay_from_journal(&plugins, &journal).expect("the sealed run replays exactly");
+    assert_eq!(replayed.snapshot(), unsealed.snapshot());
+    assert_eq!(
+        replayed.snapshot(),
+        sealed
+            .snapshot_with_segments(vec![segment])
+            .expect("the sealed run reconstructs a full snapshot")
+    );
+}
+
 #[test]
 fn institutional_interpretation_requires_exact_assignment_version_and_claim() {
     let (mut scenario, access, representation, result_content) = interpretation_scenario();
@@ -1442,4 +1747,211 @@ fn delegated_authority_fails_closed_for_every_bound_claim_dimension() {
         assert!(rejected.authority_claim_hash.is_none());
         assert!(rejected.domain_result_refs.is_empty());
     }
+}
+
+/// A release to an audience that names a holder the engine does not accept
+/// (a territory holds no knowledge) publishes to the persons and leaves the
+/// territory unpublished; the boundary never fails.
+#[test]
+fn a_release_to_ineligible_entity_holders_publishes_to_the_eligible() {
+    let fixture = release_scenario_with_members(
+        2,
+        vec![
+            holder(1),
+            holder(2),
+            KnowledgeHolderRef::Entity(EntityRef::Territory(territory())),
+        ],
+    );
+    let plugin = InformationPlugin;
+    let mut canwu = Canwu::new_with_plugins(46, fixture.scenario.clone(), &[&plugin])
+        .expect("release fixture should initialize");
+    let envelope = activate_release_operation(fixture.release.clone(), "ineligible-holders");
+    settle_to_terminal(&mut canwu, &envelope, 1);
+    let completed = operation_payload(&canwu, &envelope.id);
+    assert_eq!(completed.status, InformationOperationStatus::Completed);
+    assert_eq!(completed.publication_result_ids.len(), 2);
+    for index in [1, 2] {
+        assert_eq!(
+            knowledge_schema_names(&canwu, index),
+            vec!["release_available".to_owned()]
+        );
+    }
+    let replayed = Canwu::replay_from_journal(&[&plugin], &canwu.replay_journal())
+        .expect("the run replays exactly");
+    assert_eq!(replayed.snapshot(), canwu.snapshot());
+}
+
+/// Two deliveries of one representation to one holder in one boundary name
+/// the same holder, knowledge kind, and subjects. The publication system
+/// publishes that record once; the second operation relies on it, and both
+/// operations record its ID.
+#[test]
+fn two_deliveries_of_one_representation_to_one_holder_publish_once() {
+    let fixture = release_scenario(1);
+    let mut scenario = fixture.scenario.clone();
+    let channel = TypedDomainRecordRef::<Channel>::new("seed-channel");
+    scenario.domain_records.push(initial_record(
+        channel.clone(),
+        &ChannelPayload {
+            profile: "courier".to_owned(),
+            capabilities: vec![ChannelCapability::AddressedDelivery],
+        },
+        Vec::new(),
+    ));
+    let deliver = |suffix: &str| {
+        let attempt =
+            TypedDomainRecordRef::<DeliveryAttempt>::new(format!("seed-attempt-{suffix}"));
+        InformationOperationEnvelope {
+            id: InformationOperationId::new(TEST_NAMESPACE, format!("deliver-{suffix}")),
+            operation_version: 1,
+            operation_kind: "transition_delivery_attempt".to_owned(),
+            output_slots: Vec::new(),
+            lineage: Vec::new(),
+            operation: InformationOperation {
+                request: LifecycleRequest::TransitionDeliveryAttempt {
+                    record: attempt,
+                    expected_version: 1,
+                    proposed: DeliveryAttemptPayload {
+                        status: DeliveryAttemptStatus::Delivered,
+                        attempt_number: 1,
+                        prepared_at: SimTime::EPOCH,
+                        dispatched_at: Some(SimTime::EPOCH),
+                        due_at: SimTime::from_minutes(10),
+                        completed_at: Some(SimTime::EPOCH),
+                    },
+                },
+            },
+        }
+    };
+    for suffix in ["a", "b"] {
+        let dispatch = TypedDomainRecordRef::<Dispatch>::new(format!("seed-dispatch-{suffix}"));
+        scenario.domain_records.push(initial_record(
+            dispatch.clone(),
+            &DispatchPayload {
+                status: DispatchStatus::Active,
+                target: DispatchTarget::Addressed(vec![holder(1)]),
+                prepared_at: SimTime::EPOCH,
+                dispatched_at: Some(SimTime::EPOCH),
+                completed_at: None,
+            },
+            vec![
+                DomainReference::from_typed("channel", channel.clone()),
+                DomainReference::from_typed("representation", fixture.representation.clone()),
+                holder_reference("intended_recipient", &holder(1)),
+            ],
+        ));
+        scenario.domain_records.push(initial_record(
+            TypedDomainRecordRef::<DeliveryAttempt>::new(format!("seed-attempt-{suffix}")),
+            &DeliveryAttemptPayload {
+                status: DeliveryAttemptStatus::InTransit,
+                attempt_number: 1,
+                prepared_at: SimTime::EPOCH,
+                dispatched_at: Some(SimTime::EPOCH),
+                due_at: SimTime::from_minutes(10),
+                completed_at: None,
+            },
+            vec![
+                DomainReference::from_typed("dispatch", dispatch),
+                holder_reference("recipient", &holder(1)),
+            ],
+        ));
+    }
+    let plugin = InformationPlugin;
+    let mut canwu = Canwu::new_with_plugins(47, scenario, &[&plugin])
+        .expect("delivery fixture should initialize");
+    let first = deliver("a");
+    let second = deliver("b");
+    for envelope in [&first, &second] {
+        canwu
+            .enqueue_plugin_ingress(PluginIngressRequest::new(
+                PLUGIN_NAME,
+                INFORMATION_INGRESS,
+                canwu.time(),
+                serde_json::to_value(envelope).expect("operation envelope should encode"),
+            ))
+            .expect("queue delivery operation");
+    }
+    for _ in 0..6 {
+        settle(&mut canwu);
+    }
+    let first = operation_payload(&canwu, &first.id);
+    let second = operation_payload(&canwu, &second.id);
+    assert_eq!(first.status, InformationOperationStatus::Completed);
+    assert_eq!(second.status, InformationOperationStatus::Completed);
+    assert_eq!(first.publication_result_ids.len(), 1);
+    assert_eq!(first.publication_result_ids, second.publication_result_ids);
+    assert_eq!(
+        knowledge_schema_names(&canwu, 1),
+        vec!["representation_available".to_owned()]
+    );
+    let replayed = Canwu::replay_from_journal(&[&plugin], &canwu.replay_journal())
+        .expect("the run replays exactly");
+    assert_eq!(replayed.snapshot(), canwu.snapshot());
+}
+
+/// A host-authored packet that reuses an operation ID with other content, at
+/// a higher priority than the operation's own progress packet, is refused;
+/// the operation keeps its own input and completes.
+#[test]
+fn a_crafted_packet_for_a_persisted_operation_does_not_displace_its_progress() {
+    let fixture = release_scenario(1);
+    let plugin = InformationPlugin;
+    let mut canwu = Canwu::new_with_plugins(48, fixture.scenario.clone(), &[&plugin])
+        .expect("release fixture should initialize");
+    let envelope = activate_release_operation(fixture.release.clone(), "own-progress");
+    canwu
+        .enqueue_plugin_ingress(PluginIngressRequest::new(
+            PLUGIN_NAME,
+            INFORMATION_INGRESS,
+            canwu.time(),
+            serde_json::to_value(&envelope).expect("operation envelope should encode"),
+        ))
+        .expect("queue operation");
+    settle(&mut canwu);
+    assert_eq!(
+        operation_payload(&canwu, &envelope.id).status,
+        InformationOperationStatus::Accepted
+    );
+    // The operation's progress packet is queued; a crafted packet with the
+    // same ID and other content outranks it at the next boundary.
+    let mut crafted = envelope.clone();
+    crafted.operation = transition_release_operation(
+        fixture.release.clone(),
+        "own-progress",
+        1,
+        ReleaseStatus::Withdrawn,
+    )
+    .operation;
+    canwu
+        .enqueue_plugin_ingress(
+            PluginIngressRequest::new(
+                PLUGIN_NAME,
+                INFORMATION_INGRESS,
+                canwu.time(),
+                serde_json::to_value(&crafted).expect("crafted envelope should encode"),
+            )
+            .with_priority(1),
+        )
+        .expect("queue crafted operation");
+    for _ in 0..6 {
+        settle(&mut canwu);
+    }
+    let rejections = canwu
+        .events()
+        .iter()
+        .filter(|event| {
+            event.kind.plugin_identity() == Some((PLUGIN_NAME, INFORMATION_REJECTION_EVENT))
+        })
+        .map(|event| event.summary.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(rejections.len(), 1, "{rejections:?}");
+    assert!(rejections[0].contains("conflicting"), "{rejections:?}");
+    assert_eq!(
+        operation_payload(&canwu, &envelope.id).status,
+        InformationOperationStatus::Completed
+    );
+    assert_eq!(
+        knowledge_schema_names(&canwu, 1),
+        vec!["release_available".to_owned()]
+    );
 }

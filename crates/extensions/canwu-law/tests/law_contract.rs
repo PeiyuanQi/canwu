@@ -1,11 +1,10 @@
 use canwu_api::{
-    ArchiveProvider, ArchiveStore, ArchiveStoreOutcome, BoundaryContext, BoundaryDirective,
-    BoundaryId, BoundaryPhase, BoundaryProposal, BoundaryRequest, BoundarySystemContract, Canwu,
-    CanwuError, Command, DecisionAction, DecisionArchiveBlob, DecisionArchiveProvider,
-    DecisionAuthority, DecisionControllerBinding, DecisionError, DecisionIngressRequest,
-    DecisionMutation, DecisionPolicyIdentity, DecisionPolicyKind, DecisionRequestId,
-    DecisionTicketId, DomainRecord, DomainRecordClass, DomainRecordLifecycle, DomainRecordRef,
-    EntityRef, ErrorCode, EvidenceJournalSegment, EvidenceRef,
+    BoundaryContext, BoundaryDirective, BoundaryId, BoundaryPhase, BoundaryProposal,
+    BoundaryRequest, BoundarySystemContract, Canwu, CanwuError, Command, CompactedCanwu,
+    DecisionAction, DecisionArchiveBlob, DecisionArchiveProvider, DecisionAuthority,
+    DecisionControllerBinding, DecisionError, DecisionIngressRequest, DecisionMutation,
+    DecisionPolicyIdentity, DecisionPolicyKind, DecisionRequestId, DecisionTicketId, DomainRecord,
+    DomainRecordClass, DomainRecordLifecycle, DomainRecordRef, EntityRef, ErrorCode, EvidenceRef,
     IDENTITY_EVIDENCE_DEPENDENCIES_FIELD, IngressClass, IngressId, IngressPayload,
     KnowledgeHistoryView, KnowledgeHolderRef, KnowledgeOrigin, KnowledgeQuery,
     KnowledgeRecordDraft, KnowledgeRecordKind, KnowledgeSchemaId, KnowledgeWriteGrant,
@@ -75,11 +74,6 @@ fn assert_legal_archive_reachability_survives_restart(
             .get("canwu.law.archive.index")
             .is_some_and(|ids| !ids.is_empty())
     );
-}
-
-#[derive(Default)]
-struct MemoryArchive {
-    segments: RefCell<BTreeMap<String, EvidenceJournalSegment>>,
 }
 
 #[derive(Default)]
@@ -306,43 +300,6 @@ fn store_legal_test_object<T: Clone + PartialEq>(
     }
     objects.insert(id, object);
     Ok(LegalArchiveStoreOutcome::Stored)
-}
-
-impl ArchiveProvider for MemoryArchive {
-    fn load_evidence_segment(
-        &self,
-        segment_id: &str,
-    ) -> Result<Option<EvidenceJournalSegment>, CanwuError> {
-        Ok(self.segments.borrow().get(segment_id).cloned())
-    }
-}
-
-impl ArchiveStore for MemoryArchive {
-    fn store_evidence_segment(
-        &self,
-        segment: &EvidenceJournalSegment,
-    ) -> Result<ArchiveStoreOutcome, CanwuError> {
-        let id = segment
-            .archive
-            .as_ref()
-            .ok_or_else(|| CanwuError::new(ErrorCode::InvalidArchive, "missing archive index"))?
-            .header
-            .segment_id
-            .clone();
-        let mut segments = self.segments.borrow_mut();
-        if let Some(existing) = segments.get(&id) {
-            return if existing == segment {
-                Ok(ArchiveStoreOutcome::AlreadyPresent)
-            } else {
-                Err(CanwuError::new(
-                    ErrorCode::InvalidArchive,
-                    "archive ID is already bound to different bytes",
-                ))
-            };
-        }
-        segments.insert(id, segment.clone());
-        Ok(ArchiveStoreOutcome::Stored)
-    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1235,7 +1192,7 @@ fn per_seat_intents_create_immutable_future_effective_law() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn required_publicity_is_an_atomic_adoption_guard_and_retroactivity_is_explicit() {
+fn required_publicity_is_an_adoption_guard_that_waits_and_retroactivity_is_explicit() {
     let mut authored = definition();
     authored.source_profiles[0].allow_retroactive = true;
     authored.budgets.max_sources = 3;
@@ -1257,13 +1214,15 @@ fn required_publicity_is_an_atomic_adoption_guard_and_retroactivity_is_explicit(
             .queue_pending_intent(&plan, intent_from_outbox(item, "for"))
             .expect("queue vote");
     }
-    let before_failed_adoption = runtime.clone();
-    assert!(
-        runtime
-            .settle_boundary(&plan, SimTime::from_minutes(2), &[])
-            .is_err()
-    );
-    assert_eq!(runtime, before_failed_adoption);
+    // The vote passes before the validity publicity exists: the procedure
+    // keeps its ballots and waits instead of failing the boundary.
+    let waiting = runtime
+        .settle_boundary(&plan, SimTime::from_minutes(2), &[])
+        .expect("a passed vote without validity publicity waits");
+    assert!(waiting.adopted_proposals.is_empty());
+    assert!(runtime.law_versions.is_empty());
+    assert!(runtime.open_procedures.contains("procedure:suffrage"));
+    assert!(runtime.pending_intents.is_empty());
 
     let future_publicity = LegalPublicityEvent {
         id: "publicity:suffrage:future".to_owned(),
@@ -1319,7 +1278,7 @@ fn required_publicity_is_an_atomic_adoption_guard_and_retroactivity_is_explicit(
         .expect("adopt explicitly retrospective law");
     let version = runtime.law_versions.values().next().expect("law version");
     assert_eq!(version.retrospective_from, Some(SimTime::EPOCH));
-    assert_eq!(version.promulgated_at, Some(SimTime::from_minutes(1)));
+    assert_eq!(version.promulgated_at, Some(SimTime::from_minutes(2)));
     let retrospective_result = runtime
         .query_applicability_for_plan(
             &plan,
@@ -1344,6 +1303,93 @@ fn required_publicity_is_an_atomic_adoption_guard_and_retroactivity_is_explicit(
         retrospective_result.outcome,
         ApplicabilityOutcome::Applicable
     );
+    runtime.validate_against_plan(&plan).expect("valid runtime");
+}
+
+/// Submits the bill, passes its single vote at minute 2, and returns that
+/// settlement.
+fn pass_bill(
+    runtime: &mut LegalRuntime,
+    plan: &CompiledLawPlan,
+    bill: LegalProposal,
+) -> LegalBoundaryResult {
+    runtime.submit_proposal(plan, bill).expect("submit bill");
+    stage_required_contexts(runtime, plan);
+    let opened = runtime
+        .settle_boundary(plan, SimTime::from_minutes(1), &[])
+        .expect("open bill");
+    for item in &opened.emitted_outbox {
+        mark_test_outbox(runtime, item.sequence, IngressId::new(item.sequence));
+        runtime
+            .queue_pending_intent(plan, intent_from_outbox(item, "for"))
+            .expect("queue vote");
+    }
+    runtime
+        .settle_boundary(plan, SimTime::from_minutes(2), &[])
+        .expect("a passed bill settles")
+}
+
+#[test]
+fn passed_bills_that_can_never_be_adopted_are_rejected_at_once() {
+    fn assert_rejected(runtime: &LegalRuntime, result: &LegalBoundaryResult, reason: &str) {
+        assert_eq!(
+            result.rejected_proposals,
+            vec![LegalProposalRejection {
+                proposal: "suffrage".to_owned(),
+                reason: reason.to_owned(),
+            }]
+        );
+        assert!(result.adopted_proposals.is_empty());
+        assert_eq!(
+            runtime.proposals["suffrage"].status,
+            ProposalStatus::Rejected
+        );
+        assert!(!runtime.open_procedures.contains("procedure:suffrage"));
+    }
+
+    // An effective time that passed without an authorized retrospective date
+    // can never be cured: the bill is rejected at once, though its validity
+    // publicity, which could still arrive, is missing too.
+    let plan = compile_law(&definition()).expect("compile legal plan");
+    let mut runtime = LegalRuntime::new(&plan);
+    let mut late = proposal();
+    late.effective_at = SimTime::from_minutes(1);
+    let result = pass_bill(&mut runtime, &plan, late);
+    assert_rejected(
+        &runtime,
+        &result,
+        "its effective time passed without an authorized retrospective date",
+    );
+    assert!(runtime.law_versions.is_empty());
+    runtime.validate_against_plan(&plan).expect("valid runtime");
+
+    // An adoption past a lifetime budget of the plan rejects the bill instead
+    // of failing settlement.
+    let mut authored = definition();
+    authored.source_profiles[0].publicity_policy = PublicityPolicy::EffectivenessCondition;
+    authored.budgets.max_law_versions = 1;
+    let plan = compile_law(&authored).expect("compile a one-version plan");
+    let mut runtime = LegalRuntime::new(&plan);
+    let mut claim = proposal_change("custom-claim", LawOperation::Recognize, 0);
+    claim.source_profile = "custom".to_owned();
+    claim.procedure_profile.clear();
+    claim.rule_id = "rule:custom-claim".to_owned();
+    claim.evidence = vec![EvidenceRef::Boundary(BoundaryId::new(1))];
+    runtime
+        .admit_non_procedural_source(
+            &plan,
+            claim,
+            &["practice.recognized".to_owned()],
+            SimTime::EPOCH,
+        )
+        .expect("fill the law-version budget");
+    let result = pass_bill(&mut runtime, &plan, proposal());
+    assert_rejected(
+        &runtime,
+        &result,
+        "the source, law-version, or rule budget of the plan is full",
+    );
+    assert_eq!(runtime.law_versions.len(), 1);
     runtime.validate_against_plan(&plan).expect("valid runtime");
 }
 
@@ -1923,24 +1969,36 @@ fn rule_changes_require_exact_head_order_and_legal_state_transition() {
 }
 
 #[test]
-fn boundary_state_budget_fails_before_any_hot_path_mutation() {
+fn work_past_the_state_budget_waits_without_any_hot_path_mutation() {
     let plan = compile_law(&definition()).expect("compile legal plan");
     let mut runtime = LegalRuntime::new(&plan);
     runtime
         .submit_proposal(&plan, proposal())
         .expect("submit proposal");
     stage_required_contexts(&mut runtime, &plan);
+    let reserved = runtime.reserved_state_bytes;
     runtime.reserved_state_bytes = plan.budgets.max_state_bytes - 1;
-    let boundary = runtime.boundary_index;
     let next_sequence = runtime.next_outbox_sequence;
+    let dirty = runtime.dirty_procedures.clone();
+    let result = runtime
+        .settle_boundary(&plan, SimTime::from_minutes(1), &[])
+        .expect("a full state budget does not fail settlement");
     assert!(
-        runtime
-            .settle_boundary(&plan, SimTime::from_minutes(1), &[])
-            .is_err()
+        !result.deferred,
+        "work waiting for state waits for freed state, not for a continuation"
     );
-    assert_eq!(runtime.boundary_index, boundary);
+    assert!(result.emitted_outbox.is_empty());
     assert_eq!(runtime.next_outbox_sequence, next_sequence);
     assert!(runtime.outbox.is_empty());
+    assert_eq!(runtime.dirty_procedures, dirty);
+
+    // Freed state lets the waiting work settle.
+    runtime.reserved_state_bytes = reserved;
+    let result = runtime
+        .settle_boundary(&plan, SimTime::from_minutes(1), &[])
+        .expect("settle once state is free");
+    assert!(!result.emitted_outbox.is_empty());
+    assert!(runtime.dirty_procedures.is_empty());
 }
 
 #[test]
@@ -2915,9 +2973,46 @@ fn succession_reception_is_rule_scoped_and_received_sources_keep_exact_origin() 
         .expect("cold validation preserves reception provenance");
 }
 
+/// Queues one live legal mutation through the plugin's ingress and settles
+/// the boundary that admits it, on a full or a compact run.
+macro_rules! settle_legal_mutation {
+    ($run:expr, $mutation:expr) => {{
+        let at = $run.time();
+        $run.enqueue_plugin_ingress(PluginIngressRequest::new(
+            PLUGIN_NAME,
+            LAW_MUTATION_INGRESS,
+            at,
+            serde_json::json!({ "mutation": $mutation }),
+        ))
+        .expect("queue legal mutation");
+        $run.step_canonical()
+            .expect("a legal boundary settles")
+            .expect("legal boundary");
+    }};
+}
+
+/// Has the test provider generate one recognized-practice packet and returns
+/// its ingress ID; the next boundary admits it.
+macro_rules! observe_practice {
+    ($run:expr) => {{
+        let at = $run.time();
+        $run.enqueue_plugin_ingress(PluginIngressRequest::new(
+            "test-society",
+            "observe-practice",
+            at,
+            serde_json::json!({"practice": "repeated public conduct"}),
+        ))
+        .expect("queue observed practice");
+        $run.step_canonical()
+            .expect("provider boundary")
+            .expect("provider production")
+            .generated_ingress[0]
+    }};
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
-fn live_non_procedural_source_requires_exact_compiled_provider_ingress() {
+fn live_non_procedural_source_requires_a_recorded_compiled_provider_packet() {
     fn host(plan: &CompiledLawPlan) -> Canwu {
         let initial = persisted_law_records(&LegalRuntime::new(plan));
         Canwu::new_with_plugins(
@@ -2938,7 +3033,31 @@ fn live_non_procedural_source_requires_exact_compiled_provider_ingress() {
         claim
     }
 
+    fn admitted_custom_source(canwu: &Canwu, plan: &CompiledLawPlan) {
+        let rejections = law_rejections(canwu);
+        assert!(rejections.is_empty(), "{rejections:?}");
+        let persisted = load_legal_runtime(canwu, plan)
+            .expect("load provider-backed law")
+            .expect("law runtime");
+        assert_eq!(
+            persisted
+                .sources
+                .values()
+                .next()
+                .expect("custom source")
+                .evidence_kinds,
+            vec!["practice.recognized"]
+        );
+        assert!(
+            !persisted.proposals["live-custom"]
+                .admitted_signal_kinds
+                .contains("forged.self-claim")
+        );
+    }
+
     let plan = compile_law(&definition()).expect("compile provider-bound plan");
+    // The provider boundary generates its packet; the host queues the legal
+    // mutation for the same instant, so one boundary admits both.
     let mut accepted = host(&plan);
     accepted
         .enqueue_plugin_ingress(PluginIngressRequest::new(
@@ -2953,10 +3072,6 @@ fn live_non_procedural_source_requires_exact_compiled_provider_ingress() {
         .expect("settle provider production boundary")
         .expect("observed practice boundary")
         .generated_ingress[0];
-    accepted
-        .step_canonical()
-        .expect("settle generated provider ingress")
-        .expect("recognized-practice boundary");
     enqueue_legal_mutation(
         &mut accepted,
         &LegalMutation::AdmitNonProceduralSource {
@@ -2968,24 +3083,88 @@ fn live_non_procedural_source_requires_exact_compiled_provider_ingress() {
         .step_canonical()
         .expect("provider-backed legal boundary")
         .expect("provider-backed legal work");
-    let persisted = load_legal_runtime(&accepted, &plan)
-        .expect("load provider-backed law")
+    admitted_custom_source(&accepted, &plan);
+
+    // A provider packet an earlier boundary admitted counts too: the provider
+    // index recorded it when its boundary admitted it.
+    let mut late = host(&plan);
+    let earlier = observe_practice!(late);
+    late.step_canonical()
+        .expect("admit the provider packet on its own")
+        .expect("recognized-practice boundary");
+    let recorded = load_legal_runtime(&late, &plan)
+        .expect("load law")
         .expect("law runtime");
     assert_eq!(
-        persisted
-            .sources
-            .values()
-            .next()
-            .expect("custom source")
-            .evidence_kinds,
-        vec!["practice.recognized"]
+        recorded.provider_packets[&earlier].packet_type,
+        "recognized-practice"
     );
     assert!(
-        !persisted.proposals["live-custom"]
-            .admitted_signal_kinds
-            .contains("forged.self-claim")
+        recorded
+            .retained_evidence_dependencies
+            .contains(&EvidenceRef::Ingress(earlier)),
+        "a recorded provider packet keeps its receipt"
     );
+    enqueue_legal_mutation(
+        &mut late,
+        &LegalMutation::AdmitNonProceduralSource {
+            proposal: custom_claim(EvidenceRef::Ingress(earlier)),
+        },
+    )
+    .expect("enqueue late custom source");
+    late.step_canonical()
+        .expect("a later citation settles")
+        .expect("late citation boundary");
+    admitted_custom_source(&late, &plan);
 
+    // The index keeps `max_provider_packets` packets; a forgotten packet is
+    // refused like one it never recorded.
+    let mut small = definition();
+    small.budgets.max_provider_packets = 1;
+    let small_plan = compile_law(&small).expect("compile a one-packet provider index");
+    let mut forgotten = host(&small_plan);
+    let first = observe_practice!(forgotten);
+    forgotten
+        .step_canonical()
+        .expect("admit the first provider packet")
+        .expect("first recognized-practice boundary");
+    let second = observe_practice!(forgotten);
+    forgotten
+        .step_canonical()
+        .expect("admit the second provider packet")
+        .expect("second recognized-practice boundary");
+    let recorded = load_legal_runtime(&forgotten, &small_plan)
+        .expect("load law")
+        .expect("law runtime");
+    assert_eq!(
+        recorded
+            .provider_packets
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![second]
+    );
+    assert!(
+        !recorded
+            .retained_evidence_dependencies
+            .contains(&EvidenceRef::Ingress(first)),
+        "a forgotten provider packet releases its receipt"
+    );
+    enqueue_legal_mutation(
+        &mut forgotten,
+        &LegalMutation::AdmitNonProceduralSource {
+            proposal: custom_claim(EvidenceRef::Ingress(first)),
+        },
+    )
+    .expect("enqueue a citation of a forgotten packet");
+    forgotten
+        .step_canonical()
+        .expect("a forgotten citation is a recorded refusal")
+        .expect("forgotten citation boundary");
+    assert_provider_refusal(&forgotten, &small_plan);
+
+    // A host-authored packet of the provider type is not provider evidence,
+    // even when the same boundary admits it.
     let mut rejected = host(&plan);
     let host_spoof = rejected
         .enqueue_plugin_ingress(PluginIngressRequest::new(
@@ -2995,9 +3174,6 @@ fn live_non_procedural_source_requires_exact_compiled_provider_ingress() {
             serde_json::json!({"practice": "host-authored self-report"}),
         ))
         .expect("enqueue host spoof");
-    rejected
-        .settle_boundary(BoundaryRequest::at(rejected.time()))
-        .expect("retain host-authored provider target");
     enqueue_legal_mutation(
         &mut rejected,
         &LegalMutation::AdmitNonProceduralSource {
@@ -3005,11 +3181,21 @@ fn live_non_procedural_source_requires_exact_compiled_provider_ingress() {
         },
     )
     .expect("enqueue forged custom source");
-    let error = rejected
+    rejected
         .step_canonical()
-        .expect_err("host-authored provider target must fail closed");
-    assert_eq!(error.code, ErrorCode::InvalidAuthority);
+        .expect("host-authored provider target is a recorded refusal")
+        .expect("spoof boundary");
+    assert_provider_refusal(&rejected, &plan);
+    assert!(
+        load_legal_runtime(&rejected, &plan)
+            .expect("load law")
+            .expect("law runtime")
+            .provider_packets
+            .is_empty()
+    );
 
+    // A provider packet still queued for a later time does not authorize the
+    // mutation early.
     let mut premature = host(&plan);
     premature
         .enqueue_plugin_ingress(PluginIngressRequest::new(
@@ -3031,126 +3217,174 @@ fn live_non_procedural_source_requires_exact_compiled_provider_ingress() {
         },
     )
     .expect("enqueue premature custom source");
-    let error = premature
+    premature
         .settle_boundary(BoundaryRequest::at(premature.time()))
-        .expect_err("future provider ingress must not authorize early");
-    assert_eq!(error.code, ErrorCode::InvalidAuthority);
+        .expect("future provider ingress is a recorded refusal");
+    assert_provider_refusal(&premature, &plan);
 }
 
+/// Summaries of the law ingress refusals a run recorded.
+fn law_rejections(canwu: &Canwu) -> Vec<String> {
+    canwu
+        .events()
+        .iter()
+        .filter(|event| {
+            event.kind.plugin_identity() == Some((PLUGIN_NAME, LAW_INGRESS_REJECTED_EVENT))
+        })
+        .map(|event| event.summary.clone())
+        .collect()
+}
+
+/// The run refused its one custom source for lacking a recorded provider
+/// packet and holds no source.
+fn assert_provider_refusal(canwu: &Canwu, plan: &CompiledLawPlan) {
+    let rejections = law_rejections(canwu);
+    assert_eq!(rejections.len(), 1, "{rejections:?}");
+    assert!(
+        rejections[0].contains(
+            "cites no packet of provider test-society:recognized-practice in the legal provider index"
+        ),
+        "{rejections:?}"
+    );
+    let persisted = load_legal_runtime(canwu, plan)
+        .expect("load law")
+        .expect("law runtime");
+    assert!(persisted.sources.is_empty());
+    assert!(!persisted.proposals.contains_key("live-custom"));
+}
+
+/// Provider provenance is decided against the legal provider index, so a
+/// run whose evidence a seal compacted decides every citation as an unsealed
+/// fork, a restore from the sealed segments, and exact replay do, whichever
+/// boundary admitted the cited packet.
 #[test]
 #[allow(clippy::too_many_lines)]
-fn active_legal_provider_evidence_survives_compaction_as_a_compact_proof() {
+fn provider_citations_decide_alike_in_sealed_and_unsealed_runs() {
     let mut authored = definition();
     authored.source_profiles[0].required_signal_kinds = vec!["practice.recognized".to_owned()];
     let plan = compile_law(&authored).expect("compile provider-bound procedure");
+    let plugins: [&dyn SimulationPlugin; 2] = [&LawPlugin, &TestSocietyPlugin];
     let initial = persisted_law_records(&LegalRuntime::new(&plan));
-    let mut canwu = Canwu::new_with_plugins(
+    let mut base = Canwu::new_with_plugins(
         7,
         Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(initial),
-        &[&LawPlugin, &TestSocietyPlugin],
+        &plugins,
     )
     .expect("law and provider plugins");
 
-    canwu
-        .enqueue_plugin_ingress(PluginIngressRequest::new(
-            "test-society",
-            "observe-practice",
-            canwu.time(),
-            serde_json::json!({"practice": "repeated public conduct"}),
-        ))
-        .expect("enqueue observed practice");
-    let generated = canwu
-        .step_canonical()
-        .expect("settle provider production")
-        .expect("provider boundary")
-        .generated_ingress[0];
-    canwu
-        .step_canonical()
-        .expect("admit generated evidence")
-        .expect("evidence boundary");
-
-    let mut custom = proposal_change("archived-custom", LawOperation::Recognize, 0);
-    custom.source_profile = "custom".to_owned();
-    custom.procedure_profile.clear();
-    custom.rule_id = "rule:archived-custom".to_owned();
-    custom.evidence = vec![EvidenceRef::Ingress(generated)];
-    enqueue_legal_mutation(
-        &mut canwu,
-        &LegalMutation::AdmitNonProceduralSource { proposal: custom },
+    // A provider packet is admitted before the seal and not yet cited by law;
+    // the provider index records it, so the seal keeps its receipt.
+    let sealed_practice = observe_practice!(base);
+    base.step_canonical()
+        .expect("admit the provider packet")
+        .expect("provider packet boundary");
+    base.settle_boundary(BoundaryRequest::at(base.time()))
+        .expect("a quiet boundary before sealing");
+    let mut unsealed = base.fork();
+    let mut sealed = base.into_compacted().expect("enter compact mode");
+    let segment = sealed
+        .seal_evidence()
+        .expect("the settled history seals")
+        .expect("the settled history holds evidence");
+    let mut restored = CompactedCanwu::from_checkpoint_and_journal_with_plugins(
+        sealed.checkpoint().expect("compact checkpoint"),
+        vec![segment.clone()],
+        &plugins,
     )
-    .expect("queue evidence-bound custom");
-    canwu
-        .step_canonical()
-        .expect("settle custom")
-        .expect("custom boundary");
-    canwu
-        .settle_boundary(BoundaryRequest::at(canwu.time()))
-        .expect("admit the final retained event before sealing");
+    .expect("the sealed segments restore the compact run");
 
-    let mut compact = canwu.into_compacted().expect("enter compact mode");
-    let prepared = compact
-        .prepare_evidence_seal()
-        .expect("prepare archive")
-        .expect("retained evidence exists");
-    let archive = MemoryArchive::default();
-    assert_eq!(
-        archive
-            .store_evidence_segment(&prepared.segment)
-            .expect("store archive"),
-        ArchiveStoreOutcome::Stored
+    let bill = proposal();
+    let late_signal = LegalMutation::Signal {
+        signal: LegalSignal {
+            kind: "practice.recognized".to_owned(),
+            proposal_id: bill.id.clone(),
+            evidence: vec![EvidenceRef::Ingress(sealed_practice)],
+        },
+    };
+    let mut late_custom = proposal_change("late-custom", LawOperation::Recognize, 5);
+    late_custom.source_profile = "custom".to_owned();
+    late_custom.procedure_profile.clear();
+    late_custom.rule_id = "rule:late-custom".to_owned();
+    late_custom.evidence = vec![EvidenceRef::Ingress(sealed_practice)];
+    let late_custom = LegalMutation::AdmitNonProceduralSource {
+        proposal: late_custom,
+    };
+    // Every run opens the bill, cites the old packet twice, and then cites a
+    // fresh packet in the boundary that admits it.
+    settle_legal_mutation!(
+        unsealed,
+        LegalMutation::SubmitProposal {
+            proposal: bill.clone()
+        }
     );
-    compact
-        .commit_evidence_seal(&prepared.token, &archive)
-        .expect("commit archive");
+    settle_legal_mutation!(
+        sealed,
+        LegalMutation::SubmitProposal {
+            proposal: bill.clone()
+        }
+    );
+    settle_legal_mutation!(
+        restored,
+        LegalMutation::SubmitProposal {
+            proposal: bill.clone()
+        }
+    );
+    settle_legal_mutation!(unsealed, late_signal.clone());
+    settle_legal_mutation!(sealed, late_signal.clone());
+    settle_legal_mutation!(restored, late_signal);
+    settle_legal_mutation!(unsealed, late_custom.clone());
+    settle_legal_mutation!(sealed, late_custom.clone());
+    settle_legal_mutation!(restored, late_custom);
+    let fresh_signal = |practice| LegalMutation::Signal {
+        signal: LegalSignal {
+            kind: "practice.recognized".to_owned(),
+            proposal_id: bill.id.clone(),
+            evidence: vec![EvidenceRef::Ingress(practice)],
+        },
+    };
+    let practice = observe_practice!(unsealed);
+    settle_legal_mutation!(unsealed, fresh_signal(practice));
+    let practice = observe_practice!(sealed);
+    settle_legal_mutation!(sealed, fresh_signal(practice));
+    let practice = observe_practice!(restored);
+    settle_legal_mutation!(restored, fresh_signal(practice));
 
-    let receipt = compact
-        .archived_evidence_receipt(&EvidenceRef::Ingress(generated))
-        .expect("active proposal retains provider receipt");
-    let provenance = receipt
-        .plugin_ingress_provenance
-        .as_ref()
-        .expect("generated ingress retains compact producer proof");
-    assert_eq!(provenance.plugin, "test-society");
-    assert_eq!(provenance.packet_type, "recognized-practice");
+    // The old packet is admitted twice and the fresh one once, in every run.
+    let rejections = law_rejections(&unsealed);
+    assert!(rejections.is_empty(), "{rejections:?}");
+    let law = load_legal_runtime(&unsealed, &plan)
+        .expect("load law")
+        .expect("law runtime");
+    let admitted = &law.proposals[&bill.id];
+    assert_eq!(
+        admitted.admitted_signal_kinds,
+        BTreeSet::from(["practice.recognized".to_owned()])
+    );
+    assert_eq!(
+        admitted.evidence,
+        vec![
+            EvidenceRef::Ingress(sealed_practice),
+            EvidenceRef::Ingress(practice)
+        ]
+    );
+    assert!(law.proposals.contains_key("late-custom"));
+    assert_eq!(sealed.checkpoint_hash(), unsealed.checkpoint_hash());
+    assert_eq!(restored.checkpoint_hash(), unsealed.checkpoint_hash());
 
-    let mut bill = proposal();
-    bill.evidence = vec![EvidenceRef::Ingress(generated)];
-    compact
-        .enqueue_plugin_ingress(PluginIngressRequest::new(
-            PLUGIN_NAME,
-            LAW_MUTATION_INGRESS,
-            compact.time(),
-            serde_json::json!({
-                "mutation": LegalMutation::SubmitProposal {
-                    proposal: bill.clone(),
-                }
-            }),
-        ))
-        .expect("queue proposal backed by archived evidence");
-    compact
-        .step_canonical()
-        .expect("admit proposal from archived evidence")
-        .expect("proposal boundary");
-    compact
-        .enqueue_plugin_ingress(PluginIngressRequest::new(
-            PLUGIN_NAME,
-            LAW_MUTATION_INGRESS,
-            compact.time(),
-            serde_json::json!({
-                "mutation": LegalMutation::Signal {
-                    signal: LegalSignal {
-                        kind: "practice.recognized".to_owned(),
-                        proposal_id: bill.id,
-                        evidence: vec![EvidenceRef::Ingress(generated)],
-                    },
-                }
-            }),
-        ))
-        .expect("queue signal backed by archived provider evidence");
-    compact
-        .step_canonical()
-        .expect("verify archived provider proof without payload hydration")
-        .expect("signal boundary");
+    // Exact replay of the sealed run regenerates every boundary and equals the
+    // unsealed fork.
+    let journal = sealed
+        .replay_journal_with_segments(vec![segment.clone()])
+        .expect("the sealed run produces an exact replay journal");
+    let replayed =
+        Canwu::replay_from_journal(&plugins, &journal).expect("the sealed run replays exactly");
+    assert_eq!(replayed.snapshot(), unsealed.snapshot());
+    assert_eq!(
+        replayed.snapshot(),
+        sealed
+            .snapshot_with_segments(vec![segment])
+            .expect("the sealed run reconstructs a full snapshot")
+    );
 }
 
 fn activation_error(runtime: &LegalRuntime) -> CanwuError {
@@ -4589,6 +4823,88 @@ fn stale_durable_legal_archive_ingress_releases_its_gc_retention() {
             .disposition,
         LegalArchiveMaintenanceDisposition::RejectedStale
     );
+}
+
+/// A durable archive commit the canonical boundary refuses for a reason
+/// other than staleness records a `RejectedStale` terminal naming the
+/// refusal, so the host finalizes the retention handle as it does a stale one.
+#[test]
+fn refused_durable_legal_archive_ingress_records_a_terminal_that_releases_its_retention() {
+    let plan = compile_law(&definition()).expect("compile legal plan");
+    let mut source = LegalRuntime::new(&plan);
+    source
+        .retire_cultural_target_for_plan(
+            &plan,
+            &CulturalTargetGenerationRef {
+                target: "refused-retention-source".to_owned(),
+                generation: 1,
+            },
+            SimTime::from_minutes(1),
+            "prepare a refused archive",
+        )
+        .expect("retire source target");
+    let shard = LegalShardKey::culture_dependency(plan.definition_id.clone());
+    let mut prepared = source
+        .prepare_legal_archive(
+            &shard,
+            LegalCompactionBudgets {
+                max_records: 1,
+                max_source_bytes: 1024 * 1024,
+            },
+        )
+        .expect("prepare archive")
+        .expect("archive candidate");
+    // The altered batch passes store verification; the canonical commit,
+    // which prepares the batch again, refuses it.
+    prepared.compaction.examined_candidates += 1;
+    let archive = MemoryLegalArchive::default();
+    let mut canwu = Canwu::new_with_plugins(
+        7,
+        Scenario::new(SimTime::from_minutes(1), Vec::new())
+            .with_domain_records(persisted_law_records(&source)),
+        &[&LawPlugin],
+    )
+    .expect("host legal state");
+    let retention_receipt = enqueue_legal_archive(&mut canwu, &prepared, &archive)
+        .expect("queue altered durable archive ingress");
+    canwu
+        .step_canonical()
+        .expect("a refused archive commit settles")
+        .expect("refused archive boundary");
+    let rejections = law_rejections(&canwu);
+    assert_eq!(rejections.len(), 1, "{rejections:?}");
+    assert!(
+        rejections[0].contains(&retention_receipt.retention_handle_id)
+            && rejections[0].contains("stale or altered"),
+        "{rejections:?}"
+    );
+    let runtime = load_legal_runtime(&canwu, &plan)
+        .expect("load refused terminal runtime")
+        .expect("refused terminal runtime");
+    let terminal = &runtime.archive_retention_terminals[&retention_receipt.retention_handle_id];
+    assert_eq!(
+        terminal.disposition,
+        LegalArchiveMaintenanceDisposition::RejectedStale
+    );
+    assert!(
+        terminal
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("stale or altered")),
+        "{terminal:?}"
+    );
+
+    finalize_legal_archive_retention(&mut canwu, &plan, &archive, &retention_receipt)
+        .expect("release the refused legal archive retention");
+    canwu
+        .step_canonical()
+        .expect("settle the refused retention acknowledgement")
+        .expect("refused retention acknowledgement boundary");
+    assert!(archive.retention.borrow().reachable().objects.is_empty());
+    let runtime = load_legal_runtime(&canwu, &plan)
+        .expect("load acknowledged runtime")
+        .expect("acknowledged runtime");
+    assert!(runtime.archive_retention_terminals.is_empty());
 }
 
 #[test]

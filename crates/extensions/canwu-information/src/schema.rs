@@ -1,7 +1,7 @@
 use crate::model::{
     AccessPayload, AudiencePayload, AuthorityAssignmentPayload, ChannelPayload, ContentPayload,
-    DeliveryAttemptPayload, DispatchPayload, InstancePayload, InterpretationPayload,
-    ReleasePayload, RepresentationPayload,
+    DelegatedAuthorityPayload, DeliveryAttemptPayload, DispatchPayload, InstancePayload,
+    InterpretationPayload, ReleasePayload, RepresentationPayload,
 };
 use crate::operation::InformationOperationPayload;
 use crate::{PLUGIN_NAMESPACE, model::InformationLimitsV1};
@@ -48,6 +48,11 @@ information_record_type!(
     InformationOperationRecord,
     "operation",
     InformationOperationPayload
+);
+information_record_type!(
+    DelegatedAuthority,
+    "delegated_authority",
+    DelegatedAuthorityPayload
 );
 
 /// Human-readable descriptor for one neutral holder-facing schema.
@@ -467,6 +472,15 @@ pub fn information_record_schemas() -> Vec<DomainRecordSchema> {
                 ),
             ],
         ),
+        record_schema::<DelegatedAuthority>(
+            true,
+            object_schema(&[
+                ("authority_grant", PayloadValueType::String, true),
+                ("claim", PayloadValueType::Object, true),
+                ("command", PayloadValueType::Integer, true),
+            ]),
+            vec![],
+        ),
         record_schema::<InformationOperationRecord>(
             false,
             object_schema(&[
@@ -610,7 +624,7 @@ mod tests {
     #[test]
     fn schemas_are_unique_neutral_and_mark_immutable_kinds_create_only() {
         let schemas = information_record_schemas();
-        assert_eq!(schemas.len(), 12);
+        assert_eq!(schemas.len(), 13);
         assert!(schemas.windows(2).all(|pair| pair[0].kind < pair[1].kind));
         assert!(
             schemas
@@ -621,6 +635,7 @@ mod tests {
         for name in [
             Channel::NAME,
             Content::NAME,
+            DelegatedAuthority::NAME,
             Representation::NAME,
             Access::NAME,
             Interpretation::NAME,

@@ -2,7 +2,7 @@ use crate::schema::{
     Audience, Content, DeliveryAttempt, Dispatch, Instance, Release, Representation,
 };
 use canwu_api::{
-    BoundaryId, DomainRecordKind, DomainRecordVersionRef, EntityRef, EvidenceRef,
+    BoundaryId, CommandId, DomainRecordKind, DomainRecordVersionRef, EntityRef, EvidenceRef,
     KnowledgeHolderRef, SimTime, TypedDomainRecordRef,
 };
 use serde::{Deserialize, Serialize};
@@ -356,6 +356,36 @@ pub struct DelegationClaimV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorityAssignmentPayload {
+    pub claim: DelegationClaimV1,
+}
+
+/// A delegation claim the information plugin recorded when the command that
+/// grants it was admitted.
+///
+/// A [`DelegationEvidenceSelector::Command`] grant names commands of another
+/// plugin. When the information plugin's lifecycle system sees such a
+/// command admitted at a boundary, it stores the claim found at the grant's
+/// claim path in one create-only record, keyed by the grant code and the
+/// command ID (see [`crate::delegated_authority_reference`]). An
+/// [`InterpretationAuthority::Delegated`] interpretation that cites the
+/// command is checked against this record, never against the command
+/// itself, so the check does not depend on whether a seal has removed the
+/// command's payload. A command whose payload has no decodable claim at the
+/// claim path is not recorded, and citing it is refused as before.
+///
+/// The records are kept for the run: one per admitted command that a
+/// command grant names, never retired, so they grow with the number of such
+/// commands. A claim authorizes only interpretations dated inside its
+/// `[not_before, expires_at)` window; its record stays after the window
+/// closes.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegatedAuthorityPayload {
+    /// Code of the [`DelegationAuthorityGrant`] whose selector matched.
+    pub authority_grant: String,
+    /// The admitted command that granted the delegation.
+    pub command: CommandId,
+    /// The claim found at the grant's claim path, as the command carried it.
     pub claim: DelegationClaimV1,
 }
 

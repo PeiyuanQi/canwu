@@ -3,8 +3,9 @@ use crate::lifecycle::{
     validate_delegation_claim, validate_delegation_grant,
 };
 use crate::model::{
-    DelegationAuthorityGrant, DelegationClaimV1, DelegationEvidenceSelector, DeliveryAttemptStatus,
-    InformationLimitsV1, InterpretationAuthority, ReleaseStatus,
+    DelegatedAuthorityPayload, DelegationAuthorityGrant, DelegationClaimV1,
+    DelegationEvidenceSelector, DeliveryAttemptStatus, InformationLimitsV1,
+    InterpretationAuthority, ReleaseStatus,
 };
 use crate::operation::{
     InformationAdmissionRef, InformationContinuation, InformationOperationEnvelope,
@@ -14,21 +15,21 @@ use crate::operation::{
 };
 use crate::query::InformationRecordSet;
 use crate::schema::{
-    Access, Audience, AuthorityAssignment, Content, DeliveryAttempt, Dispatch,
+    Access, Audience, AuthorityAssignment, Content, DelegatedAuthority, DeliveryAttempt, Dispatch,
     InformationOperationRecord, Interpretation, Release, Representation,
     information_knowledge_schemas, information_record_schemas,
 };
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundarySystemContract,
-    CanwuError, CauseRef, Command, CommandIngress, DomainRecord, DomainRecordDraft,
-    DomainRecordKind, DomainRecordMutation, DomainRecordType, DomainRecordVersionRef,
-    DomainReference, DomainReferenceTarget, EntityRef, ErrorCode, EvidenceRef, IngressClass,
-    IngressPayload, KnowledgeHolderRef, KnowledgeOrigin, KnowledgeRecordDraft, KnowledgeRecordKind,
-    KnowledgeSchemaId, KnowledgeSubject, KnowledgeSubjectTarget, KnowledgeWriteGrant,
-    PayloadProperty, PayloadSchema, PayloadValueType, PluginActionDescriptor,
-    PluginIngressDescriptor, PluginRegistrar, SimDuration, SimulationPlugin, SimulationView,
-    StateKey, StateVisibility, SystemCadence, SystemDirective, TypedDomainRecordRef,
-    canonical_hash,
+    CanwuError, CauseRef, Command, CommandId, CommandIngress, DomainRecord, DomainRecordDraft,
+    DomainRecordKind, DomainRecordMutation, DomainRecordRef, DomainRecordType,
+    DomainRecordVersionRef, DomainReference, DomainReferenceTarget, EntityRef, ErrorCode,
+    EvidenceRef, IngressClass, IngressId, IngressPayload, KnowledgeHolderRef, KnowledgeOrigin,
+    KnowledgeRecordDraft, KnowledgeRecordKind, KnowledgeSchemaId, KnowledgeSubject,
+    KnowledgeSubjectTarget, KnowledgeWriteGrant, PayloadProperty, PayloadSchema, PayloadValueType,
+    PluginActionDescriptor, PluginIngressDescriptor, PluginRegistrar, SimDuration,
+    SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence, SystemDirective,
+    TypedDomainRecordRef, canonical_hash,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -43,9 +44,14 @@ pub const DELEGATED_AUTHORITY_GRANT: &str = "interpret_for_holder";
 pub const INSTITUTIONAL_AUTHORITY_GRANT: &str = "interpret_as_assigned_role";
 pub const AUTHORITY_COMMAND_PRODUCER: &str = "canwu-authority";
 pub const AUTHORITY_COMMAND_TYPE: &str = "delegate_interpretation_v1";
+/// Event the lifecycle system records when it refuses an admitted
+/// [`INFORMATION_INGRESS`] packet (one that does not decode, conflicts with
+/// another packet or with the persisted operation of the same ID) instead of
+/// failing the boundary. Its summary names the packet and the reason.
+pub const INFORMATION_REJECTION_EVENT: &str = "canwu.information.ingress_rejected.v1";
 
 const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
-const SEMANTIC_HASH: &str = "8c43afad0a0f483573b11ec595087f16a3a0aa2f3bf8ae0f43c7d019f79d50d7";
+const SEMANTIC_HASH: &str = "6f43035879633c586ca55e153b5c038f8b7a2276dd4bb8e0844b47b25707623d";
 const AUTHORITY_GRANTS_HASH: &str =
     "1f956d1dbee04d6cf7a076f778bb058e47a0a6155cd778c4163f78ccbbfe4b5c";
 const INPUT_HASH_DOMAIN: &str = "canwu.information.operation-input.v1";
@@ -82,10 +88,21 @@ pub fn information_authority_grants() -> Vec<DelegationAuthorityGrant> {
     ]
 }
 
+/// Internal packet a publishing boundary schedules for the next boundary,
+/// which records the knowledge-record IDs of the chunk it published.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct FinalizationRequest {
     id: InformationOperationId,
     canonical_input_hash: String,
+    /// First publication of the chunk, in the operation's sorted publication
+    /// order.
+    publication_start: u64,
+    /// One past the last publication of the chunk.
+    publication_end: u64,
+    /// Publications of the chunk left unpublished because their holder could
+    /// not receive knowledge, in ascending order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    unpublished: Vec<u64>,
 }
 
 impl InformationPlugin {
@@ -162,7 +179,9 @@ impl SimulationPlugin for InformationPlugin {
         }
         registrar.register_command(self.command_descriptor(), apply_operation_command)?;
         registrar.register_ingress(self.ingress_descriptor())?;
-        registrar.register_ingress(PluginIngressDescriptor {
+        // Only the publication system schedules finalization; hosts cannot
+        // author it, so its payload is plugin-made and trusted.
+        registrar.register_internal_ingress(PluginIngressDescriptor {
             name: INFORMATION_FINALIZATION_INGRESS.to_owned(),
             description: "Finalize persisted neutral information publications".to_owned(),
             class: IngressClass::Acknowledgement,
@@ -192,6 +211,7 @@ impl SimulationPlugin for InformationPlugin {
         phase7.writes.sort();
         phase7.writes.dedup();
         phase7.visibility = StateVisibility::SameBoundary;
+        phase7.emits = vec![INFORMATION_REJECTION_EVENT.to_owned()];
         registrar.register_boundary_system(phase7, apply_lifecycle_boundary)?;
 
         let mut phase13 = BoundarySystemContract::new(
@@ -249,20 +269,49 @@ fn apply_operation_command(
     }
 }
 
-#[allow(clippy::single_match_else)]
+/// One admitted operation packet of this boundary, kept with the packet that
+/// first carried it.
+struct AdmittedOperation {
+    hash: String,
+    envelope: InformationOperationEnvelope,
+    admission: InformationAdmissionRef,
+    ingress: IngressId,
+}
+
+/// Phase 7: records admitted delegations, finalizes published chunks, and
+/// advances admitted operations.
+///
+/// A host can author [`INFORMATION_INGRESS`] directly, so a packet that does
+/// not decode, that conflicts with another packet of the same boundary, or
+/// that conflicts with the persisted operation of its ID is refused with an
+/// [`INFORMATION_REJECTION_EVENT`] instead of failing the boundary. When one
+/// boundary admits different inputs for one operation ID, the input that
+/// matches the persisted operation is kept, whatever its packet's priority,
+/// so a crafted packet cannot displace an operation's own progress packet;
+/// without a persisted operation the first admitted input is kept.
+///
+/// Two operations whose plans change the same record in one boundary would
+/// make the boundary invalid, so they are planned oldest first (by admission
+/// time, then operation ID) and a later one waits for the next boundary and
+/// is planned again there. The oldest operation planned at a boundary is
+/// never deferred, so an operation waits only behind operations admitted no
+/// later than it: newer operations cannot starve it.
+#[allow(clippy::single_match_else, clippy::too_many_lines)]
 fn apply_lifecycle_boundary(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
     let records = load_information_records(view)?;
-    let mut operations = BTreeMap::<
-        InformationOperationId,
-        (
-            String,
-            InformationOperationEnvelope,
-            InformationAdmissionRef,
-        ),
-    >::new();
+    let mut directives = Vec::new();
+    let delegations = record_admitted_delegations(view, context, &mut directives)?;
+    let admitted_ingress = context
+        .admitted_ingress
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    // Distinct inputs admitted for each operation ID, each with the first
+    // packet that carried it, in admission order.
+    let mut inputs = BTreeMap::<InformationOperationId, Vec<AdmittedOperation>>::new();
     let mut finalizations = BTreeMap::<InformationOperationId, FinalizationRequest>::new();
     for ingress_id in &context.admitted_ingress {
         let Some(ingress) = view.ingress(*ingress_id)? else {
@@ -281,21 +330,26 @@ fn apply_lifecycle_boundary(
             continue;
         }
         if packet_type == INFORMATION_INGRESS {
-            let envelope = decode_envelope(payload)?;
+            let envelope = match decode_envelope(payload) {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    reject_ingress(&mut directives, *ingress_id, &error);
+                    continue;
+                }
+            };
             let hash = canonical_hash(INPUT_HASH_DOMAIN, &envelope)?;
             let admission = match &ingress.cause {
                 Some(CauseRef::Command(command)) => InformationAdmissionRef::Command(*command),
                 _ => InformationAdmissionRef::Ingress(*ingress_id),
             };
-            if let Some((prior_hash, _, _)) = operations.get(&envelope.id) {
-                if prior_hash != &hash {
-                    return Err(CanwuError::new(
-                        ErrorCode::IdempotencyConflict,
-                        "one boundary admitted conflicting information operation inputs",
-                    ));
-                }
-            } else {
-                operations.insert(envelope.id.clone(), (hash, envelope, admission));
+            let candidates = inputs.entry(envelope.id.clone()).or_default();
+            if !candidates.iter().any(|candidate| candidate.hash == hash) {
+                candidates.push(AdmittedOperation {
+                    hash,
+                    envelope,
+                    admission,
+                    ingress: *ingress_id,
+                });
             }
         } else if packet_type == INFORMATION_FINALIZATION_INGRESS {
             let request: FinalizationRequest =
@@ -318,14 +372,56 @@ fn apply_lifecycle_boundary(
         }
     }
 
-    let mut directives = Vec::new();
     for request in finalizations.values() {
         finalize_operation(view, context, request, &mut directives)?;
     }
-    for (hash, envelope, admission) in operations.values() {
-        let operation_ref = derive_operation_record_ref(&envelope.id);
-        let existing = view.typed_domain_record(&operation_ref)?;
-        let Some(existing) = existing else {
+    // Keep one input per operation: the one matching the persisted operation
+    // when there is one, else the first admitted; refuse the others.
+    let mut operations = Vec::new();
+    for (id, candidates) in inputs {
+        let existing = view.typed_domain_record(&derive_operation_record_ref(&id))?;
+        let previous = existing
+            .map(DomainRecord::decode_payload::<InformationOperationRecord>)
+            .transpose()?;
+        let kept = previous
+            .as_ref()
+            .and_then(|previous| {
+                candidates
+                    .iter()
+                    .position(|candidate| candidate.hash == previous.canonical_input_hash)
+            })
+            .unwrap_or(0);
+        for (index, candidate) in candidates.into_iter().enumerate() {
+            if index == kept {
+                let order = previous
+                    .as_ref()
+                    .map_or(context.at, |previous| previous.admitted_at);
+                operations.push((order, candidate, existing));
+            } else {
+                reject_ingress(
+                    &mut directives,
+                    candidate.ingress,
+                    &CanwuError::new(
+                        ErrorCode::IdempotencyConflict,
+                        "one boundary admitted conflicting information operation inputs",
+                    ),
+                );
+            }
+        }
+    }
+    // Oldest first; the sort is stable, so operations admitted together stay
+    // in operation-ID order.
+    operations.sort_by_key(|(order, _, _)| *order);
+    // Records changed by an operation planned earlier in this pass.
+    let mut changed = BTreeSet::<DomainRecordRef>::new();
+    for (_, admitted, existing) in &operations {
+        let AdmittedOperation {
+            hash,
+            envelope,
+            admission,
+            ingress,
+        } = admitted;
+        let Some(existing) = *existing else {
             let operation = InformationOperationPayload {
                 id: envelope.id.clone(),
                 operation_version: envelope.operation_version,
@@ -357,7 +453,12 @@ fn apply_lifecycle_boundary(
                 unreachable!("existing operation cannot classify as new")
             }
             Err(message) => {
-                return Err(CanwuError::new(ErrorCode::IdempotencyConflict, message));
+                reject_ingress(
+                    &mut directives,
+                    *ingress,
+                    &CanwuError::new(ErrorCode::IdempotencyConflict, message),
+                );
+                continue;
             }
         }
         if previous.status.is_terminal()
@@ -385,8 +486,12 @@ fn apply_lifecycle_boundary(
                 "information operation ingress found an invalid progress state",
             ));
         }
-        let Ok(authority_claim_hash) = validate_runtime_interpretation_authority(view, envelope)
-        else {
+        let Ok(authority_claim_hash) = validate_runtime_interpretation_authority(
+            view,
+            envelope,
+            &delegations,
+            &admitted_ingress,
+        ) else {
             let mut proposed = previous.clone();
             proposed.status = InformationOperationStatus::Rejected;
             proposed.rejection_code = Some("invalid_authority".to_owned());
@@ -421,6 +526,14 @@ fn apply_lifecycle_boundary(
                     .collect();
                 result_refs.sort();
                 result_refs.dedup();
+                // The plan was made against the records this boundary began
+                // with; when an earlier operation of this pass already changes
+                // one of its records, it is planned again at the next boundary.
+                if result_refs.iter().any(|target| changed.contains(target)) {
+                    directives.push(schedule_operation_progress(envelope)?);
+                    continue;
+                }
+                changed.extend(result_refs.iter().cloned());
                 let publication_count = u64::try_from(plan.publications.len()).map_err(|_| {
                     invalid_record("information publication count is not representable")
                 })?;
@@ -479,6 +592,93 @@ fn apply_lifecycle_boundary(
     })
 }
 
+fn reject_ingress(directives: &mut Vec<BoundaryDirective>, ingress: IngressId, error: &CanwuError) {
+    directives.push(BoundaryDirective::Emit {
+        event_type: INFORMATION_REJECTION_EVENT.to_owned(),
+        summary: format!("information ingress {ingress} rejected: {error}"),
+        affected: Vec::new(),
+    });
+}
+
+/// The record that holds the claim of a delegation granted by `command`
+/// under the authority grant `authority_grant`.
+///
+/// The information lifecycle system creates it when it sees the command
+/// admitted (see [`DelegatedAuthorityPayload`]); an interpretation citing the
+/// command reads this record.
+#[must_use]
+pub fn delegated_authority_reference(
+    authority_grant: &str,
+    command: CommandId,
+) -> TypedDomainRecordRef<DelegatedAuthority> {
+    TypedDomainRecordRef::new(format!("{authority_grant}:command:{}", command.get()))
+}
+
+/// Records the delegation claim of every command admitted at this boundary
+/// that a [`DelegationEvidenceSelector::Command`] grant names.
+///
+/// The commands read here are the ones this boundary admits, which every run
+/// still holds, sealed or not. Returns the delegations recorded in this pass,
+/// so an interpretation advanced in the same pass can cite them.
+fn record_admitted_delegations(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    directives: &mut Vec<BoundaryDirective>,
+) -> Result<BTreeMap<DomainRecordRef, DelegatedAuthorityPayload>, CanwuError> {
+    let grants = information_authority_grants();
+    let mut recorded = BTreeMap::new();
+    for command_id in &context.admitted_commands {
+        let Some(record) = view.command(*command_id)? else {
+            continue;
+        };
+        let Command::Plugin {
+            plugin,
+            command,
+            payload,
+        } = &record.envelope.command
+        else {
+            continue;
+        };
+        for grant in &grants {
+            let DelegationEvidenceSelector::Command {
+                producer_plugin,
+                command_type,
+            } = &grant.selector
+            else {
+                continue;
+            };
+            if plugin != producer_plugin || command != command_type {
+                continue;
+            }
+            let Some(claim) = extract_claim_value(payload, &grant.claim_path)
+                .ok()
+                .and_then(|value| serde_json::from_value::<DelegationClaimV1>(value).ok())
+            else {
+                continue;
+            };
+            let reference = delegated_authority_reference(&grant.code, *command_id);
+            if recorded.contains_key(reference.as_untyped())
+                || view.typed_domain_record(&reference)?.is_some()
+            {
+                continue;
+            }
+            let delegation = DelegatedAuthorityPayload {
+                authority_grant: grant.code.clone(),
+                command: *command_id,
+                claim,
+            };
+            directives.push(mutate(
+                DomainRecordMutation::Create {
+                    record: DomainRecordDraft::from_typed(reference.clone(), &delegation)?,
+                },
+                "Record an admitted interpretation delegation",
+            ));
+            recorded.insert(reference.into_untyped(), delegation);
+        }
+    }
+    Ok(recorded)
+}
+
 fn schedule_operation_progress(
     envelope: &InformationOperationEnvelope,
 ) -> Result<BoundaryDirective, CanwuError> {
@@ -491,6 +691,15 @@ fn schedule_operation_progress(
     })
 }
 
+/// Records the knowledge-record IDs of the chunk the previous boundary
+/// published for one operation.
+///
+/// The IDs come from the committed knowledge ledger, never from retained
+/// boundary evidence: for each publication of the chunk, the newest current
+/// record of its holder, kind, and subjects. The publication system publishes
+/// each holder, kind, and subjects at most once per boundary, so that record
+/// is the one the chunk's boundary published. A sealed run, an unsealed run,
+/// and exact replay therefore record the same IDs.
 fn finalize_operation(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
@@ -512,19 +721,57 @@ fn finalize_operation(
             "information finalization requires awaiting-finalization state",
         ));
     }
-    let correlation_prefix = publication_correlation_prefix(&previous);
-    let changes = view.knowledge_changes_by_correlation_prefix(PLUGIN_NAME, &correlation_prefix)?;
-    if changes.is_empty() {
+    let mut publications = reconstruct_publications(view, &previous)?;
+    publications.sort();
+    let total = u64::try_from(publications.len())
+        .map_err(|_| invalid_record("information publication count is not representable"))?;
+    let published_end = previous
+        .continuation
+        .as_ref()
+        .map_or(total, |continuation| continuation.cursor);
+    if request.publication_start >= request.publication_end
+        || request.publication_end != published_end
+    {
         return Err(invalid_record(
-            "information finalization found no committed publication batch",
+            "information finalization does not name the chunk its operation published",
+        ));
+    }
+    let start = usize::try_from(request.publication_start)
+        .map_err(|_| invalid_record("information publication cursor is not representable"))?;
+    let end = usize::try_from(request.publication_end)
+        .map_err(|_| invalid_record("information publication cursor is not representable"))?;
+    let chunk = publications
+        .get(start..end)
+        .ok_or_else(|| invalid_record("information finalization chunk is out of bounds"))?;
+    if request
+        .unpublished
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+        || request
+            .unpublished
+            .iter()
+            .any(|index| *index < request.publication_start || *index >= request.publication_end)
+    {
+        return Err(invalid_record(
+            "information finalization names unpublished entries outside its chunk",
         ));
     }
     let mut proposed = previous.clone();
-    proposed.publication_result_ids.extend(
-        changes
-            .into_iter()
-            .flat_map(|change| change.records.into_iter().map(|record| record.id)),
-    );
+    for (index, publication) in (request.publication_start..).zip(chunk) {
+        if request.unpublished.binary_search(&index).is_ok() {
+            continue;
+        }
+        let parts = publication_parts(view, publication)?;
+        let heads = view.knowledge_heads(
+            &parts.holder,
+            &knowledge_schema(parts.schema_name).kind,
+            &parts.subjects,
+        )?;
+        let published = heads.records.last().copied().ok_or_else(|| {
+            invalid_record("information finalization found no committed publication record")
+        })?;
+        proposed.publication_result_ids.push(published);
+    }
     proposed.publication_result_ids.sort();
     proposed.publication_result_ids.dedup();
     if proposed.continuation.is_some() {
@@ -541,6 +788,15 @@ fn finalize_operation(
     Ok(())
 }
 
+/// Phase 13: publishes the next chunk of each operation whose results this
+/// boundary committed, and schedules the chunk's finalization.
+///
+/// Each holder, knowledge kind, and subject set is published at most once in
+/// one boundary: a later operation of the same pass whose publication names
+/// the same holder, kind, and subjects as one already published here relies
+/// on that record, so the holder learns the fact once and the record's origin
+/// names the earlier operation. Finalization then finds every publication's
+/// record as the newest current record of its holder, kind, and subjects.
 fn publish_lifecycle_boundary(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
@@ -548,6 +804,7 @@ fn publish_lifecycle_boundary(
     let kind = DomainRecordKind::for_type::<InformationOperationRecord>();
     let operations = all_domain_records_of_kind(view, &kind)?;
     let mut directives = Vec::new();
+    let mut published = BTreeSet::<PublicationKey>::new();
     for record in operations {
         let previous = record.decode_payload::<InformationOperationRecord>()?;
         if previous.status == InformationOperationStatus::AwaitingFinalization
@@ -605,9 +862,17 @@ fn publish_lifecycle_boundary(
             })?;
         let result_evidence = resolve_result_evidence(view, &previous)?;
         let mut batches = BTreeMap::<KnowledgeHolderRef, Vec<KnowledgeRecordDraft>>::new();
-        for publication in slice {
+        let mut unpublished = Vec::new();
+        for (index, publication) in (continuation.cursor..).zip(slice) {
             let (holder, draft) =
                 knowledge_draft(view, publication, &result_evidence, &operation_evidence)?;
+            if !holder_accepts_knowledge(view, &holder)? {
+                unpublished.push(index);
+                continue;
+            }
+            if !published.insert((holder.clone(), draft.schema.clone(), draft.subjects.clone())) {
+                continue;
+            }
             batches.entry(holder).or_default().push(draft);
         }
         if batches.len() > MAX_PUBLICATION_BATCHES {
@@ -659,6 +924,9 @@ fn publish_lifecycle_boundary(
             payload: serde_json::to_value(FinalizationRequest {
                 id: previous.id.clone(),
                 canonical_input_hash: previous.canonical_input_hash.clone(),
+                publication_start: continuation.cursor,
+                publication_end: end as u64,
+                unpublished,
             })
             .map_err(|error| encode_error(&error))?,
             affected: Vec::new(),
@@ -750,13 +1018,38 @@ fn reconstruct_publications(
     }
 }
 
-fn knowledge_draft(
+/// Whether a holder can receive knowledge now, by the engine's own holder
+/// rule. A holder that cannot (a dead or unknown person, a missing army or
+/// government, a retired or deleted domain entity, or a core entity kind that
+/// holds no knowledge) is left unpublished, and recorded as such in the
+/// finalization request, instead of failing the boundary.
+fn holder_accepts_knowledge(
     view: &SimulationView<'_>,
-    publication: &GenericInformationPublicationDraft,
-    result_evidence: &BTreeMap<canwu_api::DomainRecordRef, DomainRecordVersionRef>,
-    operation_evidence: &DomainRecordVersionRef,
-) -> Result<(KnowledgeHolderRef, KnowledgeRecordDraft), CanwuError> {
-    let (holder, schema_name, subjects, primary, record_version) = match publication {
+    holder: &KnowledgeHolderRef,
+) -> Result<bool, CanwuError> {
+    view.knowledge_holder_accepts_publication(holder)
+}
+
+/// Holder, knowledge kind, and subjects of one publication: what makes a
+/// published record findable through `SimulationView::knowledge_heads`.
+type PublicationKey = (KnowledgeHolderRef, KnowledgeSchemaId, Vec<KnowledgeSubject>);
+
+/// The parts of one publication's knowledge record that state alone decides.
+struct PublicationParts<'a> {
+    holder: KnowledgeHolderRef,
+    schema_name: &'static str,
+    /// Sorted and without duplicates.
+    subjects: Vec<KnowledgeSubject>,
+    /// The record whose exact result version the published record cites.
+    primary: &'a canwu_api::DomainRecordRef,
+    record_version: u64,
+}
+
+fn publication_parts<'a>(
+    view: &SimulationView<'_>,
+    publication: &'a GenericInformationPublicationDraft,
+) -> Result<PublicationParts<'a>, CanwuError> {
+    let (holder, schema_name, mut subjects, primary, record_version) = match publication {
         GenericInformationPublicationDraft::RepresentationAvailable {
             holder,
             representation,
@@ -824,9 +1117,30 @@ fn knowledge_draft(
             )
         }
     };
-    let mut subjects = subjects;
     subjects.sort();
     subjects.dedup();
+    Ok(PublicationParts {
+        holder,
+        schema_name,
+        subjects,
+        primary,
+        record_version,
+    })
+}
+
+fn knowledge_draft(
+    view: &SimulationView<'_>,
+    publication: &GenericInformationPublicationDraft,
+    result_evidence: &BTreeMap<canwu_api::DomainRecordRef, DomainRecordVersionRef>,
+    operation_evidence: &DomainRecordVersionRef,
+) -> Result<(KnowledgeHolderRef, KnowledgeRecordDraft), CanwuError> {
+    let PublicationParts {
+        holder,
+        schema_name,
+        subjects,
+        primary,
+        record_version,
+    } = publication_parts(view, publication)?;
     let result = result_evidence.get(primary).ok_or_else(|| {
         invalid_record("information publication lacks exact domain-result evidence")
     })?;
@@ -889,7 +1203,11 @@ fn resolve_result_evidence(
 fn load_information_records(view: &SimulationView<'_>) -> Result<InformationRecordSet, CanwuError> {
     let mut records = Vec::new();
     for schema in information_record_schemas() {
-        if schema.kind.matches_type::<InformationOperationRecord>() {
+        // Operations and recorded delegations are bookkeeping, not lifecycle
+        // records the planner reads.
+        if schema.kind.matches_type::<InformationOperationRecord>()
+            || schema.kind.matches_type::<DelegatedAuthority>()
+        {
             continue;
         }
         records.extend(all_domain_records_of_kind(view, &schema.kind)?);
@@ -1029,9 +1347,20 @@ fn knowledge_schema(name: &str) -> KnowledgeSchemaId {
 fn record_state<T: DomainRecordType>() -> StateKey {
     canwu_api::DomainRecordSchema::for_type::<T>().state_key()
 }
+/// Checks an interpretation's authority and returns the hash of the claim it
+/// relied on.
+///
+/// Every input is committed state or this boundary's own work: a delegation
+/// command is checked through the delegation the lifecycle system recorded
+/// when the command was admitted (`delegations` holds those recorded in this
+/// pass), an institutional assignment must be its record's current or
+/// proposed version. No retained command, event, or ingress payload is read,
+/// so a sealed run decides as its unsealed replay does.
 fn validate_runtime_interpretation_authority(
     view: &SimulationView<'_>,
     envelope: &InformationOperationEnvelope,
+    delegations: &BTreeMap<DomainRecordRef, DelegatedAuthorityPayload>,
+    admitted_ingress: &BTreeSet<IngressId>,
 ) -> Result<Option<String>, CanwuError> {
     let LifecycleRequest::RecordInterpretation {
         binding,
@@ -1080,8 +1409,16 @@ fn validate_runtime_interpretation_authority(
             "interpretation authority variant does not match its grant selector",
         ));
     }
-    let persisted_payload = authority_evidence_payload(view, &evidence, &grant.selector)?;
-    let claim_value = extract_claim_value(&persisted_payload, &grant.claim_path)?;
+    let claim_value = match (&grant.selector, &evidence) {
+        (DelegationEvidenceSelector::Command { .. }, EvidenceRef::Command(command)) => {
+            serde_json::to_value(recorded_delegation(view, delegations, grant, *command)?.claim)
+                .map_err(|error| encode_error(&error))?
+        }
+        _ => extract_claim_value(
+            &authority_evidence_payload(view, &evidence, &grant.selector, admitted_ingress)?,
+            &grant.claim_path,
+        )?,
+    };
     let claim: DelegationClaimV1 = serde_json::from_value(claim_value).map_err(|error| {
         invalid_record(format!(
             "interpretation authority claim could not be decoded: {error}"
@@ -1100,10 +1437,39 @@ fn validate_runtime_interpretation_authority(
         .map_err(|error| invalid_record(error.to_string()))
 }
 
+/// The delegation a command granted under `grant`, as the lifecycle system
+/// recorded it when the command was admitted.
+fn recorded_delegation(
+    view: &SimulationView<'_>,
+    delegations: &BTreeMap<DomainRecordRef, DelegatedAuthorityPayload>,
+    grant: &DelegationAuthorityGrant,
+    command: CommandId,
+) -> Result<DelegatedAuthorityPayload, CanwuError> {
+    let reference = delegated_authority_reference(&grant.code, command);
+    let delegation = match delegations.get(reference.as_untyped()) {
+        Some(delegation) => delegation.clone(),
+        None => view
+            .typed_domain_record(&reference)?
+            .ok_or_else(|| {
+                invalid_record("delegation command evidence names no recorded delegation")
+            })?
+            .decode_payload::<DelegatedAuthority>()?,
+    };
+    if delegation.authority_grant != grant.code || delegation.command != command {
+        return Err(invalid_record(
+            "recorded delegation does not match its grant and command",
+        ));
+    }
+    Ok(delegation)
+}
+
 /// An interpretation's authenticity finding must cite the exact current
 /// version of a representation record, including the evidence that
 /// established that version; the lifecycle plan then checks that it is one of
 /// the interpreted representations and that it claims a source.
+///
+/// The current version is read from the committed provenance index or this
+/// boundary's proposals, which a seal does not change.
 fn authenticity_binding_is_current(
     view: &SimulationView<'_>,
     envelope: &InformationOperationEnvelope,
@@ -1122,36 +1488,26 @@ fn authenticity_binding_is_current(
     {
         return Ok(false);
     }
-    view.domain_record_version_is_current(&finding.representation)
+    Ok(view
+        .current_domain_record_version(&finding.representation.record)?
+        .as_ref()
+        == Some(&finding.representation))
 }
 
+/// The payload that holds the claim of a non-command delegation.
+///
+/// A command delegation is resolved through its recorded delegation instead
+/// (see [`recorded_delegation`]). An ingress delegation resolves only a packet
+/// of this plugin admitted at the current boundary (`admitted_ingress`), which
+/// every run holds; a domain-record delegation only its record's current or
+/// proposed version.
 fn authority_evidence_payload(
     view: &SimulationView<'_>,
     evidence: &EvidenceRef,
     selector: &DelegationEvidenceSelector,
+    admitted_ingress: &BTreeSet<IngressId>,
 ) -> Result<Value, CanwuError> {
     match (selector, evidence) {
-        (
-            DelegationEvidenceSelector::Command {
-                producer_plugin,
-                command_type,
-            },
-            EvidenceRef::Command(id),
-        ) => {
-            let record = view
-                .command(*id)?
-                .ok_or_else(|| invalid_record("delegation command evidence is unavailable"))?;
-            match &record.envelope.command {
-                Command::Plugin {
-                    plugin,
-                    command,
-                    payload,
-                } if plugin == producer_plugin && command == command_type => Ok(payload.clone()),
-                _ => Err(invalid_record(
-                    "delegation command producer or type does not match its grant",
-                )),
-            }
-        }
         (
             DelegationEvidenceSelector::Ingress {
                 producer_plugin,
@@ -1159,6 +1515,11 @@ fn authority_evidence_payload(
             },
             EvidenceRef::Ingress(id),
         ) => {
+            if !admitted_ingress.contains(id) {
+                return Err(invalid_record(
+                    "delegation ingress evidence was not admitted at this boundary",
+                ));
+            }
             let record = view
                 .ingress(*id)?
                 .ok_or_else(|| invalid_record("delegation ingress evidence is unavailable"))?;
@@ -1325,6 +1686,15 @@ fn finalization_payload_schema() -> PayloadSchema {
                 "canonical_input_hash".to_owned(),
                 required(PayloadValueType::String),
             ),
+            (
+                "publication_end".to_owned(),
+                required(PayloadValueType::Integer),
+            ),
+            (
+                "publication_start".to_owned(),
+                required(PayloadValueType::Integer),
+            ),
+            ("unpublished".to_owned(), optional(PayloadValueType::Array)),
         ]),
         allow_additional: false,
     }
@@ -1354,7 +1724,7 @@ mod tests {
             .register(&InformationPlugin, &mut types)
             .expect("information plugin should register");
         let descriptor = registry.descriptors().next().expect("descriptor");
-        assert_eq!(descriptor.record_schemas.len(), 12);
+        assert_eq!(descriptor.record_schemas.len(), 13);
         assert_eq!(descriptor.knowledge_schemas.len(), 4);
         assert_eq!(descriptor.commands.len(), 1);
         assert_eq!(descriptor.ingress.len(), 2);
