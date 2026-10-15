@@ -55,9 +55,8 @@ fn self_appointment(state: &mut FiscalState) {
 }
 
 fn authored_assessment(state: &mut FiscalState, id: &str, scope: &str) {
-    state.assessments.insert(
-        id.to_owned(),
-        FiscalAssessment {
+    state
+        .add_assessment(FiscalAssessment {
             id: id.to_owned(),
             rule_id: RULE.to_owned(),
             scope_binding_id: scope.to_owned(),
@@ -67,17 +66,25 @@ fn authored_assessment(state: &mut FiscalState, id: &str, scope: &str) {
             payment_form: FiscalPaymentForm::Grain,
             commutation_quote: None,
             created_at: SimTime::EPOCH,
-        },
-    );
+            source_action_id: None,
+        })
+        .expect("an authored assessment");
 }
 
-/// A finding on `target`, issued under `binding`.
+/// A finding on `target`, in the scope that holds it, issued under
+/// `binding`.
 fn audit(action_id: &str, binding: &str, target: &str) -> Draft {
+    let scope = if target == GRANARY_ASSESSMENT {
+        GRANARY_SCOPE.to_owned()
+    } else {
+        treasury_scope(0)
+    };
     draft(
         action_id,
         binding,
         FiscalAction::RecordAudit {
             audit_id: format!("{action_id}.finding"),
+            scope_binding_id: scope,
             target_id: target.to_owned(),
             severity: FiscalAuditSeverity::Concern,
             finding: "The assessed quantity was not verified".to_owned(),
@@ -136,9 +143,11 @@ fn assert_unauthorized(canwu: &Canwu, action_id: &str, message: &str) {
 
 /// The issuer the settled finding of `action_id` names.
 fn entered_by(canwu: &Canwu, action_id: &str) -> FiscalActionIssuer {
-    fiscal_state(canwu).audits[&format!("{action_id}.finding")]
-        .entered_by
-        .clone()
+    let id = format!("{action_id}.finding");
+    fiscal_state(canwu)
+        .audits()
+        .find(|finding| finding.id == id)
+        .and_then(|finding| finding.entered_by.clone())
         .expect("the finding names its issuer")
 }
 

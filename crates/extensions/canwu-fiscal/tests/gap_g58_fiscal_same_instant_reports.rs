@@ -10,14 +10,14 @@ use canwu_api::{
     Scenario, SimDuration, SimTime, SimulationGranularity, Territory, TerritoryId, WorldSnapshot,
 };
 use canwu_fiscal::{
-    FiscalAction, FiscalActionDisposition, FiscalActionRequest, FiscalAdoptionStage,
-    FiscalAdoptionState, FiscalAssessmentBasis, FiscalAuthorityBinding, FiscalCommutationPolicy,
-    FiscalContentPack, FiscalContentSelection, FiscalCoverageDeclaration, FiscalCoverageSelector,
-    FiscalCoverageStatus, FiscalHistoricalMode, FiscalMechanism, FiscalObserverBinding,
-    FiscalPackManifest, FiscalPaymentForm, FiscalPeriodDefinition, FiscalPlugin, FiscalProvenance,
-    FiscalRegionDefinition, FiscalRuleDefinition, FiscalScopeBinding, FiscalState,
-    FiscalStateRecord, HistoricalConfidence, HistoricalYearWindow, compile_fiscal_content,
-    fiscal_action_command, fiscal_state_reference,
+    FiscalAction, FiscalActionDisposition, FiscalActionRequest, FiscalActionTarget,
+    FiscalAdoptionStage, FiscalAdoptionState, FiscalAssessmentBasis, FiscalAuthorityBinding,
+    FiscalCommutationPolicy, FiscalContentPack, FiscalContentSelection, FiscalCoverageDeclaration,
+    FiscalCoverageSelector, FiscalCoverageStatus, FiscalHistoricalMode, FiscalMechanism,
+    FiscalObserverBinding, FiscalOutcomeRing, FiscalPackManifest, FiscalPaymentForm,
+    FiscalPeriodDefinition, FiscalPlugin, FiscalProvenance, FiscalRegionDefinition,
+    FiscalRuleDefinition, FiscalScopeBinding, FiscalState, FiscalStateRecord, HistoricalConfidence,
+    HistoricalYearWindow, compile_fiscal_content, fiscal_action_command, fiscal_state_reference,
 };
 use std::collections::BTreeSet;
 
@@ -141,30 +141,31 @@ fn scenario() -> Scenario {
             rebound_by: None,
         },
     );
-    state.scope_bindings.insert(
-        "scope.a".to_owned(),
-        FiscalScopeBinding {
-            id: "scope.a".to_owned(),
-            institution: institution.clone(),
-            jurisdiction_id: "region.a".to_owned(),
-            subject_scope: "registered_land".to_owned(),
-            mechanism: FiscalMechanism::LandTax,
-            authoritative_granularity: SimulationGranularity::Aggregate,
-        },
-    );
+    state.add_scope(FiscalScopeBinding {
+        id: "scope.a".to_owned(),
+        institution: institution.clone(),
+        jurisdiction_id: "region.a".to_owned(),
+        subject_scope: "registered_land".to_owned(),
+        mechanism: FiscalMechanism::LandTax,
+        authoritative_granularity: SimulationGranularity::Aggregate,
+    });
     state.observer_bindings.insert(
         "observer.auditor".to_owned(),
         FiscalObserverBinding {
             id: "observer.auditor".to_owned(),
-            actor: AUDITOR,
+            actor: Some(AUDITOR),
             knowledge_holder: KnowledgeHolderRef::Person(AUDITOR),
             visible_institutions: BTreeSet::from([institution]),
             confidence_per_mille: 900,
+            line_slot: 0,
+            controlled_by: None,
+            rebound_by: None,
+            removed: None,
+            outcomes: FiscalOutcomeRing::default(),
         },
     );
-    state.adoptions.insert(
-        "adopt.a".to_owned(),
-        FiscalAdoptionState {
+    state
+        .add_adoption(FiscalAdoptionState {
             id: "adopt.a".to_owned(),
             rule_id: "rule.land".to_owned(),
             scope_binding_id: "scope.a".to_owned(),
@@ -172,8 +173,8 @@ fn scenario() -> Scenario {
             generation: 1,
             changed_at: SimTime::EPOCH,
             source_action_id: None,
-        },
-    );
+        })
+        .expect("adoption of the scope");
     Scenario {
         start_time: SimTime::EPOCH,
         entities: world.entities(),
@@ -234,7 +235,10 @@ fn assess_now(canwu: &mut Canwu, action_id: &str) {
         .expect("fiscal boundaries settle");
     assert_eq!(canwu.time(), now);
     assert_eq!(
-        fiscal_state(canwu).action_outcomes[action_id].disposition,
+        fiscal_state(canwu)
+            .recent_outcome(&FiscalActionTarget::Ledger("scope.a".to_owned()), action_id)
+            .expect("the assessment's outcome")
+            .disposition,
         FiscalActionDisposition::Applied
     );
 }

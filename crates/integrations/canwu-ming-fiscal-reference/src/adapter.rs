@@ -130,8 +130,9 @@ fn validate_execution_result(
         ));
     }
     let request = fiscal
-        .execution_requests
-        .get(&evidence.request_id)
+        .ledger(&evidence.scope_binding_id)
+        .and_then(|ledger| ledger.book_of_request(&evidence.request_id))
+        .and_then(|book| book.execution_requests.get(&evidence.request_id))
         .ok_or_else(|| {
             invalid("reference fiscal execution evidence names an unavailable request")
         })?;

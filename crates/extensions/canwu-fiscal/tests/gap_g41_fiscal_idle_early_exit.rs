@@ -14,16 +14,15 @@ use canwu_api::{BoundaryReceipt, Canwu, SimTime};
 use canwu_fiscal::{FiscalActionDisposition, FiscalAssessment, FiscalPaymentForm, FiscalState};
 use support::{
     Fixture, PRINCIPAL, RULE, TREASURY_AUTHORITY, assessment, base_state, catalog, enqueue_tick,
-    fiscal_record_version, fiscal_report, fiscal_state, scenario_from_records, scenario_from_state,
-    settle, submit, treasury_scope,
+    fiscal_record_version, fiscal_report, fiscal_state, outcome, scenario_from_records,
+    scenario_from_state, settle, submit, treasury_scope,
 };
 
 /// A state with one authored assessment and no derived field computed.
 fn authored_state() -> FiscalState {
     let mut state = base_state();
-    state.assessments.insert(
-        "authored.assessment".to_owned(),
-        FiscalAssessment {
+    state
+        .add_assessment(FiscalAssessment {
             id: "authored.assessment".to_owned(),
             rule_id: RULE.to_owned(),
             scope_binding_id: treasury_scope(0),
@@ -33,8 +32,9 @@ fn authored_state() -> FiscalState {
             payment_form: FiscalPaymentForm::Grain,
             commutation_quote: None,
             created_at: SimTime::EPOCH,
-        },
-    );
+            source_action_id: None,
+        })
+        .expect("the authored assessment");
     state
 }
 
@@ -83,7 +83,7 @@ fn gap_g41_fiscal_idle_early_exit() {
         .execution_evidence_kinds
         .insert(canwu_api::DomainRecordKind::new(
             "fixture.execution",
-            "result",
+            "unread",
         ));
     let error = fixture
         .try_runtime(scenario_from_state(unread_evidence))
@@ -129,7 +129,9 @@ fn gap_g41_fiscal_idle_early_exit() {
     assert_eq!(reports, 2);
     let settled = fiscal_state(&canwu);
     assert_eq!(
-        settled.action_outcomes["action.assess"].disposition,
+        outcome(&canwu, "action.assess")
+            .expect("the assessment's outcome")
+            .disposition,
         FiscalActionDisposition::Applied
     );
     assert_eq!(settled.aggregates.len(), 2);

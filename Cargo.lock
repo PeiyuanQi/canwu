@@ -376,6 +376,7 @@ name = "canwu-fiscal"
 version = "0.15.0"
 dependencies = [
  "canwu-api",
+ "canwu-resource",
  "semver",
  "serde",
  "serde_json",

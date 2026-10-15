@@ -27,8 +27,8 @@ use canwu_api::{
 use canwu_fiscal::{
     FISCAL_REPORT_DRAIN_INGRESS, FISCAL_REPORT_FACTS_PER_PART, FiscalAction,
     FiscalActionDisposition, FiscalAssessment, FiscalAuditSeverity, FiscalObserverBinding,
-    FiscalPaymentForm, FiscalReport, FiscalReportPlan, FiscalReportRecord, FiscalState,
-    MAX_FISCAL_OBSERVERS, MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY, compute_projections,
+    FiscalPaymentForm, FiscalReport, FiscalReportPlan, FiscalReportRecord, FiscalSettledAction,
+    FiscalState, MAX_FISCAL_OBSERVERS, MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY, compute_projections,
     fiscal_report_knowledge_schema_id, fiscal_reports, fiscal_state_reference,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,8 +36,8 @@ use support::{
     AUDITOR, DEPUTY, Draft, Fixture, GRANARY_AUTHORITY, GRANARY_PRINCIPAL, GRANARY_SCOPE, OBSERVER,
     PRINCIPAL, RULE, TREASURY_AUTHORITY, TREASURY_SCOPES, assessment, base_state, draft, enqueue,
     enqueue_life, enqueue_requests, enqueue_tick, fiscal_record_version, fiscal_state, granary,
-    life_at, procedure_revision, published_report_records, scenario, scenario_from_state, settle,
-    submit, submit_sealed, treasury, treasury_scope,
+    life_at, observer_binding, outcome, procedure_revision, published_report_records, scenario,
+    scenario_from_state, settle, submit, submit_sealed, treasury, treasury_scope,
 };
 
 /// The second binding of the treasury's observer: the same actor, the
@@ -49,39 +49,37 @@ const FACTS_IN_ONE_OLD_RECORD: usize = 196;
 
 fn observer(
     id: &str,
+    slot: u16,
     actor: PersonId,
     institution: canwu_api::EntityRef,
     confidence: u16,
 ) -> FiscalObserverBinding {
     FiscalObserverBinding {
-        id: id.to_owned(),
-        actor,
-        knowledge_holder: canwu_api::KnowledgeHolderRef::Person(actor),
-        visible_institutions: BTreeSet::from([institution]),
         confidence_per_mille: confidence,
+        ..observer_binding(id, slot, actor, BTreeSet::from([institution]))
     }
 }
 
-/// Installs one assessment of every treasury scope for each of `cycles`
-/// accounting cycles, all created when the run starts.
-fn author_treasury_assessments(state: &mut FiscalState, cycles: usize) {
+/// Installs `assessments` assessments of every treasury scope, all created
+/// when the run starts: sixteen to a book, each of its own unit, so that the
+/// facts follow the order they are numbered in.
+fn author_treasury_assessments(state: &mut FiscalState, assessments: usize) {
     for scope in 0..TREASURY_SCOPES {
-        for cycle in 0..cycles {
-            let id = format!("authored.{scope}.{cycle:03}");
-            state.assessments.insert(
-                id.clone(),
-                FiscalAssessment {
-                    id,
+        for index in 0..assessments {
+            state
+                .add_assessment(FiscalAssessment {
+                    id: format!("authored.{scope}.{index:03}"),
                     rule_id: RULE.to_owned(),
                     scope_binding_id: treasury_scope(scope),
-                    accounting_cycle_id: format!("authored.{cycle:03}"),
+                    accounting_cycle_id: format!("authored.{:03}", index / 16),
                     quantity: 500,
-                    unit: "grain".to_owned(),
+                    unit: format!("grain.{index:03}"),
                     payment_form: FiscalPaymentForm::Grain,
                     commutation_quote: None,
                     created_at: SimTime::EPOCH,
-                },
-            );
+                    source_action_id: None,
+                })
+                .expect("an authored assessment");
         }
     }
 }
@@ -121,7 +119,7 @@ fn assert_reports_match_state(canwu: &Canwu) -> BTreeMap<String, FiscalReport> {
     for actor in state
         .observer_bindings
         .values()
-        .map(|binding| binding.actor)
+        .filter_map(|binding| binding.actor)
         .collect::<BTreeSet<_>>()
     {
         reports.extend(reports_of(canwu, actor));
@@ -190,8 +188,8 @@ fn a_report_past_one_record_is_published_in_parts() {
     let mut canwu = fixture.runtime(scenario(|state| {
         author_treasury_assessments(state, AUTHORED_CYCLES);
         for binding in [
-            observer(SECOND_BINDING, PRINCIPAL, granary(), 500),
-            observer(AUDITOR_BINDING, AUDITOR, granary(), 900),
+            observer(SECOND_BINDING, 1, PRINCIPAL, granary(), 500),
+            observer(AUDITOR_BINDING, 2, AUDITOR, granary(), 900),
         ] {
             state.observer_bindings.insert(binding.id.clone(), binding);
         }
@@ -252,6 +250,7 @@ fn a_report_past_one_record_is_published_in_parts() {
                 TREASURY_AUTHORITY,
                 FiscalAction::GrantRemission {
                     remission_id: "remit.remission".to_owned(),
+                    scope_binding_id: treasury_scope(0),
                     assessment_id: "authored.0.000".to_owned(),
                     quantity: 100,
                     reason: "flood".to_owned(),
@@ -297,12 +296,12 @@ fn a_report_past_one_record_is_published_in_parts() {
 
     // A boundary that changes no fact an observer can see publishes nothing:
     // here a rejected action, then an audit finding.
-    let ahead = procedure_revision(&canwu) + 1;
+    let behind = procedure_revision(&canwu) - 1;
     enqueue_requests(
         &mut canwu,
         &[(
             PRINCIPAL,
-            assessment("stale", TREASURY_AUTHORITY, &treasury_scope(0), "new.001").against(ahead),
+            assessment("stale", TREASURY_AUTHORITY, &treasury_scope(0), "new.001").against(behind),
         )],
     );
     assert_eq!(published(&settle(&mut canwu)), 0);
@@ -315,6 +314,7 @@ fn a_report_past_one_record_is_published_in_parts() {
                 TREASURY_AUTHORITY,
                 FiscalAction::RecordAudit {
                     audit_id: "audit.finding".to_owned(),
+                    scope_binding_id: treasury_scope(0),
                     target_id: "authored.0.000".to_owned(),
                     severity: FiscalAuditSeverity::Notice,
                     finding: "checked".to_owned(),
@@ -324,13 +324,12 @@ fn a_report_past_one_record_is_published_in_parts() {
         )],
     );
     assert_eq!(published(&receipts), 0);
-    let state = fiscal_state(&canwu);
     assert_eq!(
-        state.action_outcomes["stale"].disposition,
+        outcome(&canwu, "stale").expect("stale outcome").disposition,
         FiscalActionDisposition::Rejected
     );
     assert_eq!(
-        state.action_outcomes["audit"].disposition,
+        outcome(&canwu, "audit").expect("audit outcome").disposition,
         FiscalActionDisposition::Applied
     );
 
@@ -382,7 +381,8 @@ fn parts_past_the_boundary_limit_follow_in_the_next_boundary() {
         state.observer_bindings.clear();
         for index in 0..MAX_FISCAL_OBSERVERS {
             let confidence = if index % 2 == 0 { 1_000 } else { 600 };
-            let observer = observer(&binding(index), PRINCIPAL, treasury(), confidence);
+            let slot = u16::try_from(index).expect("slot");
+            let observer = observer(&binding(index), slot, PRINCIPAL, treasury(), confidence);
             state
                 .observer_bindings
                 .insert(observer.id.clone(), observer);
@@ -462,7 +462,7 @@ fn parts_past_the_boundary_limit_follow_in_the_next_boundary() {
     .expect("restored with a queued drain");
     restored.step_canonical().expect("the restored drain");
     let revision = procedure_revision(&canwu);
-    let outcomes = state.action_outcomes.len();
+    let outcomes = FiscalSettledAction::from_events(canwu.events()).len();
     let at = canwu.time();
     let drain = canwu
         .step_canonical()
@@ -478,7 +478,10 @@ fn parts_past_the_boundary_limit_follow_in_the_next_boundary() {
     let drained = fiscal_state(&canwu);
     assert!(drained.report_plan.deferred.is_empty());
     assert_eq!(drained.procedure_revision, revision);
-    assert_eq!(drained.action_outcomes.len(), outcomes);
+    assert_eq!(
+        FiscalSettledAction::from_events(canwu.events()).len(),
+        outcomes
+    );
     assert_eq!(
         FiscalState {
             report_plan: state.report_plan.clone(),
@@ -511,8 +514,8 @@ const DEPUTY_BINDING: &str = "observer.deputy";
 fn deputy_and_auditor() -> canwu_api::Scenario {
     scenario(|state| {
         for binding in [
-            observer(DEPUTY_BINDING, DEPUTY, treasury(), 1_000),
-            observer(AUDITOR_BINDING, AUDITOR, granary(), 900),
+            observer(DEPUTY_BINDING, 1, DEPUTY, treasury(), 1_000),
+            observer(AUDITOR_BINDING, 2, AUDITOR, granary(), 900),
         ] {
             state.observer_bindings.insert(binding.id.clone(), binding);
         }
@@ -548,7 +551,9 @@ fn a_dead_observer_is_skipped_until_he_is_alive_again() {
     let receipts = submit(&mut canwu, vec![treasury_assessment("second", 1, "c1")]);
     assert_eq!(published(&receipts), 2);
     assert_eq!(
-        fiscal_state(&canwu).action_outcomes["second"].disposition,
+        outcome(&canwu, "second")
+            .expect("second outcome")
+            .disposition,
         FiscalActionDisposition::Applied
     );
     let principal = &reports_of(&canwu, PRINCIPAL)[OBSERVER];
@@ -684,7 +689,7 @@ fn an_observer_who_does_not_exist_is_refused_when_the_run_is_created() {
     let nobody = PersonId::new(777);
     let error = fixture
         .try_runtime(scenario(|state| {
-            let binding = observer("observer.nobody", nobody, treasury(), 1_000);
+            let binding = observer("observer.nobody", 1, nobody, treasury(), 1_000);
             state.observer_bindings.insert(binding.id.clone(), binding);
         }))
         .err()
@@ -708,6 +713,7 @@ fn a_report_plan_that_came_with_a_scenario_is_ignored() {
         revision: 1,
         publish: BTreeMap::from([(OBSERVER.to_owned(), BTreeSet::from([0]))]),
         deferred: BTreeMap::from([(OBSERVER.to_owned(), BTreeSet::from([1]))]),
+        withdraw: BTreeMap::new(),
     };
     let fixture = Fixture::new();
 
@@ -752,6 +758,7 @@ fn owed_parts_wait_in_a_run_with_direct_command_history() {
     for index in 0..MAX_FISCAL_OBSERVERS {
         let observer = observer(
             &format!("observer.{index:02}"),
+            u16::try_from(index).expect("slot"),
             PRINCIPAL,
             treasury(),
             1_000,
@@ -800,14 +807,14 @@ fn owed_parts_wait_in_a_run_with_direct_command_history() {
 
 /// A scenario whose knowledge carries a report record of schema version 1,
 /// the one-record report of 0.14.0, is refused when the run is created: only
-/// version 2 is registered, and the engine accepts no record of a schema it
+/// version 3 is registered, and the engine accepts no record of a schema it
 /// does not know.
 #[test]
 fn a_scenario_with_a_version_one_report_record_is_refused() {
     let fixture = Fixture::new();
     let holder = KnowledgeHolderRef::Person(PRINCIPAL);
     let mut version_one = fiscal_report_knowledge_schema_id();
-    assert_eq!(version_one.version, 2);
+    assert_eq!(version_one.version, 3);
     version_one.version = 1;
     let mut scenario = scenario(|_| {});
     let id = KnowledgeRecordId::new(1);

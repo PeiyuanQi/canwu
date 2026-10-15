@@ -20,15 +20,15 @@ use canwu_api::{
 };
 use canwu_fiscal::{
     FISCAL_ACTING_BASIS_NOT_CURRENT, FISCAL_AUTHORITY_BASIS_NOT_CURRENT, FISCAL_ISSUER_NOT_BOUND,
-    FiscalAction, FiscalActionDisposition, FiscalActionIssuer, FiscalIssuerRole,
-    fiscal_action_command, initial_catalog_version,
+    FiscalAction, FiscalActionDisposition, FiscalActionIssuer, FiscalActionTarget,
+    FiscalIssuerRole, fiscal_action_command, initial_catalog_version,
 };
 use support::{
     DEPUTY, DEPUTY_COMMISSION, Draft, Fixture, PRINCIPAL, SUCCESSOR, SUCCESSOR_COMMISSION,
     TREASURY_AUTHORITY, admission_rejection, assessment, current_commission, draft,
     enqueue_renewal, fiscal_state, initial_commission, initial_warrant, outcome,
-    procedure_revision, scenario, sealed_fiscal_state, settle, submit, submit_sealed, tick_at,
-    treasury, treasury_scope,
+    procedure_revision, scenario, sealed_fiscal_state, settle, settled_at, submit, submit_sealed,
+    tick_at, treasury, treasury_scope,
 };
 
 /// A decision controller that decides for the treasury.
@@ -364,10 +364,7 @@ fn gap_g48_fiscal_rebind_authority() {
             authority_basis: None,
         }
     );
-    assert_eq!(
-        rebound_by.rebound_at,
-        state.action_outcomes["rebind.renewed"].settled_at
-    );
+    assert_eq!(rebound_by.rebound_at, settled_at(&canwu, "rebind.renewed"));
     // The settled event names the institution and the persons the binding now
     // names, which the engine checked against its entity registry.
     assert!(canwu.events().iter().any(|event| {
@@ -594,13 +591,25 @@ fn sealed_run_rebinds_and_idles_like_its_replay() {
         .advance_canonical(SimDuration::minutes(1))
         .expect("an idle boundary");
     let state = sealed_fiscal_state(&sealed);
-    assert!(!state.action_outcomes.contains_key("rebind.superseded"));
-    for action_id in ["rebind.current", "deputy.after-seal"] {
-        assert_eq!(
-            state.action_outcomes[action_id].disposition,
-            FiscalActionDisposition::Applied
-        );
-    }
+    let office = FiscalActionTarget::Office(treasury());
+    assert!(state.recent_outcome(&office, "rebind.superseded").is_none());
+    assert_eq!(
+        state
+            .recent_outcome(&office, "rebind.current")
+            .expect("the current rebind's outcome")
+            .disposition,
+        FiscalActionDisposition::Applied
+    );
+    assert_eq!(
+        state
+            .recent_outcome(
+                &FiscalActionTarget::Ledger(treasury_scope(0)),
+                "deputy.after-seal"
+            )
+            .expect("the deputy's assessment outcome")
+            .disposition,
+        FiscalActionDisposition::Applied
+    );
     assert_eq!(
         state.authority_bindings[TREASURY_AUTHORITY].authority_basis,
         Some(current)

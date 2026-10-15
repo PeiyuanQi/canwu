@@ -5,16 +5,18 @@ use canwu_api::{
     SimTime,
 };
 use canwu_fiscal::{
-    FISCAL_ACTION_INGRESS, FISCAL_EXECUTION_RECEIPT_INGRESS, FISCAL_INGRESS_INVALID_REJECTION,
-    FISCAL_INGRESS_MALFORMED_REJECTION, FISCAL_INGRESS_REJECTED_EVENT, FiscalAction,
-    FiscalActionDisposition, FiscalActionIssuer, FiscalActionRequest, FiscalAdoptionStage,
-    FiscalAssessment, FiscalCatalogRecord, FiscalExecutionKind, FiscalExecutionReceipt,
-    FiscalExecutionReceiptPacket, FiscalExecutionRequest, FiscalExternalOperationRef,
-    FiscalHistoricalContextPacket, FiscalHistoricalMode, FiscalIssuerRole, FiscalPaymentForm,
-    FiscalProjection, FiscalReceiptDisposition, FiscalStateRecord, MAX_FISCAL_ASSESSMENTS,
-    MAX_FISCAL_EVIDENCE_PER_RECORD, PLUGIN_NAME, compute_aggregates, enqueue_execution_receipt,
-    fiscal_action_command, fiscal_catalog_reference, fiscal_historical_context_ingress,
-    fiscal_reports, fiscal_state_reference,
+    FISCAL_ACTION_INGRESS, FISCAL_EXECUTION_RECEIPT_INGRESS, FISCAL_INGRESS_MALFORMED_REJECTION,
+    FISCAL_INGRESS_REJECTED_EVENT, FISCAL_RECEIPT_CLAIM_MISMATCH,
+    FISCAL_RECEIPT_EVIDENCE_NOT_CURRENT, FISCAL_RECEIPT_EVIDENCE_REUSED,
+    FISCAL_RECEIPT_OPERATION_REUSED, FiscalAction, FiscalActionDisposition, FiscalActionIssuer,
+    FiscalActionRequest, FiscalAdoptionStage, FiscalAssessment, FiscalCatalogRecord,
+    FiscalExecutionKind, FiscalExecutionReceipt, FiscalExecutionReceiptPacket,
+    FiscalExecutionRequest, FiscalExternalOperationRef, FiscalHistoricalContextPacket,
+    FiscalHistoricalMode, FiscalIssuerRole, FiscalPaymentForm, FiscalProjection,
+    FiscalReceiptDisposition, FiscalSettledAction, FiscalStateRecord, MAX_FISCAL_ASSESSMENTS,
+    MAX_FISCAL_EVIDENCE_PER_RECORD, MAX_FISCAL_HOT_BOOKS_PER_LEDGER, PLUGIN_NAME,
+    compute_aggregates, enqueue_execution_receipt, fiscal_action_command, fiscal_catalog_reference,
+    fiscal_historical_context_ingress, fiscal_reports, fiscal_state_reference,
 };
 use canwu_ming_fiscal_reference::{
     DEFAULT_SEED, ReferenceFiscalExecutionEvidence, enqueue_reference_execution_result,
@@ -42,9 +44,9 @@ fn every_fixture_completes_the_reference_fiscal_vertical_slice() {
         run_ming_fiscal_sample_cycle(&mut canwu, &format!("test.{fixture}"))
             .expect("sample fiscal cycle");
         let state = fiscal_state(&canwu);
-        assert_eq!(state.assessments.len(), 1);
-        assert_eq!(state.execution_requests.len(), 1);
-        assert_eq!(state.execution_receipts.len(), 1);
+        assert_eq!(state.assessments().count(), 1);
+        assert_eq!(state.execution_requests().count(), 1);
+        assert_eq!(state.execution_receipts().count(), 1);
 
         let snapshot = canwu.snapshot_json().expect("fixture snapshot");
         let restored = restore_ming_fiscal_reference(&snapshot)
@@ -62,9 +64,9 @@ fn one_historical_period_supports_consecutive_accounting_cycles() {
     run_ming_fiscal_sample_cycle(&mut canwu, "annual-1391").expect("first annual cycle");
     run_ming_fiscal_sample_cycle(&mut canwu, "annual-1392").expect("second annual cycle");
     let state = fiscal_state(&canwu);
-    assert_eq!(state.assessments.len(), 2);
-    assert_eq!(state.execution_requests.len(), 2);
-    assert_eq!(state.execution_receipts.len(), 2);
+    assert_eq!(state.assessments().count(), 2);
+    assert_eq!(state.execution_requests().count(), 2);
+    assert_eq!(state.execution_receipts().count(), 2);
     assert_eq!(state.aggregates.len(), 2);
     assert!(state.aggregates.values().all(|aggregate| {
         aggregate.assessed == 100 && aggregate.collected == 70 && aggregate.outstanding == 30
@@ -74,6 +76,9 @@ fn one_historical_period_supports_consecutive_accounting_cycles() {
     assert_eq!(restored.checkpoint_hash(), canwu.checkpoint_hash());
 }
 
+/// The hot state at its assessment capacity: every book a ledger may hold,
+/// each with as many partitions as fill the capacity, and the aggregates
+/// derived in one linear pass.
 #[test]
 fn maximum_supported_cycles_use_linear_aggregate_indexes() {
     let reference = ming_fiscal_reference_scenario("hongwu-1391").expect("fixture");
@@ -86,68 +91,79 @@ fn maximum_supported_cycles_use_linear_aggregate_indexes() {
         .expect("fiscal catalog payload");
     let mut state = fiscal_state(&canwu);
     let scope_id = "scope.lower-yangzi.land";
-    let institution = state.scope_bindings[scope_id].institution.clone();
+    let institution = state
+        .scope_binding(scope_id)
+        .expect("land scope")
+        .institution
+        .clone();
     let evidence_kind = reference_execution_evidence_ref("capacity")
         .into_untyped()
         .kind;
+    let partitions = MAX_FISCAL_ASSESSMENTS / MAX_FISCAL_HOT_BOOKS_PER_LEDGER;
     for index in 0..MAX_FISCAL_ASSESSMENTS {
         let assessment_id = format!("capacity.assessment.{index}");
         let request_id = format!("capacity.request.{index}");
         let evidence_id = format!("capacity.evidence.{index}");
-        state.assessments.insert(
-            assessment_id.clone(),
-            FiscalAssessment {
+        let unit = format!("shi_grain_equivalent.{}", index % partitions);
+        state
+            .add_assessment(FiscalAssessment {
                 id: assessment_id.clone(),
                 rule_id: "yellow_register_land_assessment".to_owned(),
                 scope_binding_id: scope_id.to_owned(),
-                accounting_cycle_id: format!("capacity.cycle.{index}"),
+                accounting_cycle_id: format!("capacity.cycle.{:02}", index / partitions),
                 quantity: 100,
-                unit: "shi_grain_equivalent".to_owned(),
+                unit: unit.clone(),
                 payment_form: FiscalPaymentForm::Grain,
                 commutation_quote: None,
                 created_at: SimTime::EPOCH,
-            },
-        );
-        state.execution_requests.insert(
-            request_id.clone(),
-            FiscalExecutionRequest {
-                id: request_id.clone(),
-                assessment_id,
-                institution: institution.clone(),
-                kind: FiscalExecutionKind::Collect,
-                quantity: 70,
-                unit: "shi_grain_equivalent".to_owned(),
-                payment_form: FiscalPaymentForm::Grain,
-                resource: ResourceId::new(1),
-                source: EntityRef::Person(actor),
-                target: institution.clone(),
-                purpose: "capacity aggregate guard".to_owned(),
-                requested_at: SimTime::EPOCH,
-            },
-        );
+                source_action_id: None,
+            })
+            .expect("capacity assessment");
+        state
+            .add_execution_request(
+                scope_id,
+                FiscalExecutionRequest {
+                    id: request_id.clone(),
+                    assessment_id,
+                    institution: institution.clone(),
+                    kind: FiscalExecutionKind::Collect,
+                    quantity: 70,
+                    unit,
+                    payment_form: FiscalPaymentForm::Grain,
+                    resource: ResourceId::new(1),
+                    source: EntityRef::Person(actor),
+                    target: institution.clone(),
+                    purpose: "capacity aggregate guard".to_owned(),
+                    requested_at: SimTime::EPOCH,
+                    source_action_id: None,
+                },
+            )
+            .expect("capacity request");
         let evidence = DomainRecordVersionRef {
             record: reference_execution_evidence_ref(&evidence_id).into_untyped(),
             version: 1,
             established_by: DomainRecordVersionSource::InitialScenario,
         };
-        state.execution_receipts.insert(
-            format!("capacity.receipt.{index}"),
-            FiscalExecutionReceipt {
-                id: format!("capacity.receipt.{index}"),
-                request_id,
-                quantity: 70,
-                disposition: FiscalReceiptDisposition::Fulfilled,
-                external_evidence: [evidence].into_iter().collect(),
-                external_operations: [FiscalExternalOperationRef {
-                    evidence_kind: evidence_kind.clone(),
-                    external_operation_id: format!("capacity.operation.{index}"),
-                }]
-                .into_iter()
-                .collect(),
-                accepted_ingress: IngressId::new(index as u64 + 1),
-                observed_at: SimTime::EPOCH,
-            },
-        );
+        state
+            .add_execution_receipt(
+                scope_id,
+                FiscalExecutionReceipt {
+                    id: format!("capacity.receipt.{index}"),
+                    request_id,
+                    quantity: 70,
+                    disposition: FiscalReceiptDisposition::Fulfilled,
+                    external_evidence: [evidence].into_iter().collect(),
+                    external_operations: [FiscalExternalOperationRef {
+                        evidence_kind: evidence_kind.clone(),
+                        external_operation_id: format!("capacity.operation.{index}"),
+                    }]
+                    .into_iter()
+                    .collect(),
+                    accepted_ingress: IngressId::new(index as u64 + 1),
+                    observed_at: SimTime::EPOCH,
+                },
+            )
+            .expect("capacity receipt");
     }
 
     state.validate(&catalog).expect("capacity state");
@@ -178,8 +194,7 @@ fn hongguang_start_preserves_five_distinct_fiscal_authority_domains() {
         .decode_payload::<FiscalStateRecord>()
         .expect("payload");
     let institutions = state
-        .scope_bindings
-        .values()
+        .scope_bindings()
         .map(|scope| scope.institution.clone())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(institutions.len(), 5);
@@ -254,7 +269,7 @@ fn hongguang_fragmentation_is_executable_without_collapsing_authority_domains() 
     let state = fiscal_state(&canwu);
     assert_eq!(state.authority_bindings.len(), 5);
     assert_eq!(
-        state.adoptions["adopt.southeast.legacy-taicang"].stage,
+        adoption(&state, "adopt.southeast.legacy-taicang").stage,
         FiscalAdoptionStage::Suspended
     );
     for rule_id in [
@@ -262,7 +277,7 @@ fn hongguang_fragmentation_is_executable_without_collapsing_authority_domains() 
         "southern_ming_merchant_credit",
         "southern_ming_regional_treasuries",
     ] {
-        assert!(state.adoptions.values().any(|adoption| {
+        assert!(state.adoptions().any(|adoption| {
             adoption.rule_id == rule_id && adoption.stage == FiscalAdoptionStage::Implemented
         }));
     }
@@ -284,7 +299,7 @@ fn wanli_start_exposes_regional_reform_candidates_without_auto_adoption() {
     assert!(transition_ids.contains("adopt_single_whip_north"));
     assert!(transition_ids.contains("adopt_single_whip_southwest"));
     assert_eq!(
-        state.adoptions["adopt.southwest.single-whip"].stage,
+        adoption(&state, "adopt.southwest.single-whip").stage,
         canwu_fiscal::FiscalAdoptionStage::Accepted
     );
 }
@@ -335,10 +350,14 @@ fn authority_bound_assessment_survives_snapshot_and_replay() {
         .decode_payload::<FiscalStateRecord>()
         .expect("state payload");
     assert_eq!(
-        state.action_outcomes["test.assessment.action"].disposition,
+        settled(&canwu, "test.assessment.action").disposition,
         FiscalActionDisposition::Applied
     );
-    assert!(state.assessments.contains_key("test.assessment"));
+    assert!(
+        state
+            .assessments()
+            .any(|assessment| assessment.id == "test.assessment")
+    );
 
     let snapshot = canwu.snapshot_json().expect("snapshot");
     let restored = restore_ming_fiscal_reference(&snapshot).expect("restore");
@@ -388,16 +407,14 @@ fn action_stale_at_settlement_is_persisted_as_a_rejected_outcome() {
         .advance_canonical(SimDuration::minutes(1))
         .expect("stale settlement");
     let state = fiscal_state(&canwu);
-    assert_eq!(
-        state.action_outcomes["stale.action"].disposition,
-        FiscalActionDisposition::Rejected
-    );
+    let outcome = settled(&canwu, "stale.action");
+    assert_eq!(outcome.disposition, FiscalActionDisposition::Rejected);
+    assert!(outcome.reason.contains("stale"));
     assert!(
-        state.action_outcomes["stale.action"]
-            .reason
-            .contains("stale")
+        !state
+            .assessments()
+            .any(|assessment| assessment.id == "stale.assessment")
     );
-    assert!(!state.assessments.contains_key("stale.assessment"));
 }
 
 #[test]
@@ -431,7 +448,7 @@ fn rejected_fiscal_actions_do_not_block_later_boundaries() {
     canwu
         .advance_canonical(SimDuration::minutes(1))
         .expect("a stale action settles as an outcome");
-    let outcome = &fiscal_state(&canwu).action_outcomes["stale.action"];
+    let outcome = settled(&canwu, "stale.action");
     assert_eq!(outcome.disposition, FiscalActionDisposition::Rejected);
     assert!(outcome.reason.starts_with("domain_record_version_conflict"));
 
@@ -469,9 +486,9 @@ fn rejected_fiscal_actions_do_not_block_later_boundaries() {
         };
         assert_eq!(error.code, ErrorCode::EntityNotFound);
         assert!(
-            !fiscal_state(&canwu)
-                .action_outcomes
-                .contains_key(&quote_action.action_id)
+            !FiscalSettledAction::from_events(canwu.events())
+                .iter()
+                .any(|settled| settled.action_id == quote_action.action_id)
         );
     }
 
@@ -481,9 +498,8 @@ fn rejected_fiscal_actions_do_not_block_later_boundaries() {
     canwu
         .advance_canonical(SimDuration::minutes(1))
         .expect("valid action boundary");
-    let state = fiscal_state(&canwu);
     assert_eq!(
-        state.action_outcomes["valid.action"].disposition,
+        settled(&canwu, "valid.action").disposition,
         FiscalActionDisposition::Applied
     );
 
@@ -547,10 +563,10 @@ fn single_whip_transition_atomically_suspends_the_superseded_rule() {
         .expect("transition settlement");
     let state = fiscal_state(&canwu);
     assert_eq!(
-        state.adoptions["adopt.north.silver-commutation"].stage,
+        adoption(&state, "adopt.north.silver-commutation").stage,
         FiscalAdoptionStage::Suspended
     );
-    assert!(state.adoptions.values().any(|adoption| {
+    assert!(state.adoptions().any(|adoption| {
         adoption.rule_id == "single_whip_north"
             && adoption.stage == FiscalAdoptionStage::Implemented
     }));
@@ -617,6 +633,7 @@ fn receipt_helper_rejects_unavailable_external_evidence() {
     };
     let packet = canwu_fiscal::FiscalExecutionReceiptPacket {
         receipt_id: "missing.evidence".to_owned(),
+        scope_binding_id: "scope.lower-yangzi.land".to_owned(),
         request_id: "missing.request".to_owned(),
         external_evidence: [unavailable].into_iter().collect(),
     };
@@ -639,6 +656,7 @@ fn receipt_helper_rejects_an_unbounded_evidence_set() {
         .collect();
     let packet = FiscalExecutionReceiptPacket {
         receipt_id: "oversized.evidence".to_owned(),
+        scope_binding_id: "scope.lower-yangzi.land".to_owned(),
         request_id: "oversized.request".to_owned(),
         external_evidence,
     };
@@ -692,15 +710,24 @@ fn a_host_cannot_enqueue_a_fiscal_action_packet() {
         .advance_canonical(SimDuration::minutes(1))
         .expect("the run continues");
     assert!(
-        !fiscal_state(&canwu)
-            .action_outcomes
-            .contains_key("forged.assessment.action")
+        !FiscalSettledAction::from_events(canwu.events())
+            .iter()
+            .any(|settled| settled.action_id == "forged.assessment.action")
     );
 }
 
 #[test]
 fn generic_receipt_ingress_cannot_bypass_exact_evidence_validation() {
+    let reference = ming_fiscal_reference_scenario("hongwu-1391").expect("fixture");
     let mut canwu = new_ming_fiscal_reference(DEFAULT_SEED, "hongwu-1391").expect("runtime");
+    let request_id = open_and_authorize_collection(
+        &mut canwu,
+        reference.world_ids.observer,
+        reference.world_ids.government,
+        "forged",
+        40,
+        1,
+    );
     let unavailable = DomainRecordVersionRef {
         record: reference_execution_evidence_ref("forged.evidence").into_untyped(),
         version: 99,
@@ -708,7 +735,8 @@ fn generic_receipt_ingress_cannot_bypass_exact_evidence_validation() {
     };
     let packet = canwu_fiscal::FiscalExecutionReceiptPacket {
         receipt_id: "forged.receipt".to_owned(),
-        request_id: "forged.request".to_owned(),
+        scope_binding_id: "scope.lower-yangzi.land".to_owned(),
+        request_id,
         external_evidence: [unavailable].into_iter().collect(),
     };
     let now = canwu.time();
@@ -720,7 +748,11 @@ fn generic_receipt_ingress_cannot_bypass_exact_evidence_validation() {
             serde_json::to_value(packet).expect("receipt payload"),
         ))
         .expect("enqueue forged receipt");
-    assert_receipt_refused(&mut canwu, "unavailable", FISCAL_INGRESS_INVALID_REJECTION);
+    assert_receipt_refused(
+        &mut canwu,
+        "current version",
+        FISCAL_RECEIPT_EVIDENCE_NOT_CURRENT,
+    );
 }
 
 #[test]
@@ -746,6 +778,7 @@ fn live_receipt_rejects_evidence_for_another_authorized_request() {
     );
     let adapter_result = ReferenceFiscalExecutionEvidence {
         id: "evidence.semantic-a".to_owned(),
+        scope_binding_id: "scope.lower-yangzi.land".to_owned(),
         external_operation_id: "resource-transfer.semantic-a".to_owned(),
         request_id: request_a,
         quantity: 40,
@@ -770,17 +803,14 @@ fn live_receipt_rejects_evidence_for_another_authorized_request() {
         now,
         &canwu_fiscal::FiscalExecutionReceiptPacket {
             receipt_id: "receipt.semantic-mismatch".to_owned(),
+            scope_binding_id: "scope.lower-yangzi.land".to_owned(),
             request_id: request_b,
             external_evidence: [evidence].into_iter().collect(),
         },
     )
     .expect("receipt ingress");
-    assert_receipt_refused(
-        &mut canwu,
-        "does not match",
-        FISCAL_INGRESS_INVALID_REJECTION,
-    );
-    assert!(fiscal_state(&canwu).execution_receipts.is_empty());
+    assert_receipt_refused(&mut canwu, "does not match", FISCAL_RECEIPT_CLAIM_MISMATCH);
+    assert_eq!(fiscal_state(&canwu).execution_receipts().count(), 0);
 }
 
 #[test]
@@ -798,6 +828,7 @@ fn receipt_payload_cannot_redeclare_evidence_quantity_or_disposition() {
     );
     let adapter_result = ReferenceFiscalExecutionEvidence {
         id: "evidence.derived-receipt".to_owned(),
+        scope_binding_id: "scope.lower-yangzi.land".to_owned(),
         external_operation_id: "resource-transfer.derived-receipt".to_owned(),
         request_id: request_id.clone(),
         quantity: 70,
@@ -838,7 +869,7 @@ fn receipt_payload_cannot_redeclare_evidence_quantity_or_disposition() {
         FISCAL_EXECUTION_RECEIPT_INGRESS,
         FISCAL_INGRESS_MALFORMED_REJECTION,
     );
-    assert!(fiscal_state(&canwu).execution_receipts.is_empty());
+    assert_eq!(fiscal_state(&canwu).execution_receipts().count(), 0);
 }
 
 #[test]
@@ -874,6 +905,7 @@ fn different_records_cannot_reuse_one_external_operation_for_the_same_request() 
         now,
         &FiscalExecutionReceiptPacket {
             receipt_id: "receipt.same-operation.second".to_owned(),
+            scope_binding_id: "scope.lower-yangzi.land".to_owned(),
             request_id,
             external_evidence: [evidence].into_iter().collect(),
         },
@@ -882,14 +914,11 @@ fn different_records_cannot_reuse_one_external_operation_for_the_same_request() 
     assert_receipt_refused(
         &mut canwu,
         "external fiscal operation",
-        FISCAL_INGRESS_INVALID_REJECTION,
+        FISCAL_RECEIPT_OPERATION_REUSED,
     );
     let state = fiscal_state(&canwu);
-    assert_eq!(state.execution_receipts.len(), 1);
-    assert_eq!(
-        state.execution_receipts.values().next().unwrap().quantity,
-        50
-    );
+    assert_eq!(state.execution_receipts().count(), 1);
+    assert_eq!(state.execution_receipts().next().unwrap().quantity, 50);
 }
 
 #[test]
@@ -927,6 +956,7 @@ fn different_requests_cannot_reuse_one_external_operation() {
         now,
         &FiscalExecutionReceiptPacket {
             receipt_id: "receipt.operation-b".to_owned(),
+            scope_binding_id: "scope.lower-yangzi.land".to_owned(),
             request_id: request_b,
             external_evidence: [evidence].into_iter().collect(),
         },
@@ -935,9 +965,9 @@ fn different_requests_cannot_reuse_one_external_operation() {
     assert_receipt_refused(
         &mut canwu,
         "external fiscal operation",
-        FISCAL_INGRESS_INVALID_REJECTION,
+        FISCAL_RECEIPT_OPERATION_REUSED,
     );
-    assert_eq!(fiscal_state(&canwu).execution_receipts.len(), 1);
+    assert_eq!(fiscal_state(&canwu).execution_receipts().count(), 1);
 }
 
 #[test]
@@ -982,6 +1012,7 @@ fn exact_external_evidence_settles_fulfillment_without_owning_resources() {
             expected_procedure_revision: authorization_version,
             action: FiscalAction::AuthorizeExecution {
                 request_id: "receipt.execution".to_owned(),
+                scope_binding_id: "scope.lower-yangzi.land".to_owned(),
                 assessment_id: "receipt.assessment".to_owned(),
                 kind: FiscalExecutionKind::Collect,
                 quantity: 70,
@@ -999,6 +1030,7 @@ fn exact_external_evidence_settles_fulfillment_without_owning_resources() {
 
     let adapter_result = ReferenceFiscalExecutionEvidence {
         id: "evidence.fulfillment".to_owned(),
+        scope_binding_id: "scope.lower-yangzi.land".to_owned(),
         request_id: "receipt.execution".to_owned(),
         quantity: 70,
         unit: "shi_grain_equivalent".to_owned(),
@@ -1020,6 +1052,7 @@ fn exact_external_evidence_settles_fulfillment_without_owning_resources() {
         .expect("exact adapter evidence version");
     let packet = canwu_fiscal::FiscalExecutionReceiptPacket {
         receipt_id: "receipt.fulfillment".to_owned(),
+        scope_binding_id: "scope.lower-yangzi.land".to_owned(),
         request_id: "receipt.execution".to_owned(),
         external_evidence: [evidence].into_iter().collect(),
     };
@@ -1035,7 +1068,7 @@ fn exact_external_evidence_settles_fulfillment_without_owning_resources() {
         .expect("state")
         .decode_payload::<FiscalStateRecord>()
         .expect("payload");
-    assert_eq!(state.execution_receipts["receipt.fulfillment"].quantity, 70);
+    assert_eq!(receipt(&state, "receipt.fulfillment").quantity, 70);
     let aggregate = state.aggregates.values().next().expect("aggregate");
     assert_eq!(aggregate.collected, 70);
     assert_eq!(aggregate.outstanding, 30);
@@ -1086,6 +1119,7 @@ fn rejected_external_receipt_records_evidence_without_fulfilling_quantity() {
             expected_procedure_revision: authorization_version,
             action: FiscalAction::AuthorizeExecution {
                 request_id: "rejected.execution".to_owned(),
+                scope_binding_id: "scope.lower-yangzi.land".to_owned(),
                 assessment_id: "rejected.assessment".to_owned(),
                 kind: FiscalExecutionKind::Collect,
                 quantity: 100,
@@ -1103,6 +1137,7 @@ fn rejected_external_receipt_records_evidence_without_fulfilling_quantity() {
 
     let adapter_result = ReferenceFiscalExecutionEvidence {
         id: "evidence.rejected".to_owned(),
+        scope_binding_id: "scope.lower-yangzi.land".to_owned(),
         request_id: "rejected.execution".to_owned(),
         quantity: 0,
         unit: "shi_grain_equivalent".to_owned(),
@@ -1124,6 +1159,7 @@ fn rejected_external_receipt_records_evidence_without_fulfilling_quantity() {
         .expect("exact rejected adapter evidence version");
     let packet = canwu_fiscal::FiscalExecutionReceiptPacket {
         receipt_id: "receipt.rejected".to_owned(),
+        scope_binding_id: "scope.lower-yangzi.land".to_owned(),
         request_id: "rejected.execution".to_owned(),
         external_evidence: [evidence].into_iter().collect(),
     };
@@ -1139,7 +1175,7 @@ fn rejected_external_receipt_records_evidence_without_fulfilling_quantity() {
         .expect("state")
         .decode_payload::<FiscalStateRecord>()
         .expect("payload");
-    assert_eq!(state.execution_receipts["receipt.rejected"].quantity, 0);
+    assert_eq!(receipt(&state, "receipt.rejected").quantity, 0);
     let aggregate = state.aggregates.values().next().expect("aggregate");
     assert_eq!(aggregate.collected, 0);
     assert_eq!(aggregate.outstanding, 100);
@@ -1162,6 +1198,32 @@ fn fiscal_state(canwu: &Canwu) -> canwu_fiscal::FiscalState {
         .expect("fiscal state payload")
 }
 
+/// The settled outcome of `action_id`, as its event records it.
+fn settled(canwu: &Canwu, action_id: &str) -> FiscalSettledAction {
+    FiscalSettledAction::from_events(canwu.events())
+        .into_iter()
+        .rev()
+        .find(|settled| settled.action_id == action_id)
+        .unwrap_or_else(|| panic!("{action_id} has no settled event"))
+}
+
+fn adoption<'a>(
+    state: &'a canwu_fiscal::FiscalState,
+    id: &str,
+) -> &'a canwu_fiscal::FiscalAdoptionState {
+    state
+        .adoptions()
+        .find(|adoption| adoption.id == id)
+        .unwrap_or_else(|| panic!("adoption {id}"))
+}
+
+fn receipt<'a>(state: &'a canwu_fiscal::FiscalState, id: &str) -> &'a FiscalExecutionReceipt {
+    state
+        .execution_receipts()
+        .find(|receipt| receipt.id == id)
+        .unwrap_or_else(|| panic!("receipt {id}"))
+}
+
 fn assert_restore_replay_and_reject_duplicate(
     canwu: &mut Canwu,
     adapter_result: &ReferenceFiscalExecutionEvidence,
@@ -1176,6 +1238,7 @@ fn assert_restore_replay_and_reject_duplicate(
         .expect("same exact adapter evidence");
     let duplicate = canwu_fiscal::FiscalExecutionReceiptPacket {
         receipt_id: "receipt.duplicate".to_owned(),
+        scope_binding_id: "scope.lower-yangzi.land".to_owned(),
         request_id: "receipt.execution".to_owned(),
         external_evidence: [evidence].into_iter().collect(),
     };
@@ -1184,8 +1247,8 @@ fn assert_restore_replay_and_reject_duplicate(
         .expect("enqueue duplicate receipt");
     assert_receipt_refused(
         canwu,
-        "external fiscal operation",
-        FISCAL_INGRESS_INVALID_REJECTION,
+        "cannot settle multiple",
+        FISCAL_RECEIPT_EVIDENCE_REUSED,
     );
 }
 
@@ -1290,6 +1353,7 @@ fn open_and_authorize_collection(
             expected_procedure_revision: authorization_revision,
             action: FiscalAction::AuthorizeExecution {
                 request_id: request_id.clone(),
+                scope_binding_id: "scope.lower-yangzi.land".to_owned(),
                 assessment_id,
                 kind: FiscalExecutionKind::Collect,
                 quantity,
@@ -1317,6 +1381,7 @@ fn execution_evidence(
 ) -> ReferenceFiscalExecutionEvidence {
     ReferenceFiscalExecutionEvidence {
         id: id.to_owned(),
+        scope_binding_id: "scope.lower-yangzi.land".to_owned(),
         external_operation_id: external_operation_id.to_owned(),
         request_id: request_id.to_owned(),
         quantity,
@@ -1354,6 +1419,7 @@ fn publish_and_settle_receipt(
         now,
         &FiscalExecutionReceiptPacket {
             receipt_id: receipt_id.to_owned(),
+            scope_binding_id: "scope.lower-yangzi.land".to_owned(),
             request_id: evidence.request_id.clone(),
             external_evidence: [version].into_iter().collect(),
         },

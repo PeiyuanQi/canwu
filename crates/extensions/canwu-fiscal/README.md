@@ -8,24 +8,50 @@ aggregates, and holder-relative estimated reports published as knowledge.
 It deliberately does not own money, grain, inventory, market quotes, transport,
 or physical transfer truth. A resource or logistics adapter performs the real
 operation, then submits a `FiscalExecutionReceiptPacket` citing exact external
-domain-record versions through `enqueue_execution_receipt`. At the live
-settlement boundary the extension requires each cited version to be the current
-version of its record, decodes the generic execution-evidence envelope,
-validates every field against the authorization, and derives the receipt
-quantity and disposition from the evidence. No receipt or historical-context
-change fails its boundary: one whose payload does not decode, whose evidence
-is no longer current or does not match its request, that cites an external
-operation another receipt settled, that reuses a receipt ID with other
-content, or a context year outside the pack, changes nothing and is refused
-with one `canwu.fiscal.ingress_rejected.v1` event, whose summary names the
-ingress and the packet and ends with `FISCAL_INGRESS_MALFORMED_REJECTION` or,
-after the message that says why, `FISCAL_INGRESS_INVALID_REJECTION`. A
-refused receipt consumes nothing, so a corrected one can settle later; if a
-cited record changes before the receipt settles, cite its new version. A configured
-evidence-kind allowlist and the host integration's redundant semantic validator
-keep arbitrary world records from proving execution. Exact evidence versions and
-`(evidence kind, external_operation_id)` pairs can each settle at most one
-receipt within one `FiscalState`.
+domain-record versions through `enqueue_execution_receipt`; the packet and the
+evidence envelope (`FiscalExecutionEvidence`) name the scope
+(`scope_binding_id`) whose request they settle. At the live settlement
+boundary the extension requires each cited version to be the current version
+of its record, decodes the generic execution-evidence envelope, validates
+every field against the authorization, and derives the receipt quantity and
+disposition from the evidence.
+
+No receipt or historical-context change fails its boundary. One that
+settlement cannot accept changes nothing and is refused with one
+`canwu.fiscal.ingress_rejected.v1` event, whose summary names the ingress and
+the packet and ends with a stable reason, and the packets after it settle in
+the same boundary:
+
+| Reason | Constant | When |
+| --- | --- | --- |
+| `malformed_payload` | `FISCAL_INGRESS_MALFORMED_REJECTION` | the payload does not decode |
+| `request_unknown` | `FISCAL_RECEIPT_REQUEST_UNKNOWN` | the scope holds no hot request with the receipt's request ID (it never had one, or the request's book was archived) |
+| `cycle_closed` | `FISCAL_RECEIPT_CYCLE_CLOSED` | the request's book is closed |
+| `evidence_count_invalid` | `FISCAL_RECEIPT_EVIDENCE_COUNT` | no evidence, or more than 32 versions |
+| `evidence_kind_unapproved` | `FISCAL_RECEIPT_EVIDENCE_KIND_UNAPPROVED` | a kind the state does not approve |
+| `evidence_not_current` | `FISCAL_RECEIPT_EVIDENCE_NOT_CURRENT` | a cited version is not its record's current version |
+| `claim_mismatch` | `FISCAL_RECEIPT_CLAIM_MISMATCH` | a claim differs from the scope, the request, or the other claims, or predates the request |
+| `quantity_exceeded` | `FISCAL_RECEIPT_QUANTITY_EXCEEDED` | the receipts would fulfil more than the request authorizes |
+| `operation_reused`, `evidence_reused` | `FISCAL_RECEIPT_OPERATION_REUSED`, `FISCAL_RECEIPT_EVIDENCE_REUSED` | already settled by a receipt of the scope's hot books |
+| `receipt_id_conflict` | `FISCAL_RECEIPT_ID_CONFLICT` | a hot receipt of the scope has the ID with other content |
+| `context_outside_pack` | `FISCAL_CONTEXT_OUTSIDE_PACK` | a context year outside the pack |
+| `state_budget_exhausted` | `FISCAL_INGRESS_BUDGET_REJECTION` | the result would not fit the state's byte budget, or the state holds 8,192 hot receipts |
+| `invalid_packet` | `FISCAL_INGRESS_INVALID_REJECTION` | anything else that leaves the state invalid, after the message that says why |
+
+A refused receipt consumes nothing, so a corrected one can settle later; if a
+cited record changes before the receipt settles, cite its new version. A
+configured evidence-kind allowlist and the host integration's redundant
+semantic validator keep arbitrary world records from proving execution. An
+exact evidence version settles at most one receipt: its claim names the scope
+and request it settles, and a request's receipts are all hot while its book
+takes receipts. An `(evidence kind, external_operation_id)` pair settles at
+most one receipt among the receipts of one scope's hot books; across scopes,
+and after a book is archived, unique operation keys are the evidence
+domain's guarantee, as the resource extension's are. Evidence must not
+predate its request, by simulated time; a request ID used again in a later
+book of the same scope, at the same simulated time as the evidence of an
+archived request of that ID, could take that evidence again, so use each
+request ID once per scope for the life of a run.
 
 A `FiscalAuthorityBinding` names its standing `authorized_actor` and may also
 name an `acting_actor` together with an exact `authority_basis` record version,
@@ -159,13 +185,36 @@ authorizations on one assessment both apply when their sum validates. An
 action settles in the boundary after the one that admits its command. A
 receipt, a historical-context change, or another action that settles in the
 admitting boundary makes it stale; a receipt that settles in the same boundary
-as the action does not.
+as the action does not, and neither does archive maintenance, which never
+advances the revision.
 
 One boundary applies at most `MAX_FISCAL_ACTIONS_PER_BOUNDARY` (64) actions
 and rejects the rest with `FISCAL_BOUNDARY_ACTION_LIMIT`; a client reissues
 those under new action IDs. A stale or unauthorized action is rejected without
 using the limit. Reports are still published once per boundary, however many
 actions settled in it.
+
+An action applies at most once, without the state keeping every outcome for
+the life of the run. Every action has a target, `FiscalActionTarget`: the
+ledger of the scope a scope action names, the office of the institution a
+binding, proposal, or transition action changes (keyed by
+`fiscal_office_key`), or the observer binding an observer action changes.
+Action IDs are per target. Each target keeps its `FISCAL_RECENT_OUTCOMES` (8)
+most recent outcomes in a ring and an outcome floor, the procedure revision of
+the newest outcome the ring has evicted. Admission refuses, from that hot
+state alone, a request whose action ID has an outcome in its target's ring
+(`IdempotencyConflict`), one that names a procedure revision the state never
+had (`ValueOutOfRange`, `FISCAL_REVISION_UNKNOWN`), and one whose revision is
+at or below its target's floor (`ValueOutOfRange`,
+`FISCAL_REVISION_EXPIRED`), which is how a re-send of an evicted outcome is
+refused. So a client issues an action against the revision it read, never a
+later one. Settlement skips, without an outcome or an event, a copy of an
+action whose outcome its target's ring holds or the boundary has already
+settled. Every outcome is recorded for good in its
+`canwu.fiscal.action_settled.v1` event (`FISCAL_ACTION_SETTLED_EVENT`), whose
+summary `FiscalSettledAction::from_summary` reads back:
+`FiscalSettledAction::from_events` lists them, and
+`FiscalState::recent_outcome` answers for the outcomes still hot.
 
 No action fails a boundary for the others. Admission rejects as
 `InvalidPayload` a request larger than `MAX_FISCAL_ACTION_JSON_BYTES`
@@ -180,17 +229,20 @@ systems add. Settlement measures every record its boundary will write: the
 state as it leaves it, and that state with the transition candidates and the
 aggregates the candidate and aggregate systems will write after it. It holds
 the largest of them, without the report plan, to the budget less
-`MAX_FISCAL_REPORT_PLAN_BYTES` (152,416 bytes), more than any plan can take,
-so a change that adds many derived fields is measured with them. When the
+`MAX_FISCAL_REPORT_PLAN_BYTES` (169,200 bytes), more than any plan can take,
+and less `FISCAL_ARCHIVE_HEAD_RESERVE_BYTES` (2 MiB), which archive
+maintenance may use, so a change that adds many derived fields is measured
+with them. When the
 whole boundary does not fit, the packets are settled again with each one
 measured. An execution receipt or a historical-context change that does not
 fit changes nothing: the state keeps neither the receipt nor its evidence
 versions and external operations, the procedure revision does not advance,
 and one `canwu.fiscal.ingress_rejected.v1` event, whose summary names the
 ingress and ends with `FISCAL_INGRESS_BUDGET_REJECTION`, is its only record.
-The crate has no archive, so a state at its budget stays there: a host that
-must record its executions watches for that event, or for the state's size,
-and starts a new run or shard before then. Near the budget each receipt or
+A state near its budget holds too many hot books: close and archive them
+([Accounting cycles and the archive](#accounting-cycles-and-the-archive)). A
+host that must record its executions watches for that event, or for the
+state's size. Near the budget each receipt or
 context change of a boundary is measured on its own, at the cost of a
 clone, a validation, two serializations, and a derivation of the state
 (an estimated 30 to 40 ms at 2.2 MB, about half a second near 32 MiB), so
@@ -211,12 +263,10 @@ its action ID is not consumed, and one `canwu.fiscal.action_dropped.v1` event
 is its only record. The event's summary names the action, and its affected
 entities name the institution the action was issued for, unless that is a
 domain record. So an accepted command whose action has no outcome after the
-next boundary was dropped. That happens in two cases. When no outcome slot is
-left, an action admitted before the last slot was taken is dropped, and from
-then on admission rejects every command. Near the byte budget admission keeps
-accepting commands: settlement rejects an action that does not fit with
-`FISCAL_STATE_BUDGET_EXHAUSTED` while the rejection itself still fits, and
-drops the ones after that.
+next boundary was dropped. That happens only near the byte budget, where
+admission keeps accepting commands: settlement rejects an action that does
+not fit with `FISCAL_STATE_BUDGET_EXHAUSTED` while the rejection itself still
+fits, and drops the ones after that. No count of outcomes runs out.
 
 A boundary that admits no fiscal ingress costs no fiscal decode once any
 boundary has written the state. Fiscal records are validated when the plugin
@@ -226,24 +276,118 @@ recompute the derived fields of a state, and an idle boundary no longer does
 either, so a state restored with altered transition candidates or aggregates
 keeps them until its next fiscal write.
 
-Fiscal collections are hard-capped at 4,096 assessments, 8,192 execution
-requests, 8,192 receipts, 32 evidence versions per receipt, 16,384 action
-outcomes, and a 32 MiB serialized state budget. These are lifetime caps: at
-64 actions a boundary, the outcome cap is 256 boundaries away, rejected
-actions use it too, and a full state rejects every further command at
-admission; the assessment cap is 64 full boundaries of assessments away, after
-which each assessment is rejected as its own outcome. Aggregate rebuilds use
-single-pass indexes. A host that needs larger campaigns must create separate
-simulation runs or shards; this crate has no in-place partition or archive
-API, and the host owns cross-shard operation-ID deduplication.
+## Accounting cycles and the archive
+
+The state is still one record, `canwu.fiscal:state`, under its 32 MiB budget,
+but what it holds is laid out by scope. Each scope binding has a
+`FiscalScopeLedger` with its adoptions and one `FiscalCycleBook` for each hot
+accounting cycle, which holds the cycle's assessments, remissions, execution
+requests and receipts, and audit findings; each institution has a
+`FiscalOffice` that counts its hot books per cycle. Objects inside a scope
+have IDs unique among the scope's hot objects, and every reference to one
+names its scope: `GrantRemission`, `AuthorizeExecution`, and `RecordAudit`
+carry `scope_binding_id`.
+
+- `OpenAssessment` opens its book. `CloseAccountingCycle` closes one book of
+  one scope; a closed book takes audit findings and nothing else
+  (`FISCAL_CYCLE_CLOSED` for an assessment, remission, or authorization, and
+  `cycle_closed` for a receipt). A ledger holds at most
+  `MAX_FISCAL_HOT_BOOKS_PER_LEDGER` (64) books (`FISCAL_HOT_BOOKS_EXHAUSTED`).
+- An archive commit takes closed books out of the state into the fiscal
+  archive. It raises each scope's watermark to the greatest cycle it archived
+  and, in the commit that archives an institution's last hot book of a cycle,
+  archives that institution's totals of the cycle once and raises the office
+  watermark. No book is opened at or below either watermark
+  (`FISCAL_CYCLE_ARCHIVED`), so an accounting partition (scope, cycle, unit,
+  payment form) is assessed at most once for the life of a run without
+  reading the archive. Cycle IDs compare in byte order; name them so that
+  they sort (`"1644"`, `"1644-03"`).
+- The host archives. `FiscalState::prepare_fiscal_archive` selects closed
+  books, in (scope, cycle) order, up to a book limit and
+  `MAX_FISCAL_ARCHIVE_COMMIT_RECORDS` (4,096) records, and builds the blobs
+  (`MAX_FISCAL_ARCHIVE_RECORDS_PER_BLOB`, 64, records each), membership,
+  temporal, and lookup-index pages, and directory of a
+  `PreparedFiscalArchiveBatchV1`. `enqueue_fiscal_archive` stores and verifies
+  them in a `FiscalArchiveStore`, persists the retention handle, and queues
+  the commit (`fiscal_archive_commit_v1`); `finalize_fiscal_archive_retention`
+  queues its acknowledgement once the commit has settled. Prepare and enqueue
+  in one gap between boundaries. Both work on `Canwu` and `CompactedCanwu`
+  (`FiscalArchiveRuntime`). On a run that has sealed evidence, pass the end
+  cursor of its last sealed segment: a book citing an evidence version
+  established after it is refused at preparation
+  (`FiscalArchiveError::UnsealedCitations`) until a seal covers it. The cut is
+  the host's to pass; the functions cannot read it from the run, so a sealing
+  host that passes `None` skips that refusal. Preparation refuses
+  (`FiscalArchiveError::Backpressure`) while the state holds
+  `MAX_FISCAL_ARCHIVE_PENDING_HANDLES` (64) unacknowledged retention handles,
+  of applied or stale commits.
+- A commit settles before every other fiscal packet of its boundary and is
+  checked against the state alone: settlement rebuilds the records it binds
+  from the books it names and compares. A commit prepared from an older
+  state ends as a stale no-op, with a receipt and a handle the host
+  acknowledges; a copy of a commit whose handle the state already holds,
+  because the same batch was queued again, records nothing; each is recorded
+  in its `canwu.fiscal.archive_maintenance.v1` event. A stale commit past the
+  head's room (64 unacknowledged stale handles), and one that does not match,
+  is refused with the refusal event and changes nothing. An acknowledgement
+  retires its handle once. Neither advances the procedure revision, so no
+  action becomes stale, and a boundary whose only change is archive
+  maintenance publishes no report.
+- No boundary reads the archive store. Admission, settlement, idempotency, and
+  partition uniqueness use the hot state only, so a run settles exactly the
+  same whether or not its store can be read, and restore and exact replay
+  need no store. Only the host's archive operations read a store, the one the
+  host passes them: `archived_fiscal_record` looks up an archived book, an
+  institution's totals of a cycle, or a maintenance receipt by
+  `FiscalArchiveKeyV1`, through the cumulative lookup index whose pages the
+  directory root authenticates; `audit_fiscal_archive` checks the whole
+  archive against the state's head.
+- A store reports failures as `FiscalArchiveError`; the store trait and the
+  error are the fiscal crate's own, and the lookup index uses the
+  `canwu-resource` lookup-page functions behind them. `()` is a store that
+  holds nothing.
+
+The hot state keeps at most 4,096 assessments, 8,192 execution requests, and
+8,192 receipts, with 32 evidence versions per receipt, under the 32 MiB
+budget. None of these is a lifetime cap: closing and archiving books frees
+them, and a run makes as many of each as it archives. Aggregate rebuilds use
+single-pass indexes over the hot books. Each closed book's per-cycle totals
+are archived with it; the strategic aggregates cover the hot books.
+
+## Observers and reports
+
+A `FiscalObserverBinding` names who holds its report, `knowledge_holder`: the
+person of its `actor`, or, with no actor, a government, so a court or a
+ministry can hold a report no one person does. `controlled_by` names the
+institution that may change the binding: `RebindObserver` re-points it to
+another actor and holder, and `RemoveObserver` removes it. Either is issued
+under an authority binding of that institution, by its principal or by the
+institution deciding as a body, never by an acting actor; a binding with no
+controlling institution cannot change, and a removed one takes no further
+action (`FISCAL_OBSERVER_REMOVED`).
 
 An observer's report is one summary record and parts of 16 facts, one fact
 for each aggregate the observer's binding lets it see. Read it with
 `fiscal_reports(&viewer)`, which returns one `FiscalReport` for each observer
-binding that names the viewer's actor, keyed by binding ID; its `projection`
-is what `compute_projections` derives from the fiscal state. A report record
-on its own (`FiscalReportRecord`, version 2 of the `fiscal_report` knowledge
-schema) is one summary or one part, not a report.
+binding whose report the viewer's holder holds, keyed by binding ID, or, as
+a trusted host and for any holder, a government included, with
+`fiscal_reports_of_holder`; its `projection` is what `compute_projections`
+derives from the fiscal state. A report record on its own
+(`FiscalReportRecord`, version 3 of the `fiscal_report` knowledge schema) is
+one summary or one part, not a report.
+
+- Each binding's report lines are numbered from its `line_slot`, a number
+  below `MAX_FISCAL_OBSERVERS` (64) that no other binding of the state has
+  and that a removed binding keeps, so a slot is never used again. Rebinding
+  or removing one binding leaves every other binding's lines where they
+  were.
+- When a binding is re-pointed to another holder, the new holder gets the
+  whole report at the next publication, and the old holder's report is
+  withdrawn: its summary is
+  superseded by one marked `withdrawn`, and the reading functions leave the
+  report out. A removed binding's report is withdrawn the same way. A
+  withdrawn holder keeps the records it was given; they are history, not a
+  current report.
 
 - A boundary publishes only the parts whose facts changed, with the
   observer's summary. A boundary that changes nothing an observer can see
@@ -279,11 +423,12 @@ schema) is one summary or one part, not a report.
   are shared in the order of the observer bindings, so which parts are
   pending depends on the reports of the observers before it.
 - The engine publishes no knowledge to a dead person. While an observer's
-  actor is dead, nothing is published to that observer and the report stays
-  as it was; what changes in it is kept in the report plan, by part, and is
-  published by the first boundary after the person is alive again that runs
-  the fiscal systems: the boundary that revives the person, when it admits
-  any ingress or event.
+  holder is a dead person, nothing is published to that observer and the
+  report stays as it was; what changes in it is kept in the report plan, by
+  part, and is published by the first boundary after the person is alive
+  again that runs the fiscal systems: the boundary that revives the person,
+  when it admits any ingress or event. A government holder is always
+  reachable.
 - Publishing owed parts changes the fiscal state only in its report plan, so
   the procedure revision does not advance and no action becomes stale. A
   boundary finds owed parts by reading the plan's owed observers, and their
@@ -295,22 +440,20 @@ schema) is one summary or one part, not a report.
   a boundary has written. One that comes with a scenario is ignored, and the
   first derivation publishes every report whole.
 
-A scenario whose knowledge carries a report record of schema version 1 is
-refused when the run is created, because that version is no longer
+A scenario whose knowledge carries a report record of schema version 1 or 2
+is refused when the run is created, because those versions are no longer
 registered. A state is refused at activation when it could not be reported:
 
-- when an observer binding names a person who does not exist. The state
-  record references the person of every observer binding, and the engine
-  checks references against its entity registry, so encode a state with
-  `FiscalState::into_record`;
+- when an observer binding names a person or government holder that does not
+  exist, a holder that is not its actor's person or, with no actor, a
+  government, or a line slot that is out of range or another binding's. The
+  state record references the holder of every observer binding, and the
+  engine checks references against its entity registry, so encode a state
+  with `FiscalState::into_record`;
 - when an assessment's unit or accounting cycle, or the namespace, name, and
   ID of a scope's domain-record institution together, is longer than
   `MAX_FISCAL_IDENTIFIER_BYTES` (160), which bounds a fact so that a part
   always fits one knowledge record.
-
-Observer bindings cannot change in a run, and report lines are numbered by a
-binding's place among them: an action that changed observer bindings would
-have to keep every binding's place or publish every report whole again.
 
 Two costs grow with what a run has published, and both are the engine's.
 Finding the record a part supersedes reads the holder's whole ledger, twice

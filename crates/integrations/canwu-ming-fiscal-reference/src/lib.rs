@@ -25,11 +25,14 @@ use canwu_api::{
     SimulationGranularity,
 };
 use canwu_fiscal::{
-    FiscalAction, FiscalActionRequest, FiscalAdoptionState, FiscalAuthorityBinding,
-    FiscalContentSelection, FiscalExecutionKind, FiscalExternalOperationRef, FiscalObserverBinding,
-    FiscalPaymentForm, FiscalReceiptDisposition, FiscalScopeBinding, FiscalState,
-    compute_aggregates, compute_transition_candidates, enqueue_execution_receipt,
-    fiscal_action_command, fiscal_catalog_reference, fiscal_state_reference, recompute_derived,
+    FiscalAction, FiscalActionDisposition, FiscalActionRequest, FiscalAdoptionState,
+    FiscalArchiveError, FiscalArchiveStore, FiscalAuthorityBinding, FiscalContentSelection,
+    FiscalExecutionKind, FiscalExternalOperationRef, FiscalObserverBinding, FiscalOutcomeRing,
+    FiscalPaymentForm, FiscalReceiptDisposition, FiscalScopeBinding, FiscalSettledAction,
+    FiscalState, MAX_FISCAL_ARCHIVE_COMMIT_RECORDS, compute_aggregates,
+    compute_transition_candidates, enqueue_execution_receipt, enqueue_fiscal_archive,
+    finalize_fiscal_archive_retention, fiscal_action_command, fiscal_catalog_reference,
+    fiscal_state_reference, recompute_derived,
 };
 use canwu_ming_fiscal::{MingFiscalFixture, compile_ming_fiscal, ming_fiscal_fixture};
 use canwu_reference_world::{ReferenceWorldIds, ReferenceWorldPlugin, demo_scenario};
@@ -98,10 +101,8 @@ pub fn ming_fiscal_reference_scenario(
         })?;
         let jurisdiction_id = jurisdiction_from_scope(&adoption.scope_id)?;
         let institution = institution_for_scope(&adoption.scope_id, &institutions)?;
-        state
-            .scope_bindings
-            .entry(adoption.scope_id.clone())
-            .or_insert(FiscalScopeBinding {
+        if state.ledger(&adoption.scope_id).is_none() {
+            state.add_scope(FiscalScopeBinding {
                 id: adoption.scope_id.clone(),
                 institution,
                 jurisdiction_id,
@@ -109,31 +110,33 @@ pub fn ming_fiscal_reference_scenario(
                 mechanism: rule.mechanism,
                 authoritative_granularity: SimulationGranularity::Aggregate,
             });
-        state.adoptions.insert(
-            adoption.adoption_id.clone(),
-            FiscalAdoptionState {
-                id: adoption.adoption_id.clone(),
-                rule_id: adoption.rule_id.clone(),
-                scope_binding_id: adoption.scope_id.clone(),
-                stage: adoption.stage,
-                generation: 1,
-                changed_at: SimTime::EPOCH,
-                source_action_id: None,
-            },
-        );
+        }
+        state.add_adoption(FiscalAdoptionState {
+            id: adoption.adoption_id.clone(),
+            rule_id: adoption.rule_id.clone(),
+            scope_binding_id: adoption.scope_id.clone(),
+            stage: adoption.stage,
+            generation: 1,
+            changed_at: SimTime::EPOCH,
+            source_action_id: None,
+        })?;
     }
     state.observer_bindings.insert(
         "observer.revenue-minister".to_owned(),
         FiscalObserverBinding {
             id: "observer.revenue-minister".to_owned(),
-            actor: world_ids.observer,
+            actor: Some(world_ids.observer),
             knowledge_holder: canwu_api::KnowledgeHolderRef::Person(world_ids.observer),
             visible_institutions: state
-                .scope_bindings
-                .values()
+                .scope_bindings()
                 .map(|scope| scope.institution.clone())
                 .collect(),
             confidence_per_mille: 850,
+            line_slot: 0,
+            controlled_by: None,
+            rebound_by: None,
+            removed: None,
+            outcomes: FiscalOutcomeRing::default(),
         },
     );
     recompute_derived(&mut state, &catalog, SimTime::EPOCH)?;
@@ -296,10 +299,16 @@ pub fn validate_ming_fiscal_reference(canwu: &Canwu) -> Result<(), CanwuError> {
             "Ming fiscal transition candidates do not match authoritative procedure state",
         ));
     }
-    for receipt in state.execution_receipts.values() {
-        validate_reference_receipt(canwu, &state, receipt)?;
+    for (_, book) in state.books() {
+        for receipt in book.execution_receipts.values() {
+            let request = book
+                .execution_requests
+                .get(&receipt.request_id)
+                .ok_or_else(|| invalid_reference("Ming fiscal receipt lost its request"))?;
+            validate_reference_receipt(canwu, request, receipt)?;
+        }
     }
-    for assessment in state.assessments.values() {
+    for assessment in state.assessments() {
         if let Some(quote) = &assessment.commutation_quote
             && canwu.domain_record_version(quote).is_none()
         {
@@ -308,7 +317,7 @@ pub fn validate_ming_fiscal_reference(canwu: &Canwu) -> Result<(), CanwuError> {
             ));
         }
     }
-    for audit in state.audits.values() {
+    for audit in state.audits() {
         if audit
             .evidence
             .iter()
@@ -342,7 +351,7 @@ where
         assessment_id,
         rule_id,
         scope_id,
-        period_id,
+        accounting_cycle_id,
         payment_form,
     } = plan;
     submit_reference_action_with_trace(
@@ -355,8 +364,8 @@ where
             action: FiscalAction::OpenAssessment {
                 assessment_id: assessment_id.clone(),
                 rule_id,
-                scope_binding_id: scope_id,
-                accounting_cycle_id: format!("{period_id}.{id_prefix}"),
+                scope_binding_id: scope_id.clone(),
+                accounting_cycle_id,
                 quantity: 100,
                 unit: sample_unit(payment_form).to_owned(),
                 payment_form,
@@ -377,6 +386,7 @@ where
             expected_procedure_revision: fiscal_state_version(canwu)?,
             action: FiscalAction::AuthorizeExecution {
                 request_id: request_id.clone(),
+                scope_binding_id: scope_id.clone(),
                 assessment_id,
                 kind: FiscalExecutionKind::Collect,
                 quantity: 70,
@@ -394,13 +404,68 @@ where
     settle_sample_execution_with_trace(
         canwu,
         id_prefix,
-        request_id,
+        (scope_id, request_id),
         actor,
         institution,
         payment_form,
         &mut on_boundary,
     )?;
     validate_ming_fiscal_reference(canwu)
+}
+
+/// Closes the accounting cycle book of the sample cycle `id_prefix`, so that
+/// an archive commit can take it out of the fiscal state.
+pub fn close_ming_fiscal_sample_cycle(
+    canwu: &mut Canwu,
+    id_prefix: &str,
+) -> Result<(), CanwuError> {
+    let plan = sample_cycle_plan(canwu, id_prefix)?;
+    submit_reference_action_with_trace(
+        canwu,
+        plan.actor,
+        &FiscalActionRequest {
+            action_id: format!("{id_prefix}.close.action"),
+            authority_binding_id: plan.authority_id,
+            expected_procedure_revision: fiscal_state_version(canwu)?,
+            action: FiscalAction::CloseAccountingCycle {
+                scope_binding_id: plan.scope_id,
+                accounting_cycle_id: plan.accounting_cycle_id,
+            },
+        },
+        MingFiscalTracePhase::CanonicalBoundary,
+        &mut |_canwu, _phase, _receipt| Ok(()),
+    )
+}
+
+/// Archives every closed book the fiscal state holds into `store`, in
+/// commits of up to [`MAX_FISCAL_ARCHIVE_COMMIT_RECORDS`] records: each is
+/// prepared, stored, verified, queued, settled, and its retention finalized
+/// and acknowledged. Returns how many books left the state.
+pub fn archive_ming_fiscal_books(
+    canwu: &mut Canwu,
+    store: &dyn FiscalArchiveStore,
+) -> Result<u64, FiscalArchiveError> {
+    let before = fiscal_state(canwu)?.archive.archived_book_count;
+    loop {
+        let state = fiscal_state(canwu)?;
+        if !state.books().any(|(_, book)| !book.is_open()) {
+            break;
+        }
+        let prepared =
+            state.prepare_fiscal_archive(MAX_FISCAL_ARCHIVE_COMMIT_RECORDS, store, None)?;
+        let receipt = enqueue_fiscal_archive(canwu, &prepared, store, None)?;
+        canwu.advance_canonical(SimDuration::minutes(1))?;
+        finalize_fiscal_archive_retention(canwu, store, &receipt)?;
+        canwu.advance_canonical(SimDuration::minutes(1))?;
+    }
+    Ok(fiscal_state(canwu)?.archive.archived_book_count - before)
+}
+
+fn fiscal_state(canwu: &Canwu) -> Result<FiscalState, CanwuError> {
+    canwu
+        .typed_domain_record(&fiscal_state_reference())
+        .ok_or_else(|| invalid_reference("Ming fiscal state is unavailable"))?
+        .decode_payload::<canwu_fiscal::FiscalStateRecord>()
 }
 
 struct SampleCyclePlan {
@@ -410,7 +475,7 @@ struct SampleCyclePlan {
     assessment_id: String,
     rule_id: String,
     scope_id: String,
-    period_id: String,
+    accounting_cycle_id: String,
     payment_form: FiscalPaymentForm,
 }
 
@@ -424,8 +489,7 @@ fn sample_cycle_plan(canwu: &Canwu, id_prefix: &str) -> Result<SampleCyclePlan, 
         .ok_or_else(|| invalid_reference("Ming fiscal state is unavailable"))?
         .decode_payload::<canwu_fiscal::FiscalStateRecord>()?;
     let (adoption, scope, authority) = initial_state
-        .adoptions
-        .values()
+        .adoptions()
         .filter(|adoption| {
             adoption.stage.is_operational()
                 && catalog.rules.get(&adoption.rule_id).is_some_and(|rule| {
@@ -434,9 +498,7 @@ fn sample_cycle_plan(canwu: &Canwu, id_prefix: &str) -> Result<SampleCyclePlan, 
                 })
         })
         .find_map(|adoption| {
-            let scope = initial_state
-                .scope_bindings
-                .get(&adoption.scope_binding_id)?;
+            let scope = initial_state.scope_binding(&adoption.scope_binding_id)?;
             let authority = initial_state
                 .authority_bindings
                 .values()
@@ -468,7 +530,7 @@ fn sample_cycle_plan(canwu: &Canwu, id_prefix: &str) -> Result<SampleCyclePlan, 
         assessment_id: format!("{id_prefix}.assessment"),
         rule_id: adoption.rule_id,
         scope_id: scope.id,
-        period_id: period,
+        accounting_cycle_id: format!("{period}.{id_prefix}"),
         payment_form,
     })
 }
@@ -476,7 +538,7 @@ fn sample_cycle_plan(canwu: &Canwu, id_prefix: &str) -> Result<SampleCyclePlan, 
 fn settle_sample_execution_with_trace<F>(
     canwu: &mut Canwu,
     id_prefix: &str,
-    request_id: String,
+    (scope_id, request_id): (String, String),
     actor: PersonId,
     institution: EntityRef,
     payment_form: FiscalPaymentForm,
@@ -487,6 +549,7 @@ where
 {
     let evidence = ReferenceFiscalExecutionEvidence {
         id: format!("{id_prefix}.execution-evidence"),
+        scope_binding_id: scope_id.clone(),
         request_id: request_id.clone(),
         quantity: 70,
         unit: sample_unit(payment_form).to_owned(),
@@ -515,6 +578,7 @@ where
         now,
         &canwu_fiscal::FiscalExecutionReceiptPacket {
             receipt_id: format!("{id_prefix}.receipt"),
+            scope_binding_id: scope_id,
             request_id,
             external_evidence: [evidence_version].into_iter().collect(),
         },
@@ -556,15 +620,12 @@ where
     )?;
     let receipts = canwu.advance_canonical(SimDuration::minutes(1))?;
     notify_trace(on_boundary, canwu, phase, &receipts)?;
-    let state = canwu
-        .typed_domain_record(&fiscal_state_reference())
-        .ok_or_else(|| invalid_reference("Ming fiscal state is unavailable"))?
-        .decode_payload::<canwu_fiscal::FiscalStateRecord>()?;
-    let outcome = state
-        .action_outcomes
-        .get(&request.action_id)
+    let outcome = FiscalSettledAction::from_events(canwu.events())
+        .into_iter()
+        .rev()
+        .find(|settled| settled.action_id == request.action_id)
         .ok_or_else(|| invalid_reference("sample fiscal action produced no durable outcome"))?;
-    if outcome.disposition != canwu_fiscal::FiscalActionDisposition::Applied {
+    if outcome.disposition != FiscalActionDisposition::Applied {
         return Err(invalid_reference(format!(
             "sample fiscal action {} was rejected: {}",
             request.action_id, outcome.reason
@@ -610,10 +671,9 @@ const fn sample_unit(payment_form: FiscalPaymentForm) -> &'static str {
 
 fn validate_reference_receipt(
     canwu: &Canwu,
-    state: &FiscalState,
+    request: &canwu_fiscal::FiscalExecutionRequest,
     receipt: &canwu_fiscal::FiscalExecutionReceipt,
 ) -> Result<(), CanwuError> {
-    let request = &state.execution_requests[&receipt.request_id];
     let mut evidenced_quantity = 0_u64;
     let mut external_operations = BTreeSet::new();
     for version in &receipt.external_evidence {

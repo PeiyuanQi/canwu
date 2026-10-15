@@ -44,19 +44,29 @@ ledgers.
 每个 fixture 选择一个有界年份切片；长期战役可以在已编译范围内推进显式历史语境，但资源与
 物流账本的存档、归档或分片仍由上层应用负责。
 
-Runtime fiscal state is bounded to 4,096 assessments, 8,192 execution requests,
-8,192 receipts, 32 evidence versions per receipt, 16,384 action outcomes, and a
-32 MiB serialized-state budget. These are lifetime caps, and one boundary
-applies at most 64 fiscal actions. Aggregate rebuilds use single-pass indexes. For campaigns beyond these
-experimental limits, the host must create separate simulation runs or shards;
-the fiscal extension has no in-place partition or archive API, and the host is
-responsible for cross-shard operation-ID deduplication.
+The runtime fiscal state keeps its books per scope and accounting cycle. A
+host closes a cycle's books with `CloseAccountingCycle` and archives closed
+books into a fiscal archive store it owns (`prepare_fiscal_archive`,
+`enqueue_fiscal_archive`, `finalize_fiscal_archive_retention`); the reference
+integration does both with `close_ming_fiscal_sample_cycle` and
+`archive_ming_fiscal_books`. The hot state holds at most 4,096 assessments,
+8,192 execution requests, 8,192 receipts, and 64 books per scope, with 32
+evidence versions per receipt, under a 32 MiB serialized-state budget, and one
+boundary applies at most 64 fiscal actions. Archiving frees that room, so none
+of these is a lifetime cap. Aggregate rebuilds use single-pass indexes over the
+hot books. Across scopes, and after a book is archived, unique external
+operation IDs are the evidence domain's guarantee.
 
-运行时财政状态最多分别容纳 4,096 条核算、8,192 条执行请求、8,192 张凭证和
-16,384 条行动结果；每张凭证最多引用 32 个证据版本，序列化状态上限为 32 MiB。
-这些都是整个运行期内的总量上限；一个边界最多应用 64 个财政行动。聚合重建使用
-单遍索引。超过这些实验性边界时，上层应用必须拆成独立模拟运行或分片；财政扩展
-没有原地分区或归档 API，跨分片外部操作 ID 去重也由上层应用负责。
+运行时财政状态按范围和核算周期保存账册。上层应用用 `CloseAccountingCycle`
+结清某一周期的账册，再把已结清的账册归档到自己持有的财政归档存储中
+（`prepare_fiscal_archive`、`enqueue_fiscal_archive`、
+`finalize_fiscal_archive_retention`）；参考整合用
+`close_ming_fiscal_sample_cycle` 和 `archive_ming_fiscal_books` 完成这两步。
+常驻状态最多容纳 4,096 条核算、8,192 条执行请求、8,192 张凭证，每个范围最多
+64 本账册，每张凭证最多引用 32 个证据版本，序列化状态上限为 32 MiB；一个边界
+最多应用 64 个财政行动。归档会释放这些容量，因此它们都不是整个运行期内的总量
+上限。聚合重建对常驻账册使用单遍索引。跨范围以及账册归档之后，外部操作 ID 的
+唯一性由证据所属领域保证。
 
 The pack divides the chronology into eight playable periods:
 
@@ -115,18 +125,22 @@ and calls `enqueue_execution_receipt`. At that live settlement boundary,
 admission decodes every exact typed result version and matches its request,
 execution kind, payment form, resource, source, target, and unit. The persisted
 quantity and disposition are derived from those results rather than declared by
-the caller. Within one fiscal runtime state, neither one exact adapter-result
-version nor one `(evidence kind, external_operation_id)` pair can settle two
-receipts. The four dispositions are fulfilled, partial, rejected, and excused.
+the caller. An exact adapter-result version names the scope and request it
+settles, so it settles at most one receipt; within one scope's hot books, one
+`(evidence kind, external_operation_id)` pair cannot settle two receipts
+either. A receipt that does not validate is refused with an event that names
+its reason, and does not stop the boundary. The four dispositions are
+fulfilled, partial, rejected, and excused.
 
 核算记录“应当发生什么”，执行授权记录机构可以征收、汇解、支出、储备或退还
 什么；二者都不会直接改变资源余额。上层应用在资源、市场、生产或物流领域执行
 真实操作，发布类型化适配结果，再调用 `enqueue_execution_receipt`。在运行时结算
 边界，接纳过程会解码每个精确类型化结果版本，并逐项核对请求、执行类型、支付
 形态、资源、来源、目标和单位；持久化凭证的数量与处置结果从证据派生，不由调用
-方自行声明。在单个财政运行时状态内，同一精确适配结果版本或同一
-`（证据种类，外部操作 ID）` 组合都不能结算两张凭证。处置结果可以是完成、
-部分完成、拒绝或豁免。
+方自行声明。精确适配结果版本写明它结算的范围和请求，因此最多结算一张凭证；
+在同一范围的常驻账册内，同一 `（证据种类，外部操作 ID）` 组合也不能结算两张
+凭证。未通过校验的凭证会以写明原因的事件被拒绝，不会中断边界。处置结果可以是
+完成、部分完成、拒绝或豁免。
 
 A `FiscalAuthorityBinding` may name an acting actor next to its
 standing `authorized_actor`, together with an exact `authority_basis` record

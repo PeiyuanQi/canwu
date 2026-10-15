@@ -12,22 +12,24 @@
 //! `*_ms`.
 
 use canwu_api::{
-    BoundaryRequest, Canwu, CanwuError, CommandEnvelope, CommandId, CommandRequest,
+    BoundaryRequest, Canwu, CanwuError, CommandEnvelope, CommandRequest,
     CommandRequestId, EntityRef, Government, GovernmentId, IngressClass, Issuer,
     KnowledgeHolderRef, KnowledgeSnapshot, MapPoint, OrganizationId, PayloadSchema, Person,
     PersonId, PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar, ResourceId, Scenario,
     SimTime, SimulationGranularity, SimulationPlugin, Territory, TerritoryId, WorldSnapshot,
 };
 use canwu_fiscal::{
-    CompiledFiscalCatalog, FiscalAction, FiscalActionDisposition, FiscalActionOutcome,
+    CompiledFiscalCatalog, FISCAL_RECENT_OUTCOMES, FiscalAction, FiscalActionDisposition,
     FiscalActionRequest, FiscalAdoptionStage, FiscalAdoptionState, FiscalAssessment,
     FiscalAssessmentBasis, FiscalAuthorityBinding, FiscalCommutationPolicy, FiscalContentPack,
     FiscalContentSelection, FiscalCoverageDeclaration, FiscalCoverageSelector,
     FiscalCoverageStatus, FiscalExecutionKind, FiscalExecutionRequest, FiscalHistoricalMode,
-    FiscalMechanism, FiscalObserverBinding, FiscalPackManifest, FiscalPaymentForm,
-    FiscalPeriodDefinition, FiscalPlugin, FiscalProvenance, FiscalRegionDefinition,
-    FiscalRuleDefinition, FiscalScopeBinding, FiscalState, FiscalStateRecord, HistoricalConfidence,
-    HistoricalYearWindow, compile_fiscal_content, compute_aggregates,
+    FiscalMechanism, FiscalObserverBinding, FiscalOutcomeRing, FiscalPackManifest,
+    FiscalPaymentForm, FiscalPeriodDefinition, FiscalPlugin, FiscalProvenance,
+    FiscalRecentOutcome, FiscalRegionDefinition, FiscalRuleDefinition, FiscalScopeBinding,
+    FiscalSettledAction, FiscalState, FiscalStateRecord, HistoricalConfidence,
+    HistoricalYearWindow, MAX_FISCAL_HOT_BOOKS_PER_LEDGER, compile_fiscal_content,
+    compute_aggregates,
     compute_transition_candidates, fiscal_action_command, fiscal_state_reference,
     recompute_derived,
 };
@@ -233,9 +235,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             admission_ms.push(admit);
             settlement_ms.push(settle);
         }
-        applied = fiscal_state(&run)?
-            .action_outcomes
-            .values()
+        applied = FiscalSettledAction::from_events(run.events())
+            .iter()
             .filter(|outcome| {
                 outcome.action_id.starts_with(BATCH_ACTION_PREFIX)
                     && outcome.disposition == FiscalActionDisposition::Applied
@@ -515,49 +516,41 @@ fn fiscal_history(
             "authorized_actor": principal(institution)?,
         }))?;
         state.authority_bindings.insert(binding.id.clone(), binding);
-        state.scope_bindings.insert(
-            scope_id(institution),
-            FiscalScopeBinding {
-                id: scope_id(institution),
-                institution: entity.clone(),
-                jurisdiction_id: "region.a".to_owned(),
-                subject_scope: "registered_land".to_owned(),
-                mechanism: FiscalMechanism::LandTax,
-                authoritative_granularity: SimulationGranularity::Aggregate,
-            },
-        );
+        state.add_scope(FiscalScopeBinding {
+            id: scope_id(institution),
+            institution: entity.clone(),
+            jurisdiction_id: "region.a".to_owned(),
+            subject_scope: "registered_land".to_owned(),
+            mechanism: FiscalMechanism::LandTax,
+            authoritative_granularity: SimulationGranularity::Aggregate,
+        });
         let adoption_id = format!("adopt.{institution}");
-        state.adoptions.insert(
-            adoption_id.clone(),
-            FiscalAdoptionState {
-                id: adoption_id,
-                rule_id: "rule.land".to_owned(),
-                scope_binding_id: scope_id(institution),
-                stage: FiscalAdoptionStage::Implemented,
-                generation: 1,
-                changed_at: SimTime::EPOCH,
-                source_action_id: None,
-            },
-        );
+        state.add_adoption(FiscalAdoptionState {
+            id: adoption_id,
+            rule_id: "rule.land".to_owned(),
+            scope_binding_id: scope_id(institution),
+            stage: FiscalAdoptionStage::Implemented,
+            generation: 1,
+            changed_at: SimTime::EPOCH,
+            source_action_id: None,
+        })?;
         for cycle in 0..options.cycles {
             let assessment_id = format!("assess.{institution}.{cycle}");
             let request_id = format!("request.{institution}.{cycle}");
-            state.assessments.insert(
-                assessment_id.clone(),
-                FiscalAssessment {
-                    id: assessment_id.clone(),
-                    rule_id: "rule.land".to_owned(),
-                    scope_binding_id: scope_id(institution),
-                    accounting_cycle_id: format!("cycle.{cycle}"),
-                    quantity: 1_000,
-                    unit: "grain".to_owned(),
-                    payment_form: FiscalPaymentForm::Grain,
-                    commutation_quote: None,
-                    created_at: SimTime::EPOCH,
-                },
-            );
-            state.execution_requests.insert(
-                request_id.clone(),
+            state.add_assessment(FiscalAssessment {
+                id: assessment_id.clone(),
+                rule_id: "rule.land".to_owned(),
+                scope_binding_id: scope_id(institution),
+                accounting_cycle_id: format!("cycle.{cycle:03}"),
+                quantity: 1_000,
+                unit: "grain".to_owned(),
+                payment_form: FiscalPaymentForm::Grain,
+                commutation_quote: None,
+                created_at: SimTime::EPOCH,
+                source_action_id: None,
+            })?;
+            state.add_execution_request(
+                &scope_id(institution),
                 FiscalExecutionRequest {
                     id: request_id.clone(),
                     assessment_id: assessment_id.clone(),
@@ -571,24 +564,24 @@ fn fiscal_history(
                     target: entity.clone(),
                     purpose: "Profile collection".to_owned(),
                     requested_at: SimTime::EPOCH,
+                    source_action_id: None,
                 },
-            );
-            for action_id in [
-                format!("history.{assessment_id}"),
-                format!("history.{request_id}"),
-            ] {
-                state.action_outcomes.insert(
-                    action_id.clone(),
-                    FiscalActionOutcome {
-                        action_id,
-                        disposition: FiscalActionDisposition::Applied,
-                        reason: "applied".to_owned(),
-                        command: CommandId::new(1),
-                        settled_at: SimTime::EPOCH,
-                    },
-                );
-            }
+            )?;
         }
+    }
+    // A lived-in state: every scope's ring of recent outcomes is full.
+    let outcomes = u64::try_from(FISCAL_RECENT_OUTCOMES)?;
+    state.procedure_revision = outcomes + 1;
+    for ledger in state.ledgers.values_mut() {
+        let mut ring = FiscalOutcomeRing::default();
+        for revision in 1..=outcomes {
+            ring.recent.push(FiscalRecentOutcome {
+                action_id: format!("history.{revision}"),
+                disposition: FiscalActionDisposition::Applied,
+                settled_revision: revision,
+            });
+        }
+        ledger.outcomes = ring;
     }
     // Each observer sees its own run of institutions. Two of them keep its
     // report inside one knowledge record, which is all 0.14.0 could publish.
@@ -600,12 +593,17 @@ fn fiscal_history(
             id.clone(),
             FiscalObserverBinding {
                 id,
-                actor,
+                actor: Some(actor),
                 knowledge_holder: KnowledgeHolderRef::Person(actor),
                 visible_institutions: (first..first + options.observed_institutions)
                     .map(institution_entity)
                     .collect::<Result<_, _>>()?,
                 confidence_per_mille: 850,
+                line_slot: u16::try_from(observer)?,
+                controlled_by: None,
+                rebound_by: None,
+                removed: None,
+                outcomes: FiscalOutcomeRing::default(),
             },
         );
     }
@@ -761,6 +759,7 @@ fn options() -> Result<Options, Box<dyn Error>> {
     }
     if options.institutions < 2
         || options.cycles == 0
+        || options.cycles >= MAX_FISCAL_HOT_BOOKS_PER_LEDGER
         || options.samples == 0
         || options.batch == 0
         || options.batch >= options.institutions

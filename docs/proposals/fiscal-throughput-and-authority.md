@@ -21,6 +21,15 @@ scenario-declared appointment policy, so `RebindAudit` keeps the behaviour
 described below only where that policy makes the audited institution its own
 appointer.
 
+0.16.0 also removes every lifetime cap below, as
+[world-scale fiscal state](world-scale-fiscal.md) describes (Phase 1): the
+state's books are kept per scope and accounting cycle, closed, and archived;
+action outcomes are a ring of 8 per action target with a floor, so no outcome
+slot runs out and admission refuses a re-sent action from the ring and the
+floor; every receipt refusal has a stable reason; and observer bindings can be
+re-pointed and removed, their report lines named from a slot of their own. The
+*Outcome capacity* and *Lifetime caps* paragraphs below describe 0.15.0.
+
 The release entry is in [Versioning and Persistence](../versioning.md). The
 other 0.15.0 proposals are
 [society settlement cadence and runtime revision](society-cadence-and-runtime-revision.md),

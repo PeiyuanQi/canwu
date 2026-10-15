@@ -20,9 +20,10 @@ use canwu_api::{CanwuError, DomainRecordVersionRef, EntityRef, ErrorCode, SimTim
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Whether an action changes who holds a binding, or takes part in deciding
-/// that: the rebinds and the appointment actions. Only the principal and
-/// institution roles issue them, and a person a policy lists issues a
-/// nomination or petition; an acting actor never does.
+/// that: the rebinds, the appointment actions, and re-pointing or removing an
+/// observer binding. Only the principal and institution roles issue them,
+/// and a person a policy lists issues a nomination or petition; an acting
+/// actor never does.
 pub(crate) fn is_appointment_action(action: &FiscalAction) -> bool {
     matches!(
         action,
@@ -31,6 +32,8 @@ pub(crate) fn is_appointment_action(action: &FiscalAction) -> bool {
             | FiscalAction::NominateAuditor { .. }
             | FiscalAction::PetitionAuditorRemoval { .. }
             | FiscalAction::DecideAuditAppointment { .. }
+            | FiscalAction::RebindObserver { .. }
+            | FiscalAction::RemoveObserver { .. }
     )
 }
 
@@ -641,7 +644,7 @@ fn require_binding_slot(
     Ok(())
 }
 
-fn audit_binding<'a>(
+pub(crate) fn audit_binding<'a>(
     state: &'a FiscalState,
     audit_binding_id: &str,
 ) -> Result<&'a FiscalAuditBinding, CanwuError> {
@@ -653,7 +656,7 @@ fn audit_binding<'a>(
 
 /// The institution whose auditors a decision concerns: the cited proposal's,
 /// the one an appointment names, or the decided binding's.
-fn decided_institution<'a>(
+pub(crate) fn decided_institution<'a>(
     state: &'a FiscalState,
     audit_binding_id: &str,
     decision: &'a FiscalAppointmentDecision,

@@ -142,6 +142,7 @@ fn only_the_command_that_produced_an_action_packet_can_settle_it() {
                 .against(revision + 1),
             "command": command,
             "issuer": issuer,
+            "target": {"type": "ledger", "id": treasury_scope(1)},
         })
     };
     let error = canwu
@@ -174,12 +175,14 @@ fn only_the_command_that_produced_an_action_packet_can_settle_it() {
         CommandAttemptOutcome::Rejected { error } => panic!("the command was refused: {error}"),
     };
 
-    // In the boundary that settles it, another command is admitted, decided
-    // against the revision that settlement leaves, and another plugin's
-    // boundary system schedules two packets into the action ingress: one that
-    // names the admitted command with an action and an issuer of its own, and
-    // one that is not an action packet at all. All three settle together in
-    // the next boundary.
+    // After it settles, another command is admitted, decided against the
+    // revision that settlement left, and another plugin's boundary system
+    // schedules two packets into the action ingress: one that names the
+    // first command with an action and an issuer of its own, and one that is
+    // not an action packet at all. All three settle together in the next
+    // boundary.
+    canwu.step_canonical().expect("the settling boundary");
+    assert_eq!(procedure_revision(&canwu), revision + 1);
     enqueue_requests(
         &mut canwu,
         &[(
@@ -213,8 +216,8 @@ fn only_the_command_that_produced_an_action_packet_can_settle_it() {
     assert!(outcome(&canwu, "forged.boundary").is_none());
     assert!(
         !fiscal_state(&canwu)
-            .assessments
-            .contains_key("forged.boundary.assessment")
+            .assessments()
+            .any(|assessment| assessment.id == "forged.boundary.assessment")
     );
     let rejections = rejections(&canwu);
     assert_eq!(rejections.len(), 2, "{rejections:?}");

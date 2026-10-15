@@ -353,9 +353,16 @@ what one 0.14.0 report record could hold; `--observers 1
 batch. The report also gives the records and payload bytes of one observer's
 report as first published, and of what the settling boundary publishes.
 
-The source uses only API that `canwu-fiscal` 0.14.0 also has, so the same file
-builds against both releases. 0.14.0 cannot run the wide-observer case: the
-boundary that publishes its first report fails. Every recorded run is kept:
+Up to the 0.16.0 fiscal-limits change the source used only API that
+`canwu-fiscal` 0.14.0 also has, so the same file built against every release
+the runs below compare. The world-scale fiscal change of 0.16.0 (see
+[`docs/proposals/world-scale-fiscal.md`](../docs/proposals/world-scale-fiscal.md))
+gives the state its per-scope books, outcome rings, and observer line slots,
+and the source now installs that shape, so it no longer builds against 0.15.0
+or earlier: compare with an earlier release from an export of that release's
+own copy of the binary. Each scope's settled history is its hot books, at most
+64 cycles. 0.14.0 cannot run the wide-observer case: the boundary that
+publishes its first report fails. Every recorded run is kept:
 
 | Run | 0.14.0 | 0.15.0 | 0.15.0, one observer of 48 institutions |
 | --- | --- | --- | --- |

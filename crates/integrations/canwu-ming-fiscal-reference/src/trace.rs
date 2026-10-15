@@ -3,8 +3,8 @@
 use crate::invalid_reference;
 use canwu_api::{BoundaryReceipt, BoundaryRecord, Canwu, CanwuError, ErrorCode, SimTime};
 use canwu_fiscal::{
-    FiscalHistoricalMode, FiscalProjection, FiscalState, FiscalStateRecord, fiscal_reports,
-    fiscal_state_reference,
+    FiscalHistoricalMode, FiscalProjection, FiscalState, FiscalStateRecord,
+    fiscal_reports_of_holder, fiscal_state_reference,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -44,15 +44,18 @@ impl Display for MingFiscalTracePhase {
     }
 }
 
+/// What the fiscal state holds hot: the objects of its books, the recent
+/// outcomes its action targets keep, and its derived fields.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MingFiscalTraceCounts {
     pub adoptions: usize,
+    pub books: usize,
     pub assessments: usize,
     pub remissions: usize,
     pub execution_requests: usize,
     pub execution_receipts: usize,
     pub audits: usize,
-    pub action_outcomes: usize,
+    pub recent_outcomes: usize,
     pub transition_candidates: usize,
     pub aggregates: usize,
 }
@@ -60,13 +63,30 @@ pub struct MingFiscalTraceCounts {
 impl From<&FiscalState> for MingFiscalTraceCounts {
     fn from(state: &FiscalState) -> Self {
         Self {
-            adoptions: state.adoptions.len(),
-            assessments: state.assessments.len(),
-            remissions: state.remissions.len(),
-            execution_requests: state.execution_requests.len(),
-            execution_receipts: state.execution_receipts.len(),
-            audits: state.audits.len(),
-            action_outcomes: state.action_outcomes.len(),
+            adoptions: state.adoptions().count(),
+            books: state.books().count(),
+            assessments: state.assessments().count(),
+            remissions: state.remissions().count(),
+            execution_requests: state.execution_requests().count(),
+            execution_receipts: state.execution_receipts().count(),
+            audits: state.audits().count(),
+            recent_outcomes: state
+                .ledgers
+                .values()
+                .map(|ledger| ledger.outcomes.recent.len())
+                .chain(
+                    state
+                        .offices
+                        .values()
+                        .map(|office| office.outcomes.recent.len()),
+                )
+                .chain(
+                    state
+                        .observer_bindings
+                        .values()
+                        .map(|observer| observer.outcomes.recent.len()),
+                )
+                .sum(),
             transition_candidates: state.transition_candidates.len(),
             aggregates: state.aggregates.len(),
         }
@@ -302,8 +322,9 @@ fn collect_projections(canwu: &Canwu, state: &FiscalState) -> BTreeMap<String, F
         .observer_bindings
         .iter()
         .filter_map(|(observer_id, binding)| {
-            let viewer = canwu.viewer_for_actor(binding.actor).ok()?;
-            let report = fiscal_reports(&viewer).ok()?.remove(observer_id)?;
+            let report = fiscal_reports_of_holder(canwu, &binding.knowledge_holder)
+                .ok()?
+                .remove(observer_id)?;
             Some((observer_id.clone(), report.projection))
         })
         .collect()

@@ -81,9 +81,8 @@ fn appointment_scenario(configure: impl FnOnce(&mut FiscalState)) -> Scenario {
                 removes_without_petition: false,
             },
         );
-        state.assessments.insert(
-            ASSESSMENT.to_owned(),
-            FiscalAssessment {
+        state
+            .add_assessment(FiscalAssessment {
                 id: ASSESSMENT.to_owned(),
                 rule_id: RULE.to_owned(),
                 scope_binding_id: treasury_scope(0),
@@ -93,8 +92,9 @@ fn appointment_scenario(configure: impl FnOnce(&mut FiscalState)) -> Scenario {
                 payment_form: FiscalPaymentForm::Grain,
                 commutation_quote: None,
                 created_at: SimTime::EPOCH,
-            },
-        );
+                source_action_id: None,
+            })
+            .expect("the authored assessment");
         configure(state);
     });
     scenario.entities.extend([council()]);
@@ -197,6 +197,7 @@ fn audit(action_id: &str) -> Draft {
         AUDIT,
         FiscalAction::RecordAudit {
             audit_id: format!("{action_id}.finding"),
+            scope_binding_id: treasury_scope(0),
             target_id: ASSESSMENT.to_owned(),
             severity: FiscalAuditSeverity::Concern,
             finding: "The assessed quantity was not verified".to_owned(),
@@ -362,7 +363,11 @@ fn the_appointer_appoints_an_auditor_with_and_without_a_nomination() {
 
     // The auditor's finding records who nominated him and who decided.
     submit(&mut canwu, vec![(AUDITOR, audit("audit.first"))]);
-    let finding = fiscal_state(&canwu).audits["audit.first.finding"].clone();
+    let finding = fiscal_state(&canwu)
+        .audits()
+        .find(|finding| finding.id == "audit.first.finding")
+        .cloned()
+        .expect("the first finding");
     assert_eq!(finding.appointed_by, Some(decided));
     assert_eq!(finding.nomination, Some(nominated.clone()));
 
@@ -400,7 +405,10 @@ fn the_appointer_appoints_an_auditor_with_and_without_a_nomination() {
         Some("decide.direct")
     );
     assert_eq!(
-        state.audits["audit.first.finding"].nomination,
+        state
+            .audits()
+            .find(|finding| finding.id == "audit.first.finding")
+            .and_then(|finding| finding.nomination.clone()),
         Some(nominated)
     );
 

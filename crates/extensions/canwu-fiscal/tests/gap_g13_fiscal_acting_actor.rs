@@ -16,13 +16,13 @@ use canwu_api::{
 };
 use canwu_fiscal::{
     FISCAL_ACTING_BASIS_NOT_CURRENT, FiscalAction, FiscalActionDisposition, FiscalActionRequest,
-    FiscalAdoptionStage, FiscalAdoptionState, FiscalAssessmentBasis, FiscalAuthorityBinding,
-    FiscalCommutationPolicy, FiscalContentPack, FiscalContentSelection, FiscalCoverageDeclaration,
-    FiscalCoverageSelector, FiscalCoverageStatus, FiscalHistoricalMode, FiscalMechanism,
-    FiscalPackManifest, FiscalPaymentForm, FiscalPeriodDefinition, FiscalPlugin, FiscalProvenance,
-    FiscalRegionDefinition, FiscalRuleDefinition, FiscalScopeBinding, FiscalState,
-    FiscalStateRecord, HistoricalConfidence, HistoricalYearWindow, compile_fiscal_content,
-    fiscal_action_command, fiscal_state_reference,
+    FiscalActionTarget, FiscalAdoptionStage, FiscalAdoptionState, FiscalAssessmentBasis,
+    FiscalAuthorityBinding, FiscalCommutationPolicy, FiscalContentPack, FiscalContentSelection,
+    FiscalCoverageDeclaration, FiscalCoverageSelector, FiscalCoverageStatus, FiscalHistoricalMode,
+    FiscalMechanism, FiscalPackManifest, FiscalPaymentForm, FiscalPeriodDefinition, FiscalPlugin,
+    FiscalProvenance, FiscalRegionDefinition, FiscalRuleDefinition, FiscalScopeBinding,
+    FiscalSettledAction, FiscalState, FiscalStateRecord, HistoricalConfidence,
+    HistoricalYearWindow, compile_fiscal_content, fiscal_action_command, fiscal_state_reference,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -257,20 +257,16 @@ fn scenario() -> Scenario {
             rebound_by: None,
         },
     );
-    state.scope_bindings.insert(
-        "scope.a".to_owned(),
-        FiscalScopeBinding {
-            id: "scope.a".to_owned(),
-            institution,
-            jurisdiction_id: "region.a".to_owned(),
-            subject_scope: "registered_land".to_owned(),
-            mechanism: FiscalMechanism::LandTax,
-            authoritative_granularity: SimulationGranularity::Aggregate,
-        },
-    );
-    state.adoptions.insert(
-        "adopt.a".to_owned(),
-        FiscalAdoptionState {
+    state.add_scope(FiscalScopeBinding {
+        id: "scope.a".to_owned(),
+        institution,
+        jurisdiction_id: "region.a".to_owned(),
+        subject_scope: "registered_land".to_owned(),
+        mechanism: FiscalMechanism::LandTax,
+        authoritative_granularity: SimulationGranularity::Aggregate,
+    });
+    state
+        .add_adoption(FiscalAdoptionState {
             id: "adopt.a".to_owned(),
             rule_id: "rule.land".to_owned(),
             scope_binding_id: "scope.a".to_owned(),
@@ -278,8 +274,8 @@ fn scenario() -> Scenario {
             generation: 1,
             changed_at: SimTime::EPOCH,
             source_action_id: None,
-        },
-    );
+        })
+        .expect("adoption of the scope");
     let grant = DomainRecordDraft::from_typed(
         grant_reference(),
         &ActingGrantPayload {
@@ -354,11 +350,21 @@ fn submit_assessment(canwu: &mut Canwu, issuer: PersonId, action_id: &str, cycle
         .expect("fiscal command boundary");
 }
 
+/// The outcome of one action, as its settled event records it.
+fn outcome(canwu: &Canwu, action_id: &str) -> Option<FiscalSettledAction> {
+    FiscalSettledAction::from_events(canwu.events())
+        .into_iter()
+        .find(|settled| settled.action_id == action_id)
+}
+
 fn applied(canwu: &Canwu, action_id: &str) -> bool {
-    fiscal_state(canwu)
-        .action_outcomes
-        .get(action_id)
+    outcome(canwu, action_id)
         .is_some_and(|outcome| outcome.disposition == FiscalActionDisposition::Applied)
+}
+
+/// The scope every action of this test targets.
+fn scope_target() -> FiscalActionTarget {
+    FiscalActionTarget::Ledger("scope.a".to_owned())
 }
 
 #[test]
@@ -379,12 +385,12 @@ fn gap_g13_fiscal_acting_actor() {
     assert!(
         applied(&canwu, "action.acting.current"),
         "acting actor with a current basis must be admitted: {:?}",
-        fiscal_state(&canwu).action_outcomes
+        outcome(&canwu, "action.acting.current")
     );
     assert!(
         fiscal_state(&canwu)
-            .assessments
-            .contains_key("action.acting.current.assessment")
+            .assessments()
+            .any(|assessment| assessment.id == "action.acting.current.assessment")
     );
 
     // The application renews its grant in the boundary that admits the next
@@ -407,7 +413,7 @@ fn gap_g13_fiscal_acting_actor() {
             .outcome,
         CommandAttemptOutcome::Accepted { .. }
     ));
-    let outcome = fiscal_state(&canwu).action_outcomes["action.acting.renewed"].clone();
+    let outcome = outcome(&canwu, "action.acting.renewed").expect("the renewed outcome");
     assert_eq!(outcome.disposition, FiscalActionDisposition::Rejected);
     assert!(outcome.reason.ends_with(FISCAL_ACTING_BASIS_NOT_CURRENT));
     let current = canwu
@@ -433,9 +439,9 @@ fn gap_g13_fiscal_acting_actor() {
     assert_eq!(error.code, ErrorCode::InvalidAuthority);
     assert_eq!(error.message, FISCAL_ACTING_BASIS_NOT_CURRENT);
     assert!(
-        !fiscal_state(&canwu)
-            .action_outcomes
-            .contains_key("action.acting.stale")
+        fiscal_state(&canwu)
+            .recent_outcome(&scope_target(), "action.acting.stale")
+            .is_none()
     );
 
     // The principal is unaffected by the acting basis.
@@ -578,9 +584,17 @@ fn sealed_run_rejects_a_superseded_commutation_quote_like_its_replay() {
     sealed
         .advance_canonical(SimDuration::minutes(1))
         .expect("the admitted quote action settles");
-    let outcomes = sealed_fiscal_state(&sealed).action_outcomes;
-    assert!(!outcomes.contains_key("action.quote.superseded"));
-    assert!(outcomes.contains_key("action.quote.current"));
+    let state = sealed_fiscal_state(&sealed);
+    assert!(
+        state
+            .recent_outcome(&scope_target(), "action.quote.superseded")
+            .is_none()
+    );
+    assert!(
+        state
+            .recent_outcome(&scope_target(), "action.quote.current")
+            .is_some()
+    );
 
     let replayed = Canwu::replay_from_journal(
         &plugins,

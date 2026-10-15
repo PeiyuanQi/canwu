@@ -5,12 +5,14 @@ use crate::model::{
     FiscalState, FiscalStrategicAggregate, FiscalTransitionCandidate,
     MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY, invalid,
 };
-use canwu_api::{CanwuError, EntityRef, SimTime};
+use canwu_api::{CanwuError, EntityRef, KnowledgeHolderRef, KnowledgeLimitsV1, SimTime};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Brings the transition candidates and the aggregates of `state` up to date.
+/// Brings the office bookkeeping, the transition candidates, and the
+/// aggregates of `state` up to date; an author runs it after adding scopes,
+/// adoptions, and book entries.
 ///
 /// The report plan is not touched: it records what changed between two
 /// derivations of a running state, and only the aggregate system writes it.
@@ -19,6 +21,7 @@ pub fn recompute_derived(
     catalog: &CompiledFiscalCatalog,
     at: SimTime,
 ) -> Result<(), CanwuError> {
+    state.recompute_offices();
     state.transition_candidates = compute_transition_candidates(state, catalog, at);
     state.aggregates = compute_aggregates(state, catalog)?;
     Ok(())
@@ -47,8 +50,7 @@ pub fn compute_transition_candidates(
         }
         for jurisdiction_id in &transition.jurisdiction_ids {
             let scopes: Vec<_> = state
-                .scope_bindings
-                .values()
+                .scope_bindings()
                 .filter(|scope| scope.jurisdiction_id == *jurisdiction_id)
                 .collect();
             if scopes.is_empty()
@@ -61,21 +63,19 @@ pub fn compute_transition_candidates(
                 continue;
             }
             let source_ready = transition.from_rule_ids.is_empty()
-                || state.adoptions.values().any(|adoption| {
+                || state.adoptions().any(|adoption| {
                     state
-                        .scope_bindings
-                        .get(&adoption.scope_binding_id)
+                        .scope_binding(&adoption.scope_binding_id)
                         .is_some_and(|scope| scope.jurisdiction_id == *jurisdiction_id)
                         && transition.from_rule_ids.contains(&adoption.rule_id)
                         && adoption.stage != FiscalAdoptionStage::Repealed
                 });
             let target_active = transition.to_rule_ids.iter().all(|target_rule| {
-                state.adoptions.values().any(|adoption| {
+                state.adoptions().any(|adoption| {
                     adoption.rule_id == *target_rule
                         && adoption.stage.is_operational()
                         && state
-                            .scope_bindings
-                            .get(&adoption.scope_binding_id)
+                            .scope_binding(&adoption.scope_binding_id)
                             .is_some_and(|scope| scope.jurisdiction_id == *jurisdiction_id)
                 })
             });
@@ -85,15 +85,12 @@ pub fn compute_transition_candidates(
                     .get(required)
                     .is_some_and(|prerequisite| {
                         prerequisite.to_rule_ids.iter().all(|target_rule| {
-                            state.adoptions.values().any(|adoption| {
+                            state.adoptions().any(|adoption| {
                                 adoption.rule_id == *target_rule
                                     && adoption.stage.is_operational()
-                                    && state
-                                        .scope_bindings
-                                        .get(&adoption.scope_binding_id)
-                                        .is_some_and(|scope| {
-                                            scope.jurisdiction_id == *jurisdiction_id
-                                        })
+                                    && state.scope_binding(&adoption.scope_binding_id).is_some_and(
+                                        |scope| scope.jurisdiction_id == *jurisdiction_id,
+                                    )
                             })
                         })
                     })
@@ -147,105 +144,48 @@ fn aggregate_key(aggregate: &FiscalStrategicAggregate) -> AggregateKey {
     )
 }
 
-/// Derives the aggregates of `state`, keyed by aggregate ID.
+/// Derives the aggregates of `state`, keyed by aggregate ID: one per
+/// accounting partition of every hot book, holding the book's totals of that
+/// partition.
 ///
 /// An aggregate keeps the ID it has in `state.aggregates`, and a new
-/// aggregate takes the next ID, so an ID names the same aggregate for the
-/// life of a run and the IDs list the aggregates in the order they first
+/// aggregate takes the next ID, so an ID names the same aggregate while its
+/// book is hot and the IDs list the aggregates in the order they first
 /// appeared. Aggregates that appear together are numbered in key order, which
 /// is the order of all of them when `state.aggregates` is empty.
 ///
 /// A state may come with aggregates. If they are numbered from zero without a
 /// gap and each is still an aggregate of the state, they keep their IDs and
 /// the ones that are missing are appended, so a state that comes with all of
-/// its aggregates keeps its numbering. Any other numbering is replaced by one
-/// in key order.
+/// its aggregates keeps its numbering. Any other numbering, such as the one an
+/// archive commit leaves when it takes books out, is replaced by one in key
+/// order.
 pub fn compute_aggregates(
     state: &FiscalState,
-    catalog: &CompiledFiscalCatalog,
+    _catalog: &CompiledFiscalCatalog,
 ) -> Result<BTreeMap<String, FiscalStrategicAggregate>, CanwuError> {
     let mut by_key = BTreeMap::new();
-    let mut assessment_keys = BTreeMap::new();
-    for assessment in state.assessments.values() {
-        let scope = state
-            .scope_bindings
-            .get(&assessment.scope_binding_id)
-            .ok_or_else(|| invalid("aggregate encountered an unknown fiscal scope"))?;
-        let rule = catalog
-            .rules
-            .get(&assessment.rule_id)
-            .ok_or_else(|| invalid("aggregate encountered an unknown fiscal rule"))?;
-        let key = (
-            scope.institution.clone(),
-            rule.mechanism,
-            scope.id.clone(),
-            assessment.accounting_cycle_id.clone(),
-            assessment.unit.clone(),
-            assessment.payment_form,
-        );
-        assessment_keys.insert(assessment.id.as_str(), key.clone());
-        let aggregate = by_key
-            .entry(key)
-            .or_insert_with(|| FiscalStrategicAggregate {
+    for (ledger, book) in state.books() {
+        let scope = &ledger.scope;
+        for total in book.totals(scope.mechanism)? {
+            let aggregate = FiscalStrategicAggregate {
                 institution: scope.institution.clone(),
-                mechanism: rule.mechanism,
+                mechanism: total.mechanism,
                 scope_binding_id: scope.id.clone(),
-                accounting_cycle_id: assessment.accounting_cycle_id.clone(),
-                unit: assessment.unit.clone(),
-                payment_form: assessment.payment_form,
-                assessed: 0,
-                remission_granted: 0,
-                collected: 0,
-                remitted: 0,
-                disbursed: 0,
-                reserved: 0,
-                returned: 0,
-                outstanding: 0,
-            });
-        aggregate.assessed = checked_sum(aggregate.assessed, assessment.quantity)?;
-    }
-    for remission in state.remissions.values() {
-        let key = assessment_keys
-            .get(remission.assessment_id.as_str())
-            .ok_or_else(|| invalid("aggregate remission has no assessment"))?;
-        let aggregate = by_key
-            .get_mut(key)
-            .ok_or_else(|| invalid("aggregate remission partition is unavailable"))?;
-        aggregate.remission_granted = checked_sum(aggregate.remission_granted, remission.quantity)?;
-    }
-    let mut request_keys = BTreeMap::new();
-    for request in state.execution_requests.values() {
-        let key = assessment_keys
-            .get(request.assessment_id.as_str())
-            .ok_or_else(|| invalid("aggregate execution request has no assessment"))?;
-        request_keys.insert(request.id.as_str(), (key.clone(), request.kind));
-    }
-    for receipt in state
-        .execution_receipts
-        .values()
-        .filter(|receipt| receipt.disposition.counts_as_fulfillment())
-    {
-        let (key, kind) = request_keys
-            .get(receipt.request_id.as_str())
-            .ok_or_else(|| invalid("aggregate receipt has no execution request"))?;
-        let aggregate = by_key
-            .get_mut(key)
-            .ok_or_else(|| invalid("aggregate receipt partition is unavailable"))?;
-        let target = match kind {
-            crate::model::FiscalExecutionKind::Collect => &mut aggregate.collected,
-            crate::model::FiscalExecutionKind::Remit => &mut aggregate.remitted,
-            crate::model::FiscalExecutionKind::Disburse => &mut aggregate.disbursed,
-            crate::model::FiscalExecutionKind::Reserve => &mut aggregate.reserved,
-            crate::model::FiscalExecutionKind::Return => &mut aggregate.returned,
-        };
-        *target = checked_sum(*target, receipt.quantity)?;
-    }
-    for aggregate in by_key.values_mut() {
-        aggregate.outstanding = aggregate
-            .assessed
-            .checked_sub(aggregate.remission_granted)
-            .and_then(|value| value.checked_sub(aggregate.collected))
-            .ok_or_else(|| invalid("fiscal aggregate underflowed"))?;
+                accounting_cycle_id: book.accounting_cycle_id.clone(),
+                unit: total.unit,
+                payment_form: total.payment_form,
+                assessed: total.assessed,
+                remission_granted: total.remission_granted,
+                collected: total.collected,
+                remitted: total.remitted,
+                disbursed: total.disbursed,
+                reserved: total.reserved,
+                returned: total.returned,
+                outstanding: total.outstanding,
+            };
+            by_key.insert(aggregate_key(&aggregate), aggregate);
+        }
     }
     Ok(with_stable_ids(&state.aggregates, by_key))
 }
@@ -286,15 +226,17 @@ fn with_stable_ids(
         .collect()
 }
 
-/// What each observer of `state` is told as of `at`, keyed by observer binding
-/// ID. The facts follow the aggregates in ID order and are labelled
-/// `fact.NNNN` by their place among the facts the observer can see, so a
-/// fact keeps its label while later aggregates are added.
+/// What each active observer of `state` is told as of `at`, keyed by
+/// observer binding ID. The facts follow the aggregates in ID order and are
+/// labelled `fact.NNNN` by their place among the facts the observer can see,
+/// so a fact keeps its label while later aggregates are added. A removed
+/// binding is told nothing.
 #[must_use]
 pub fn compute_projections(state: &FiscalState, at: SimTime) -> BTreeMap<String, FiscalProjection> {
     state
         .observer_bindings
         .values()
+        .filter(|observer| observer.is_active())
         .map(|observer| {
             let facts = state
                 .aggregates
@@ -329,9 +271,9 @@ pub fn compute_projections(state: &FiscalState, at: SimTime) -> BTreeMap<String,
 /// One observer's facts in the order reports publish them, without labels.
 ///
 /// That order is aggregate ID order. IDs are given in the order aggregates
-/// first appear and are never given again, so a new aggregate adds a fact at
-/// the end, and the parts cut from this order keep their members while the
-/// last part fills.
+/// first appear and are never given again while their books are hot, so a
+/// new aggregate adds a fact at the end, and the parts cut from this order
+/// keep their members while the last part fills.
 fn observer_facts(
     observer: &FiscalObserverBinding,
     aggregates: &BTreeMap<String, FiscalStrategicAggregate>,
@@ -345,6 +287,18 @@ fn observer_facts(
         })
         .map(|aggregate| report_fact(String::new(), aggregate, observer.confidence_per_mille))
         .collect()
+}
+
+/// The number of parts of one observer's report under `aggregates`.
+pub(crate) fn observer_part_count(
+    observer: &FiscalObserverBinding,
+    aggregates: &BTreeMap<String, FiscalStrategicAggregate>,
+) -> u32 {
+    count(
+        observer_facts(observer, aggregates)
+            .len()
+            .div_ceil(FISCAL_REPORT_FACTS_PER_PART),
+    )
 }
 
 fn report_fact(
@@ -378,25 +332,37 @@ fn count(value: usize) -> u32 {
 /// of aggregates, when the previous plan deferred it, or, for the first plan
 /// of a state, whenever it has facts. Each observer with a planned part also
 /// gets its summary. At most [`MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY`]
-/// records are planned: the parts an earlier plan deferred come first, the
-/// rest are deferred, and a later plan takes them up.
+/// records, withdrawals included, are planned, and at most the engine's
+/// publications per system and boundary, one per observer and one per
+/// withdrawal: the parts an earlier plan deferred come first, the rest are
+/// deferred, and a later plan takes them up.
 ///
-/// `unreachable` lists the observer bindings whose actor cannot receive
+/// `unreachable` lists the observer bindings whose holder cannot receive
 /// knowledge now. Nothing is planned for them and they use none of the
 /// boundary's records: what changed in their reports is deferred, and stays
-/// deferred until a plan finds them reachable again.
+/// deferred until a plan finds them reachable again. A removed binding is
+/// planned nothing. `state.pending_withdrawals`, the holders this boundary
+/// re-pointed a binding away from or removed it from, go into the plan whole.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn next_report_plan(
     state: &FiscalState,
     aggregates: &BTreeMap<String, FiscalStrategicAggregate>,
     unreachable: &BTreeSet<String>,
 ) -> Option<FiscalReportPlan> {
-    // Observer bindings never change, so a state without any has no report.
+    let withdraw = state.pending_withdrawals.clone();
+    let withdrawals: usize = withdraw.values().map(BTreeSet::len).sum();
+    // Observer bindings are installed only with the scenario, so a state
+    // without any has no report.
     if state.observer_bindings.is_empty() {
         return None;
     }
     let previous = &state.report_plan;
     let reported = previous.revision != 0;
-    if reported && previous.deferred.is_empty() && state.aggregates == *aggregates {
+    if reported
+        && previous.deferred.is_empty()
+        && state.aggregates == *aggregates
+        && withdraw.is_empty()
+    {
         return None;
     }
     // IDs are stable, so the institutions whose reports can have changed are
@@ -417,7 +383,14 @@ pub(crate) fn next_report_plan(
     let mut deferred = BTreeMap::<String, BTreeSet<u32>>::new();
     let mut carried = Vec::new();
     let mut changed = Vec::new();
-    for observer in state.observer_bindings.values() {
+    let mut publications = KnowledgeLimitsV1::CURRENT
+        .batches_per_system_boundary
+        .saturating_sub(withdrawals);
+    for observer in state
+        .observer_bindings
+        .values()
+        .filter(|observer| observer.is_active())
+    {
         let owed = previous.deferred.get(&observer.id);
         if reported
             && owed.is_none()
@@ -444,14 +417,16 @@ pub(crate) fn next_report_plan(
         if reported && owed.is_none() && differing.is_empty() {
             continue;
         }
-        if unreachable.contains(&observer.id) {
-            // Kept for when the observer can receive knowledge again. The
-            // entry stands even without a part, for the summary it is owed.
+        if unreachable.contains(&observer.id) || publications == 0 {
+            // Kept for when the observer can receive knowledge again, or for
+            // the next boundary. The entry stands even without a part, for
+            // the summary it is owed.
             let held = deferred.entry(observer.id.clone()).or_default();
             held.extend(owed.into_iter().flatten().copied());
             held.extend(differing);
             continue;
         }
+        publications -= 1;
         publish.insert(observer.id.clone(), BTreeSet::new());
         carried.extend(
             owed.into_iter()
@@ -465,11 +440,14 @@ pub(crate) fn next_report_plan(
                 .map(|part| (observer.id.as_str(), part)),
         );
     }
-    if publish.is_empty() && deferred == previous.deferred {
+    if publish.is_empty() && deferred == previous.deferred && withdraw.is_empty() {
         return None;
     }
-    // Every listed observer gets its summary; the parts share what is left.
-    let mut budget = MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY.saturating_sub(publish.len());
+    // Every listed observer gets its summary and every withdrawal its one
+    // record; the parts share what is left.
+    let mut budget = MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY
+        .saturating_sub(publish.len())
+        .saturating_sub(withdrawals);
     for (observer_id, part) in carried.into_iter().chain(changed) {
         let planned = if budget == 0 {
             deferred.entry(observer_id.to_owned()).or_default()
@@ -483,14 +461,13 @@ pub(crate) fn next_report_plan(
         revision: state.procedure_revision,
         publish,
         deferred,
+        withdraw,
     })
 }
 
 /// The summary and the parts the report system publishes for one observer.
 pub(crate) struct PlannedReport<'a> {
     pub(crate) observer: &'a FiscalObserverBinding,
-    /// The observer binding's place among the state's observer bindings.
-    pub(crate) slot: u32,
     pub(crate) summary: FiscalReportSummary,
     pub(crate) parts: Vec<FiscalReportPart>,
 }
@@ -506,8 +483,8 @@ pub(crate) fn planned_reports(state: &FiscalState, at: SimTime) -> Vec<PlannedRe
     state
         .observer_bindings
         .values()
-        .enumerate()
-        .filter_map(|(slot, observer)| {
+        .filter(|observer| observer.is_active())
+        .filter_map(|observer| {
             let planned = plan.publish.get(&observer.id)?;
             let facts = observer_facts(observer, &state.aggregates);
             let summary = FiscalReportSummary {
@@ -518,6 +495,7 @@ pub(crate) fn planned_reports(state: &FiscalState, at: SimTime) -> Vec<PlannedRe
                 fact_count: count(facts.len()),
                 part_count: count(facts.len().div_ceil(FISCAL_REPORT_FACTS_PER_PART)),
                 pending_parts: plan.deferred.get(&observer.id).cloned().unwrap_or_default(),
+                withdrawn: false,
             };
             let parts = planned
                 .iter()
@@ -535,12 +513,56 @@ pub(crate) fn planned_reports(state: &FiscalState, at: SimTime) -> Vec<PlannedRe
                 .collect();
             Some(PlannedReport {
                 observer,
-                slot: count(slot),
                 summary,
                 parts,
             })
         })
         .collect()
+}
+
+/// One withdrawn summary the report system publishes: its binding, the
+/// holder it goes to, and the summary.
+pub(crate) type PlannedWithdrawal<'a> = (
+    &'a FiscalObserverBinding,
+    &'a KnowledgeHolderRef,
+    FiscalReportSummary,
+);
+
+/// The withdrawn summaries the plan of `state` has the boundary at `at`
+/// publish: for each binding re-pointed away from a holder, or removed, one
+/// summary marked withdrawn for each such holder. Nothing unless the plan was
+/// computed at the state's own procedure revision.
+pub(crate) fn planned_withdrawals(state: &FiscalState, at: SimTime) -> Vec<PlannedWithdrawal<'_>> {
+    let plan = &state.report_plan;
+    if plan.revision != state.procedure_revision {
+        return Vec::new();
+    }
+    let mut withdrawals = Vec::new();
+    for (observer_id, holders) in &plan.withdraw {
+        let Some(observer) = state.observer_bindings.get(observer_id) else {
+            continue;
+        };
+        for holder in holders {
+            withdrawals.push((
+                observer,
+                holder,
+                FiscalReportSummary {
+                    observer_id: observer.id.clone(),
+                    actor: match holder {
+                        KnowledgeHolderRef::Person(person) => Some(*person),
+                        KnowledgeHolderRef::Entity(_) => None,
+                    },
+                    as_of: at,
+                    confidence_per_mille: observer.confidence_per_mille,
+                    fact_count: 0,
+                    part_count: 0,
+                    pending_parts: BTreeSet::new(),
+                    withdrawn: true,
+                },
+            ));
+        }
+    }
+    withdrawals
 }
 
 /// Reassembles fiscal reports from the payloads of the fiscal report records
@@ -554,6 +576,8 @@ pub(crate) fn planned_reports(state: &FiscalState, at: SimTime) -> Vec<PlannedRe
 /// published from. In an incomplete report the facts of a pending part are
 /// the older ones the holder has, or missing when it has none, and the other
 /// facts keep their labels; [`FiscalReport::pending_parts`] names the pending
+/// parts. A part at or past the summary's `part_count` is not part of the
+/// report, and a report whose summary is withdrawn is left out with its
 /// parts.
 ///
 /// # Errors
@@ -585,45 +609,46 @@ pub fn assemble_fiscal_reports<'a>(
             ));
         }
     }
-    let reports = summaries
-        .into_iter()
-        .map(|(observer_id, summary)| {
-            let facts: BTreeMap<_, _> = parts
-                .remove(&observer_id)
-                .unwrap_or_default()
-                .into_iter()
-                .flat_map(|(part, facts)| {
-                    let first = usize::try_from(part)
-                        .unwrap_or(usize::MAX)
-                        .saturating_mul(FISCAL_REPORT_FACTS_PER_PART);
-                    facts
-                        .into_iter()
-                        .enumerate()
-                        .map(move |(offset, mut fact)| {
-                            fact.id = format!("fact.{:04}", first.saturating_add(offset));
-                            (fact.id.clone(), fact)
-                        })
-                })
-                .collect();
-            if summary.pending_parts.is_empty() && count(facts.len()) != summary.fact_count {
-                return Err(invalid(
-                    "fiscal report parts do not hold the facts their summary counts",
-                ));
-            }
-            Ok((
-                observer_id,
-                FiscalReport {
-                    projection: FiscalProjection {
-                        actor: summary.actor,
-                        as_of: summary.as_of,
-                        confidence_per_mille: summary.confidence_per_mille,
-                        facts,
-                    },
-                    pending_parts: summary.pending_parts,
+    let mut reports = BTreeMap::new();
+    for (observer_id, summary) in summaries {
+        let held = parts.remove(&observer_id).unwrap_or_default();
+        if summary.withdrawn {
+            continue;
+        }
+        let facts: BTreeMap<_, _> = held
+            .into_iter()
+            .filter(|(part, _)| *part < summary.part_count)
+            .flat_map(|(part, facts)| {
+                let first = usize::try_from(part)
+                    .unwrap_or(usize::MAX)
+                    .saturating_mul(FISCAL_REPORT_FACTS_PER_PART);
+                facts
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(offset, mut fact)| {
+                        fact.id = format!("fact.{:04}", first.saturating_add(offset));
+                        (fact.id.clone(), fact)
+                    })
+            })
+            .collect();
+        if summary.pending_parts.is_empty() && count(facts.len()) != summary.fact_count {
+            return Err(invalid(
+                "fiscal report parts do not hold the facts their summary counts",
+            ));
+        }
+        reports.insert(
+            observer_id,
+            FiscalReport {
+                projection: FiscalProjection {
+                    actor: summary.actor,
+                    as_of: summary.as_of,
+                    confidence_per_mille: summary.confidence_per_mille,
+                    facts,
                 },
-            ))
-        })
-        .collect::<Result<BTreeMap<_, _>, CanwuError>>()?;
+                pending_parts: summary.pending_parts,
+            },
+        );
+    }
     if !parts.is_empty() {
         return Err(invalid("a fiscal report part has no summary"));
     }
@@ -649,16 +674,11 @@ fn estimate(value: u64, confidence_per_mille: u16) -> crate::model::FiscalAmount
     }
 }
 
-fn checked_sum(left: u64, right: u64) -> Result<u64, CanwuError> {
-    left.checked_add(right)
-        .ok_or_else(|| invalid("fiscal aggregate overflowed"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{
-        FiscalAmountEstimate, FiscalAssessment, MAX_FISCAL_IDENTIFIER_BYTES, MAX_FISCAL_OBSERVERS,
+        FiscalAmountEstimate, MAX_FISCAL_IDENTIFIER_BYTES, MAX_FISCAL_OBSERVERS,
         MAX_FISCAL_REPORT_PARTS,
     };
     use canwu_api::{
@@ -676,10 +696,15 @@ mod tests {
         let actor = PersonId::new(1);
         FiscalObserverBinding {
             id: id.to_owned(),
-            actor,
+            actor: Some(actor),
             knowledge_holder: KnowledgeHolderRef::Person(actor),
             visible_institutions: BTreeSet::from([institution]),
             confidence_per_mille: 1_000,
+            line_slot: 0,
+            controlled_by: None,
+            rebound_by: None,
+            removed: None,
+            outcomes: crate::model::FiscalOutcomeRing::default(),
         }
     }
 
@@ -701,27 +726,14 @@ mod tests {
 
     /// Adds the assessment of one accounting cycle and returns the aggregate
     /// that reports it.
+    /// The aggregate that reports the assessment of one accounting cycle.
+    /// Planning reads aggregates only, so the state holds no book.
     fn assess(
-        state: &mut FiscalState,
+        _state: &mut FiscalState,
         institution: EntityRef,
         cycle: &str,
         assessed: u64,
     ) -> FiscalStrategicAggregate {
-        let id = format!("assessment.{cycle}");
-        state.assessments.insert(
-            id.clone(),
-            FiscalAssessment {
-                id,
-                rule_id: "rule.a".to_owned(),
-                scope_binding_id: SCOPE.to_owned(),
-                accounting_cycle_id: cycle.to_owned(),
-                quantity: assessed,
-                unit: "grain".to_owned(),
-                payment_form: FiscalPaymentForm::Grain,
-                commutation_quote: None,
-                created_at: SimTime::EPOCH,
-            },
-        );
         FiscalStrategicAggregate {
             institution,
             mechanism: FiscalMechanism::LandTax,

@@ -5,38 +5,45 @@
 //! authority bases that fiscal bindings cite; renewing a commission advances
 //! its version, and a tick makes a boundary event-bearing without touching
 //! fiscal state. The same plugin owns one warrant, a record of a kind the
-//! fiscal plugin was not configured to read, and can change whether a person
-//! is alive.
+//! fiscal plugin was not configured to read, can change whether a person is
+//! alive, and records execution results, the evidence fiscal receipts cite.
+//! The fiscal archive tests keep their objects in an in-memory store.
 
 // Each integration target intentionally uses a different subset of these helpers.
 #![allow(dead_code)]
 
 use canwu_api::{
-    BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundaryReceipt,
-    BoundarySystemContract, Canwu, CanwuError, CommandAttemptOutcome, CommandEnvelope,
-    CommandRequest, CommandRequestId, CompactedCanwu, CustodyState, DomainRecord,
-    DomainRecordClass, DomainRecordDraft, DomainRecordKind, DomainRecordLifecycle,
-    DomainRecordMutation, DomainRecordSchema, DomainRecordType, DomainRecordVersionRef,
-    DomainRecordVersionSource, DomainValueKindClass, EntityRef, Government, GovernmentId,
-    IngressClass, IngressPayload, Issuer, KnowledgeHolderRef, KnowledgeRecord, KnowledgeSnapshot,
-    LifeState, MapPoint, OrganizationId, PayloadSchema, Person, PersonAvailability, PersonId,
-    PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar, Scenario, SimDuration, SimTime,
+    ArchiveProvider, ArchiveStore, ArchiveStoreOutcome, BoundaryContext, BoundaryDirective,
+    BoundaryPhase, BoundaryProposal, BoundaryReceipt, BoundarySystemContract, Canwu, CanwuError,
+    CommandAttemptOutcome, CommandEnvelope, CommandRequest, CommandRequestId, CompactedCanwu,
+    CustodyState, DomainRecord, DomainRecordClass, DomainRecordDraft, DomainRecordKind,
+    DomainRecordLifecycle, DomainRecordMutation, DomainRecordSchema, DomainRecordType,
+    DomainRecordVersionRef, DomainRecordVersionSource, DomainValueKindClass, EntityRef,
+    EvidenceJournalSegment, Government, GovernmentId, IngressClass, IngressPayload, Issuer,
+    KnowledgeHolderRef, KnowledgeRecord, KnowledgeSnapshot, LifeState, MapPoint, OrganizationId,
+    PayloadSchema, Person, PersonAvailability, PersonId, PluginIngressDescriptor,
+    PluginIngressRequest, PluginRegistrar, ResourceId, Scenario, SimDuration, SimTime,
     SimulationGranularity, SimulationPlugin, SimulationView, StateKey, StateVisibility,
     SystemCadence, Territory, TerritoryId, TypedDomainRecordRef, WorldSnapshot,
 };
 use canwu_fiscal::{
-    CompiledFiscalCatalog, FiscalAction, FiscalActionOutcome, FiscalActionRequest,
-    FiscalAdoptionStage, FiscalAdoptionState, FiscalAssessmentBasis, FiscalAuthorityBinding,
-    FiscalCommutationPolicy, FiscalContentPack, FiscalContentSelection, FiscalCoverageDeclaration,
-    FiscalCoverageSelector, FiscalCoverageStatus, FiscalHistoricalMode, FiscalMechanism,
-    FiscalObserverBinding, FiscalPackManifest, FiscalPaymentForm, FiscalPeriodDefinition,
-    FiscalPlugin, FiscalProvenance, FiscalRegionDefinition, FiscalReport, FiscalReportRecord,
-    FiscalRuleDefinition, FiscalScopeBinding, FiscalState, FiscalStateRecord, HistoricalConfidence,
-    HistoricalYearWindow, compile_fiscal_content, fiscal_action_command, fiscal_reports,
+    CompiledFiscalCatalog, FiscalAction, FiscalActionRequest, FiscalAdoptionStage,
+    FiscalAdoptionState, FiscalArchiveError, FiscalArchiveIngressReceiptV1,
+    FiscalArchiveRetentionHandleV1, FiscalArchiveRetentionPhaseV1, FiscalArchiveStore,
+    FiscalAssessmentBasis, FiscalAuthorityBinding, FiscalCommutationPolicy, FiscalContentPack,
+    FiscalContentSelection, FiscalCoverageDeclaration, FiscalCoverageSelector,
+    FiscalCoverageStatus, FiscalExecutionEvidence, FiscalExecutionKind,
+    FiscalExecutionReceiptPacket, FiscalHistoricalMode, FiscalMechanism, FiscalObserverBinding,
+    FiscalPackManifest, FiscalPaymentForm, FiscalPeriodDefinition, FiscalPlugin, FiscalProvenance,
+    FiscalReceiptDisposition, FiscalRegionDefinition, FiscalReport, FiscalReportRecord,
+    FiscalRuleDefinition, FiscalScopeBinding, FiscalSettledAction, FiscalState, FiscalStateRecord,
+    HistoricalConfidence, HistoricalYearWindow, compile_fiscal_content, enqueue_fiscal_archive,
+    finalize_fiscal_archive_retention, fiscal_action_command, fiscal_reports,
     fiscal_state_reference, recompute_derived,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const PRINCIPAL: PersonId = PersonId::new(1);
 pub const DEPUTY: PersonId = PersonId::new(2);
@@ -62,6 +69,7 @@ const COMMISSION_PLUGIN: &str = "fixture-commissions";
 const RENEW_COMMISSION_INGRESS: &str = "renew_commission_v1";
 const TICK_INGRESS: &str = "tick_v1";
 const LIFE_INGRESS: &str = "set_life_v1";
+const EVIDENCE_INGRESS: &str = "record_evidence_v1";
 
 #[must_use]
 pub fn treasury() -> EntityRef {
@@ -113,6 +121,38 @@ pub fn initial_commission(id: &str) -> DomainRecordVersionRef {
     }
 }
 
+/// An application-owned record of one external execution result, which a
+/// fiscal receipt cites as its evidence.
+pub struct ExecutionResult;
+
+impl DomainRecordType for ExecutionResult {
+    type Payload = FiscalExecutionEvidence;
+    type Class = DomainValueKindClass;
+
+    const NAMESPACE: &'static str = "fixture.execution";
+    const NAME: &'static str = "result";
+}
+
+/// An application-owned record of a kind the fiscal plugin reads as
+/// execution evidence but the base state does not approve.
+pub struct UnapprovedResult;
+
+impl DomainRecordType for UnapprovedResult {
+    type Payload = FiscalExecutionEvidence;
+    type Class = DomainValueKindClass;
+
+    const NAMESPACE: &'static str = "fixture.execution";
+    const NAME: &'static str = "unapproved";
+}
+
+fn execution_state_key() -> StateKey {
+    DomainRecordSchema::for_record::<ExecutionResult>().state_key()
+}
+
+fn unapproved_state_key() -> StateKey {
+    DomainRecordSchema::for_record::<UnapprovedResult>().state_key()
+}
+
 /// An application-owned record of a kind the fiscal plugin does not read.
 pub struct Warrant;
 
@@ -156,6 +196,8 @@ impl SimulationPlugin for CommissionPlugin {
     fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
         registrar.register_record_schema(DomainRecordSchema::for_record::<Commission>())?;
         registrar.register_record_schema(DomainRecordSchema::for_record::<Warrant>())?;
+        registrar.register_record_schema(DomainRecordSchema::for_record::<ExecutionResult>())?;
+        registrar.register_record_schema(DomainRecordSchema::for_record::<UnapprovedResult>())?;
         for (name, description) in [
             (
                 RENEW_COMMISSION_INGRESS,
@@ -166,6 +208,7 @@ impl SimulationPlugin for CommissionPlugin {
                 "Make one boundary event-bearing without changing any record",
             ),
             (LIFE_INGRESS, "Set whether one person is alive"),
+            (EVIDENCE_INGRESS, "Record the listed execution results"),
         ] {
             registrar.register_ingress(PluginIngressDescriptor {
                 name: name.to_owned(),
@@ -179,8 +222,20 @@ impl SimulationPlugin for CommissionPlugin {
             BoundaryPhase::DomainDeltaProposal,
             SystemCadence::EventDriven,
         );
-        renew.reads = vec![StateKey::core_ingress(), commission_state_key()];
-        renew.writes = vec![StateKey::core_person_availability(), commission_state_key()];
+        renew.reads = vec![
+            StateKey::core_ingress(),
+            commission_state_key(),
+            execution_state_key(),
+            unapproved_state_key(),
+        ];
+        renew.reads.sort();
+        renew.writes = vec![
+            StateKey::core_person_availability(),
+            commission_state_key(),
+            execution_state_key(),
+            unapproved_state_key(),
+        ];
+        renew.writes.sort();
         renew.visibility = StateVisibility::SameBoundary;
         registrar.register_boundary_system(renew, renew_commissions)
     }
@@ -193,6 +248,42 @@ fn renew_commissions(
     let mut directives = Vec::new();
     for ingress_id in &context.admitted_ingress {
         if let Some(ingress) = view.ingress(*ingress_id)?
+            && let IngressPayload::Plugin {
+                plugin,
+                packet_type,
+                payload,
+                ..
+            } = &ingress.payload
+            && plugin == COMMISSION_PLUGIN
+            && packet_type == EVIDENCE_INGRESS
+        {
+            for (unapproved, result) in
+                serde_json::from_value::<Vec<(bool, FiscalExecutionEvidence)>>(payload.clone())
+                    .expect("execution results")
+            {
+                let record = if unapproved {
+                    DomainRecordDraft::from_typed(
+                        TypedDomainRecordRef::<UnapprovedResult>::new(&result.id),
+                        &result,
+                    )?
+                } else {
+                    DomainRecordDraft::from_typed(execution_reference(&result.id), &result)?
+                };
+                // A result recorded again under its ID is its record's next
+                // version, so a long run keeps a bounded number of records.
+                let mutation = match view.domain_record(&record.reference)? {
+                    Some(existing) => DomainRecordMutation::Update {
+                        expected_version: existing.version,
+                        record,
+                    },
+                    None => DomainRecordMutation::Create { record },
+                };
+                directives.push(BoundaryDirective::MutateRecord {
+                    mutation,
+                    summary: "Record one execution result".to_owned(),
+                });
+            }
+        } else if let Some(ingress) = view.ingress(*ingress_id)?
             && let IngressPayload::Plugin {
                 plugin,
                 packet_type,
@@ -254,8 +345,11 @@ impl Fixture {
     pub fn new() -> Self {
         Self {
             commissions: CommissionPlugin,
-            fiscal: FiscalPlugin::default()
-                .with_authority_basis_kinds([DomainRecordKind::for_type::<Commission>()]),
+            fiscal: FiscalPlugin::new([
+                DomainRecordKind::for_type::<ExecutionResult>(),
+                DomainRecordKind::for_type::<UnapprovedResult>(),
+            ])
+            .with_authority_basis_kinds([DomainRecordKind::for_type::<Commission>()]),
         }
     }
 
@@ -420,34 +514,52 @@ pub fn base_state() -> FiscalState {
     operational_scopes.push(scope(GRANARY_SCOPE, granary()));
     for binding in operational_scopes {
         let adoption_id = binding.id.replacen("scope", "adopt", 1);
-        state.adoptions.insert(
-            adoption_id.clone(),
-            FiscalAdoptionState {
+        let scope_binding_id = binding.id.clone();
+        state.add_scope(binding);
+        state
+            .add_adoption(FiscalAdoptionState {
                 id: adoption_id,
                 rule_id: RULE.to_owned(),
-                scope_binding_id: binding.id.clone(),
+                scope_binding_id,
                 stage: FiscalAdoptionStage::Implemented,
                 generation: 1,
                 changed_at: SimTime::EPOCH,
                 source_action_id: None,
-            },
-        );
-        state.scope_bindings.insert(binding.id.clone(), binding);
+            })
+            .expect("adoption of a known scope");
     }
+    state.add_scope(scope(PENDING_SCOPE, treasury()));
     state
-        .scope_bindings
-        .insert(PENDING_SCOPE.to_owned(), scope(PENDING_SCOPE, treasury()));
+        .execution_evidence_kinds
+        .insert(DomainRecordKind::for_type::<ExecutionResult>());
     state.observer_bindings.insert(
         OBSERVER.to_owned(),
-        FiscalObserverBinding {
-            id: OBSERVER.to_owned(),
-            actor: PRINCIPAL,
-            knowledge_holder: KnowledgeHolderRef::Person(PRINCIPAL),
-            visible_institutions: BTreeSet::from([treasury()]),
-            confidence_per_mille: 1_000,
-        },
+        observer_binding(OBSERVER, 0, PRINCIPAL, BTreeSet::from([treasury()])),
     );
     state
+}
+
+/// An observer binding of `actor`'s person holder on report line slot
+/// `slot`, which no scenario action may change.
+#[must_use]
+pub fn observer_binding(
+    id: &str,
+    slot: u16,
+    actor: PersonId,
+    visible_institutions: BTreeSet<EntityRef>,
+) -> FiscalObserverBinding {
+    FiscalObserverBinding {
+        id: id.to_owned(),
+        actor: Some(actor),
+        knowledge_holder: KnowledgeHolderRef::Person(actor),
+        visible_institutions,
+        confidence_per_mille: 1_000,
+        line_slot: slot,
+        controlled_by: None,
+        rebound_by: None,
+        removed: None,
+        outcomes: canwu_fiscal::FiscalOutcomeRing::default(),
+    }
 }
 
 /// The world, the commission records, and the given fiscal state exactly as
@@ -720,9 +832,34 @@ pub fn submit_sealed(sealed: &mut CompactedCanwu, commands: Vec<(PersonId, Draft
         .expect("sealed boundaries");
 }
 
+/// The outcome of `action_id`, as its settled event records it: the last one
+/// the run's retained events hold.
 #[must_use]
-pub fn outcome(canwu: &Canwu, action_id: &str) -> Option<FiscalActionOutcome> {
-    fiscal_state(canwu).action_outcomes.get(action_id).cloned()
+pub fn outcome(canwu: &Canwu, action_id: &str) -> Option<FiscalSettledAction> {
+    FiscalSettledAction::from_events(canwu.events())
+        .into_iter()
+        .rev()
+        .find(|settled| settled.action_id == action_id)
+}
+
+/// When the settled event of `action_id` was recorded.
+pub fn settled_at(canwu: &Canwu, action_id: &str) -> SimTime {
+    canwu
+        .events()
+        .iter()
+        .find(|event| {
+            event.kind.plugin_identity()
+                == Some((
+                    canwu_fiscal::PLUGIN_NAME,
+                    canwu_fiscal::FISCAL_ACTION_SETTLED_EVENT,
+                ))
+                && FiscalSettledAction::from_summary(&event.summary)
+                    .is_some_and(|settled| settled.action_id == action_id)
+        })
+        .map_or_else(
+            || panic!("{action_id} has no settled event"),
+            |event| event.timestamp,
+        )
 }
 
 /// The error of the command attempt that carried `action_id`, when admission
@@ -798,4 +935,308 @@ pub fn current_commission(canwu: &Canwu, commission: &str) -> DomainRecordVersio
         .current_domain_record_version(&commission_reference(commission).into_untyped())
         .expect("current commission version query")
         .expect("current commission version")
+}
+
+fn execution_reference(id: &str) -> TypedDomainRecordRef<ExecutionResult> {
+    TypedDomainRecordRef::new(id)
+}
+
+/// What one execution of `quantity` against `request` of `scope` claims:
+/// a fulfilled collection from the principal to the treasury, under its own
+/// external operation.
+#[must_use]
+pub fn execution_claim(
+    id: &str,
+    scope: &str,
+    request: &str,
+    quantity: u64,
+) -> FiscalExecutionEvidence {
+    FiscalExecutionEvidence {
+        id: id.to_owned(),
+        external_operation_id: format!("operation.{id}"),
+        scope_binding_id: scope.to_owned(),
+        request_id: request.to_owned(),
+        quantity,
+        unit: "grain".to_owned(),
+        payment_form: FiscalPaymentForm::Grain,
+        execution_kind: FiscalExecutionKind::Collect,
+        resource: ResourceId::new(1),
+        source: EntityRef::Person(PRINCIPAL),
+        target: treasury(),
+        disposition: FiscalReceiptDisposition::Fulfilled,
+    }
+}
+
+/// An authorization of a collection of `quantity` from the principal to the
+/// treasury, against `assessment` of `scope`.
+#[must_use]
+pub fn collection(
+    action_id: &str,
+    scope: &str,
+    assessment: &str,
+    request: &str,
+    quantity: u64,
+) -> Draft {
+    draft(
+        action_id,
+        TREASURY_AUTHORITY,
+        FiscalAction::AuthorizeExecution {
+            request_id: request.to_owned(),
+            scope_binding_id: scope.to_owned(),
+            assessment_id: assessment.to_owned(),
+            kind: FiscalExecutionKind::Collect,
+            quantity,
+            unit: "grain".to_owned(),
+            resource: ResourceId::new(1),
+            source: EntityRef::Person(PRINCIPAL),
+            target: treasury(),
+            purpose: "fixture collection".to_owned(),
+        },
+    )
+}
+
+/// A close of one accounting cycle book of `scope`, issued by the treasury.
+#[must_use]
+pub fn close(action_id: &str, scope: &str, cycle: &str) -> Draft {
+    draft(
+        action_id,
+        TREASURY_AUTHORITY,
+        FiscalAction::CloseAccountingCycle {
+            scope_binding_id: scope.to_owned(),
+            accounting_cycle_id: cycle.to_owned(),
+        },
+    )
+}
+
+/// Records the execution results in one boundary and returns the exact
+/// version of each, in order. A result marked `true` is of the kind the
+/// state does not approve.
+pub fn record_results(
+    canwu: &mut Canwu,
+    results: &[(bool, FiscalExecutionEvidence)],
+) -> Vec<DomainRecordVersionRef> {
+    enqueue_results(canwu, results);
+    settle(canwu);
+    result_versions(canwu, results)
+}
+
+/// Queues the recording of the execution results for the next boundary.
+pub fn enqueue_results(canwu: &mut Canwu, results: &[(bool, FiscalExecutionEvidence)]) {
+    canwu
+        .enqueue_plugin_ingress(PluginIngressRequest::new(
+            COMMISSION_PLUGIN,
+            EVIDENCE_INGRESS,
+            canwu.time(),
+            serde_json::to_value(results).expect("results payload"),
+        ))
+        .expect("evidence ingress");
+}
+
+/// The current version of each recorded execution result, in order.
+#[must_use]
+pub fn result_versions(
+    canwu: &Canwu,
+    results: &[(bool, FiscalExecutionEvidence)],
+) -> Vec<DomainRecordVersionRef> {
+    results
+        .iter()
+        .map(|(unapproved, result)| {
+            let reference = if *unapproved {
+                TypedDomainRecordRef::<UnapprovedResult>::new(&result.id).into_untyped()
+            } else {
+                execution_reference(&result.id).into_untyped()
+            };
+            canwu
+                .current_domain_record_version(&reference)
+                .expect("evidence version query")
+                .expect("evidence version")
+        })
+        .collect()
+}
+
+/// A receipt of `scope` citing `evidence`.
+#[must_use]
+pub fn receipt_packet(
+    id: &str,
+    scope: &str,
+    request: &str,
+    evidence: impl IntoIterator<Item = DomainRecordVersionRef>,
+) -> FiscalExecutionReceiptPacket {
+    FiscalExecutionReceiptPacket {
+        receipt_id: id.to_owned(),
+        scope_binding_id: scope.to_owned(),
+        request_id: request.to_owned(),
+        external_evidence: evidence.into_iter().collect(),
+    }
+}
+
+/// Every refusal event the run's retained events hold, by summary.
+#[must_use]
+pub fn refusals(canwu: &Canwu) -> Vec<String> {
+    canwu
+        .events()
+        .iter()
+        .filter(|event| {
+            event.kind.plugin_identity()
+                == Some((
+                    canwu_fiscal::PLUGIN_NAME,
+                    canwu_fiscal::FISCAL_INGRESS_REJECTED_EVENT,
+                ))
+        })
+        .map(|event| event.summary.clone())
+        .collect()
+}
+
+/// A fiscal archive store in memory: every object by namespace and ID, and
+/// the latest phase of every retention handle.
+#[derive(Default)]
+pub struct MemoryArchiveStore {
+    objects: RefCell<BTreeMap<(String, String), Vec<u8>>>,
+    handles: RefCell<BTreeMap<String, FiscalArchiveRetentionPhaseV1>>,
+}
+
+impl MemoryArchiveStore {
+    /// How many objects of `namespace` the store holds.
+    #[must_use]
+    pub fn count(&self, namespace: &str) -> usize {
+        self.objects
+            .borrow()
+            .keys()
+            .filter(|(stored, _)| stored == namespace)
+            .count()
+    }
+
+    /// The phase the store last recorded for one retention handle.
+    #[must_use]
+    pub fn handle_phase(&self, handle_id: &str) -> Option<FiscalArchiveRetentionPhaseV1> {
+        self.handles.borrow().get(handle_id).copied()
+    }
+}
+
+impl FiscalArchiveStore for MemoryArchiveStore {
+    fn store_fiscal_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), FiscalArchiveError> {
+        self.objects
+            .borrow_mut()
+            .insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
+        Ok(())
+    }
+
+    fn load_fiscal_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, FiscalArchiveError> {
+        Ok(self
+            .objects
+            .borrow()
+            .get(&(namespace.to_owned(), object_id.to_owned()))
+            .cloned())
+    }
+
+    fn persist_fiscal_archive_retention(
+        &self,
+        handle: &FiscalArchiveRetentionHandleV1,
+    ) -> Result<(), FiscalArchiveError> {
+        self.handles
+            .borrow_mut()
+            .insert(handle.handle_id.clone(), handle.phase);
+        Ok(())
+    }
+
+    fn finalize_fiscal_archive_retention(
+        &self,
+        handle_id: &str,
+        phase: FiscalArchiveRetentionPhaseV1,
+    ) -> Result<(), FiscalArchiveError> {
+        self.handles
+            .borrow_mut()
+            .insert(handle_id.to_owned(), phase);
+        Ok(())
+    }
+}
+
+/// Prepares one archive commit of up to `books` closed books from the run's
+/// state and `store`, and queues it. The run has never sealed its evidence.
+pub fn enqueue_archive(
+    canwu: &mut Canwu,
+    store: &MemoryArchiveStore,
+    books: usize,
+) -> FiscalArchiveIngressReceiptV1 {
+    let prepared = fiscal_state(canwu)
+        .prepare_fiscal_archive(books, store, None)
+        .expect("archive batch");
+    enqueue_fiscal_archive(canwu, &prepared, store, None).expect("archive commit queued")
+}
+
+/// Archives up to `books` closed books: prepares, stores, verifies, and
+/// queues one commit, settles it, then finalizes its retention and settles
+/// the acknowledgement. Returns the commit's ingress receipt.
+pub fn archive(
+    canwu: &mut Canwu,
+    store: &MemoryArchiveStore,
+    books: usize,
+) -> FiscalArchiveIngressReceiptV1 {
+    let receipt = enqueue_archive(canwu, store, books);
+    settle(canwu);
+    finalize_fiscal_archive_retention(canwu, store, &receipt).expect("retention finalized");
+    settle(canwu);
+    receipt
+}
+
+/// An evidence archive in memory, for sealing runs whose fiscal state
+/// declares payload-required evidence: such a run seals with prepare, store,
+/// and commit.
+#[derive(Default)]
+pub struct MemoryEvidenceArchive {
+    segments: RefCell<BTreeMap<String, EvidenceJournalSegment>>,
+}
+
+impl ArchiveProvider for MemoryEvidenceArchive {
+    fn load_evidence_segment(
+        &self,
+        segment_id: &str,
+    ) -> Result<Option<EvidenceJournalSegment>, CanwuError> {
+        Ok(self.segments.borrow().get(segment_id).cloned())
+    }
+}
+
+impl ArchiveStore for MemoryEvidenceArchive {
+    fn store_evidence_segment(
+        &self,
+        segment: &EvidenceJournalSegment,
+    ) -> Result<ArchiveStoreOutcome, CanwuError> {
+        let id = segment
+            .archive
+            .as_ref()
+            .expect("an archive index")
+            .header
+            .segment_id
+            .clone();
+        self.segments.borrow_mut().insert(id, segment.clone());
+        Ok(ArchiveStoreOutcome::Stored)
+    }
+}
+
+/// Seals the compact run's retained evidence through `archive` and returns
+/// the sealed segment.
+pub fn seal(
+    compact: &mut CompactedCanwu,
+    archive: &MemoryEvidenceArchive,
+) -> EvidenceJournalSegment {
+    let prepared = compact
+        .prepare_evidence_seal()
+        .expect("a seal is prepared")
+        .expect("retained evidence exists");
+    archive
+        .store_evidence_segment(&prepared.segment)
+        .expect("the segment is stored");
+    compact
+        .commit_evidence_seal(&prepared.token, archive)
+        .expect("the seal commits");
+    prepared.segment
 }

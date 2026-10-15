@@ -2,7 +2,9 @@
 
 Status: design for 0.16.0, reviewed ("implement with changes, with phasing")
 and amended. Phase 0, the engine probe, is measured
-([Phase 0 results](#phase-0-results)); nothing else is implemented. The owner
+([Phase 0 results](#phase-0-results)), and Phase 1 is implemented on the single
+state record ([Phase 1 as implemented](#phase-1-as-implemented)); Phase 2 is
+not. The owner
 decided on 2026-10-15 that Phases 0, 1, and 2 ship in 0.16.0 and that the
 release waits for them, so that 0.16.0 can run the county-level world; Phase 3
 stays later ([Phases](#phases)). It answers downstream gaps G-15
@@ -40,6 +42,7 @@ and the lookup-index functions that the 0.16.0 production archive package
 2. [Why one record cannot reach it](#why-one-record-cannot-reach-it)
 3. [The design on one page](#the-design-on-one-page)
 4. [Phases](#phases)
+   - [Phase 1 as implemented](#phase-1-as-implemented)
 5. [State layout](#state-layout)
 6. [Revisions, staleness, and idempotency](#revisions-staleness-and-idempotency)
 7. [Throughput](#throughput)
@@ -303,6 +306,16 @@ items listed under [Beyond fiscal](#beyond-fiscal-caps-that-block-the-target)
 (the write path and the idle floor), which are the owner's to schedule; Phase
 2 measures and reports the remaining gap.
 
+**Engine numbers Phase 2 is sized against.** The record-store package
+(`docs/proposals/record-store-ceiling-and-cost.md`, in review, integrated before
+Phase 2) measured, on 65,536 stored records: an idle boundary of 0.08 to
+0.10 ms (from 51 to 67 ms), independent of the number of stored records; one
+2.45 KiB structured write 24.3 µs (from 526 µs), and 48 to 66 µs a write at
+50,000 writes in one boundary; and a paged-checkpoint record ceiling of
+512 MiB in 1 MiB chunks (from 1.15 MB). Phase 2 sizes its record budgets,
+per-boundary limits, and the cost of a day of the county-level world against
+these numbers, not Phase 0's, and states the ones it used.
+
 **Phase 3: observers at scale (later).** Report cadence (`Interval`) with
 future due times, institution granularity, thousands of observers publishing
 in one instant, rotation of many parked holders, and domain-entity holders.
@@ -313,6 +326,161 @@ publishes whole scope-level rows on every change of its institutions' books;
 a world with thousands of observers whose institutions change daily drains
 for many boundaries at each instant. Institution granularity is the first item
 to pull forward if a 0.16.0 world needs court-level reports.
+
+### Phase 1 as implemented
+
+Phase 1 is implemented on the 0.16.0 integration branch (the fiscal and society
+package and the knowledge package included), with the semantics above on the
+one state record `canwu.fiscal:state`. What it holds and how it differs from
+the design follows; the rest of this proposal still describes Phase 2.
+
+**State.** `FiscalState` keeps one `FiscalScopeLedger` per scope binding
+(`ledgers`, keyed by scope ID: the binding, its adoptions, its hot
+`FiscalCycleBook`s keyed by accounting cycle, its watermark, and its outcome
+ring) and one `FiscalOffice` per institution with hot books, an archived cycle, or an outcome
+(`offices`, keyed by `fiscal_office_key`: its hot-book count, archived book
+count, and archived totals per hot cycle, its watermark, and its ring).
+`FISCAL_RUNTIME_SCHEMA_VERSION` is 4. The flat maps of assessments,
+remissions, requests, receipts, audits, adoptions, scope bindings, and action
+outcomes are gone; read them through `FiscalState::assessments()` and the
+other iterators, `ledger`, `scope_binding(s)`, and `books`. Book objects carry
+`source_action_id`.
+
+**Actions.** `FiscalActionRequest` keeps `expected_procedure_revision`: the
+global revision stays the staleness basis. `GrantRemission`,
+`AuthorizeExecution`, and `RecordAudit` gain `scope_binding_id`; the new
+variants are `CloseAccountingCycle`, `RebindObserver`, and `RemoveObserver`.
+Each action has a `FiscalActionTarget` (ledger, office, observer); action IDs
+are per target. Admission refuses an ID in its target's ring
+(`IdempotencyConflict`), a revision above the state's
+(`FISCAL_REVISION_UNKNOWN`), and one at or below the target's floor
+(`FISCAL_REVISION_EXPIRED`), and settlement skips a copy whose outcome is in
+the ring or already settled in the boundary. A host that issued actions
+against a revision it predicted, not one it read, now has them refused at
+admission rather than rejected as stale at settlement. `ApplyTransition`,
+the rebinds, and the appointment actions target the office of the institution
+they change. `FiscalSettledAction` reads an outcome back from its
+`canwu.fiscal.action_settled.v1` event; `FiscalActionOutcome` and
+`MAX_FISCAL_ACTION_OUTCOMES` are removed.
+
+**Archive.** As [The fiscal archive](#the-fiscal-archive-g-15) describes, with
+these choices. A commit binds the state's `archive_source_root`, a digest of
+the procedure revision and the archive head, so any settled action, receipt,
+or context change between preparation and settlement makes it stale; commits
+settle first in their boundary, so a commit prepared and queued in one gap is
+current. Settlement rebuilds the blobs, pages, and directory from the books
+the commit names and compares them, and never advances the procedure
+revision. A malformed or non-matching commit is refused with
+`canwu.fiscal.ingress_rejected.v1` instead of failing the boundary. A copy of
+a commit whose handle the head already holds (the same batch queued again)
+settles as a stale duplicate and records nothing; the head keeps at most 64
+unacknowledged stale handles beside its 64 applied ones, and a stale commit
+past them is refused with the event and changes nothing. A boundary whose
+only change is archive maintenance marks the last report plan carried out,
+so it publishes no report. The sealed cut is the host's to pass:
+preparation cannot read a run's last cut, so a sealing host that passes
+`None` skips the refusal of unsealed citations. The
+state's byte budget for settlement leaves `FISCAL_ARCHIVE_HEAD_RESERVE_BYTES`
+(2 MiB) for the archive head and is measured again after maintenance, so
+maintenance is never refused for the budget.
+
+**Observers.** As [Observers and reports](#observers-and-reports-g-16)
+describes for the single record: an optional actor, a person or government
+holder, `controlled_by`, and `line_slot`, a slot below `MAX_FISCAL_OBSERVERS`
+(64) allocated with the binding, unique, and kept by a removed binding. A
+line is `slot * 1,024 + index` in four hexadecimal places (65,536 lines), the
+0.15.0 line scheme with the binding's slot in place of its position. The
+`fiscal_report` knowledge schema is version 3. A withdrawal publishes one
+summary marked `withdrawn` with no parts, and assembly ignores parts at or
+past a summary's part count, so the withdrawn holder's old parts never
+reassemble. Withdrawals count against the boundary's publications
+(`KnowledgeLimitsV1`), ahead of reports.
+
+**Receipts and context.** Every refusal is an event with the reasons of
+[Receipts and historical context at scale](#receipts-and-historical-context-at-scale)
+(one packet per receipt; batches are Phase 2). A receipt the state has no
+room for, because it holds 8,192 hot receipts, is refused with
+`state_budget_exhausted`, as one past the byte budget is.
+
+**Deviations from the design, for review.**
+
+- Per-cycle totals are not stored in the book: `FiscalCycleBook::totals`
+  derives them, the strategic aggregates (which carry the cycle) show them
+  while the book is hot, and the archive keeps them with the book and, per
+  institution, in the totals record.
+- Resolved auditor proposals are not archived. The fiscal and society
+  package already bounds them to the newest
+  `MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY` (64) per policy, and each
+  proposal's actions keep their settled events, so nothing lifetime remains.
+- The per-(institution, mechanism, cycle) partition-key bound
+  (`FISCAL_PARTITION_KEYS_EXHAUSTED`) is deferred to Phase 2, with the
+  institution rows it bounds.
+- Phase 1 keeps hot caps on the one record: 4,096 assessments, remissions,
+  and audit findings, 8,192 adoptions, execution requests, and receipts, and
+  64 books per ledger. None is a lifetime cap.
+- `fiscal_reports_of_holder` reads a holder's reports as a trusted host, for
+  holders a viewer cannot be (a government).
+- Evidence must not predate its request by simulated time, as in 0.15.0. A
+  request ID used again in a later book of a scope, at the same simulated
+  time as the evidence of an archived request of that ID, could take that
+  evidence again; hosts use each request ID once per scope for the life of a
+  run. Comparing boundary order instead would need each request to record its
+  boundary.
+
+**Proofs.** The tests of [Acceptance tests](#acceptance-tests), Phase 1, with
+two changes in how they run:
+
+- The lifetime test, `fiscal_archive_lifetime.rs`, runs its full size only
+  in a release build (`cargo test --release -p canwu-fiscal --test
+  fiscal_archive_lifetime -- --ignored`). Its pipeline of 274 one-cycle rounds
+  fills every boundary's 64 actions: 17,561 settled actions (4,125
+  assessments, 8,220 execution requests, 4,117 nominations, 825 closes, 274
+  dismissals), 8,220 receipts, 825 archived books, and 275 cycles of
+  institution totals, with nothing rejected, refused, or dropped and the state
+  at most about 168 KB. It takes 46 s in a release build. In a debug build
+  every boundary rewrites the whole state record at about 0.3 s a boundary
+  (the engine's write path, as Phase 0 measured it, at about 1.8 ms per KiB
+  in a debug build), which is about six minutes for its 550 boundaries, so the
+  debug suite runs the same pipeline for 8 rounds and holds that the state
+  stops growing once the pipeline is full (7 s). Phase 2, and the
+  record-store package's engine changes, make the full size affordable in the
+  debug suite again.
+- The reference run is a test of `canwu-ming-fiscal-reference`,
+  `archive_century.rs` (24 s in a debug build): one sample cycle a year,
+  closed every year, archived every ten. Restore and replay of archiving runs
+  are held by the fiscal crate's tests.
+
+| Year | Fiscal state (bytes) | Snapshot (bytes) | Archive store (bytes) |
+| ---: | ---: | ---: | ---: |
+| 10 | 4,141 | 6,011,192 | 40,686 |
+| 25 | 15,962 | 13,673,147 | 84,837 |
+| 50 | 4,153 | 29,082,317 | 233,492 |
+| 100 | 4,157 | 57,931,997 | 508,186 |
+
+The state's largest size over the century was 27,771 bytes (just before a
+decade's archive), against the 32 MiB budget. The snapshot grows by about
+580 KB a year because an unsealed run keeps every boundary's evidence, most of
+it the boundaries' record changes and the knowledge published to the
+observer; sealing bounds that, and it is not a fiscal growth.
+
+**Per boundary.** `fiscal-profile` in allocation mode (allocation counts do
+not depend on the machine's load), in its default shape (48 institutions with
+40 settled cycles each, four observers), against the integration branch just
+before Phase 1 (three samples each, all equal):
+
+| Measure | Before | Phase 1 |
+| --- | ---: | ---: |
+| Fiscal state (bytes) | 2,155,406 | 1,947,029 |
+| Admitting boundary of 48 actions (allocations) | 1,714,681 | 1,635,402 |
+| Settling boundary of 48 actions | 6,476,053 | 6,282,337 |
+| Decode / clone / encode the state | 42,436 / 42,435 / 191,824 | 40,440 / 40,439 / 180,896 |
+| Validate the state | 6,412 | 9,418 |
+| Settlement's measure | 34,124 | 29,646 |
+| Idle boundary, settled state / no fiscal records | 488 / 480 | 489 / 481 |
+
+The state is smaller (rings instead of 3,840 kept outcomes) and every
+operation on it a little cheaper, except validation, which now also checks
+the ledgers, offices, rings, and observer slots.
 
 ## State layout
 
@@ -1644,10 +1812,10 @@ reverting its fix in the working tree.
 | `fiscal_action_idempotency.rs` | A re-send refused while its outcome is in the ring (`IdempotencyConflict`) and after eviction (`FISCAL_REVISION_EXPIRED`); a revision above the current one refused (`FISCAL_REVISION_UNKNOWN`); two commands with one action ID admitted before either settles apply once (the second is skipped); a batch naming an ID twice is refused; an eviction inside one boundary lets no copy through. |
 | `fiscal_cycle_archive.rs` | Close, archive (several blobs), both watermarks refuse a new book, a hot book below the office watermark is unaffected, institution totals archived once by the commit that empties the cycle in any order, lookup of a book and of institution totals, a book with citations newer than the last sealed cut refused at preparation, stale and duplicate commits terminate, acknowledgement twice is a no-op, commits settle before actions, sealed run = unsealed fork = restore from sealed segments = exact replay. |
 | `fiscal_archive_without_store.rs` | With an archive store that fails every read, every boundary of a run that closes, archives, settles receipts, and publishes reports has the same receipts, records, and hashes as with a working store. |
-| `fiscal_archive_lifetime.rs` | Past every 0.15.0 lifetime cap: more than 4,096 assessments, 16,384 outcomes, 8,192 receipts, and 4,096 auditor proposals over many cycles and commits; nothing is refused for lifetime. Sized to run in a debug build within the suite's time. |
+| `fiscal_archive_lifetime.rs` | Past every 0.15.0 lifetime cap: more than 4,096 assessments, 16,384 outcomes, 8,192 execution requests and receipts, and 4,096 auditor proposals over many cycles and commits; nothing is refused for lifetime. The full size runs in a release build (`-- --ignored`); the debug suite runs the same pipeline for 8 rounds and holds that the state stops growing ([Phase 1 as implemented](#phase-1-as-implemented)). |
 | `fiscal_observer_bindings.rs` | A government holder without a person; re-pointing keeps every other binding's lines and gives the new holder the whole report; the old holder's report is withdrawn; removal; line slots never reused; a dead holder's lines owed and published on revival. |
 | `fiscal_receipt_refusals.rs` | Each receipt and historical-context refusal reason is an event, settles the packets after it, and changes nothing; no receipt or context packet fails a boundary. |
-| Reference run (harness) | `canwu-ming-fiscal-reference` for 100 simulated years with an archive cadence: the state stays inside 32 MiB, and its size over the run is recorded. |
+| Reference run (`canwu-ming-fiscal-reference`, `archive_century.rs`) | 100 simulated years with an archive cadence: the state stays inside 32 MiB and does not grow with the run, and its size over the run is recorded ([Phase 1 as implemented](#phase-1-as-implemented)). |
 
 **Phase 2** (partitioned records):
 
@@ -1702,10 +1870,6 @@ tests), M (one crate, days), L (a crate's storage or settlement redesign), XL
 In the fiscal extension, after this design:
 
 - an invalid committed fiscal record (activation and every write exclude it);
-- an archive commit or acknowledgement packet that is malformed or forged (only
-  `enqueue_fiscal_archive` and `finalize_fiscal_archive_retention` make them, and
-  they never make one), or an applied commit whose selection is not hot and
-  closed (it would need a batch that `enqueue_fiscal_archive` refused);
 - counter overflow (64-bit);
 - from Phase 3 only, an engine refusal the plugin cannot foresee: a report
   published to a domain-entity holder that a system of another plugin retires
@@ -1718,7 +1882,10 @@ An action never fails a boundary: it is applied, rejected as its own outcome,
 or dropped with `canwu.fiscal.action_dropped.v1` when even its rejection cannot
 be recorded (its record at its byte budget). A receipt or historical-context
 packet never fails one either: it settles or is refused with
-`canwu.fiscal.ingress_rejected.v1`. A report that cannot be published now
+`canwu.fiscal.ingress_rejected.v1`. Neither does an archive packet: a commit
+or acknowledgement that is malformed or forged, a commit that does not bind
+its selection, and a stale commit the head has no room for are refused with
+the same event and change nothing. A report that cannot be published now
 stays pending.
 
 ## Risks, open decisions, and questions for review
