@@ -413,9 +413,72 @@ fn declared_evidence(root: ProductionState) -> Vec<canwu_api::EvidenceRef> {
     .dependencies
 }
 
+/// A run whose root holds a running execution, every evidence version of
+/// which is an initial-scenario version, seals before its first boundary and
+/// continues as its unsealed fork does. The root declares none of those
+/// versions: they stay readable after any seal, and the engine refuses to
+/// have them declared.
+#[test]
+fn a_run_with_running_work_seals_before_its_first_boundary() {
+    let plugin = ProductionPlugin;
+    let archive = TestArchive::default();
+    let mut state = base_state();
+    let lease = activate_lease(&mut state, "sealed");
+    state
+        .apply_operation(
+            &command(&state, "production:start:sealed", start_operation(&lease)),
+            lease.at,
+        )
+        .expect("the execution starts");
+    let mut unsealed = runtime(&plugin, state, &archive);
+    enqueue_operation(
+        &mut unsealed,
+        1,
+        "production:authorize:sealed-missing",
+        ProductionOperation::AuthorizeWorkOrder {
+            work_order: WorkOrderId::new("production:order:sealed-missing").expect("order ID"),
+        },
+    );
+    let mut sealed = unsealed.fork().into_compacted().expect("compact interface");
+    sealed
+        .seal_evidence()
+        .expect("the run seals before its first boundary")
+        .expect("the queued command seals");
+    for _ in 0..3 {
+        let at = unsealed.time();
+        assert_eq!(
+            sealed
+                .settle_boundary(canwu_api::BoundaryRequest::at(at))
+                .expect("sealed boundary"),
+            unsealed
+                .settle_boundary(canwu_api::BoundaryRequest::at(at))
+                .expect("unsealed boundary")
+        );
+        assert_eq!(sealed.checkpoint_hash(), unsealed.checkpoint_hash());
+    }
+}
+
+/// Rewrites every execution input's consumer evidence, and its work in
+/// progress's copy, to `version`.
+fn with_consumer_evidence(
+    mut state: ProductionState,
+    version: &canwu_api::DomainRecordVersionRef,
+) -> ProductionState {
+    for execution in state.executions.values_mut() {
+        for input in &mut execution.inputs {
+            input.consumption.consumer_evidence = version.clone();
+        }
+    }
+    for wip in state.work_in_progress.values_mut() {
+        for input in &mut wip.consumed_input_evidence {
+            input.consumption.consumer_evidence = version.clone();
+        }
+    }
+    state
+}
+
 #[test]
 fn only_unfinished_executions_declare_their_input_consumer_evidence() {
-    // A running execution declares its input's consumer evidence.
     let mut running = base_state();
     let lease = activate_lease(&mut running, "running");
     running
@@ -428,14 +491,33 @@ fn only_unfinished_executions_declare_their_input_consumer_evidence() {
             lease.at,
         )
         .expect("the execution starts");
-    let consumer = canwu_api::EvidenceRef::DomainRecordVersion(
-        lease.input.consumption.consumer_evidence.clone(),
+    // The fixture's consumer evidence is an initial-scenario version, which
+    // stays readable after any seal: not even a running execution declares
+    // it.
+    let initial = lease.input.consumption.consumer_evidence.clone();
+    assert_eq!(
+        initial.established_by,
+        canwu_api::DomainRecordVersionSource::InitialScenario
     );
-    assert!(declared_evidence(running).contains(&consumer));
+    assert!(!declared_evidence(running.clone()).contains(
+        &canwu_api::EvidenceRef::DomainRecordVersion(initial.clone())
+    ));
+
+    // A running execution declares a consumer version a boundary
+    // established.
+    let established = canwu_api::DomainRecordVersionRef {
+        established_by: canwu_api::DomainRecordVersionSource::BoundaryChange {
+            boundary: canwu_api::BoundaryId::new(3),
+            change_index: 0,
+        },
+        ..initial
+    };
+    let consumer = canwu_api::EvidenceRef::DomainRecordVersion(established.clone());
+    assert!(declared_evidence(with_consumer_evidence(running, &established)).contains(&consumer));
 
     // A settled one, whose consumer evidence restore compares by reference
     // only, does not, so a seal may drop that body.
-    let settled = settled_state(1);
+    let settled = with_consumer_evidence(settled_state(1), &established);
     let execution = settled
         .executions
         .values()

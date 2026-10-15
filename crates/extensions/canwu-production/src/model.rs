@@ -1255,6 +1255,19 @@ impl ProductionState {
                     .values()
                     .flat_map(|head| head.source_evidence.iter().cloned()),
             )
+            // An initial-scenario version, the runtime's own initial version
+            // included, stays readable after any seal, so it needs no
+            // declaration, and the engine refuses one.
+            .filter(|reference| {
+                !matches!(
+                    reference,
+                    EvidenceRef::DomainRecordVersion(version)
+                        if matches!(
+                            version.established_by,
+                            canwu_api::DomainRecordVersionSource::InitialScenario
+                        )
+                )
+            })
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();

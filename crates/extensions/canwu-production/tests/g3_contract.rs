@@ -527,6 +527,47 @@ fn current_record_version<T: DomainRecordType>(
     panic!("current record version provenance is unavailable")
 }
 
+/// A copy of `state` for seeding a new run, in which no boundary of the run
+/// it came from exists. Its observation heads, sealed over the old run's
+/// versions, are dropped (the next boundary that observes rebuilds them), and
+/// every other boundary-established record version it cites becomes the
+/// initial-scenario version 1 that the new run seeds.
+fn cite_seeded_versions(state: &ProductionState) -> ProductionState {
+    fn rewrite(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                if fields.contains_key("record")
+                    && fields
+                        .get("established_by")
+                        .and_then(|source| source.get("type"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("boundary_change")
+                {
+                    fields.insert(
+                        "established_by".to_owned(),
+                        serde_json::json!({ "type": "initial_scenario" }),
+                    );
+                    fields.insert("version".to_owned(), serde_json::json!(1));
+                }
+                fields.values_mut().for_each(rewrite);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(rewrite),
+            _ => {}
+        }
+    }
+    let mut state = state.clone();
+    state.observation_heads.clear();
+    state.observation_rollover.clear();
+    state.observation_dirty_index.clear();
+    state.observation_due_index.clear();
+    let mut value = serde_json::to_value(&state).expect("production state JSON");
+    rewrite(&mut value);
+    let mut copy: ProductionState = serde_json::from_value(value).expect("seeded production state");
+    copy.rebuild_runtime_indexes().expect("seeded indexes");
+    copy.validate().expect("the seeded copy validates");
+    copy
+}
+
 fn next_boundary(canwu: &Canwu) -> u64 {
     canwu
         .boundaries()
@@ -3323,7 +3364,9 @@ fn canonical_commissioning_closes_resource_and_local_grants_before_project_archi
             .is_err(),
         "rehashing every container must not authenticate incomplete completion closure"
     );
-    let mut under_cap_pressure = completed.clone();
+    // The archive runtime below is seeded with this state, so it cites only
+    // the versions that runtime holds.
+    let mut under_cap_pressure = cite_seeded_versions(&completed);
     let maximum_outcomes = ProductionLimitsV1::canonical().max_operation_outcomes;
     for index in 0..maximum_outcomes.saturating_sub(under_cap_pressure.operation_outcomes.len()) {
         let id = ProductionOperationOutcomeId::new(format!(

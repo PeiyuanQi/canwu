@@ -1482,6 +1482,14 @@ impl ResourceState {
                             .cloned()
                     }),
             )
+            // An initial-scenario version stays readable after any seal, so
+            // it needs no declaration, and the engine refuses one.
+            .filter(|version| {
+                !matches!(
+                    version.established_by,
+                    canwu_api::DomainRecordVersionSource::InitialScenario
+                )
+            })
             .map(EvidenceRef::DomainRecordVersion)
             .collect::<BTreeSet<_>>()
             .into_iter()

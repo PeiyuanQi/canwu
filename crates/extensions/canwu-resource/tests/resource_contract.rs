@@ -12,6 +12,35 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+/// The provider of the external `test.provider.execution` records a
+/// scenario holds, under the owner name those records carry. It registers
+/// their schema, which every current record needs for a run to seal.
+struct ProviderFixture(&'static str);
+
+impl canwu_api::SimulationPlugin for ProviderFixture {
+    fn name(&self) -> &'static str {
+        self.0
+    }
+
+    fn version(&self) -> &'static str {
+        "1"
+    }
+
+    fn semantic_hash(&self) -> &'static str {
+        "00000000000000000000000000000000000000000000000000000000000000e1"
+    }
+
+    fn register(
+        &self,
+        registrar: &mut canwu_api::PluginRegistrar<'_>,
+    ) -> Result<(), canwu_api::CanwuError> {
+        registrar.register_record_schema(canwu_api::DomainRecordSchema::new(
+            DomainRecordKind::new("test.provider", "execution"),
+            DomainRecordClass::Record,
+        ))
+    }
+}
+
 fn digest(value: char) -> String {
     value.to_string().repeat(64)
 }
@@ -34,6 +63,20 @@ fn external_version(id: &str) -> DomainRecordVersionRef {
         record: DomainRecordRef::new("test.provider", "execution", id),
         version: 1,
         established_by: DomainRecordVersionSource::InitialScenario,
+    }
+}
+
+/// An external record version a boundary established. Only such a version
+/// is declared as payload-required evidence: an initial-scenario one stays
+/// readable after any seal.
+fn established_version(id: &str) -> DomainRecordVersionRef {
+    DomainRecordVersionRef {
+        record: DomainRecordRef::new("test.provider", "execution", id),
+        version: 1,
+        established_by: DomainRecordVersionSource::BoundaryChange {
+            boundary: canwu_api::BoundaryId::new(1),
+            change_index: 0,
+        },
     }
 }
 
@@ -451,7 +494,7 @@ fn conservation_partial_minimum_and_protected_floor_are_enforced() {
     partial.state.limits.max_archive_candidates = 19;
     let allocation = only_leg(&partial.state);
     let leg = partial.state.allocation_legs[&allocation.id].clone();
-    let consumer = external_version("partial-consumer");
+    let consumer = established_version("partial-consumer");
     let key = ResourceOperationKey::new("test:consume:partial").expect("key");
     let certificate = activate_certificate(
         &mut partial.state,
@@ -648,8 +691,27 @@ fn advance_transfer(
     suffix: &str,
     progress: TransferProgressV1,
 ) {
+    let evidence = established_version(&format!("transport-{suffix}"));
+    advance_transfer_with(value, transfer, suffix, progress, &evidence);
+    assert!(value.state.continuation.active);
+    assert!(
+        value
+            .state
+            .continuation
+            .dependencies
+            .contains(&EvidenceRef::DomainRecordVersion(evidence))
+    );
+}
+
+/// Advances `transfer` citing `evidence` as its transport evidence.
+fn advance_transfer_with(
+    value: &mut Fixture,
+    transfer: &ResourceTransferId,
+    suffix: &str,
+    progress: TransferProgressV1,
+    evidence: &DomainRecordVersionRef,
+) {
     let revision = value.state.transfers[transfer].revision;
-    let evidence = external_version(&format!("transport-{suffix}"));
     let outcome = value
         .state
         .apply_operation(&ResourceOperationRequestV1::AdvanceTransfer(
@@ -670,17 +732,78 @@ fn advance_transfer(
             },
         ))
         .expect("advance");
-    assert_eq!(outcome.exact_evidence, vec![evidence]);
-    assert!(value.state.continuation.active);
+    assert_eq!(outcome.exact_evidence, vec![evidence.clone()]);
+}
+
+/// A run whose root holds a transfer in flight, citing an initial-scenario
+/// record version as its transport evidence, seals before its first
+/// boundary and continues as its unsealed fork does. The root does not
+/// declare that version: it stays readable after any seal, and the engine
+/// refuses to have it declared.
+#[test]
+fn a_run_citing_initial_scenario_evidence_seals_before_its_first_boundary() {
+    let (mut value, leg) = transfer_fixture("sealed");
+    let transfer = start_transfer(&mut value, leg, "sealed", None);
+    let evidence = external_version("transport-sealed");
+    advance_transfer_with(
+        &mut value,
+        &transfer,
+        "sealed",
+        TransferProgressV1::InTransit,
+        &evidence,
+    );
     assert!(
-        value
+        !value
             .state
             .continuation
             .dependencies
-            .contains(&EvidenceRef::DomainRecordVersion(
-                outcome.exact_evidence[0].clone(),
-            ))
+            .contains(&EvidenceRef::DomainRecordVersion(evidence.clone()))
     );
+    let provider = DomainRecord {
+        reference: evidence.record.clone(),
+        owner: "test-provider".to_owned(),
+        class: DomainRecordClass::Record,
+        version: 1,
+        lifecycle: DomainRecordLifecycle::Active,
+        payload: serde_json::json!({"transport": "sealed"}),
+        references: Vec::new(),
+    };
+    let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
+        .with_domain_records(vec![provider, value.state.into_record().expect("record")]);
+    let plugin = ResourcePlugin::default();
+    let mut unsealed = canwu_api::Canwu::new_with_plugins(
+        47,
+        scenario,
+        &[&ProviderFixture("test-provider"), &plugin],
+    )
+    .expect("resource runtime");
+    enqueue_resource_completion_operation(
+        &mut unsealed,
+        SimTime::EPOCH,
+        &ResourceCompletionOperationV1::Expire(ExpireCompletionCapacityV1 {
+            at: SimTime::EPOCH,
+            current_boundary: 0,
+            candidate_limit: 1,
+        }),
+    )
+    .expect("expiry ingress");
+    let mut sealed = unsealed.fork().into_compacted().expect("compact interface");
+    sealed
+        .seal_evidence()
+        .expect("the run seals before its first boundary")
+        .expect("the queued work seals");
+    for minute in 0..3 {
+        let at = SimTime::EPOCH + SimDuration::minutes(minute);
+        assert_eq!(
+            sealed
+                .settle_boundary(BoundaryRequest::at(at))
+                .expect("sealed boundary"),
+            unsealed
+                .settle_boundary(BoundaryRequest::at(at))
+                .expect("unsealed boundary")
+        );
+        assert_eq!(sealed.checkpoint_hash(), unsealed.checkpoint_hash());
+    }
 }
 
 fn terminal_certificate(
@@ -1184,8 +1307,15 @@ fn named_terminal_report_reservation_publishes_the_last_real_hot_slot() {
     };
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
         .with_domain_records(vec![provider, value.state.into_record().expect("record")]);
-    let mut canwu = canwu_api::Canwu::new_with_plugins(41, scenario, &[&ResourcePlugin::default()])
-        .expect("resource runtime");
+    let mut canwu = canwu_api::Canwu::new_with_plugins(
+        41,
+        scenario,
+        &[
+            &ProviderFixture("test-provider"),
+            &ResourcePlugin::default(),
+        ],
+    )
+    .expect("resource runtime");
     enqueue_resource_completion_operation(
         &mut canwu,
         SimTime::EPOCH,
@@ -1516,8 +1646,12 @@ fn delayed_report_wakes_and_publishes_on_an_otherwise_quiet_boundary() {
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
         .with_domain_records(vec![provider, value.state.into_record().expect("record")]);
     let plugin = ResourcePlugin::default();
-    let mut canwu =
-        canwu_api::Canwu::new_with_plugins(29, scenario, &[&plugin]).expect("resource runtime");
+    let mut canwu = canwu_api::Canwu::new_with_plugins(
+        29,
+        scenario,
+        &[&ProviderFixture("test-provider"), &plugin],
+    )
+    .expect("resource runtime");
     let acquisition = lease_request(
         1,
         "test:lease:delayed-report-trigger",
@@ -3402,8 +3536,9 @@ fn canonical_external_participant_ingress_requires_exact_coordinator_payload_and
     let scenario = Scenario::new(SimTime::EPOCH, Vec::new())
         .with_domain_records(vec![resource_record.clone(), provider.clone()]);
     let plugin = ResourcePlugin::new([DomainRecordKind::new("test.provider", "execution")]);
-    let mut canwu =
-        canwu_api::Canwu::new_with_plugins(31, scenario, &[&plugin]).expect("canonical runtime");
+    let provider_plugin = ProviderFixture("test.provider");
+    let mut canwu = canwu_api::Canwu::new_with_plugins(31, scenario, &[&provider_plugin, &plugin])
+        .expect("canonical runtime");
     enqueue_resource_completion_operation(
         &mut canwu,
         SimTime::EPOCH,
@@ -3443,8 +3578,9 @@ fn canonical_external_participant_ingress_requires_exact_coordinator_payload_and
 
     let forged_scenario = Scenario::new(SimTime::EPOCH, Vec::new())
         .with_domain_records(vec![resource_record, provider]);
-    let mut forged = canwu_api::Canwu::new_with_plugins(32, forged_scenario, &[&plugin])
-        .expect("forged runtime");
+    let mut forged =
+        canwu_api::Canwu::new_with_plugins(32, forged_scenario, &[&provider_plugin, &plugin])
+            .expect("forged runtime");
     let mut forged_request = request;
     forged_request.holder = holder(2);
     let forged_operation = ResourceCompletionOperationV1::GrantExternalParticipant(forged_request);
