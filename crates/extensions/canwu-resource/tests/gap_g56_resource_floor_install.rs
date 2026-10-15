@@ -577,18 +577,21 @@ fn a_custodian_names_any_floor_and_the_root_stays_bounded() {
             EntityRef::Person(PersonId::new(GRANTEE)),
         ],
     )
-    .with_domain_records(vec![
-        DomainRecord {
-            reference: consent.record.clone(),
-            owner: "fixture-provider".to_owned(),
-            class: DomainRecordClass::Record,
-            version: consent.version,
-            lifecycle: DomainRecordLifecycle::Active,
-            payload: serde_json::json!({ "evidence": "consent" }),
-            references: Vec::new(),
-        },
-        resource.into_record().expect("resource record"),
-    ]);
+    .with_domain_records(
+        [
+            vec![DomainRecord {
+                reference: consent.record.clone(),
+                owner: "fixture-provider".to_owned(),
+                class: DomainRecordClass::Record,
+                version: consent.version,
+                lifecycle: DomainRecordLifecycle::Active,
+                payload: serde_json::json!({ "evidence": "consent" }),
+                references: Vec::new(),
+            }],
+            resource.into_records().expect("resource record"),
+        ]
+        .concat(),
+    );
     let archive = MemoryArchive::default();
     let mut canwu = Canwu::new_with_plugins(56, scenario, &plugins).expect("runtime");
     canwu.set_plugin_archive_object_provider(Rc::new(archive.clone()));

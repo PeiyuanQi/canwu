@@ -191,7 +191,7 @@ fn runtime(archive: &MemoryArchive) -> Canwu {
             .expect("account");
     }
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
-        .with_domain_records(vec![state.into_record().expect("resource record")]);
+        .with_domain_records(state.into_records().expect("resource record"));
     let mut canwu =
         Canwu::new_with_plugins(17, scenario, &[&ResourcePlugin::default()]).expect("runtime");
     canwu.set_plugin_archive_object_provider(Rc::new(archive.clone()));

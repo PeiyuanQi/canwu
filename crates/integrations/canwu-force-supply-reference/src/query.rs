@@ -9,6 +9,7 @@ use canwu_api::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 const MAX_ARCHIVED_REPORT_RECORDS: usize = 16_384;
 
@@ -290,8 +291,111 @@ fn report_from_state_with_archive(
     Ok(report)
 }
 
-#[allow(clippy::too_many_lines)]
+/// Which resource outcomes a validation of the force runtime compares.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResourceOutcomes {
+    /// The ones the resource root holds hot. One it does not hold is
+    /// unavailable only when the resource root has no archive to hold it.
+    Hot,
+    /// Hot ones, and archived ones through the archive provider attached to
+    /// the runtime.
+    HotAndArchived,
+}
+
+/// Checks that the resource root of `canwu` holds `expected`, the exact
+/// outcome a force record cites. An outcome is written once: the resource
+/// root holds it while it is hot, and the resource archive once a commit has
+/// archived it, so the cited version's body need not be read for it.
+fn check_resource_outcome(
+    canwu: &Canwu,
+    resource: Option<&canwu_resource::ResourceState>,
+    expected: &canwu_resource::ResourceOperationOutcomeVersionV1,
+    outcomes: ResourceOutcomes,
+    unavailable: &str,
+    differs: &str,
+) -> Result<(), CanwuError> {
+    let Some(resource) = resource else {
+        return Err(invalid(unavailable));
+    };
+    let exact = match resource.outcomes.get(&expected.operation_key) {
+        Some(outcome) => outcome.clone(),
+        None if resource.archive_head.directory_root.is_none() => {
+            return Err(invalid(unavailable));
+        }
+        None if outcomes == ResourceOutcomes::Hot => return Ok(()),
+        None => canwu_resource::archived_resource_operation_outcome(
+            resource,
+            &HostResourceArchive(canwu),
+            &expected.operation_key,
+        )
+        .map_err(|error| invalid(format!("resource archive lookup failed: {error}")))?
+        .ok_or_else(|| invalid(unavailable))?,
+    };
+    if canwu_resource::ResourceOperationOutcomeVersionV1::from(&exact) != *expected {
+        return Err(invalid(differs));
+    }
+    Ok(())
+}
+
+/// The resource archive as the provider attached to a runtime serves it.
+struct HostResourceArchive<'a>(&'a Canwu);
+
+impl canwu_resource::ResourceArchiveStore for HostResourceArchive<'_> {
+    fn store_resource_archive_object(
+        &self,
+        _namespace: &str,
+        _object_id: &str,
+        _bytes: &[u8],
+    ) -> Result<(), canwu_resource::ResourceError> {
+        Err(canwu_resource::ResourceError::InvalidLifecycle(
+            "the attached resource archive is read here only".to_owned(),
+        ))
+    }
+
+    fn load_resource_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, canwu_resource::ResourceError> {
+        self.0
+            .plugin_archive_object(namespace, object_id)
+            .map_err(|error| canwu_resource::ResourceError::InvalidDefinition(error.to_string()))
+    }
+
+    fn persist_resource_archive_retention(
+        &self,
+        _handle: &canwu_resource::ResourceArchiveRetentionHandleV1,
+    ) -> Result<(), canwu_resource::ResourceError> {
+        Err(canwu_resource::ResourceError::InvalidLifecycle(
+            "the attached resource archive is read here only".to_owned(),
+        ))
+    }
+
+    fn finalize_resource_archive_retention(
+        &self,
+        _handle_id: &str,
+        _phase: canwu_resource::ResourceArchiveRetentionPhaseV1,
+    ) -> Result<(), canwu_resource::ResourceError> {
+        Err(canwu_resource::ResourceError::InvalidLifecycle(
+            "the attached resource archive is read here only".to_owned(),
+        ))
+    }
+}
+
+/// Validates the hot force runtime and the exact versions it cites, without
+/// reading any archive.
+///
+/// A resource outcome it cites is compared only while the resource root
+/// holds it hot; one that is not hot is refused only when the resource root
+/// has no archive. An archived one is compared by
+/// [`validate_force_supply_runtime_with_archive_store`] and by the restore
+/// helpers, which read it through the runtime's archive provider.
 pub fn validate_force_supply_runtime(canwu: &Canwu) -> Result<(), CanwuError> {
+    validate_runtime(canwu, ResourceOutcomes::Hot)
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_runtime(canwu: &Canwu, outcomes: ResourceOutcomes) -> Result<(), CanwuError> {
     let Some(record) = canwu_api::typed_domain_record(canwu, &force_supply_runtime_reference())
     else {
         return Ok(());
@@ -303,6 +407,7 @@ pub fn validate_force_supply_runtime(canwu: &Canwu) -> Result<(), CanwuError> {
             "force-supply runtime root version or canonical encoding differs",
         ));
     }
+    let resource = canwu_resource::resource_state(canwu)?.map(|(_, state)| state);
     for intent in state.intents.values() {
         for target in &intent.completion_certificate.locked_target_versions {
             if let canwu_resource::CompletionLockedTargetV1::ExternalRecord { version } = target {
@@ -322,15 +427,14 @@ pub fn validate_force_supply_runtime(canwu: &Canwu) -> Result<(), CanwuError> {
             {
                 return Err(invalid("retained resource outcome provider is invalid"));
             }
-            let resource = record.decode_payload::<canwu_resource::ResourceRuntimeRecord>()?;
-            let exact = resource
-                .outcomes
-                .get(&outcome.operation_key)
-                .map(canwu_resource::ResourceOperationOutcomeVersionV1::from)
-                .ok_or_else(|| invalid("retained resource outcome is unavailable"))?;
-            if &exact != outcome {
-                return Err(invalid("retained resource outcome exact binding differs"));
-            }
+            check_resource_outcome(
+                canwu,
+                resource.as_ref(),
+                outcome,
+                outcomes,
+                "retained resource outcome is unavailable",
+                "retained resource outcome exact binding differs",
+            )?;
         }
     }
     for publication in state.knowledge_publications.values() {
@@ -384,15 +488,14 @@ pub fn validate_force_supply_runtime(canwu: &Canwu) -> Result<(), CanwuError> {
         {
             return Err(invalid("archived resource outcome provider is invalid"));
         }
-        let resource = record.decode_payload::<canwu_resource::ResourceRuntimeRecord>()?;
-        let exact = resource
-            .outcomes
-            .get(&receipt.resource_outcome.operation_key)
-            .map(canwu_resource::ResourceOperationOutcomeVersionV1::from)
-            .ok_or_else(|| invalid("archived resource outcome is unavailable"))?;
-        if exact != receipt.resource_outcome {
-            return Err(invalid("archived resource outcome exact binding differs"));
-        }
+        check_resource_outcome(
+            canwu,
+            resource.as_ref(),
+            &receipt.resource_outcome,
+            outcomes,
+            "archived resource outcome is unavailable",
+            "archived resource outcome exact binding differs",
+        )?;
         if let (Some(outcome), Some(source)) = (
             &receipt.externality_outcome,
             &receipt.externality_outcome_source,
@@ -427,12 +530,14 @@ pub fn validate_force_supply_runtime(canwu: &Canwu) -> Result<(), CanwuError> {
 }
 
 /// Validates the hot force runtime together with every committed or pending
-/// package archive object and readable store-side retention phase.
+/// package archive object and readable store-side retention phase, and every
+/// archived resource outcome it cites, which it reads through the archive
+/// provider attached to `canwu`.
 pub fn validate_force_supply_runtime_with_archive_store(
     canwu: &Canwu,
     store: &dyn crate::PackageArchiveStore,
 ) -> Result<(), CanwuError> {
-    validate_force_supply_runtime(canwu)?;
+    validate_runtime(canwu, ResourceOutcomes::HotAndArchived)?;
     let Some(record) = canwu_api::typed_domain_record(canwu, &force_supply_runtime_reference())
     else {
         return Ok(());
@@ -447,29 +552,190 @@ pub fn validate_force_supply_runtime_with_archive_store(
     )
 }
 
+/// Restores a runtime from a snapshot, attaches `archive_provider`, the
+/// archive the runtime's plugins read archived records from, and validates
+/// the force runtime, every resource outcome it cites included, hot or
+/// archived.
 pub fn from_force_supply_snapshot_json(
     json: &str,
     plugins: &[&dyn canwu_api::SimulationPlugin],
+    archive_provider: Rc<dyn canwu_api::PluginArchiveObjectProvider>,
 ) -> Result<Canwu, CanwuError> {
-    let canwu = Canwu::from_snapshot_json_with_plugins(json, plugins)?;
-    validate_force_supply_runtime(&canwu)?;
+    let mut canwu = Canwu::from_snapshot_json_with_plugins(json, plugins)?;
+    canwu.set_plugin_archive_object_provider(archive_provider);
+    validate_runtime(&canwu, ResourceOutcomes::HotAndArchived)?;
     Ok(canwu)
 }
 
+/// Restores a runtime from a checkpoint journal, attaches `archive_provider`,
+/// and validates the force runtime as [`from_force_supply_snapshot_json`]
+/// does.
 pub fn from_force_supply_checkpoint_journal(
     bundle: canwu_api::CheckpointJournal,
     plugins: &[&dyn canwu_api::SimulationPlugin],
+    archive_provider: Rc<dyn canwu_api::PluginArchiveObjectProvider>,
 ) -> Result<Canwu, CanwuError> {
-    let canwu = Canwu::from_checkpoint_journal_with_plugins(bundle, plugins)?;
-    validate_force_supply_runtime(&canwu)?;
+    let mut canwu = Canwu::from_checkpoint_journal_with_plugins(bundle, plugins)?;
+    canwu.set_plugin_archive_object_provider(archive_provider);
+    validate_runtime(&canwu, ResourceOutcomes::HotAndArchived)?;
     Ok(canwu)
 }
 
+/// Replays a journal with `archive_provider` attached and validates the
+/// force runtime as [`from_force_supply_snapshot_json`] does.
 pub fn replay_force_supply_from_journal(
     plugins: &[&dyn canwu_api::SimulationPlugin],
     journal: &canwu_api::ReplayJournal,
+    archive_provider: Rc<dyn canwu_api::PluginArchiveObjectProvider>,
 ) -> Result<Canwu, CanwuError> {
-    let canwu = Canwu::replay_from_journal(plugins, journal)?;
-    validate_force_supply_runtime(&canwu)?;
+    let canwu =
+        Canwu::replay_from_journal_with_archive_provider(plugins, journal, archive_provider)?;
+    validate_runtime(&canwu, ResourceOutcomes::HotAndArchived)?;
     Ok(canwu)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ResourceOutcomes, check_resource_outcome};
+    use canwu_api::{BoundaryRequest, Canwu, CanwuError, EntityRef, PersonId, Scenario, SimTime};
+    use canwu_resource::{
+        ResourceArchiveRetentionHandleV1, ResourceArchiveRetentionPhaseV1, ResourceArchiveStore,
+        ResourceCancelDemandRequestV1, ResourceDemandId, ResourceError, ResourceLimitsV1,
+        ResourceOperationKey, ResourceOperationOutcomeVersionV1, ResourceOperationRequestV1,
+        ResourcePlugin, ResourceRevision, ResourceState, enqueue_resource_archive, resource_state,
+    };
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+    use std::rc::Rc;
+
+    /// Stored archive objects by namespace and object id.
+    type ArchiveObjects = BTreeMap<(String, String), Vec<u8>>;
+
+    #[derive(Clone, Default)]
+    struct MemoryArchive {
+        objects: Rc<RefCell<ArchiveObjects>>,
+    }
+
+    impl ResourceArchiveStore for MemoryArchive {
+        fn store_resource_archive_object(
+            &self,
+            namespace: &str,
+            object_id: &str,
+            bytes: &[u8],
+        ) -> Result<(), ResourceError> {
+            self.objects
+                .borrow_mut()
+                .insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
+            Ok(())
+        }
+
+        fn load_resource_archive_object(
+            &self,
+            namespace: &str,
+            object_id: &str,
+        ) -> Result<Option<Vec<u8>>, ResourceError> {
+            Ok(self
+                .objects
+                .borrow()
+                .get(&(namespace.to_owned(), object_id.to_owned()))
+                .cloned())
+        }
+
+        fn persist_resource_archive_retention(
+            &self,
+            _handle: &ResourceArchiveRetentionHandleV1,
+        ) -> Result<(), ResourceError> {
+            Ok(())
+        }
+
+        fn finalize_resource_archive_retention(
+            &self,
+            _handle_id: &str,
+            _phase: ResourceArchiveRetentionPhaseV1,
+        ) -> Result<(), ResourceError> {
+            Ok(())
+        }
+    }
+
+    impl canwu_api::PluginArchiveObjectProvider for MemoryArchive {
+        fn load_plugin_archive_object(
+            &self,
+            namespace: &str,
+            object_id: &str,
+        ) -> Result<Option<Vec<u8>>, CanwuError> {
+            Ok(self
+                .objects
+                .borrow()
+                .get(&(namespace.to_owned(), object_id.to_owned()))
+                .cloned())
+        }
+    }
+
+    fn key(value: &str) -> ResourceOperationKey {
+        ResourceOperationKey::new(value).expect("operation key")
+    }
+
+    /// A runtime whose resource root has archived the outcome of one durable
+    /// rejection, and the exact version of that outcome a record would cite.
+    fn archived_outcome() -> (Canwu, ResourceOperationOutcomeVersionV1) {
+        let mut state = ResourceState::empty(ResourceLimitsV1::canonical()).expect("state");
+        let request = ResourceOperationRequestV1::CancelDemand(ResourceCancelDemandRequestV1 {
+            operation_key: key("fixture:operation:cancel-missing"),
+            demand: ResourceDemandId::new("fixture:demand:missing").expect("demand"),
+            expected_demand_revision: ResourceRevision::INITIAL,
+        });
+        state.apply_operation(&request).expect("durable rejection");
+        let cited =
+            ResourceOperationOutcomeVersionV1::from(&state.outcomes[&request.operation_key()]);
+        let archive = MemoryArchive::default();
+        let plugin = ResourcePlugin::default();
+        let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
+            .with_domain_records(state.into_records().expect("the root persists"));
+        let mut canwu = Canwu::new_with_plugins(1, scenario, &[&plugin]).expect("runtime");
+        canwu.set_plugin_archive_object_provider(Rc::new(archive.clone()));
+        let (_, root) = resource_state(&canwu)
+            .expect("resource root")
+            .expect("resource runtime");
+        let prepared = root
+            .prepare_resource_archive(1, &archive)
+            .expect("archive batch");
+        enqueue_resource_archive(&mut canwu, &prepared, &archive).expect("archive commit");
+        canwu
+            .settle_boundary(BoundaryRequest::at(canwu.time()))
+            .expect("the commit applies");
+        (canwu, cited)
+    }
+
+    #[test]
+    fn an_archived_citation_is_compared_with_the_archived_outcome() {
+        let (canwu, cited) = archived_outcome();
+        let (_, resource) = resource_state(&canwu)
+            .expect("resource root")
+            .expect("resource runtime");
+        assert!(!resource.outcomes.contains_key(&cited.operation_key));
+        let check = |cited: &ResourceOperationOutcomeVersionV1, outcomes| {
+            check_resource_outcome(
+                &canwu,
+                Some(&resource),
+                cited,
+                outcomes,
+                "unavailable",
+                "differs",
+            )
+        };
+        check(&cited, ResourceOutcomes::HotAndArchived).expect("the archived outcome is cited");
+
+        let mut forged = cited.clone();
+        forged.quantity += 1;
+        let error = check(&forged, ResourceOutcomes::HotAndArchived).expect_err("forged");
+        assert_eq!(error.message, "differs");
+        let mut unsettled = cited.clone();
+        unsettled.operation_key = key("fixture:operation:never-settled");
+        let error = check(&unsettled, ResourceOutcomes::HotAndArchived).expect_err("unsettled");
+        assert_eq!(error.message, "unavailable");
+
+        // Validation that reads no archive leaves an archived citation to
+        // the restore helpers.
+        check(&forged, ResourceOutcomes::Hot).expect("not compared without the archive");
+    }
 }

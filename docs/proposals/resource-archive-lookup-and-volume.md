@@ -13,6 +13,18 @@ result, so a refusal needs room for its outcome only.
 state-side retention handle and succeeds after a later commit archived the
 receipt. The passages below that say otherwise describe 0.15.0.
 
+Changed in 0.16.0 by [resource root write cost](resource-root-write-cost.md):
+the resource root persists as a live root and one record per hot terminal
+bucket, so a boundary that settles an operation no longer decodes,
+validates, re-encodes, or journals the hot terminal records it does not
+touch. The table under "Choosing the budget" describes 0.15.0; a boundary now
+costs the same at every backlog, and the backlog is paid for by the archive
+commit that clears it. `max_archive_candidates` may be raised to 16,384 and a
+commit carries up to 64 pages (16,384 records). The archive source root a
+batch names is now a digest of the state revision, the admitted sequence, the
+number of hot terminal records, and the archive head, so blob and retention
+handle ids differ from 0.15.0.
+
 The release entry is in [Versioning and Persistence](../versioning.md). The
 other 0.15.0 proposals are
 [society settlement cadence and runtime revision](society-cadence-and-runtime-revision.md),

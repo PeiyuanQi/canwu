@@ -98,7 +98,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         allocation.remainder
     );
 
-    // The plugin scenario root is the record returned here.
-    let _authoritative_record = state.into_record()?;
+    // A scenario installs the root as these records: its live root and the
+    // buckets of the terminal records its operations left.
+    let _authoritative_records = state.into_records()?;
     Ok(())
 }

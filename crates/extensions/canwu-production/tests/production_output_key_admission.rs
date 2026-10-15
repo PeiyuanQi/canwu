@@ -312,6 +312,9 @@ fn resource_root_holding(
     resource
         .terminal_archive_candidates
         .retain(|_, key| key != &ResourceTerminalRecordKeyV1::Outcome(archived.clone()));
+    resource
+        .refresh_hot_terminal_ledger()
+        .expect("the ledger counts the candidates placed directly");
     resource.archive_head.revision += 1;
     resource.archive_head.directory_root = Some(batch.directory.id.clone());
     resource.archive_head.archived_record_count += 1;
@@ -333,7 +336,7 @@ fn an_output_key_a_resource_outcome_holds_is_refused_when_the_execution_starts()
     let mut scenario = scenario(state);
     scenario
         .domain_records
-        .push(resource.into_record().expect("resource root"));
+        .extend(resource.into_records().expect("resource root"));
     let production_plugin = ProductionPlugin;
     let resource_plugin = ResourcePlugin::default();
     let plugins: [&dyn canwu_api::SimulationPlugin; 2] = [&production_plugin, &resource_plugin];
@@ -412,7 +415,7 @@ fn an_output_set_no_resource_batch_can_settle_is_refused_when_the_execution_star
     let mut scenario = scenario(ready);
     scenario
         .domain_records
-        .push(resource.into_record().expect("resource root"));
+        .extend(resource.into_records().expect("resource root"));
     let production_plugin = ProductionPlugin;
     let resource_plugin = ResourcePlugin::default();
     let plugins: [&dyn canwu_api::SimulationPlugin; 2] = [&production_plugin, &resource_plugin];

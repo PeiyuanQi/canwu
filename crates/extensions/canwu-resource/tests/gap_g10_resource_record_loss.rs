@@ -533,7 +533,7 @@ fn gap_g10_resource_record_loss() {
             causes
                 .iter()
                 .map(cause_record)
-                .chain([state.into_record().expect("resource record")])
+                .chain(state.into_records().expect("resource record"))
                 .collect(),
         );
     let resource_plugin = ResourcePlugin::default();

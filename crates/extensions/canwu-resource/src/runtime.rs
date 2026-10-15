@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const RESOURCE_STATE_FORMAT_VERSION: u32 = 2;
+pub const RESOURCE_STATE_FORMAT_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceAllocationRequestV1 {
@@ -786,6 +786,7 @@ impl ResourceState {
             archive_maintenance_receipts: BTreeMap::new(),
             conservation: ConservationTotalsV1::default(),
             next_admitted_sequence: 1,
+            hot_terminal: crate::ResourceHotTerminalLedgerV1::default(),
         })
     }
 
@@ -1039,16 +1040,12 @@ impl ResourceState {
                 .external_completion_participants
                 .terminal_grants
                 .contains_key(acquisition)
-            || self
-                .terminal_archive_candidates
-                .values()
-                .any(|candidate| candidate == &key)
+            || self.hot_candidate_attached(&key)
         {
             return Ok(());
         }
         let terminal_sequence = self.next_sequence()?;
-        self.terminal_archive_candidates
-            .insert(terminal_sequence, key);
+        self.add_hot_candidate(terminal_sequence, key)?;
         Ok(())
     }
 
@@ -1101,15 +1098,11 @@ impl ResourceState {
         keys.push(crate::ResourceTerminalRecordKeyV1::Demand(
             demand_id.clone(),
         ));
-        keys.retain(|key| {
-            !self
-                .terminal_archive_candidates
-                .values()
-                .any(|candidate| candidate == key)
-        });
+        // The closure's records are read above, so a hot terminal one among
+        // them is attached.
+        keys.retain(|key| !self.hot_candidate_attached(key));
         let projected = self
-            .terminal_archive_candidates
-            .len()
+            .hot_terminal_records()
             .checked_add(keys.len())
             .ok_or(ResourceError::Overflow)?;
         if projected > self.limits.max_archive_candidates {
@@ -1119,7 +1112,7 @@ impl ResourceState {
         }
         for key in keys {
             let sequence = self.next_sequence()?;
-            self.terminal_archive_candidates.insert(sequence, key);
+            self.add_hot_candidate(sequence, key)?;
         }
         Ok(())
     }
@@ -1486,8 +1479,8 @@ impl ResourceState {
         // commit makes room is a question about all of them.
         let reserved_work = self
             .terminal_work_is_reserved(&ResourceOperationRequestV1::Credit(requests[0].clone()));
-        let hot_candidates = self.terminal_archive_candidates.len();
-        let hot_outcomes = self.outcomes.len();
+        let hot_candidates = self.hot_terminal_records();
+        let hot_outcomes = self.hot_operation_outcomes();
         let mut candidate = self.clone();
         let mut outcomes = Vec::with_capacity(requests.len());
         for request in requests {
@@ -1650,8 +1643,8 @@ impl ResourceState {
             ));
         }
         let terminal_work_is_reserved = self.terminal_work_is_reserved(request);
-        let hot_candidates = self.terminal_archive_candidates.len();
-        let hot_outcomes = self.outcomes.len();
+        let hot_candidates = self.hot_terminal_records();
+        let hot_outcomes = self.hot_operation_outcomes();
         // The root as it was. An applied operation keeps it to take the
         // whole operation back; a rejection restores it at once and is taken
         // back from its recorded position instead.
@@ -1722,10 +1715,10 @@ impl ResourceState {
         };
         outcome.semantic_digest =
             canonical_digest("canwu.resource.operation-outcome.v1", &outcome)?;
-        self.terminal_archive_candidates.insert(
+        self.add_hot_candidate(
             outcome.sequence,
             crate::ResourceTerminalRecordKeyV1::Outcome(outcome.operation_key.clone()),
-        );
+        )?;
         self.outcomes
             .insert(outcome.operation_key.clone(), outcome.clone());
         if status == ResourceOperationStatus::Applied
@@ -1751,7 +1744,7 @@ impl ResourceState {
                         sequence: outcome.sequence,
                         state_revision,
                         next_admitted_sequence,
-                    }),
+                    })?,
                 }
                 Ok(OperationSettlement::NoRoom(RoomShortage::RootLimit))
             }
@@ -1762,12 +1755,16 @@ impl ResourceState {
     /// Takes back a rejection recorded on a root that was otherwise left as
     /// it was: its outcome, its archive candidate, and the counters
     /// recording it advanced. A rejection changes nothing else.
-    fn take_back_rejection(&mut self, recorded: RecordedRejection) {
+    fn take_back_rejection(&mut self, recorded: RecordedRejection) -> Result<(), ResourceError> {
+        self.drop_hot_candidate(&crate::ResourceTerminalRecordKeyV1::Outcome(
+            recorded.operation_key.clone(),
+        ))?;
         self.outcomes.remove(&recorded.operation_key);
         self.terminal_archive_candidates.remove(&recorded.sequence);
         self.state_revision = recorded.state_revision;
         self.next_admitted_sequence = recorded.next_admitted_sequence;
         self.refresh_continuation();
+        Ok(())
     }
 
     /// Whether this root, about to record `pending_records` more outcomes,
@@ -1794,13 +1791,11 @@ impl ResourceState {
         pending_records: usize,
     ) -> Result<Option<RoomShortage>, ResourceError> {
         let candidates = self
-            .terminal_archive_candidates
-            .len()
+            .hot_terminal_records()
             .checked_add(pending_records)
             .ok_or(ResourceError::Overflow)?;
         let outcomes = self
-            .outcomes
-            .len()
+            .hot_operation_outcomes()
             .checked_add(pending_records)
             .ok_or(ResourceError::Overflow)?;
         let (reserved_candidates, reserved_outcomes) = if reserved_work {
@@ -2123,10 +2118,10 @@ impl ResourceState {
             reason,
         )?;
         let sequence = self.next_sequence()?;
-        self.terminal_archive_candidates.insert(
+        self.add_hot_candidate(
             sequence,
             crate::ResourceTerminalRecordKeyV1::LeaseReceipt(receipt.sequence),
-        );
+        )?;
         Ok(AppliedOperation {
             quantity: receipt.reserved_units,
             remainder: 0,
@@ -2465,11 +2460,14 @@ impl ResourceState {
                 "allocation candidate budget is invalid".to_owned(),
             ));
         }
+        // Hot terminal demands count too; the ledger knows their requesters
+        // whether or not they are attached.
         if requester.is_some_and(|requester| {
-            !self
-                .demands
-                .values()
-                .any(|demand| &demand.requester == requester)
+            !self.hot_terminal.demand_requesters.contains_key(requester)
+                && !self
+                    .demands
+                    .values()
+                    .any(|demand| &demand.requester == requester)
         }) {
             return Err(ResourceError::Authority(
                 "resource allocation requester owns no target demand".to_owned(),
@@ -2774,10 +2772,10 @@ impl ResourceState {
             canonical_digest("canwu.resource.consumption.v1", &consumption)?;
         self.consumptions
             .insert(consumption.id.clone(), consumption.clone());
-        self.terminal_archive_candidates.insert(
+        self.add_hot_candidate(
             consumption.terminal_sequence,
             crate::ResourceTerminalRecordKeyV1::Consumption(consumption.id.clone()),
-        );
+        )?;
         self.conservation.admitted_consumption = self
             .conservation
             .admitted_consumption
@@ -2817,7 +2815,7 @@ impl ResourceState {
         request: &ResourceTransferStartRequestV1,
         settled_at: Option<SimTime>,
     ) -> Result<AppliedOperation, ResourceError> {
-        if self.transfers.len() >= self.limits.max_transfers
+        if self.hot_transfer_count()? >= self.limits.max_transfers
             || self.transfers.contains_key(&request.transfer_id)
         {
             return Err(ResourceError::LimitExceeded(
@@ -2881,8 +2879,7 @@ impl ResourceState {
             ));
         }
         let projected = self
-            .transfers
-            .len()
+            .hot_transfer_count()?
             .checked_add(legs.len())
             .ok_or(ResourceError::Overflow)?;
         if projected > self.limits.max_transfers
@@ -3276,10 +3273,10 @@ impl ResourceState {
                     terminal_sequence: self.next_sequence()?,
                 };
                 self.losses.insert(loss.id.clone(), loss);
-                self.terminal_archive_candidates.insert(
+                self.add_hot_candidate(
                     self.losses[loss_id].terminal_sequence,
                     crate::ResourceTerminalRecordKeyV1::Loss(loss_id.clone()),
-                );
+                )?;
                 let transfer = self
                     .transfers
                     .get_mut(&request.transfer)
@@ -3342,10 +3339,10 @@ impl ResourceState {
             .expect("checked above");
         transfer.exact_evidence = exact_evidence.clone();
         transfer.terminal_sequence = terminal_sequence;
-        self.terminal_archive_candidates.insert(
+        self.add_hot_candidate(
             terminal_sequence,
             crate::ResourceTerminalRecordKeyV1::Transfer(request.transfer.clone()),
-        );
+        )?;
         self.active_transfers.remove(&request.transfer);
         self.completion_leases
             .complete_grant(&snapshot.completion_acquisition, &original_grant)?;
@@ -3419,10 +3416,10 @@ impl ResourceState {
         transfer.exact_evidence = exact_evidence.clone();
         transfer.terminal_sequence = terminal_sequence;
         let transfer_id = transfer.id.clone();
-        self.terminal_archive_candidates.insert(
+        self.add_hot_candidate(
             terminal_sequence,
             crate::ResourceTerminalRecordKeyV1::Transfer(transfer_id.clone()),
-        );
+        )?;
         self.active_transfers.remove(&request.transfer);
         self.completion_leases
             .complete_grant(&snapshot.completion_acquisition, &original_grant)?;
@@ -3516,10 +3513,10 @@ impl ResourceState {
             operation_key: request.operation_key.clone(),
             terminal_sequence: self.next_sequence()?,
         };
-        self.terminal_archive_candidates.insert(
+        self.add_hot_candidate(
             loss.terminal_sequence,
             crate::ResourceTerminalRecordKeyV1::Loss(loss.id.clone()),
-        );
+        )?;
         self.losses.insert(loss.id.clone(), loss);
         self.completion_leases
             .complete_grant(&acquisition, &grant)?;
@@ -3802,6 +3799,8 @@ impl ResourceState {
         if candidates.is_empty() {
             return;
         }
+        // Hot terminal demands refer to policies too; the ledger knows which
+        // whether or not they are attached.
         let referenced: BTreeSet<_> = self
             .accounts
             .values()
@@ -3811,6 +3810,7 @@ impl ResourceState {
                     .values()
                     .filter_map(|demand| demand.protected_floor_policy.as_ref()),
             )
+            .chain(self.hot_terminal.demand_floor_policies.keys())
             .collect();
         let retired: Vec<_> = candidates
             .into_iter()
@@ -4023,10 +4023,10 @@ impl ResourceState {
         fulfillment.semantic_digest =
             canonical_digest("canwu.resource.fulfillment.v1", &fulfillment)?;
         self.fulfillments.insert(id, fulfillment.clone());
-        self.terminal_archive_candidates.insert(
+        self.add_hot_candidate(
             fulfillment.terminal_sequence,
             crate::ResourceTerminalRecordKeyV1::Fulfillment(fulfillment.id.clone()),
-        );
+        )?;
         Ok(fulfillment)
     }
 
@@ -4324,10 +4324,10 @@ impl ResourceState {
             None,
         )?;
         let sequence = self.next_sequence()?;
-        self.terminal_archive_candidates.insert(
+        self.add_hot_candidate(
             sequence,
             crate::ResourceTerminalRecordKeyV1::LeaseReceipt(receipt.sequence),
-        );
+        )?;
         if let Some(grants) = self
             .completion_report_reservations
             .get(&acquisition)
@@ -5106,6 +5106,25 @@ impl ResourceState {
         Ok(())
     }
 
+    /// Transfers of the root, live and hot terminal, attached or not: what
+    /// `max_transfers` counts when a transfer starts.
+    fn hot_transfer_count(&self) -> Result<usize, ResourceError> {
+        let attached_terminal = self
+            .terminal_archive_candidates
+            .values()
+            .filter(|key| matches!(key, crate::ResourceTerminalRecordKeyV1::Transfer(_)))
+            .count();
+        self.transfers
+            .len()
+            .checked_sub(attached_terminal)
+            .and_then(|live| {
+                usize::try_from(self.hot_terminal.transfers)
+                    .ok()
+                    .and_then(|hot| live.checked_add(hot))
+            })
+            .ok_or(ResourceError::Overflow)
+    }
+
     fn next_sequence(&mut self) -> Result<u64, ResourceError> {
         let current = self.next_admitted_sequence;
         self.next_admitted_sequence = current.checked_add(1).ok_or(ResourceError::Overflow)?;
@@ -5154,17 +5173,14 @@ impl ResourceState {
             || active_reservations > self.limits.max_demands
             || active_allocation_legs > self.limits.max_demands
             || self.active_transfers.len() > self.limits.max_transfers
-            || self.outcomes.len() > self.limits.max_operation_outcomes
             || self.observation_heads.len() > self.limits.max_observation_heads
             || self.dirty_demands.len() > self.limits.max_dirty_demands
-            || self.terminal_archive_candidates.len() > self.limits.max_archive_candidates
-            || self.applied_archive_maintenance_receipts()
-                > self.limits.max_archive_maintenance_receipts
         {
             return Err(ResourceError::LimitExceeded(
                 "resource authoritative records exceed configured limits".to_owned(),
             ));
         }
+
         for (id, account) in &self.accounts {
             if id != &account.id {
                 return Err(ResourceError::InvalidDefinition(
@@ -5524,12 +5540,10 @@ impl ResourceState {
                     .to_owned(),
             ));
         }
-        let encoded = serde_json::to_vec(self).map_err(|error| {
-            ResourceError::InvalidDefinition(format!(
-                "resource authoritative state cannot be encoded: {error}"
-            ))
-        })?;
-        if encoded.len() > max_state_bytes {
+        // The hot terminal budgets, and the ledger against the attached
+        // records.
+        self.validate_hot_terminal_ledger()?;
+        if self.encoded_root_bytes()? > max_state_bytes {
             return Err(ResourceError::LimitExceeded(
                 "resource authoritative state byte cap is exhausted".to_owned(),
             ));

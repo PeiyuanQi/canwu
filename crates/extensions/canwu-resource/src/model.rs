@@ -4,10 +4,10 @@ use crate::{
     ResourceArchiveRetentionHandleV1, ResourceTerminalRecordKeyV1, RunBudgetRevisionV1,
 };
 use canwu_api::{
-    CapacityBookingId, DomainRecord, DomainRecordClass, DomainRecordDraft, DomainRecordLifecycle,
-    DomainRecordType, DomainRecordVersionRef, DomainValueKindClass, EntityRef, EvidenceRef,
-    HandoffId, ItineraryRevisionId, KnowledgeHolderRef, LegExecutionId,
-    PayloadRequiredEvidenceContinuationV1, SimTime, TransportExecutionId,
+    CapacityBookingId, DomainRecord, DomainRecordType, DomainRecordVersionRef,
+    DomainValueKindClass, EntityRef, EvidenceRef, HandoffId, ItineraryRevisionId,
+    KnowledgeHolderRef, LegExecutionId, PayloadRequiredEvidenceContinuationV1, SimTime,
+    TransportExecutionId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,8 +34,10 @@ pub struct ResourceLimitsV1 {
     /// plugin skips a packet whose result does not fit, with an event, and
     /// records nothing; the same request settles when sent again once an
     /// archive commit or a released lease has made room. At most
-    /// [`Self::MAX_ARCHIVE_CANDIDATES`]. Size it from the cost of a boundary
-    /// at that backlog, not from the ceiling.
+    /// [`Self::MAX_ARCHIVE_CANDIDATES`]. It also fixes the number of hot
+    /// terminal buckets ([`crate::resource_hot_terminal_bucket_count`]).
+    /// A larger budget costs ordinary boundaries nothing; size it from the
+    /// archive commit that clears it, which rewrites one bucket per record.
     pub max_archive_candidates: usize,
     /// Hot maintenance receipts of applied archive commits. Each of them is
     /// an archive candidate, so this must be at least
@@ -54,28 +56,33 @@ impl ResourceLimitsV1 {
     pub const DEFAULT_SHARDS: usize = 8;
     pub const MAX_HOLDERS: usize = 1_024;
     pub const MAX_QUERY_PAGE: usize = 256;
+    /// The canonical `max_operation_outcomes`.
     pub const MAX_HOT_RECEIPTS: usize = 8_192;
+    /// Hard maximum of `max_operation_outcomes`: the operation outcomes the
+    /// root may hold hot, at most one per hot terminal record.
+    pub const MAX_OPERATION_OUTCOMES: usize = 16_384;
     /// Hard maximum of `max_archive_candidates` and of
     /// `max_archive_maintenance_receipts`: the hot terminal records the
     /// resource root may hold between two archive commits. It is what one
     /// archive commit carries ([`crate::MAX_RESOURCE_ARCHIVE_COMMIT_RECORDS`]).
     ///
-    /// The ceiling is headroom for a burst, not a working size. Every
-    /// boundary that changes the root decodes, validates, re-encodes, and
-    /// journals the whole root, hot terminal records included, so each such
-    /// boundary costs time and journal bytes in proportion to the backlog.
-    /// A host application chooses its budget from that cost at the backlog
-    /// it accepts and keeps the backlog small by archiving often; the
-    /// canonical value stays 256.
-    pub const MAX_ARCHIVE_CANDIDATES: usize = 4_096;
+    /// Each hot terminal record lies in a bucket record of its own
+    /// ([`crate::ResourceHotTerminalBucketV1`]), so a boundary that settles an
+    /// operation reads and writes the live root and the buckets of the
+    /// records it touches, whatever the backlog. What the backlog still costs
+    /// is paid where it is handled: the boundary that applies an archive
+    /// commit rewrites one bucket per archived record, the host application
+    /// reads every hot record to prepare the commit, and a restore validates
+    /// them all. The canonical value stays 256.
+    pub const MAX_ARCHIVE_CANDIDATES: usize = 16_384;
     pub const MAX_HOT_RECORD_BYTES: usize = 65_536;
     pub const MAX_AUTHORITATIVE_STATE_BYTES: usize = 256 * 1024 * 1024;
     /// Most bytes of `max_state_bytes` that operations leave free for the
     /// root's own maintenance writes, which are not skipped: the receipt and
     /// retention handle a stale archive commit records (about 4 KB for a
-    /// commit of sixteen pages) and the report scheduling state the report
-    /// system persists. A root with a smaller cap reserves a quarter of it
-    /// ([`Self::operation_state_bytes`]).
+    /// commit of sixteen pages, 13 KB for one of sixty-four) and the report
+    /// scheduling state the report system persists. A root with a smaller
+    /// cap reserves a quarter of it ([`Self::operation_state_bytes`]).
     pub const MAINTENANCE_STATE_BYTE_RESERVE: usize = 64 * 1024;
 
     #[must_use]
@@ -131,7 +138,7 @@ impl ResourceLimitsV1 {
             || self.max_mutations_per_boundary == 0
             || self.max_mutations_per_boundary > 4_096
             || self.max_operation_outcomes == 0
-            || self.max_operation_outcomes > Self::MAX_HOT_RECEIPTS
+            || self.max_operation_outcomes > Self::MAX_OPERATION_OUTCOMES
             || self.max_reports_per_boundary == 0
             || self.max_reports_per_boundary > 256
             || self.max_observation_heads == 0
@@ -1327,8 +1334,14 @@ pub struct ResourceReportGrantV1 {
     pub delay_minutes: u64,
 }
 
-/// Canonical authoritative resource root stored as one versioned plugin-owned
-/// domain record. Nested records retain their own exact revisions.
+/// Canonical authoritative resource root. Nested records retain their own
+/// exact revisions.
+///
+/// It persists as its live root, the domain record `resource:runtime:v1`,
+/// and one record per hot terminal bucket (see [`crate::ResourceLiveRootV1`]
+/// and [`ResourceState::into_records`]). A boundary works on the live root
+/// with only the hot terminal records it reads attached; `hot_terminal`
+/// counts all of them.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceState {
     pub format_version: u32,
@@ -1383,13 +1396,16 @@ pub struct ResourceState {
     pub archive_maintenance_receipts: BTreeMap<u64, ResourceArchiveMaintenanceReceiptV1>,
     pub conservation: ConservationTotalsV1,
     pub next_admitted_sequence: u64,
+    /// Counts and aggregates over every hot terminal record, attached or
+    /// not. Every rule that counts hot terminal records reads it.
+    pub hot_terminal: crate::ResourceHotTerminalLedgerV1,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ResourceRuntimeRecord;
 
 impl DomainRecordType for ResourceRuntimeRecord {
-    type Payload = ResourceState;
+    type Payload = crate::ResourceLiveRootV1;
     type Class = DomainValueKindClass;
 
     const NAMESPACE: &'static str = PLUGIN_NAMESPACE;
@@ -1402,43 +1418,18 @@ pub fn resource_runtime_reference() -> canwu_api::TypedDomainRecordRef<ResourceR
 }
 
 impl ResourceState {
-    pub fn into_record(mut self) -> Result<DomainRecord, canwu_api::CanwuError> {
-        self.refresh_continuation();
-        self.validate().map_err(resource_canwu_error)?;
-        let draft = self.record_draft()?;
-        Ok(DomainRecord {
-            reference: draft.reference,
-            owner: crate::PLUGIN_NAME.to_owned(),
-            class: DomainRecordClass::Record,
-            version: self.state_revision.get(),
-            lifecycle: DomainRecordLifecycle::Active,
-            payload: draft.payload,
-            references: draft.references,
-        })
-    }
-
-    pub(crate) fn record_draft(&self) -> Result<DomainRecordDraft, canwu_api::CanwuError> {
-        let mut persisted = self.clone();
-        persisted.refresh_continuation();
-        serde_json::to_value(&persisted.report_dirty_grants).map_err(|error| {
-            canwu_api::CanwuError::new(
+    /// The live root record of a state that holds no hot terminal record.
+    /// A root with hot terminal records persists as several records
+    /// ([`Self::into_records`]); this refuses it.
+    pub fn into_record(self) -> Result<DomainRecord, canwu_api::CanwuError> {
+        if self.hot_terminal.records != 0 || !self.terminal_archive_candidates.is_empty() {
+            return Err(canwu_api::CanwuError::new(
                 canwu_api::ErrorCode::InvalidDomainRecord,
-                format!("resource report dirty index is not serializable: {error}"),
-            )
-        })?;
-        serde_json::to_value(&persisted.report_due_index).map_err(|error| {
-            canwu_api::CanwuError::new(
-                canwu_api::ErrorCode::InvalidDomainRecord,
-                format!("resource report due index is not serializable: {error}"),
-            )
-        })?;
-        serde_json::to_value(&persisted.report_cursor).map_err(|error| {
-            canwu_api::CanwuError::new(
-                canwu_api::ErrorCode::InvalidDomainRecord,
-                format!("resource report cursor is not serializable: {error}"),
-            )
-        })?;
-        DomainRecordDraft::from_typed(resource_runtime_reference(), &persisted)
+                "the resource root holds hot terminal records: install it with into_records",
+            ));
+        }
+        let mut records = self.into_records()?;
+        Ok(records.remove(0))
     }
 
     pub(crate) fn refresh_continuation(&mut self) {

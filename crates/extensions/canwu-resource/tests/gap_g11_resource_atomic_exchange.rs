@@ -480,7 +480,7 @@ fn gap_g11_resource_atomic_exchange() {
             EntityRef::Person(PersonId::new(2)),
         ],
     )
-    .with_domain_records(vec![state.into_record().expect("resource record")]);
+    .with_domain_records(state.into_records().expect("resource record"));
     let plugin = ResourcePlugin::default();
     let mut canwu =
         canwu_api::Canwu::new_with_plugins(11, scenario, &[&plugin]).expect("resource runtime");

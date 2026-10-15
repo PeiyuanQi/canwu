@@ -782,6 +782,54 @@ of the same two builds are beside them. They are interpreted in
 | Paged records | [`elapsed`](baselines/2026-10-15-paged-record-0.16.0-base-elapsed.json), [`allocations`](baselines/2026-10-15-paged-record-0.16.0-base-allocations.json) | [`elapsed`](baselines/2026-10-15-paged-record-0.16.0-record-store-elapsed.json), [`allocations`](baselines/2026-10-15-paged-record-0.16.0-record-store-allocations.json) |
 | Architecture suite | [`allocations`](baselines/2026-10-15-architecture-0.16.0-base-allocations.json) | [`allocations`](baselines/2026-10-15-architecture-0.16.0-record-store-allocations.json) |
 
+## Resource root profile
+
+`resource-root-profile` measures what one boundary costs the resource plugin
+as the hot terminal backlog of its root grows. Each `--backlogs` case installs
+a root holding that many hot terminal records (rejected operation outcomes of
+about 1.1 KB, placed in the root directly), then settles, `--samples` times
+after `--warmup` unmeasured rounds: one requester-scoped allocation pass that
+settles as a rejection (`operation`), eight such passes in one boundary
+(`batch_of_8`), and a boundary that admits only a packet of a tick plugin
+(`idle`). After the samples it settles one archive commit of every hot record
+(`archive_commit`, one sample). Only `settle_boundary` is measured; the
+evidence each boundary appends to the journal is reported as encoded JSON.
+`--mode allocations`, in a build with `--features allocation-counting`,
+reports allocator calls and requested bytes instead of time.
+
+```console
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml \
+  --bin resource-root-profile -- \
+  --mode elapsed \
+  --backlogs 0,256,1024,4000 \
+  --samples 5 \
+  --warmup 1 \
+  --label WHAT-WAS-BUILT \
+  --machine YOUR-STABLE-MACHINE-LABEL \
+  --recorded-on YYYY-MM-DD \
+  --output benchmarks/baselines/YYYY-MM-DD-resource-root-LABEL-elapsed.json
+```
+
+A backlog above 4,000 uses the largest candidate budget, which only a build
+with the 0.16.0 ceiling accepts. The 2026-10-15 reports compare four builds:
+the integration base `f511463` (label `base`), this change on it
+(`base-split`), the integration base with the record store package `305193a`
+(`record-store`), and this change on that (`record-store-split`, with a
+16,000-record case beside it). The builds before the change ran the same
+profile with two lines changed, because the root then installed as one record
+(`into_record` instead of `into_records`, and no ledger refresh). Each report's
+`source` names the checkout the binary ran in, and its `build` object the
+build itself. They are interpreted in
+[`docs/proposals/resource-root-write-cost.md`](../docs/proposals/resource-root-write-cost.md):
+
+| Build | Reports |
+| --- | --- |
+| Base | [`elapsed`](baselines/2026-10-15-resource-root-0.16.0-base-elapsed.json), [`allocations`](baselines/2026-10-15-resource-root-0.16.0-base-allocations.json) |
+| Split on the base | [`elapsed`](baselines/2026-10-15-resource-root-0.16.0-base-split-elapsed.json), [`allocations`](baselines/2026-10-15-resource-root-0.16.0-base-split-allocations.json) |
+| Record store | [`elapsed`](baselines/2026-10-15-resource-root-0.16.0-record-store-elapsed.json), [`allocations`](baselines/2026-10-15-resource-root-0.16.0-record-store-allocations.json) |
+| Split on the record store | [`elapsed`](baselines/2026-10-15-resource-root-0.16.0-record-store-split-elapsed.json), [`allocations`](baselines/2026-10-15-resource-root-0.16.0-record-store-split-allocations.json), [`elapsed at 16,000`](baselines/2026-10-15-resource-root-0.16.0-record-store-split-16000-elapsed.json), [`allocations at 16,000`](baselines/2026-10-15-resource-root-0.16.0-record-store-split-16000-allocations.json) |
+
 ## Recorded information-flow smoke baseline
 
 The 2026-08-21 smoke evidence consists of separate

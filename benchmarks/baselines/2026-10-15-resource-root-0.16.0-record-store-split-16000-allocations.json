@@ -1,0 +1,73 @@
+{
+  "benchmark": "resource-root-profile",
+  "build": {
+    "commit": "305193a + this change",
+    "description": "this change on the integration base with the record store package",
+    "note": "source reports the checkout the profile ran in, not the build; the build is named here"
+  },
+  "cases": [
+    {
+      "archive_commit": {
+        "archived_records": 16054,
+        "boundary": {
+          "allocated_bytes": 481718674.0,
+          "allocations": 3394008.0,
+          "journal_bytes": 20804857,
+          "raw_allocations": [
+            3394008
+          ]
+        }
+      },
+      "batch_of_8": {
+        "allocated_bytes": 931224.0,
+        "allocations": 6034.0,
+        "journal_bytes": 29093,
+        "raw_allocations": [
+          6035,
+          5960,
+          6034,
+          6259,
+          5972
+        ]
+      },
+      "hot_terminal_records": 16000,
+      "idle": {
+        "allocated_bytes": 24088.0,
+        "allocations": 294.0,
+        "journal_bytes": 798,
+        "raw_allocations": [
+          293,
+          295,
+          294,
+          294,
+          294
+        ]
+      },
+      "installed_resource_record_bytes": 9927227,
+      "operation": {
+        "allocated_bytes": 197285.0,
+        "allocations": 1222.0,
+        "journal_bytes": 10665,
+        "raw_allocations": [
+          1222,
+          1378,
+          1300,
+          1077,
+          1076
+        ]
+      }
+    }
+  ],
+  "label": "after-rebased-16000",
+  "machine": "local-windows-x86_64",
+  "mode": "allocations",
+  "recorded_on": "2026-10-15",
+  "samples": 5,
+  "source": {
+    "content_hash": "cf492293a00e4af3cf2349820220ca636874e6e30ac463c510eca0b5812930d6",
+    "git_commit": "305193a05d4e467d8f975b929a4acd0223cbe19f",
+    "git_dirty": true,
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.0\nLLVM version: 23.1.1"
+  },
+  "warmup": 1
+}

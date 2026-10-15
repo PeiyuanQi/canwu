@@ -23,6 +23,7 @@ mod lease;
 mod model;
 mod plugin;
 mod query;
+mod root;
 mod runtime;
 mod skip;
 
@@ -31,6 +32,7 @@ pub use lease::*;
 pub use model::*;
 pub use plugin::*;
 pub use query::*;
+pub use root::*;
 pub use runtime::*;
 pub use skip::*;
 

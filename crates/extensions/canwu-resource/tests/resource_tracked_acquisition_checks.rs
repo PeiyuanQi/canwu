@@ -107,7 +107,9 @@ fn runtime() -> Canwu {
         references: Vec::new(),
     };
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
-        .with_domain_records(vec![record, state.into_record().expect("resource record")]);
+        .with_domain_records(
+            [vec![record], state.into_records().expect("resource record")].concat(),
+        );
     let resource = ResourcePlugin::new([DomainRecordKind::new(EVIDENCE_NAMESPACE, "evidence")]);
     Canwu::new_with_plugins(5, scenario, &[&EvidencePlugin, &resource]).expect("runtime")
 }

@@ -177,10 +177,9 @@ fn publish_intent(
     if own.payload["published"] == true {
         return Ok(BoundaryProposal::default());
     }
-    let resource = view
-        .domain_record(&resource_runtime_reference().into_untyped())?
-        .expect("resource record")
-        .decode_payload::<ResourceRuntimeRecord>()?;
+    // The live root: the allocated leg is live, not hot terminal.
+    let (_, resource) = canwu_resource::resource_root_in_view(view, [])
+        .map(|root| root.expect("resource record"))?;
     let leg = resource
         .allocation_legs
         .values()

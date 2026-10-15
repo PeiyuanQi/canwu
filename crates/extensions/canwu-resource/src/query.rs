@@ -4,8 +4,8 @@ use crate::{
     ResourceConsumptionId, ResourceConsumptionVersionV1, ResourceDemandId, ResourceError,
     ResourceFulfillmentId, ResourceFulfillmentVersionV1, ResourceOperationKey,
     ResourceOperationOutcome, ResourceOperationOutcomeId, ResourceOperationOutcomeVersionV1,
-    ResourceReportGrantId, ResourceReportId, ResourceRevision, ResourceRuntimeRecord,
-    ResourceScopeId, ResourceState, canonical_digest, resource_runtime_reference,
+    ResourceReportGrantId, ResourceReportId, ResourceRevision, ResourceScopeId, ResourceState,
+    canonical_digest,
 };
 use canwu_api::{
     Canwu, CanwuError, DomainRecord, DomainRecordVersionRef, ErrorCode, EvidenceRef,
@@ -247,17 +247,14 @@ pub struct ResourceObservationWitnessV1 {
     pub digest: String,
 }
 
-/// The resource runtime record and its decoded state, if the run has one.
-/// Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+/// The whole resource root of a run: its live root record and the state
+/// with every hot terminal record attached from its bucket. Reading it costs
+/// time in proportion to the hot terminal backlog. Takes either runtime
+/// handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
 pub fn resource_state<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &H,
 ) -> Result<Option<(DomainRecord, ResourceState)>, CanwuError> {
-    let reference = resource_runtime_reference();
-    let Some(record) = canwu_api::typed_domain_record(canwu, &reference).cloned() else {
-        return Ok(None);
-    };
-    let state = record.decode_payload::<ResourceRuntimeRecord>()?;
-    Ok(Some((record, state)))
+    crate::whole_resource_root(canwu)
 }
 
 /// The current allocation leg with this ID. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
@@ -757,8 +754,7 @@ pub fn validate_resource_runtime<H: canwu_api::CanwuRun + ?Sized>(
             "resource runtime domain-record version differs from its state revision",
         ));
     }
-    let encoded = serde_json::to_vec(&state).map_err(|error| invalid(error.to_string()))?;
-    if encoded.len() > state.limits.max_state_bytes {
+    if state.encoded_root_bytes().map_err(resource_error)? > state.limits.max_state_bytes {
         return Err(invalid("resource authoritative state exceeds its byte cap"));
     }
     for outcome in state.outcomes.values() {

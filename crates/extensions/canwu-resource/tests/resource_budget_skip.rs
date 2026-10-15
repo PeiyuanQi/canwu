@@ -206,7 +206,7 @@ fn reject(state: &mut ResourceState, index: usize) {
 
 fn runtime(resource: ResourceState, archive: &MemoryArchive) -> Canwu {
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
-        .with_domain_records(vec![resource.into_record().expect("resource record")]);
+        .with_domain_records(resource.into_records().expect("resource record"));
     let mut canwu =
         Canwu::new_with_plugins(16, scenario, &[&ResourcePlugin::default()]).expect("runtime");
     canwu.set_plugin_archive_object_provider(Rc::new(archive.clone()));
@@ -569,7 +569,7 @@ fn skips_agree_across_a_seal_a_fork_a_restore_and_an_exact_replay() {
     let plugin = ResourcePlugin::default();
     let plugins: [&dyn canwu_api::SimulationPlugin; 1] = [&plugin];
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
-        .with_domain_records(vec![world(limits).into_record().expect("resource record")]);
+        .with_domain_records(world(limits).into_records().expect("resource record"));
     let mut base = Canwu::new_with_plugins(16, scenario, &plugins).expect("runtime");
     let revision = base.revision();
     for (offset, (operation_key, name)) in (0_u64..).zip([
@@ -1167,10 +1167,13 @@ fn production_run(
     archive: &MemoryArchive,
 ) -> Canwu {
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
-        .with_domain_records(vec![
-            production_record(certificate, outputs),
-            resource.into_record().expect("resource record"),
-        ]);
+        .with_domain_records(
+            [
+                vec![production_record(certificate, outputs)],
+                resource.into_records().expect("resource record"),
+            ]
+            .concat(),
+        );
     let mut canwu = Canwu::new_with_plugins(
         18,
         scenario,

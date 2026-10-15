@@ -1,0 +1,69 @@
+{
+  "benchmark": "resource-root-profile",
+  "build": {
+    "commit": "305193a + this change",
+    "description": "this change on the integration base with the record store package",
+    "note": "source reports the checkout the profile ran in, not the build; the build is named here"
+  },
+  "cases": [
+    {
+      "archive_commit": {
+        "archived_records": 16054,
+        "boundary": {
+          "journal_bytes": 20804857,
+          "ms": 524.3126,
+          "raw_ms": [
+            524.3126
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 29093,
+        "ms": 1.3339999999999999,
+        "raw_ms": [
+          0.9557,
+          0.9557,
+          1.3339999999999999,
+          1.4684,
+          1.4303000000000001
+        ]
+      },
+      "hot_terminal_records": 16000,
+      "idle": {
+        "journal_bytes": 798,
+        "ms": 0.056799999999999996,
+        "raw_ms": [
+          0.0401,
+          0.041699999999999994,
+          0.056799999999999996,
+          0.0637,
+          0.062299999999999994
+        ]
+      },
+      "installed_resource_record_bytes": 9927227,
+      "operation": {
+        "journal_bytes": 10665,
+        "ms": 0.42319999999999997,
+        "raw_ms": [
+          0.42319999999999997,
+          0.4329,
+          0.4118,
+          0.4107,
+          0.5292
+        ]
+      }
+    }
+  ],
+  "label": "after-rebased-16000",
+  "machine": "local-windows-x86_64",
+  "mode": "elapsed",
+  "recorded_on": "2026-10-15",
+  "samples": 5,
+  "source": {
+    "content_hash": "cf492293a00e4af3cf2349820220ca636874e6e30ac463c510eca0b5812930d6",
+    "git_commit": "305193a05d4e467d8f975b929a4acd0223cbe19f",
+    "git_dirty": true,
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.0\nLLVM version: 23.1.1"
+  },
+  "warmup": 1
+}

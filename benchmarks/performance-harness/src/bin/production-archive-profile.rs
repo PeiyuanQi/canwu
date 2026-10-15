@@ -927,6 +927,7 @@ fn move_resource_head(
     state.outcomes.clear();
     state.consumptions.clear();
     state.terminal_archive_candidates.clear();
+    state.refresh_hot_terminal_ledger()?;
     state.archive_head.revision += 1;
     state.archive_head.directory_root = Some(directory.to_owned());
     state.archive_head.archived_record_count += records;
@@ -983,6 +984,7 @@ fn archived_input_case(
     resource
         .outcomes
         .insert(outcome.operation_key.clone(), outcome);
+    resource.refresh_hot_terminal_ledger()?;
     let prepared = resource.prepare_resource_archive(2, &store)?;
     prepared.store_and_verify(&store)?;
     move_resource_head(&mut resource, &prepared.directory.id, 2)?;
@@ -990,6 +992,7 @@ fn archived_input_case(
         for record in 0..per_commit {
             add_hot_filler(&mut resource, template, commit * per_commit + record)?;
         }
+        resource.refresh_hot_terminal_ledger()?;
         let prepared = resource.prepare_resource_archive(per_commit, &store)?;
         prepared.store_and_verify(&store)?;
         move_resource_head(&mut resource, &prepared.directory.id, per_commit as u64)?;

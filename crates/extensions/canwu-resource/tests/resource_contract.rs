@@ -769,7 +769,9 @@ fn a_run_citing_initial_scenario_evidence_seals_before_its_first_boundary() {
         references: Vec::new(),
     };
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
-        .with_domain_records(vec![provider, value.state.into_record().expect("record")]);
+        .with_domain_records(
+            [vec![provider], value.state.into_records().expect("record")].concat(),
+        );
     let plugin = ResourcePlugin::default();
     let mut unsealed = canwu_api::Canwu::new_with_plugins(
         47,
@@ -1306,7 +1308,9 @@ fn named_terminal_report_reservation_publishes_the_last_real_hot_slot() {
         references: Vec::new(),
     };
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
-        .with_domain_records(vec![provider, value.state.into_record().expect("record")]);
+        .with_domain_records(
+            [vec![provider], value.state.into_records().expect("record")].concat(),
+        );
     let mut canwu = canwu_api::Canwu::new_with_plugins(
         41,
         scenario,
@@ -1455,10 +1459,13 @@ fn holder_reports_use_persisted_authoritative_scope_and_reject_relabeling() {
             EntityRef::Person(PersonId::new(2)),
         ],
     )
-    .with_domain_records(vec![
-        provider,
-        value.state.into_record().expect("resource record"),
-    ]);
+    .with_domain_records(
+        [
+            vec![provider],
+            value.state.into_records().expect("resource record"),
+        ]
+        .concat(),
+    );
     let canwu = canwu_api::Canwu::new_with_plugins(3, scenario, &[&ResourcePlugin::default()])
         .expect("runtime");
     let witness = resource_observation_witness(
@@ -1644,7 +1651,9 @@ fn delayed_report_wakes_and_publishes_on_an_otherwise_quiet_boundary() {
         references: Vec::new(),
     };
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
-        .with_domain_records(vec![provider, value.state.into_record().expect("record")]);
+        .with_domain_records(
+            [vec![provider], value.state.into_records().expect("record")].concat(),
+        );
     let plugin = ResourcePlugin::default();
     let mut canwu = canwu_api::Canwu::new_with_plugins(
         29,
@@ -2302,7 +2311,7 @@ fn bounded_archive_backpressure_restart_and_forgery_are_explicit() {
 
     let plugin = ResourcePlugin::default();
     let scenario = Scenario::new(SimTime::EPOCH, Vec::new())
-        .with_domain_records(vec![state.into_record().expect("record")]);
+        .with_domain_records(state.into_records().expect("record"));
     let mut canwu = canwu_api::Canwu::new_with_plugins(11, scenario, &[&plugin]).expect("runtime");
     let mut forged_live_batch = prepared.clone();
     forged_live_batch.blob.records[0].quantity = 999;
@@ -2503,7 +2512,7 @@ fn archived_operation_identity_controls_exact_retry_after_target_retirement() {
     let store = Rc::new(MemoryArchiveStore::default());
     let plugin = ResourcePlugin::default();
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
-        .with_domain_records(vec![value.state.into_record().expect("resource record")]);
+        .with_domain_records(value.state.into_records().expect("resource record"));
     let mut canwu =
         canwu_api::Canwu::new_with_plugins(41, scenario, &[&plugin]).expect("archive runtime");
     enqueue_resource_archive(&mut canwu, &prepared, store.as_ref()).expect("enqueue archive");
@@ -2524,7 +2533,7 @@ fn archived_operation_identity_controls_exact_retry_after_target_retirement() {
         Some(expected_outcome)
     );
     let restart_scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
-        .with_domain_records(vec![archived_state.into_record().expect("archived record")]);
+        .with_domain_records(archived_state.into_records().expect("archived record"));
     let mut restarted =
         canwu_api::Canwu::new_with_plugins(42, restart_scenario, &[&plugin]).expect("restart host");
     restarted.set_plugin_archive_object_provider(store);
@@ -2637,7 +2646,7 @@ fn terminal_demand_allocation_closure_retires_and_releases_active_capacity() {
     let store = MemoryArchiveStore::default();
     let plugin = ResourcePlugin::default();
     let scenario = Scenario::new(SimTime::EPOCH, Vec::new())
-        .with_domain_records(vec![value.state.into_record().expect("resource record")]);
+        .with_domain_records(value.state.into_records().expect("resource record"));
     let mut canwu =
         canwu_api::Canwu::new_with_plugins(43, scenario, &[&plugin]).expect("archive runtime");
     enqueue_resource_archive(&mut canwu, &prepared, &store).expect("enqueue archive");
@@ -2684,7 +2693,7 @@ fn tracked_commands_cannot_cross_holder_targets() {
             EntityRef::Person(PersonId::new(2)),
         ],
     )
-    .with_domain_records(vec![value.state.into_record().expect("record")]);
+    .with_domain_records(value.state.into_records().expect("record"));
     let mut canwu = canwu_api::Canwu::new_with_plugins(13, scenario, &[&ResourcePlugin::default()])
         .expect("runtime");
 
@@ -2840,7 +2849,7 @@ fn canonical_allocation_ingress_is_requester_bound_and_revision_exact() {
             EntityRef::Person(PersonId::new(2)),
         ],
     )
-    .with_domain_records(vec![value.state.into_record().expect("record")]);
+    .with_domain_records(value.state.into_records().expect("record"));
     let mut canwu = canwu_api::Canwu::new_with_plugins(19, scenario, &[&ResourcePlugin::default()])
         .expect("runtime");
     let request = ResourceAllocationRequestV1 {
@@ -2906,7 +2915,7 @@ fn canonical_completion_ingress_persists_holder_status_and_abort() {
     };
     let acquisition = request.id.clone();
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
-        .with_domain_records(vec![value.state.into_record().expect("record")]);
+        .with_domain_records(value.state.into_records().expect("record"));
     let plugin = ResourcePlugin::default();
     let mut canwu =
         canwu_api::Canwu::new_with_plugins(23, scenario, &[&plugin]).expect("resource runtime");
@@ -2974,7 +2983,7 @@ fn completion_grant_expires_without_coordinator_follow_up() {
     let acquisition = request.id.clone();
     let account = value.account.clone();
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
-        .with_domain_records(vec![value.state.into_record().expect("record")]);
+        .with_domain_records(value.state.into_records().expect("record"));
     let plugin = ResourcePlugin::default();
     let mut canwu =
         canwu_api::Canwu::new_with_plugins(31, scenario, &[&plugin]).expect("resource runtime");
@@ -3419,7 +3428,7 @@ fn completed_external_participant_archives_and_restores_authoritatively() {
     let store = MemoryArchiveStore::default();
     let plugin = ResourcePlugin::default();
     let scenario = Scenario::new(SimTime::EPOCH, Vec::new())
-        .with_domain_records(vec![value.state.into_record().expect("resource record")]);
+        .with_domain_records(value.state.into_records().expect("resource record"));
     let mut canwu =
         canwu_api::Canwu::new_with_plugins(34, scenario, &[&plugin]).expect("archive runtime");
     enqueue_resource_archive(&mut canwu, &prepared, &store).expect("enqueue participant archive");
@@ -3532,9 +3541,9 @@ fn canonical_external_participant_ingress_requires_exact_coordinator_payload_and
         }],
         current_boundary: 1,
     };
-    let resource_record = value.state.into_record().expect("resource record");
+    let resource_records = value.state.into_records().expect("resource record");
     let scenario = Scenario::new(SimTime::EPOCH, Vec::new())
-        .with_domain_records(vec![resource_record.clone(), provider.clone()]);
+        .with_domain_records([resource_records.clone(), vec![provider.clone()]].concat());
     let plugin = ResourcePlugin::new([DomainRecordKind::new("test.provider", "execution")]);
     let provider_plugin = ProviderFixture("test.provider");
     let mut canwu = canwu_api::Canwu::new_with_plugins(31, scenario, &[&provider_plugin, &plugin])
@@ -3557,12 +3566,12 @@ fn canonical_external_participant_ingress_requires_exact_coordinator_payload_and
             .state,
         CompletionGrantStateV1::Held
     );
-    let restored_scenario = Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(vec![
+    let restored_scenario = Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(
         state
             .clone()
-            .into_record()
+            .into_records()
             .expect("restored resource record"),
-    ]);
+    );
     let restarted =
         canwu_api::Canwu::new_with_plugins(33, restored_scenario, &[&ResourcePlugin::default()])
             .expect("restart");
@@ -3577,7 +3586,7 @@ fn canonical_external_participant_ingress_requires_exact_coordinator_payload_and
     );
 
     let forged_scenario = Scenario::new(SimTime::EPOCH, Vec::new())
-        .with_domain_records(vec![resource_record, provider]);
+        .with_domain_records([resource_records, vec![provider]].concat());
     let mut forged =
         canwu_api::Canwu::new_with_plugins(32, forged_scenario, &[&provider_plugin, &plugin])
             .expect("forged runtime");
@@ -3623,9 +3632,14 @@ fn canonical_external_participant_ingress_requires_exact_coordinator_payload_and
 fn forged_restore_candidate_is_rejected() {
     let mut state = ResourceState::empty(ResourceLimitsV1::canonical()).expect("state");
     rejected_operation(&mut state, "restore");
-    let mut record = state.into_record().expect("record");
-    record.payload["outcomes"]["test:reject:restore"]["quantity"] = serde_json::json!(1);
-    let scenario = Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(vec![record]);
+    // The outcome is a hot terminal record: it lies in a bucket of its own.
+    let mut records = state.into_records().expect("record");
+    let bucket = records
+        .iter_mut()
+        .find(|record| record.payload.get("entries").is_some())
+        .expect("hot terminal bucket");
+    bucket.payload["entries"][0]["payload"]["value"]["quantity"] = serde_json::json!(1);
+    let scenario = Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(records);
     let result = canwu_api::Canwu::new_with_plugins(17, scenario, &[&ResourcePlugin::default()]);
     let error = match result {
         Ok(_) => panic!("forged resource state unexpectedly activated"),

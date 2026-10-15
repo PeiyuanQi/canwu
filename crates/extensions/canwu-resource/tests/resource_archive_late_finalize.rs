@@ -134,7 +134,7 @@ fn a_commit_is_finalized_after_a_later_commit_archived_its_receipt() {
     let plugin = ResourcePlugin::default();
     let archive = MemoryArchive::default();
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
-        .with_domain_records(vec![resource.into_record().expect("resource record")]);
+        .with_domain_records(resource.into_records().expect("resource record"));
     let mut canwu = Canwu::new_with_plugins(4, scenario, &[&plugin]).expect("runtime");
     canwu.set_plugin_archive_object_provider(Rc::new(archive.clone()));
 

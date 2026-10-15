@@ -159,6 +159,7 @@ fn apply_commit(
 ) -> Result<(), ResourceError> {
     state.outcomes.clear();
     state.terminal_archive_candidates.clear();
+    state.refresh_hot_terminal_ledger()?;
     state.archive_head.revision += 1;
     state.archive_head.directory_root = Some(prepared.directory.id.clone());
     state.archive_head.archived_record_count += prepared.selected.len() as u64;
@@ -223,6 +224,8 @@ fn archive_case(
         for record in 0..per_commit {
             add_hot_outcome(&mut state, template, commit * per_commit + record)?;
         }
+        // The candidates were placed directly: count them in the ledger.
+        state.refresh_hot_terminal_ledger()?;
         let started = Instant::now();
         let prepared = state.prepare_resource_archive(per_commit, &store)?;
         last_prepare_ms = milliseconds(started);
@@ -321,6 +324,7 @@ fn backlog_case(
     for index in 0..backlog {
         add_hot_outcome(&mut state, template, index)?;
     }
+    state.refresh_hot_terminal_ledger()?;
     state.validate()?;
     let resource_root_bytes = serde_json::to_vec(&state)?.len();
 
@@ -334,7 +338,7 @@ fn backlog_case(
     let requester = KnowledgeHolderRef::Person(PersonId::new(1));
     let plugin = ResourcePlugin::default();
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
-        .with_domain_records(vec![state.into_record()?]);
+        .with_domain_records(state.into_records()?);
     let mut canwu = Canwu::new_with_plugins(0x00CA_4E55, scenario, &[&plugin])?;
     let mut boundary_ms = Vec::with_capacity(SAMPLES);
     let mut journal_bytes = Vec::with_capacity(SAMPLES);

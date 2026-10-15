@@ -18,6 +18,7 @@ use canwu_resource::{
     ResourceTerminalArchivePayloadV1, ResourceTerminalRecordKeyV1, ResourceTransferId,
     archived_resource_operation_outcome, archived_resource_terminal_record, resource_state,
 };
+use std::rc::Rc;
 
 /// Reads the resource archive through the archive provider the runtime holds.
 struct RuntimeArchive<'a>(&'a canwu_api::Canwu);
@@ -770,4 +771,97 @@ fn requisition_externality_rejects_a_local_economy_changed_after_its_lock() {
     let local = economy.local_economies.values().next().expect("economy");
     assert_eq!(local.pending_harvest_penalty_per_mille, 0);
     assert_eq!(month_5.cooperation_per_mille, month_4.cooperation_per_mille);
+}
+
+/// Serves the archive objects the provider attached to a runtime serves.
+struct ArchiveObjectsOf(canwu_api::Canwu);
+
+impl canwu_api::PluginArchiveObjectProvider for ArchiveObjectsOf {
+    fn load_plugin_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, canwu_api::CanwuError> {
+        self.0.plugin_archive_object(namespace, object_id)
+    }
+}
+
+/// A force runtime cites resource outcomes a resource archive commit may
+/// have archived. The force-supply restore attaches the archive before it
+/// validates and reads an archived citation from it: it restores with the
+/// archive and refuses without it. (The force-supply unit tests compare a
+/// forged citation; a snapshot that carries one is refused by its boundary
+/// hash chain before any plugin validates it.)
+#[test]
+fn a_force_runtime_citing_archived_resource_outcomes_restores_with_its_archive_only() {
+    let mut harness = GrainHarness::new().expect("real Canwu composition");
+    for decision in decisions().into_iter().take(4) {
+        harness
+            .advance_month(decision)
+            .expect("archive-producing month");
+    }
+    let canwu = harness.canwu();
+    let force = canwu
+        .typed_domain_record(&force_supply_runtime_reference())
+        .expect("force runtime")
+        .decode_payload::<ForceSupplyRuntimeRecord>()
+        .expect("force runtime payload");
+    let (_, resource) = resource_state(canwu)
+        .expect("resource root")
+        .expect("resource runtime");
+    assert!(
+        force.terminal_receipts.values().any(|receipt| {
+            let key = &receipt.resource_outcome.operation_key;
+            !resource.outcomes.contains_key(key)
+                && archived_resource_operation_outcome(&resource, &RuntimeArchive(canwu), key)
+                    .expect("archive lookup")
+                    .is_some()
+        }),
+        "a terminal receipt cites an archived resource outcome"
+    );
+
+    let economy_kind = canwu_economy_reference::economy_reference_runtime_reference()
+        .into_untyped()
+        .kind;
+    let force_kind = force_supply_runtime_reference().into_untyped().kind;
+    let resource = canwu_resource::ResourcePlugin::new([economy_kind, force_kind]);
+    let economy = canwu_economy_reference::EconomyReferencePlugin;
+    let force = canwu_force_supply_reference::ForceSupplyReferencePlugin;
+    let plugins: [&dyn canwu_api::SimulationPlugin; 3] = [&resource, &economy, &force];
+    let snapshot = canwu.snapshot_json().expect("snapshot");
+    canwu_force_supply_reference::from_force_supply_snapshot_json(
+        &snapshot,
+        &plugins,
+        Rc::new(ArchiveObjectsOf(canwu.fork())),
+    )
+    .expect("the force runtime restores with its archive");
+    let Err(error) = canwu_force_supply_reference::from_force_supply_snapshot_json(
+        &snapshot,
+        &plugins,
+        Rc::new(()),
+    ) else {
+        panic!("an archived citation is not taken on trust");
+    };
+    assert!(
+        error.message.contains("resource archive lookup failed"),
+        "{error:?}"
+    );
+    let checkpoint = canwu.checkpoint_journal().expect("checkpoint journal");
+    canwu_force_supply_reference::from_force_supply_checkpoint_journal(
+        checkpoint.clone(),
+        &plugins,
+        Rc::new(ArchiveObjectsOf(canwu.fork())),
+    )
+    .expect("the checkpoint restores with its archive");
+    assert!(
+        canwu_force_supply_reference::from_force_supply_checkpoint_journal(
+            checkpoint,
+            &plugins,
+            Rc::new(()),
+        )
+        .is_err()
+    );
+
+    GrainHarness::from_snapshot_json(&harness.snapshot_json().expect("harness snapshot"))
+        .expect("the harness restores and validates the archived outcomes");
 }

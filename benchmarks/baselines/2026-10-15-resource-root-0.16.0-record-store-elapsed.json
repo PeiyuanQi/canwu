@@ -1,0 +1,210 @@
+{
+  "benchmark": "resource-root-profile",
+  "build": {
+    "commit": "305193a",
+    "description": "integration base with the record store package, before this change",
+    "note": "source reports the checkout the profile ran in, not the build; the build is named here"
+  },
+  "cases": [
+    {
+      "archive_commit": {
+        "archived_records": 54,
+        "boundary": {
+          "journal_bytes": 38605,
+          "ms": 0.4451,
+          "raw_ms": [
+            0.4451
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 43185,
+        "ms": 1.2049999999999998,
+        "raw_ms": [
+          0.6957000000000001,
+          0.9753999999999999,
+          1.2049999999999998,
+          1.4313,
+          1.7429
+        ]
+      },
+      "hot_terminal_records": 0,
+      "idle": {
+        "journal_bytes": 774,
+        "ms": 0.1706,
+        "raw_ms": [
+          0.1145,
+          0.13349999999999998,
+          0.1815,
+          0.1706,
+          0.1912
+        ]
+      },
+      "installed_resource_record_bytes": 2018,
+      "operation": {
+        "journal_bytes": 37806,
+        "ms": 0.5142,
+        "raw_ms": [
+          0.27080000000000004,
+          0.3861,
+          0.5142,
+          0.6126,
+          0.7565999999999999
+        ]
+      }
+    },
+    {
+      "archive_commit": {
+        "archived_records": 310,
+        "boundary": {
+          "journal_bytes": 177804,
+          "ms": 1.2459,
+          "raw_ms": [
+            1.2459
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 321079,
+        "ms": 9.0676,
+        "raw_ms": [
+          7.9452,
+          9.0676,
+          9.1533,
+          8.590399999999999,
+          9.3508
+        ]
+      },
+      "hot_terminal_records": 256,
+      "idle": {
+        "journal_bytes": 774,
+        "ms": 0.8875000000000001,
+        "raw_ms": [
+          0.8458,
+          0.8756,
+          0.8875000000000001,
+          0.9108999999999999,
+          0.9329
+        ]
+      },
+      "installed_resource_record_bytes": 140882,
+      "operation": {
+        "journal_bytes": 315682,
+        "ms": 3.7268000000000003,
+        "raw_ms": [
+          3.4562999999999997,
+          3.5974000000000004,
+          3.7268000000000003,
+          3.9736,
+          4.2287
+        ]
+      }
+    },
+    {
+      "archive_commit": {
+        "archived_records": 1078,
+        "boundary": {
+          "journal_bytes": 597229,
+          "ms": 4.0905000000000005,
+          "raw_ms": [
+            4.0905000000000005
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 1158621,
+        "ms": 34.0596,
+        "raw_ms": [
+          40.077099999999994,
+          32.7333,
+          34.2347,
+          34.0596,
+          32.8647
+        ]
+      },
+      "hot_terminal_records": 1024,
+      "idle": {
+        "journal_bytes": 774,
+        "ms": 3.337,
+        "raw_ms": [
+          3.2464999999999997,
+          3.3164000000000002,
+          3.6476,
+          3.6337,
+          3.337
+        ]
+      },
+      "installed_resource_record_bytes": 559589,
+      "operation": {
+        "journal_bytes": 1153206,
+        "ms": 15.1644,
+        "raw_ms": [
+          16.043000000000003,
+          15.1051,
+          15.1644,
+          15.6887,
+          14.9976
+        ]
+      }
+    },
+    {
+      "archive_commit": {
+        "archived_records": 4054,
+        "boundary": {
+          "journal_bytes": 2239216,
+          "ms": 19.6064,
+          "raw_ms": [
+            19.6064
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 4438173,
+        "ms": 138.70340000000002,
+        "raw_ms": [
+          138.8742,
+          138.4967,
+          138.70340000000002,
+          132.6115,
+          138.7507
+        ]
+      },
+      "hot_terminal_records": 4000,
+      "idle": {
+        "journal_bytes": 774,
+        "ms": 15.2968,
+        "raw_ms": [
+          15.9037,
+          15.2968,
+          14.1906,
+          13.889000000000001,
+          15.713899999999999
+        ]
+      },
+      "installed_resource_record_bytes": 2199365,
+      "operation": {
+        "journal_bytes": 4432758,
+        "ms": 64.5693,
+        "raw_ms": [
+          71.4716,
+          64.5693,
+          66.2253,
+          60.372,
+          63.1809
+        ]
+      }
+    }
+  ],
+  "label": "before-rebased",
+  "machine": "local-windows-x86_64",
+  "mode": "elapsed",
+  "recorded_on": "2026-10-15",
+  "samples": 5,
+  "source": {
+    "content_hash": "cf492293a00e4af3cf2349820220ca636874e6e30ac463c510eca0b5812930d6",
+    "git_commit": "305193a05d4e467d8f975b929a4acd0223cbe19f",
+    "git_dirty": true,
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.0\nLLVM version: 23.1.1"
+  },
+  "warmup": 1
+}

@@ -53,8 +53,11 @@ resource = ["dep:canwu-resource"]
 ```
 
 Create scenario state with `ResourceState::empty`, install immutable
-definitions/units and opening accounts, then use `ResourceState::into_record`
-to obtain the one authoritative `DomainRecord` root. Activate
+definitions/units and opening accounts, then use `ResourceState::into_records`
+to obtain the records that persist the authoritative root: its live root
+`resource:runtime:v1`, and one record per hot terminal bucket when the root
+already holds terminal records (`ResourceState::into_record` returns the live
+root of a root that holds none). Activate
 `ResourcePlugin::new(adapter_evidence_kinds)` with the exact external record
 kinds allowed to prove adapter consumption, external-inflow credit, loss, or
 outflow. Production output credits do not use adapter ingress; they settle
@@ -501,6 +504,24 @@ and candidate indexes are persisted in `ResourceState`. The maintenance
 receipt of an applied commit becomes a terminal candidate and can itself move
 cold; ordinary lifecycle work does not scan cold history.
 
+The root persists in parts. Its live root, the domain record
+`resource:runtime:v1` (`ResourceLiveRootV1`), holds everything except the hot
+terminal records, the root's archive candidates, which it only counts in a
+`ResourceHotTerminalLedgerV1`. Each hot terminal record lies in a bucket
+record of its own, `resource:hot-terminal:{bucket}`
+(`ResourceHotTerminalBucketV1`), chosen by a hash of its identity
+(`resource_hot_terminal_bucket`) among as many buckets as the candidate
+budget rounded up to a power of two. A boundary reads and writes the live
+root and the buckets of the records it touches: the resource plugin attaches
+every hot terminal record a packet names, and every record those name, before
+it settles the packet, and every rule that counts hot terminal records reads
+the ledger. A boundary with nothing for the resource plugin reads nothing of
+the root. `resource_state` reads the whole root, every bucket included. A
+boundary system or command handler of another plugin reads it with
+`resource_root_in_view` or `ResourceRootReader`, naming the hot terminal
+records it needs, and declares the read of `resource_hot_terminal_state_key()`
+beside the live root's; `whole_resource_root_in_view` reads every bucket.
+
 An archive commit never fails for capacity. A commit that went stale because
 another commit or an operation settled first is a terminal no-op: its receipt
 is not a candidate, stays in the root outside the budgets until
@@ -520,19 +541,21 @@ batches prepared from one root share their leading blobs, pages, and lookup
 pages, so an object named by a rejected or abandoned handle may belong to an
 applied commit. Deletion is by reachability only.
 
-One commit carries up to `MAX_RESOURCE_ARCHIVE_COMMIT_RECORDS` (4,096) records
-as blobs of at most 256, each with its own membership and temporal page, and a
-run may make any number of commits. `max_archive_candidates` defaults to 256
-and may be raised to `ResourceLimitsV1::MAX_ARCHIVE_CANDIDATES` (4,096);
-`max_archive_maintenance_receipts` must be at least as large. The ceiling is
-headroom for a burst, not a working size. Every boundary that changes the
-resource root decodes, validates, re-encodes, and journals the whole root, so
-one boundary costs time and journal bytes in proportion to the hot terminal
-records: in the recorded baseline about 13 ms and 0.3 MB at 256 records,
-52 ms and 1.2 MB at 1,024, and 246 ms and 4.6 MB at 4,000
-(`benchmarks/baselines/2026-10-13-resource-archive-full.json`). Choose the
-budget from that cost at the backlog you accept, and archive often rather than
-run with a large backlog. Room is measured on what an operation leaves: a
+One commit carries up to `MAX_RESOURCE_ARCHIVE_COMMIT_RECORDS` (16,384)
+records as blobs of at most 256, each with its own membership and temporal
+page, and a run may make any number of commits. `max_archive_candidates`
+defaults to 256 and may be raised to `ResourceLimitsV1::MAX_ARCHIVE_CANDIDATES`
+(16,384); `max_archive_maintenance_receipts` must be at least as large, and
+`max_operation_outcomes` may be raised to
+`ResourceLimitsV1::MAX_OPERATION_OUTCOMES` (16,384). A boundary that settles
+operations costs the same whatever the hot terminal backlog: in the recorded
+baseline one operation boundary takes about 0.2 ms and 8 KB of journal at
+every backlog up to 4,000 records
+(`benchmarks/baselines/2026-10-15-resource-root-*.json`). The backlog is paid
+for by the archive commit that clears it, which rewrites one bucket per
+archived record (about 25 µs and 1.3 KB of journal per record in that
+baseline), by preparing the commit, which reads every hot record, and by a
+restore, which validates them all. Room is measured on what an operation leaves: a
 refused operation needs one slot for its outcome, an applied one a slot for
 every terminal record it adds, beside the slots reserved for admitted
 completion lifecycles. An operation that does not fit settles nothing and is

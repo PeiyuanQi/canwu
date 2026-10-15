@@ -105,6 +105,7 @@ fn production_external_state_keys() -> Vec<StateKey> {
         StateKey::core_domain_records(),
         StateKey::core_evidence(),
         DomainRecordSchema::for_record::<canwu_resource::ResourceRuntimeRecord>().state_key(),
+        canwu_resource::resource_hot_terminal_state_key(),
         DomainRecordSchema::for_record::<canwu_technology::TechniqueRevision>().state_key(),
         DomainRecordSchema::for_record::<canwu_technology::CapabilityQualification>().state_key(),
         DomainRecordSchema::for_record::<canwu_technology::ImplementationRecord>().state_key(),
@@ -810,10 +811,15 @@ fn settle_completion_step(
         participant: _,
     } = operation
     {
-        let resource_record = view
-            .typed_domain_record(&canwu_resource::resource_runtime_reference())?
-            .ok_or_else(|| invalid("resource completion runtime is unavailable"))?;
-        let resource = resource_record.decode_payload::<canwu_resource::ResourceRuntimeRecord>()?;
+        let resource = resource_root(
+            view,
+            [
+                canwu_resource::ResourceTerminalRecordKeyV1::ExternalCompletionParticipant(
+                    acquisition.clone(),
+                ),
+            ],
+            "resource completion runtime is unavailable",
+        )?;
         let authoritative = resource
             .external_completion_participants
             .participant(acquisition)
@@ -1633,10 +1639,8 @@ pub fn enqueue_production_resource_continuation<H: canwu_api::CanwuRun + ?Sized>
             "production continuation witness requires an active facility project",
         ));
     }
-    let resource_record =
-        canwu_api::typed_domain_record(canwu, &canwu_resource::resource_runtime_reference())
-            .ok_or_else(|| invalid("resource runtime is unavailable"))?;
-    let resource = resource_record.decode_payload::<canwu_resource::ResourceRuntimeRecord>()?;
+    let (_, resource) = canwu_resource::resource_state(canwu)?
+        .ok_or_else(|| invalid("resource runtime is unavailable"))?;
     let root = resource
         .archive_head
         .directory_root
@@ -2030,11 +2034,15 @@ fn refuse_output_keys_held_by_resource(
     view: &SimulationView<'_>,
     execution: &crate::ProductionExecution,
 ) -> Result<(), CanwuError> {
-    let Some(record) = view.typed_domain_record(&canwu_resource::resource_runtime_reference())?
+    let Some((_, resource)) = canwu_resource::resource_root_in_view(
+        view,
+        execution.output_requests.iter().map(|request| {
+            canwu_resource::ResourceTerminalRecordKeyV1::Outcome(request.operation_key.clone())
+        }),
+    )?
     else {
         return Ok(());
     };
-    let resource = record.decode_payload::<canwu_resource::ResourceRuntimeRecord>()?;
     // The output batch must be one the resource root can ever settle: one it
     // can never hold is skipped and lost, and the execution would never
     // settle.
@@ -2273,11 +2281,11 @@ fn validate_external_operation_evidence(
         ));
     }
 
-    let resource_record = view
-        .typed_domain_record(&canwu_resource::resource_runtime_reference())?
-        .ok_or_else(|| invalid("production input resource runtime is unavailable"))?;
-    let resource_state =
-        resource_record.decode_payload::<canwu_resource::ResourceRuntimeRecord>()?;
+    let resource_state = resource_root(
+        view,
+        resource_input_keys(&execution.inputs),
+        "production input resource runtime is unavailable",
+    )?;
     resource_state.validate().map_err(|error| {
         invalid(format!(
             "production input resource state is invalid: {error}"
@@ -2439,10 +2447,11 @@ fn authoritative_resource_inputs_are_hot(
     view: &SimulationView<'_>,
     inputs: &[crate::ResourceInputBinding],
 ) -> Result<bool, CanwuError> {
-    let record = view
-        .typed_domain_record(&canwu_resource::resource_runtime_reference())?
-        .ok_or_else(|| invalid("production input resource runtime is unavailable"))?;
-    let state = record.decode_payload::<canwu_resource::ResourceRuntimeRecord>()?;
+    let state = resource_root(
+        view,
+        resource_input_keys(inputs),
+        "production input resource runtime is unavailable",
+    )?;
     Ok(inputs.iter().all(|input| {
         state.consumptions.contains_key(&input.consumption.id)
             && state
@@ -2462,10 +2471,12 @@ fn validate_resource_continuation_witness(
         .ok_or_else(|| invalid("production continuation witness project is unavailable"))?;
     let mut detached = witness.clone();
     let recorded = std::mem::take(&mut detached.semantic_digest);
-    let resource_record = view
-        .typed_domain_record(&canwu_resource::resource_runtime_reference())?
-        .ok_or_else(|| invalid("production continuation resource runtime is unavailable"))?;
-    let resource = resource_record.decode_payload::<canwu_resource::ResourceRuntimeRecord>()?;
+    // The archive head is in the live root.
+    let resource = resource_root(
+        view,
+        [],
+        "production continuation resource runtime is unavailable",
+    )?;
     if resource.archive_head.archived_record_count < witness.resource_archive_record_count
         || (resource.archive_head.archived_record_count == witness.resource_archive_record_count
             && resource.archive_head.directory_root.as_deref()
@@ -2489,10 +2500,12 @@ fn validate_project_resource_completion(
     view: &SimulationView<'_>,
     project: &crate::FacilityProject,
 ) -> Result<(), CanwuError> {
-    let record = view
-        .typed_domain_record(&canwu_resource::resource_runtime_reference())?
-        .ok_or_else(|| invalid("production project resource runtime is unavailable"))?;
-    let state = record.decode_payload::<canwu_resource::ResourceRuntimeRecord>()?;
+    // The participant grant is active: it is in the live root.
+    let state = resource_root(
+        view,
+        [],
+        "production project resource runtime is unavailable",
+    )?;
     state.validate().map_err(|error| {
         invalid(format!(
             "production project resource state is invalid: {error}"
@@ -2644,10 +2657,11 @@ fn validate_authoritative_resource_inputs(
     view: &SimulationView<'_>,
     inputs: &[crate::ResourceInputBinding],
 ) -> Result<(), CanwuError> {
-    let record = view
-        .typed_domain_record(&canwu_resource::resource_runtime_reference())?
-        .ok_or_else(|| invalid("production input resource runtime is unavailable"))?;
-    let state = record.decode_payload::<canwu_resource::ResourceRuntimeRecord>()?;
+    let state = resource_root(
+        view,
+        resource_input_keys(inputs),
+        "production input resource runtime is unavailable",
+    )?;
     state.validate().map_err(|error| {
         invalid(format!(
             "production input resource state is invalid: {error}"
@@ -2902,6 +2916,42 @@ fn current_version_body(
     })
 }
 
+/// The resource root as a production boundary or admission reads it: the
+/// live root, with the hot terminal records `keys` name attached
+/// ([`canwu_resource::resource_root_in_view`]).
+fn resource_root(
+    view: &SimulationView<'_>,
+    keys: impl IntoIterator<Item = canwu_resource::ResourceTerminalRecordKeyV1>,
+    unavailable: &str,
+) -> Result<canwu_resource::ResourceState, CanwuError> {
+    canwu_resource::resource_root_in_view(view, keys)?
+        .map(|(_, state)| state)
+        .ok_or_else(|| invalid(unavailable))
+}
+
+/// The resource records production inputs cite: each consumption, its
+/// allocation leg, and the outcome that settled it.
+fn resource_input_keys(
+    inputs: &[crate::ResourceInputBinding],
+) -> Vec<canwu_resource::ResourceTerminalRecordKeyV1> {
+    inputs
+        .iter()
+        .flat_map(|input| {
+            [
+                canwu_resource::ResourceTerminalRecordKeyV1::Consumption(
+                    input.consumption.id.clone(),
+                ),
+                canwu_resource::ResourceTerminalRecordKeyV1::AllocationLeg(
+                    input.allocation_leg.id.clone(),
+                ),
+                canwu_resource::ResourceTerminalRecordKeyV1::Outcome(
+                    input.consumption_outcome.operation_key.clone(),
+                ),
+            ]
+        })
+        .collect()
+}
+
 fn holder_entity_ref(holder: &KnowledgeHolderRef) -> canwu_api::EntityRef {
     match holder {
         KnowledgeHolderRef::Person(person) => canwu_api::EntityRef::Person(*person),
@@ -3030,7 +3080,10 @@ fn validate_production_completion_ingress(
                     "production completion participant source is not the resource runtime",
                 ));
             }
-            let resource = record.decode_payload::<canwu_resource::ResourceRuntimeRecord>()?;
+            // An active participant grant is in the live root.
+            let resource = record
+                .decode_payload::<canwu_resource::ResourceRuntimeRecord>()?
+                .into_live();
             let authoritative = resource
                 .external_completion_participants
                 .grants
@@ -3052,11 +3105,15 @@ fn validate_production_completion_ingress(
                     "production completion acknowledgement has the wrong participant",
                 ));
             }
-            let resource_record = view
-                .typed_domain_record(&canwu_resource::resource_runtime_reference())?
-                .ok_or_else(|| invalid("resource completion runtime is unavailable"))?;
-            let resource =
-                resource_record.decode_payload::<canwu_resource::ResourceRuntimeRecord>()?;
+            let resource = resource_root(
+                view,
+                [
+                    canwu_resource::ResourceTerminalRecordKeyV1::ExternalCompletionParticipant(
+                        acquisition.clone(),
+                    ),
+                ],
+                "resource completion runtime is unavailable",
+            )?;
             let authoritative = resource
                 .external_completion_participants
                 .participant(acquisition)
@@ -3113,11 +3170,13 @@ fn validate_output_ack_source(
     view: &SimulationView<'_>,
     acknowledgement: &ProductionOutputAcknowledgement,
 ) -> Result<(), CanwuError> {
-    let resource_record = view
-        .typed_domain_record(&canwu_resource::resource_runtime_reference())?
-        .ok_or_else(|| invalid("production output resource runtime is unavailable"))?;
-    let resource_state =
-        resource_record.decode_payload::<canwu_resource::ResourceRuntimeRecord>()?;
+    let resource_state = resource_root(
+        view,
+        acknowledgement.outcomes.iter().map(|outcome| {
+            canwu_resource::ResourceTerminalRecordKeyV1::Outcome(outcome.operation_key.clone())
+        }),
+        "production output resource runtime is unavailable",
+    )?;
     if acknowledgement.outcomes.is_empty()
         || acknowledgement
             .outcomes

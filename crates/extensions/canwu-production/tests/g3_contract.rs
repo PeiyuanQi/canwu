@@ -636,7 +636,7 @@ fn canonical_cross_plugin_completion_coordinator_uses_real_ingress_and_exact_gra
     let mut scenario = scenario_with_production(production);
     scenario
         .domain_records
-        .push(resource.into_record().expect("resource root"));
+        .extend(resource.into_records().expect("resource root"));
     let production_plugin = ProductionPlugin;
     let resource_plugin = ResourcePlugin::default();
     let mut canwu = Canwu::new_with_plugins(211, scenario, &[&production_plugin, &resource_plugin])
@@ -2887,7 +2887,7 @@ fn multiple_outputs_settle_atomically_and_replay_exactly() {
     let mut scenario = scenario_with_production(production);
     scenario
         .domain_records
-        .push(resource.into_record().expect("resource output root"));
+        .extend(resource.into_records().expect("resource output root"));
     let production_plugin = ProductionPlugin;
     let resource_plugin = ResourcePlugin::default();
     let mut canwu = Canwu::new_with_plugins(216, scenario, &[&production_plugin, &resource_plugin])
@@ -3258,7 +3258,7 @@ fn canonical_commissioning_closes_resource_and_local_grants_before_project_archi
     let mut scenario = scenario_with_production(state);
     scenario
         .domain_records
-        .push(resource.into_record().expect("resource project root"));
+        .extend(resource.into_records().expect("resource project root"));
     let production_plugin = ProductionPlugin;
     let resource_plugin = ResourcePlugin::default();
     let mut canwu = Canwu::new_with_plugins(212, scenario, &[&production_plugin, &resource_plugin])
@@ -4393,12 +4393,12 @@ fn restored_active_project_advances_through_canonical_ingress_with_resource_arch
         .validate()
         .expect("archive-backed resource fixture");
     let mut scenario = scenario_with_production(production);
-    scenario.domain_records.extend([
-        resource.into_record().expect("resource archive root"),
-        technique_spec,
-        technique_revision,
-        qualification,
-    ]);
+    scenario
+        .domain_records
+        .extend(resource.into_records().expect("resource archive root"));
+    scenario
+        .domain_records
+        .extend([technique_spec, technique_revision, qualification]);
     let production_plugin = ProductionPlugin;
     let resource_plugin = ResourcePlugin::default();
     let technology_plugin = canwu_technology::TechnologyPlugin;
@@ -5219,21 +5219,21 @@ fn gap_g14_production_realized_output() {
         )
         .expect("harvest evidence draft");
         let mut scenario = scenario_with_production(production);
-        scenario.domain_records.extend([
+        scenario.domain_records.extend(
             resource
                 .clone()
-                .into_record()
+                .into_records()
                 .expect("resource output root"),
-            canwu_api::DomainRecord {
-                reference: harvest_draft.reference,
-                owner: "fixture-harvest".to_owned(),
-                class: canwu_api::DomainRecordClass::Record,
-                version: 1,
-                lifecycle: canwu_api::DomainRecordLifecycle::Active,
-                payload: harvest_draft.payload,
-                references: harvest_draft.references,
-            },
-        ]);
+        );
+        scenario.domain_records.extend([canwu_api::DomainRecord {
+            reference: harvest_draft.reference,
+            owner: "fixture-harvest".to_owned(),
+            class: canwu_api::DomainRecordClass::Record,
+            version: 1,
+            lifecycle: canwu_api::DomainRecordLifecycle::Active,
+            payload: harvest_draft.payload,
+            references: harvest_draft.references,
+        }]);
         Canwu::new_with_plugins(seed, scenario, &plugins).expect("realized-output runtime")
     };
     let complete = |per_mille: Option<u16>, evidence: Option<DomainRecordVersionRef>| {
@@ -5604,7 +5604,7 @@ fn live_completion_settles_output() {
     let mut scenario = scenario_with_production(production);
     scenario
         .domain_records
-        .push(resource.into_record().expect("resource output root"));
+        .extend(resource.into_records().expect("resource output root"));
     let production_plugin = ProductionPlugin;
     let resource_plugin = ResourcePlugin::default();
     let plugins: [&dyn canwu_api::SimulationPlugin; 2] = [&production_plugin, &resource_plugin];
@@ -5722,7 +5722,7 @@ fn deferred_output_batch_settles_and_its_execution_archives() {
     let mut scenario = scenario_with_production(production);
     scenario
         .domain_records
-        .push(resource.into_record().expect("resource output root"));
+        .extend(resource.into_records().expect("resource output root"));
     let production_plugin = ProductionPlugin;
     let resource_plugin = ResourcePlugin::default();
     let plugins: [&dyn canwu_api::SimulationPlugin; 2] = [&production_plugin, &resource_plugin];
@@ -5832,7 +5832,7 @@ fn deferred_output_batch_settles_and_its_execution_archives() {
         let mut scenario = scenario_with_production(production);
         scenario
             .domain_records
-            .push(resource_now.clone().into_record().expect("resource root"));
+            .extend(resource_now.clone().into_records().expect("resource root"));
         let rebuilt =
             Canwu::new_with_plugins(219, scenario, &plugins).expect("rebuilt settled runtime");
         validate_production_runtime_with_archives(&rebuilt, &store, &store)

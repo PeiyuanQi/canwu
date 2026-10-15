@@ -1,0 +1,226 @@
+{
+  "benchmark": "resource-root-profile",
+  "build": {
+    "commit": "305193a",
+    "description": "integration base with the record store package, before this change",
+    "note": "source reports the checkout the profile ran in, not the build; the build is named here"
+  },
+  "cases": [
+    {
+      "archive_commit": {
+        "archived_records": 54,
+        "boundary": {
+          "allocated_bytes": 474669.0,
+          "allocations": 3801.0,
+          "journal_bytes": 38605,
+          "raw_allocations": [
+            3801
+          ]
+        }
+      },
+      "batch_of_8": {
+        "allocated_bytes": 1962498.0,
+        "allocations": 14007.0,
+        "journal_bytes": 43185,
+        "raw_allocations": [
+          7073,
+          10551,
+          14007,
+          17458,
+          20927
+        ]
+      },
+      "hot_terminal_records": 0,
+      "idle": {
+        "allocated_bytes": 219056.0,
+        "allocations": 2163.0,
+        "journal_bytes": 774,
+        "raw_allocations": [
+          1280,
+          1726,
+          2163,
+          2600,
+          3044
+        ]
+      },
+      "installed_resource_record_bytes": 2018,
+      "operation": {
+        "allocated_bytes": 764792.0,
+        "allocations": 5566.0,
+        "journal_bytes": 37806,
+        "raw_allocations": [
+          2444,
+          4014,
+          5566,
+          7111,
+          8657
+        ]
+      }
+    },
+    {
+      "archive_commit": {
+        "archived_records": 310,
+        "boundary": {
+          "allocated_bytes": 1930054.0,
+          "allocations": 16861.0,
+          "journal_bytes": 177804,
+          "raw_allocations": [
+            16861
+          ]
+        }
+      },
+      "batch_of_8": {
+        "allocated_bytes": 15156043.0,
+        "allocations": 112463.0,
+        "journal_bytes": 321079,
+        "raw_allocations": [
+          105540,
+          109000,
+          112463,
+          115937,
+          119390
+        ]
+      },
+      "hot_terminal_records": 256,
+      "idle": {
+        "allocated_bytes": 1501641.0,
+        "allocations": 14701.0,
+        "journal_bytes": 774,
+        "raw_allocations": [
+          13814,
+          14256,
+          14701,
+          15141,
+          15579
+        ]
+      },
+      "installed_resource_record_bytes": 140882,
+      "operation": {
+        "allocated_bytes": 6289126.0,
+        "allocations": 49664.0,
+        "journal_bytes": 315682,
+        "raw_allocations": [
+          46566,
+          48112,
+          49664,
+          51224,
+          52771
+        ]
+      }
+    },
+    {
+      "archive_commit": {
+        "archived_records": 1078,
+        "boundary": {
+          "allocated_bytes": 6371473.0,
+          "allocations": 56056.0,
+          "journal_bytes": 597229,
+          "raw_allocations": [
+            56056
+          ]
+        }
+      },
+      "batch_of_8": {
+        "allocated_bytes": 56977672.0,
+        "allocations": 407887.0,
+        "journal_bytes": 1158621,
+        "raw_allocations": [
+          400999,
+          404437,
+          407887,
+          411346,
+          414840
+        ]
+      },
+      "hot_terminal_records": 1024,
+      "idle": {
+        "allocated_bytes": 5345574.0,
+        "allocations": 52319.0,
+        "journal_bytes": 774,
+        "raw_allocations": [
+          51446,
+          51882,
+          52319,
+          52766,
+          53212
+        ]
+      },
+      "installed_resource_record_bytes": 559589,
+      "operation": {
+        "allocated_bytes": 23592866.0,
+        "allocations": 182007.0,
+        "journal_bytes": 1153206,
+        "raw_allocations": [
+          178919,
+          180472,
+          182007,
+          183552,
+          185116
+        ]
+      }
+    },
+    {
+      "archive_commit": {
+        "archived_records": 4054,
+        "boundary": {
+          "allocated_bytes": 23533532.0,
+          "allocations": 207924.0,
+          "journal_bytes": 2239216,
+          "raw_allocations": [
+            207924
+          ]
+        }
+      },
+      "batch_of_8": {
+        "allocated_bytes": 229625320.0,
+        "allocations": 1552621.0,
+        "journal_bytes": 4438173,
+        "raw_allocations": [
+          1545706,
+          1549171,
+          1552621,
+          1556085,
+          1559541
+        ]
+      },
+      "hot_terminal_records": 4000,
+      "idle": {
+        "allocated_bytes": 20296150.0,
+        "allocations": 198105.0,
+        "journal_bytes": 774,
+        "raw_allocations": [
+          197225,
+          197668,
+          198105,
+          198546,
+          198986
+        ]
+      },
+      "installed_resource_record_bytes": 2199365,
+      "operation": {
+        "allocated_bytes": 99694602.0,
+        "allocations": 694822.0,
+        "journal_bytes": 4432758,
+        "raw_allocations": [
+          691718,
+          693276,
+          694822,
+          696372,
+          697921
+        ]
+      }
+    }
+  ],
+  "label": "before-rebased",
+  "machine": "local-windows-x86_64",
+  "mode": "allocations",
+  "recorded_on": "2026-10-15",
+  "samples": 5,
+  "source": {
+    "content_hash": "cf492293a00e4af3cf2349820220ca636874e6e30ac463c510eca0b5812930d6",
+    "git_commit": "305193a05d4e467d8f975b929a4acd0223cbe19f",
+    "git_dirty": true,
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.0\nLLVM version: 23.1.1"
+  },
+  "warmup": 1
+}

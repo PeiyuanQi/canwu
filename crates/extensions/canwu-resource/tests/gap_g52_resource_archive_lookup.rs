@@ -246,7 +246,7 @@ fn cold_lookup_reads_only_authenticated_index_pages_whatever_the_commit_count() 
     let archive = CountingArchive::default();
     let resource = ResourceState::empty(ResourceLimitsV1::canonical()).expect("resource state");
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
-        .with_domain_records(vec![resource.into_record().expect("resource record")]);
+        .with_domain_records(resource.into_records().expect("resource record"));
     let mut canwu = Canwu::new_with_plugins(52, scenario, &[&plugin]).expect("runtime");
     canwu.set_plugin_archive_object_provider(Rc::new(archive.clone()));
 

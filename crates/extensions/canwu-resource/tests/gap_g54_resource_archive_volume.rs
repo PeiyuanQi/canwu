@@ -136,7 +136,7 @@ fn reject(resource: &mut ResourceState, index: usize) -> ResourceOperationOutcom
 
 fn runtime(plugin: &ResourcePlugin, resource: ResourceState, archive: &MemoryArchive) -> Canwu {
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
-        .with_domain_records(vec![resource.into_record().expect("resource record")]);
+        .with_domain_records(resource.into_records().expect("resource record"));
     let mut canwu = Canwu::new_with_plugins(54, scenario, &[plugin]).expect("runtime");
     canwu.set_plugin_archive_object_provider(Rc::new(archive.clone()));
     canwu

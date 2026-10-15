@@ -5,16 +5,16 @@ use crate::{
 use canwu_api::{
     ArchiveReachabilityManifest, BoundaryContext, BoundaryDirective, BoundaryPhase,
     BoundaryProposal, BoundarySystemContract, CanwuError, CauseRef, Command, CommandContext,
-    CommandIngress, DomainRecord, DomainRecordKind, DomainRecordMutation, DomainRecordSchema,
-    DomainRecordType, EntityRef, ErrorCode, EventAudience, EvidenceRef, IngressClass, IngressId,
-    IngressPayload, IngressRecord, Issuer, KnowledgeOrigin, KnowledgeRecordDraft,
-    KnowledgeRecordKind, KnowledgeSchemaId, KnowledgeSubject, KnowledgeSubjectSchema,
-    KnowledgeSubjectTarget, KnowledgeSubjectTargetKind, KnowledgeWriteGrant,
-    PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD, PayloadSchema, PluginActionDescriptor,
-    PluginArchiveObjectProvider, PluginArchiveRetention, PluginIngressDescriptor,
-    PluginIngressPermit, PluginIngressRequest, PluginIngressTarget, PluginKnowledgeSchema,
-    PluginRegistrar, SimTime, SimulationPlugin, SimulationView, StateKey, StateVisibility,
-    SystemCadence, SystemDirective, payload_required_evidence_continuation_property_v1,
+    CommandIngress, DomainRecord, DomainRecordKind, DomainRecordSchema, DomainRecordType,
+    EntityRef, ErrorCode, EventAudience, EvidenceRef, IngressClass, IngressId, IngressPayload,
+    IngressRecord, Issuer, KnowledgeOrigin, KnowledgeRecordDraft, KnowledgeRecordKind,
+    KnowledgeSchemaId, KnowledgeSubject, KnowledgeSubjectSchema, KnowledgeSubjectTarget,
+    KnowledgeSubjectTargetKind, KnowledgeWriteGrant, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
+    PayloadSchema, PluginActionDescriptor, PluginArchiveObjectProvider, PluginArchiveRetention,
+    PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest, PluginIngressTarget,
+    PluginKnowledgeSchema, PluginRegistrar, SimTime, SimulationPlugin, SimulationView, StateKey,
+    StateVisibility, SystemCadence, SystemDirective,
+    payload_required_evidence_continuation_property_v1,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,7 +43,7 @@ pub const RESOURCE_REPORT_WAKE_INGRESS: &str = "resource_report_wake_v1";
 pub const RESOURCE_DEFERRED_INGRESS: &str = "resource_deferred_packet_v1";
 pub const RESOURCE_REPORT_KNOWLEDGE: &str = "resource_report";
 pub const RESOURCE_SEMANTIC_HASH: &str =
-    "3d7a56a2b7cf0f1a1b2b0e5b5d1a95b0d1b3c9e0f4f61c2e8b7d0a3c5e9f1b24";
+    "da2564d428dd3342631561045e2e4238e50f3c7110a777928168d5a6e52fc86e";
 
 const RESOURCE_REPORT_SCHEMA_HASH: &str =
     "2e271b9ea79404e662ba51360ce8061421ae896c1e70b09e99feb8d0de01a007";
@@ -179,6 +179,85 @@ impl crate::ResourceArchiveStore for PluginResourceArchiveProvider<'_> {
     }
 }
 
+/// In a debug build the resource plugin settles each boundary's packets a
+/// second time, on the whole root, and requires the same result. The second
+/// settlement reads every archive object the first one read from what the
+/// first one read, so the archive store serves one settlement's reads, as in
+/// a release build.
+mod archive_reads {
+    #[cfg(debug_assertions)]
+    use std::cell::RefCell;
+    #[cfg(debug_assertions)]
+    use std::collections::BTreeMap;
+
+    #[cfg(debug_assertions)]
+    type Reads = BTreeMap<(String, String), Option<Vec<u8>>>;
+
+    #[cfg(debug_assertions)]
+    thread_local! {
+        /// While a settlement records, its reads; while the second one
+        /// replays them, the same reads marked as replayed.
+        static READS: RefCell<Option<(bool, Reads)>> = const { RefCell::new(None) };
+    }
+
+    /// Runs the first settlement and records the archive objects it reads.
+    #[cfg(debug_assertions)]
+    pub(super) fn recording<T>(settle: impl FnOnce() -> T) -> T {
+        READS.with(|reads| *reads.borrow_mut() = Some((false, BTreeMap::new())));
+        let result = settle();
+        READS.with(|reads| {
+            if let Some((replay, _)) = reads.borrow_mut().as_mut() {
+                *replay = true;
+            }
+        });
+        result
+    }
+
+    /// Runs the second settlement against the reads the first recorded, and
+    /// forgets them.
+    #[cfg(debug_assertions)]
+    pub(super) fn replaying<T>(settle: impl FnOnce() -> T) -> T {
+        let result = settle();
+        READS.with(|reads| *reads.borrow_mut() = None);
+        result
+    }
+
+    #[cfg(not(debug_assertions))]
+    pub(super) fn recording<T>(settle: impl FnOnce() -> T) -> T {
+        settle()
+    }
+
+    pub(super) fn load(
+        namespace: &str,
+        object_id: &str,
+        fetch: impl FnOnce() -> Result<Option<Vec<u8>>, crate::ResourceError>,
+    ) -> Result<Option<Vec<u8>>, crate::ResourceError> {
+        #[cfg(debug_assertions)]
+        {
+            let key = (namespace.to_owned(), object_id.to_owned());
+            let replayed = READS.with(|reads| match reads.borrow().as_ref() {
+                Some((true, recorded)) => recorded.get(&key).cloned(),
+                _ => None,
+            });
+            if let Some(value) = replayed {
+                return Ok(value);
+            }
+            let value = fetch()?;
+            READS.with(|reads| {
+                if let Some((false, recorded)) = reads.borrow_mut().as_mut() {
+                    recorded.insert(key, value.clone());
+                }
+            });
+            Ok(value)
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = (namespace, object_id);
+            fetch()
+        }
+    }
+}
+
 struct ViewResourceArchiveProvider<'a>(&'a SimulationView<'a>);
 
 impl crate::ResourceArchiveStore for ViewResourceArchiveProvider<'_> {
@@ -198,9 +277,11 @@ impl crate::ResourceArchiveStore for ViewResourceArchiveProvider<'_> {
         namespace: &str,
         object_id: &str,
     ) -> Result<Option<Vec<u8>>, crate::ResourceError> {
-        self.0
-            .plugin_archive_object(namespace, object_id)
-            .map_err(|error| crate::ResourceError::InvalidDefinition(error.to_string()))
+        archive_reads::load(namespace, object_id, || {
+            self.0
+                .plugin_archive_object(namespace, object_id)
+                .map_err(|error| crate::ResourceError::InvalidDefinition(error.to_string()))
+        })
     }
 
     fn persist_resource_archive_retention(
@@ -341,7 +422,8 @@ fn resource_archive_reachability(
     // deleted superseded pages is not refused.
     let mut live = roots.clone();
     if let Some(record) = view.typed_domain_record(&resource_runtime_reference())? {
-        let state = record.decode_payload::<ResourceRuntimeRecord>()?;
+        // The archive head and retention handles are in the live root.
+        let state = crate::decode_live_root(record)?;
         if let Some(root) = &state.archive_head.directory_root {
             roots.insert(root.clone());
             live.insert(root.clone());
@@ -440,6 +522,9 @@ impl SimulationPlugin for ResourcePlugin {
 
     fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
         registrar.register_record_schema(resource_record_schema())?;
+        registrar.register_record_schema(DomainRecordSchema::for_record::<
+            crate::ResourceHotTerminalBucketRecord,
+        >())?;
         registrar.register_knowledge_schema(resource_report_knowledge_schema())?;
         registrar.register_event_audience(
             "canwu.resource.operation_settled.v1",
@@ -457,6 +542,7 @@ impl SimulationPlugin for ResourcePlugin {
             StateKey::core_domain_records(),
             StateKey::core_evidence(),
             resource_state_key(),
+            resource_hot_terminal_state_key(),
         ];
         command_reads.extend(self.adapter_state_keys());
         command_reads.sort();
@@ -600,6 +686,7 @@ impl SimulationPlugin for ResourcePlugin {
             StateKey::core_ingress(),
             StateKey::core_knowledge(),
             resource_state_key(),
+            resource_hot_terminal_state_key(),
             // External completion participant requests coordinated by the
             // production package bind an exact current production runtime.
             StateKey::new("canwu.production", "runtime"),
@@ -607,7 +694,7 @@ impl SimulationPlugin for ResourcePlugin {
         lifecycle.reads.extend(self.adapter_state_keys());
         lifecycle.reads.sort();
         lifecycle.reads.dedup();
-        lifecycle.writes = vec![resource_state_key()];
+        lifecycle.writes = vec![resource_state_key(), resource_hot_terminal_state_key()];
         lifecycle.plugin_ingress_targets = vec![
             PluginIngressTarget {
                 target_plugin: "canwu-production".to_owned(),
@@ -656,8 +743,12 @@ impl SimulationPlugin for ResourcePlugin {
             BoundaryPhase::PerspectiveAndReportMaterialization,
             SystemCadence::EventDriven,
         );
-        reports.reads = vec![StateKey::core_knowledge(), resource_state_key()];
-        reports.writes = vec![resource_state_key()];
+        reports.reads = vec![
+            StateKey::core_knowledge(),
+            resource_state_key(),
+            resource_hot_terminal_state_key(),
+        ];
+        reports.writes = vec![resource_state_key(), resource_hot_terminal_state_key()];
         reports.knowledge_writes = vec![KnowledgeWriteGrant {
             schema: resource_report_knowledge_schema_id(),
             visibilities: vec![StateVisibility::SameBoundary],
@@ -703,17 +794,46 @@ fn admit_resource_command(
     if let ResourceOperationRequestV1::Completion(operation) = &value.request {
         reject_invalid_completion_identity(operation)?;
     }
-    let record = view
+    let live = view
         .typed_domain_record(&resource_runtime_reference())?
         .ok_or_else(|| invalid("resource runtime is unavailable"))?;
-    let state = record.decode_payload::<ResourceRuntimeRecord>()?;
+    // The live root, with the outcome under the command's key and every hot
+    // terminal record the command names, and what those name, attached.
+    let mut work = crate::ResourceRootWork::new(view, live)?;
+    work.attach([crate::ResourceTerminalRecordKeyV1::Outcome(
+        value.request.operation_key(),
+    )])?;
+    work.attach_named(payload)?;
+    let admitted =
+        archive_reads::recording(|| admit_resource_command_on(view, context, &value, &work.state));
+    #[cfg(debug_assertions)]
+    {
+        let mut whole = crate::ResourceRootWork::new(view, live)?;
+        whole.attach_all()?;
+        let expected = archive_reads::replaying(|| {
+            admit_resource_command_on(view, context, &value, &whole.state)
+        });
+        assert_eq!(
+            admitted, expected,
+            "a resource command was admitted differently on the live root than on the whole root"
+        );
+    }
+    admitted
+}
+
+fn admit_resource_command_on(
+    view: &SimulationView<'_>,
+    context: &CommandContext,
+    value: &ResourceCommandV1,
+    state: &crate::ResourceState,
+) -> Result<Vec<SystemDirective>, CanwuError> {
     let request_digest =
         crate::canonical_digest("canwu.resource.operation-request.v1", &value.request)
             .map_err(resource_canwu_error)?;
-    if archived_operation_outcome(view, &state, &value.request, &request_digest)?.is_some() {
+    if archived_operation_outcome(view, state, &value.request, &request_digest)?.is_some() {
         return Ok(Vec::new());
     }
-    validate_resource_authority(view, context, &value)?;
+    validate_resource_authority(view, context, value, state)?;
     validate_tracked_acquisition(view, context, &value.request)?;
     // A key whose outcome is still in the root belongs to the request that
     // settled it. Refusing a different request here records the refusal on
@@ -1138,20 +1258,90 @@ enum DeferredPacket<'a> {
 /// forged, or unreadable during a key lookup, a forged archive commit or
 /// retention acknowledgement, an invalid root after settlement, and
 /// arithmetic overflow.
+///
+/// A boundary that admits no resource packet reads nothing of the root. One
+/// that does reads the live root and the hot terminal records its packets
+/// name ([`crate::ResourceRootWork::attach_named`]), and writes the live root
+/// and the buckets whose records changed.
 fn settle_resource_lifecycle(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
-    let Some(record) = view
-        .typed_domain_record(&resource_runtime_reference())?
-        .cloned()
-    else {
+    let admitted = resource_packets_maintenance_first(view, &context.admitted_ingress)?;
+    if admitted.is_empty() {
+        return Ok(BoundaryProposal::default());
+    }
+    let Some(live) = view.typed_domain_record(&resource_runtime_reference())? else {
         return Ok(BoundaryProposal::default());
     };
-    let mut state = record.decode_payload::<ResourceRuntimeRecord>()?;
+    let mut work = crate::ResourceRootWork::new(view, live)?;
+    let proposal =
+        archive_reads::recording(|| settle_lifecycle_on(view, context, &admitted, &mut work))?;
+    // Every debug build settles the same packets on the whole root as well
+    // and requires the same proposal, so the test suites check that the
+    // records a packet reads are attached before it settles.
+    #[cfg(debug_assertions)]
+    {
+        let mut whole = crate::ResourceRootWork::new(view, live)?;
+        whole.attach_all()?;
+        let expected =
+            archive_reads::replaying(|| settle_lifecycle_on(view, context, &admitted, &mut whole))?;
+        assert_eq!(
+            proposal, expected,
+            "the resource lifecycle settled differently on the live root than on the whole root"
+        );
+    }
+    Ok(proposal)
+}
+
+/// The operation keys a resource packet of `packet_type` settles under, as
+/// far as its payload decodes; a packet that does not decode settles none.
+fn packet_operation_keys(packet_type: &str, payload: &Value) -> Vec<crate::ResourceOperationKey> {
+    fn decoded<T: serde::de::DeserializeOwned>(payload: &Value) -> Option<T> {
+        T::deserialize(payload).ok()
+    }
+    match packet_type {
+        RESOURCE_COMMAND_INGRESS => decoded::<AdmittedResourceCommandV1>(payload)
+            .map(|admitted| vec![admitted.value.request.operation_key()])
+            .unwrap_or_default(),
+        RESOURCE_ADAPTER_INGRESS => decoded::<ResourceAdapterOperationV1>(payload)
+            .map(|packet| vec![packet.request.operation_key()])
+            .unwrap_or_default(),
+        RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS => {
+            decoded::<ResourceProductionOutputBatchV1>(payload)
+                .map(|batch| {
+                    batch
+                        .requests
+                        .into_iter()
+                        .map(|request| request.operation_key)
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        RESOURCE_ALLOCATION_INGRESS => decoded::<ResourceAuthorizedAllocationV1>(payload)
+            .map(|packet| vec![packet.request.operation_key])
+            .unwrap_or_default(),
+        RESOURCE_COMPLETION_INGRESS => decoded::<crate::ResourceCompletionOperationV1>(payload)
+            .map(|operation| {
+                vec![ResourceOperationRequestV1::Completion(operation).operation_key()]
+            })
+            .unwrap_or_default(),
+        RESOURCE_DEFERRED_INGRESS => decoded::<ResourceDeferredPacketV1>(payload)
+            .map(|deferred| packet_operation_keys(&deferred.packet_type, &deferred.payload))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Settles `admitted` on `work` and proposes what changed.
+fn settle_lifecycle_on<S: crate::HotTerminalSource + ?Sized>(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    admitted: &[IngressId],
+    work: &mut crate::ResourceRootWork<'_, S>,
+) -> Result<BoundaryProposal, CanwuError> {
     let mut settlement = LifecycleSettlement::default();
-    let admitted = archive_maintenance_first(view, &context.admitted_ingress)?;
-    for ingress_id in &admitted {
+    for ingress_id in admitted {
         let Some(ingress) = view.ingress(*ingress_id)? else {
             continue;
         };
@@ -1167,27 +1357,60 @@ fn settle_resource_lifecycle(
         if plugin != PLUGIN_NAME {
             continue;
         }
+        // Every hot terminal record the packet names, and what those name,
+        // is attached before anything reads the root for it: the outcomes
+        // under the operation keys it settles, which a completion operation
+        // derives from its identities and an expiry tick from the boundary,
+        // and every record its payload names by identity. An archive commit
+        // reads the records it selects only when it applies, and archive
+        // maintenance names receipts by sequence.
+        work.attach(
+            packet_operation_keys(packet_type, payload)
+                .into_iter()
+                .chain(
+                    (packet_type == RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS)
+                        .then(|| expiry_tick_operation_keys(context))
+                        .into_iter()
+                        .flatten(),
+                )
+                .map(crate::ResourceTerminalRecordKeyV1::Outcome),
+        )?;
+        if packet_type != RESOURCE_ARCHIVE_COMMIT_INGRESS {
+            work.attach_named(payload)?;
+        }
+        match packet_type.as_str() {
+            RESOURCE_ARCHIVE_COMMIT_INGRESS => {
+                if let Ok(commit) = crate::VerifiedResourceArchiveCommitV1::deserialize(payload)
+                    && work
+                        .state
+                        .archive_source_root()
+                        .map_err(resource_canwu_error)?
+                        == commit.expected_source_root
+                {
+                    work.attach(commit.selected)?;
+                }
+            }
+            RESOURCE_ARCHIVE_RETENTION_ACK_INGRESS => {
+                if let Ok(ResourceArchiveRetentionAcknowledgementV1::Receipt(receipt)) =
+                    ResourceArchiveRetentionAcknowledgementV1::deserialize(payload)
+                {
+                    work.attach([
+                        crate::ResourceTerminalRecordKeyV1::ArchiveMaintenanceReceipt(
+                            receipt.sequence,
+                        ),
+                    ])?;
+                }
+            }
+            _ => {}
+        }
+        let state = &mut work.state;
         let origin = PacketOrigin::of(ingress);
         match packet_type.as_str() {
             RESOURCE_COMMAND_INGRESS => {
-                settle_command_packet(
-                    view,
-                    context,
-                    ingress,
-                    payload,
-                    &mut state,
-                    &mut settlement,
-                )?;
+                settle_command_packet(view, context, ingress, payload, state, &mut settlement)?;
             }
             RESOURCE_ADAPTER_INGRESS => {
-                settle_adapter_packet(
-                    view,
-                    context,
-                    ingress,
-                    payload,
-                    &mut state,
-                    &mut settlement,
-                )?;
+                settle_adapter_packet(view, context, ingress, payload, state, &mut settlement)?;
             }
             RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS => settle_output_batch_packet(
                 view,
@@ -1197,17 +1420,12 @@ fn settle_resource_lifecycle(
                     payload,
                     origin,
                 },
-                &mut state,
+                state,
                 &mut settlement,
             )?,
-            RESOURCE_ALLOCATION_INGRESS => settle_allocation_packet(
-                view,
-                context,
-                ingress,
-                payload,
-                &mut state,
-                &mut settlement,
-            )?,
+            RESOURCE_ALLOCATION_INGRESS => {
+                settle_allocation_packet(view, context, ingress, payload, state, &mut settlement)?;
+            }
             RESOURCE_COMPLETION_INGRESS => settle_completion_packet(
                 view,
                 context,
@@ -1216,21 +1434,14 @@ fn settle_resource_lifecycle(
                     payload,
                     origin,
                 },
-                &mut state,
+                state,
                 &mut settlement,
             )?,
             RESOURCE_DEFERRED_INGRESS => {
-                settle_deferred_packet(
-                    view,
-                    context,
-                    ingress,
-                    payload,
-                    &mut state,
-                    &mut settlement,
-                )?;
+                settle_deferred_packet(view, context, ingress, payload, state, &mut settlement)?;
             }
             RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS => {
-                settle_expiry_tick(context, ingress.id, &mut state, &mut settlement)?;
+                settle_expiry_tick(view, context, ingress.id, state, &mut settlement)?;
             }
             RESOURCE_ARCHIVE_COMMIT_INGRESS => {
                 let commit: crate::VerifiedResourceArchiveCommitV1 =
@@ -1242,7 +1453,7 @@ fn settle_resource_lifecycle(
                 // makes room. A skipped expiry schedules no successor, so
                 // this cannot spin.
                 if receipt.disposition == crate::ResourceArchiveMaintenanceDispositionV1::Applied
-                    && expiry_overdue(&state, context.boundary_id.get())
+                    && expiry_overdue(state, context.boundary_id.get())
                 {
                     settlement.schedule_expiry_tick();
                 }
@@ -1279,22 +1490,15 @@ fn settle_resource_lifecycle(
             ..BoundaryProposal::default()
         });
     }
-    state.state_revision =
-        crate::ResourceRevision::new(record.version.checked_add(1).ok_or_else(|| {
+    work.state.state_revision =
+        crate::ResourceRevision::new(work.live_version.checked_add(1).ok_or_else(|| {
             CanwuError::new(ErrorCode::ValueOutOfRange, "resource version overflow")
         })?)
         .map_err(resource_canwu_error)?;
-    state.validate().map_err(resource_canwu_error)?;
-    directives.insert(
-        0,
-        BoundaryDirective::MutateRecord {
-            mutation: DomainRecordMutation::Update {
-                record: state.record_draft()?,
-                expected_version: record.version,
-            },
-            summary: "Settle resource lifecycle ingress".to_owned(),
-        },
-    );
+    work.state.validate().map_err(resource_canwu_error)?;
+    let mut writes = work.persist("Settle resource lifecycle ingress")?;
+    writes.append(&mut directives);
+    let mut directives = writes;
     directives.push(BoundaryDirective::Emit {
         event_type: "canwu.resource.operation_settled.v1".to_owned(),
         summary: "Settled one or more resource operations".to_owned(),
@@ -1952,6 +2156,34 @@ fn prepare_external_targets_current(
         })
 }
 
+/// The expiries an expiry tick settles at `context`: of completion grants and
+/// of external participants. Their operation keys name the instant and the
+/// boundary, not anything the tick's payload names.
+fn expiry_tick_operations(context: &BoundaryContext) -> [crate::ResourceCompletionOperationV1; 2] {
+    [
+        crate::ResourceCompletionOperationV1::Expire(crate::ExpireCompletionCapacityV1 {
+            at: context.at,
+            current_boundary: context.boundary_id.get(),
+            candidate_limit: 1_024,
+        }),
+        crate::ResourceCompletionOperationV1::ExpireExternalParticipants(
+            crate::ExpireExternalCompletionParticipantGrantsV1 {
+                at: context.at,
+                current_boundary: context.boundary_id.get(),
+                candidate_limit: 1_024,
+            },
+        ),
+    ]
+}
+
+/// The operation keys an expiry tick settles under at `context`.
+fn expiry_tick_operation_keys(context: &BoundaryContext) -> Vec<crate::ResourceOperationKey> {
+    expiry_tick_operations(context)
+        .into_iter()
+        .map(|operation| ResourceOperationRequestV1::Completion(operation).operation_key())
+        .collect()
+}
+
 /// Advances completion-lease expiry and the cleanup of aborting leases.
 ///
 /// An expiry whose result does not fit the root settles nothing, with a skip
@@ -1961,7 +2193,14 @@ fn prepare_external_targets_current(
 /// next applied archive commit schedules while an expiry is due, which makes
 /// room for it, with the tick the next grant schedules, or with one the host
 /// application queues ([`enqueue_resource_completion_expiry_tick`]).
+///
+/// An expiry's key names the instant and the boundary, and a host
+/// application's completion operation may have taken it first. The same
+/// expiry recorded before is a resend and settles nothing; an expiry another
+/// request holds the key of settles nothing with a skip event, and the tick
+/// is scheduled again, at a boundary whose key is another.
 fn settle_expiry_tick(
+    view: &SimulationView<'_>,
     context: &BoundaryContext,
     ingress: IngressId,
     state: &mut crate::ResourceState,
@@ -1985,6 +2224,7 @@ fn settle_expiry_tick(
         }
         out.changed = true;
     }
+    let [local, external] = expiry_tick_operations(context);
     let mut expiries = Vec::new();
     if state
         .completion_leases
@@ -1992,13 +2232,7 @@ fn settle_expiry_tick(
         .range(..=boundary)
         .any(|(_, values)| !values.is_empty())
     {
-        expiries.push(crate::ResourceCompletionOperationV1::Expire(
-            crate::ExpireCompletionCapacityV1 {
-                at: context.at,
-                current_boundary: boundary,
-                candidate_limit: 1_024,
-            },
-        ));
+        expiries.push(local);
     }
     if state
         .external_completion_participants
@@ -2006,18 +2240,27 @@ fn settle_expiry_tick(
         .range(..=boundary)
         .any(|(_, values)| !values.is_empty())
     {
-        expiries.push(
-            crate::ResourceCompletionOperationV1::ExpireExternalParticipants(
-                crate::ExpireExternalCompletionParticipantGrantsV1 {
-                    at: context.at,
-                    current_boundary: boundary,
-                    candidate_limit: 1_024,
-                },
-            ),
-        );
+        expiries.push(external);
     }
     for expiry in expiries {
         let request = ResourceOperationRequestV1::Completion(expiry);
+        let request_digest = request.request_digest().map_err(resource_canwu_error)?;
+        match operation_key_holder(view, state, &request, &request_digest)? {
+            OperationKeyHolder::Nobody => {}
+            OperationKeyHolder::ThisRequestInRoot | OperationKeyHolder::ThisRequestInArchive => {
+                continue;
+            }
+            OperationKeyHolder::AnotherRequest => {
+                out.skip(
+                    ingress,
+                    crate::ResourceIngressSkipReasonV1::OperationKeyTaken,
+                    Some(&request.operation_key()),
+                    OPERATION_KEY_TAKEN_DETAIL,
+                    EventHolder::Nobody,
+                );
+                continue;
+            }
+        }
         match state
             .settle_operation(&request)
             .map_err(resource_canwu_error)?
@@ -2048,9 +2291,9 @@ fn settle_expiry_tick(
     Ok(())
 }
 
-/// Orders the ingress one boundary admitted so that archive commits and
-/// retention acknowledgements settle before every other packet, each group in
-/// its admitted order.
+/// The resource packets among `admitted`: archive commits and retention
+/// acknowledgements first, then every other one, each group in its admitted
+/// order. Packets of other plugins are left out.
 ///
 /// A full candidate budget skips the next operation, and the remedy is an
 /// archive commit. Settling the commit first lets it apply against the root
@@ -2058,28 +2301,28 @@ fn settle_expiry_tick(
 /// for the operations admitted beside it, instead of going stale after one of
 /// them. A boundary that admitted no archive packet, or nothing else, keeps
 /// its order.
-fn archive_maintenance_first(
+fn resource_packets_maintenance_first(
     view: &SimulationView<'_>,
     admitted: &[canwu_api::IngressId],
 ) -> Result<Vec<canwu_api::IngressId>, CanwuError> {
     let mut maintenance = Vec::new();
     let mut others = Vec::new();
     for ingress_id in admitted {
-        let is_maintenance = match view.ingress(*ingress_id)?.map(|ingress| &ingress.payload) {
-            Some(IngressPayload::Plugin {
-                plugin,
-                packet_type,
-                ..
-            }) => {
-                plugin == PLUGIN_NAME
-                    && matches!(
-                        packet_type.as_str(),
-                        RESOURCE_ARCHIVE_COMMIT_INGRESS | RESOURCE_ARCHIVE_RETENTION_ACK_INGRESS
-                    )
-            }
-            _ => false,
+        let Some(IngressPayload::Plugin {
+            plugin,
+            packet_type,
+            ..
+        }) = view.ingress(*ingress_id)?.map(|ingress| &ingress.payload)
+        else {
+            continue;
         };
-        if is_maintenance {
+        if plugin != PLUGIN_NAME {
+            continue;
+        }
+        if matches!(
+            packet_type.as_str(),
+            RESOURCE_ARCHIVE_COMMIT_INGRESS | RESOURCE_ARCHIVE_RETENTION_ACK_INGRESS
+        ) {
             maintenance.push(*ingress_id);
         } else {
             others.push(*ingress_id);
@@ -2100,6 +2343,9 @@ fn completion_expiry_tick_directive() -> BoundaryDirective {
     }
 }
 
+/// Validates the live root a boundary proposed. The resource plugin
+/// validates each hot terminal record as it settles and attaches it, so this
+/// reads the live root alone, and nothing in a boundary that wrote none.
 fn validate_resource_invariants(
     view: &SimulationView<'_>,
     _context: &BoundaryContext,
@@ -2107,19 +2353,66 @@ fn validate_resource_invariants(
     let Some(record) = view.proposed_typed_domain_record(&resource_runtime_reference())? else {
         return Ok(BoundaryProposal::default());
     };
-    let state = record.decode_payload::<ResourceRuntimeRecord>()?;
-    state.validate().map_err(resource_canwu_error)?;
+    crate::decode_live_root(record)?
+        .validate()
+        .map_err(resource_canwu_error)?;
     Ok(BoundaryProposal::default())
 }
 
+/// Whether the live root `payload` holds a dirty report grant or a report due
+/// by minute `now`, read from its encoded value without decoding the root.
+fn report_work_due(payload: &Value, now: i64) -> bool {
+    let dirty = payload
+        .get("report_dirty_grants")
+        .and_then(Value::as_array)
+        .is_some_and(|grants| !grants.is_empty());
+    // A key that is not a minute is decoded, and refused, with the root.
+    let due = payload
+        .get("report_due_index")
+        .and_then(Value::as_object)
+        .is_some_and(|index| {
+            index
+                .keys()
+                .any(|at| at.parse::<i64>().map_or(true, |at| at <= now))
+        });
+    dirty || due
+}
+
+/// Publishes the holder reports that are due or dirty. A boundary in which
+/// none is reads only two fields of the live root's encoded value.
 fn materialize_resource_reports(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
-    let Some(record) = view.typed_domain_record(&resource_runtime_reference())? else {
+    let Some(live) = view.typed_domain_record(&resource_runtime_reference())? else {
         return Ok(BoundaryProposal::default());
     };
-    let mut state = record.decode_payload::<ResourceRuntimeRecord>()?;
+    if !report_work_due(&live.payload, context.at.as_minutes()) {
+        return Ok(BoundaryProposal::default());
+    }
+    let mut work = crate::ResourceRootWork::new(view, live)?;
+    let proposal = materialize_reports_on(view, context, &mut work)?;
+    // As for the lifecycle: a debug build requires the whole root to
+    // publish the same reports and write the same records.
+    #[cfg(debug_assertions)]
+    {
+        let mut whole = crate::ResourceRootWork::new(view, live)?;
+        whole.attach_all()?;
+        let expected = materialize_reports_on(view, context, &mut whole)?;
+        assert_eq!(
+            proposal, expected,
+            "resource reports materialized differently on the live root than on the whole root"
+        );
+    }
+    Ok(proposal)
+}
+
+fn materialize_reports_on<S: crate::HotTerminalSource + ?Sized>(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    work: &mut crate::ResourceRootWork<'_, S>,
+) -> Result<BoundaryProposal, CanwuError> {
+    let state = &mut work.state;
     let mut changed = false;
     let due_times = state
         .report_due_index
@@ -2264,6 +2557,23 @@ fn materialize_resource_reports(
         published += 1;
         changed = true;
     }
+    // A head is checked against the records it cites while its revision is
+    // current, so they are attached first.
+    let heads = grants_by_holder
+        .values()
+        .flatten()
+        .filter_map(|(grant_id, _)| {
+            state
+                .observation_head_by_grant
+                .get(grant_id)
+                .and_then(|head| state.observation_heads.get(head))
+        })
+        .map(encode)
+        .collect::<Result<Vec<_>, _>>()?;
+    for head in &heads {
+        work.attach_named(head)?;
+    }
+    let state = &mut work.state;
     for (batch_ordinal, (holder, grant_ids)) in grants_by_holder.into_iter().enumerate() {
         let mut records = Vec::with_capacity(grant_ids.len());
         for (grant_id, mandatory_acquisition) in grant_ids {
@@ -2283,7 +2593,7 @@ fn materialize_resource_reports(
                 )
             })?;
             let report =
-                materialize_resource_report(&state, &holder, &grant_id, context.at, context.at)
+                materialize_resource_report(state, &holder, &grant_id, context.at, context.at)
                     .map_err(resource_canwu_error)?;
             let mut origin_evidence =
                 std::iter::once(EvidenceRef::DomainRecordVersion(version.clone()))
@@ -2344,23 +2654,15 @@ fn materialize_resource_reports(
     }
     if changed {
         state.state_revision = crate::ResourceRevision::new(
-            record
-                .version
+            work.live_version
                 .checked_add(1)
                 .ok_or_else(|| invalid("resource report state revision overflowed"))?,
         )
         .map_err(resource_canwu_error)?;
-        state.validate().map_err(resource_canwu_error)?;
-        directives.insert(
-            0,
-            BoundaryDirective::MutateRecord {
-                mutation: DomainRecordMutation::Update {
-                    record: state.record_draft()?,
-                    expected_version: record.version,
-                },
-                summary: "Persist resource report due/dirty fairness state".to_owned(),
-            },
-        );
+        work.state.validate().map_err(resource_canwu_error)?;
+        let mut writes = work.persist("Persist resource report due/dirty fairness state")?;
+        writes.append(&mut directives);
+        directives = writes;
     }
     Ok(BoundaryProposal {
         directives,
@@ -3716,21 +4018,15 @@ fn adapter_source_matches(packet: &ResourceAdapterOperationV1) -> bool {
     }
 }
 
+/// Checks that the command's subject controls the holder its target names in
+/// `state`, which holds every hot terminal record the command names.
 fn validate_resource_authority(
     view: &SimulationView<'_>,
     context: &CommandContext,
     value: &ResourceCommandV1,
+    state: &crate::ResourceState,
 ) -> Result<(), CanwuError> {
     validate_resource_subject_issuer(context, &value.subject)?;
-    let record = view
-        .typed_domain_record(&resource_runtime_reference())?
-        .ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::InvalidDomainRecord,
-                "resource runtime is unavailable for target-bound authority",
-            )
-        })?;
-    let state = record.decode_payload::<ResourceRuntimeRecord>()?;
     let target_holder = match &value.request {
         ResourceOperationRequestV1::CreateAccount(request) => {
             if request.account.place_scope.is_some() {
@@ -3968,16 +4264,25 @@ fn validate_resource_activation_records(records: &[DomainRecord]) -> Result<(), 
             "resource plugin owns more than one runtime root",
         ));
     }
-    if let Some(record) = resource_records.first() {
-        let state = record.decode_payload::<ResourceRuntimeRecord>()?;
-        state.validate().map_err(resource_canwu_error)?;
-        if record.reference != resource_runtime_reference().into_untyped()
-            || record.version != state.state_revision.get()
-        {
-            return Err(CanwuError::new(
-                ErrorCode::InvalidDomainRecord,
-                "resource runtime root identity or revision differs",
-            ));
+    let buckets = records.iter().filter(|record| {
+        record
+            .reference
+            .kind
+            .matches_type::<crate::ResourceHotTerminalBucketRecord>()
+    });
+    match resource_records.first() {
+        // The whole root: the live root, every bucket, and the ledger that
+        // counts their entries, validated as one state.
+        Some(record) => {
+            crate::ResourceState::from_records(record, buckets)?;
+        }
+        None => {
+            if buckets.count() != 0 {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidDomainRecord,
+                    "resource hot terminal buckets exist without a resource runtime root",
+                ));
+            }
         }
     }
     Ok(())
@@ -3993,6 +4298,7 @@ pub fn resource_command_descriptor() -> PluginActionDescriptor {
             StateKey::core_domain_records(),
             StateKey::core_evidence(),
             resource_state_key(),
+            resource_hot_terminal_state_key(),
         ],
         writes: Vec::new(),
     }
@@ -4327,6 +4633,14 @@ fn resource_state_key() -> StateKey {
         ResourceRuntimeRecord::NAMESPACE,
         ResourceRuntimeRecord::NAME,
     )
+}
+
+/// The state key of the hot terminal buckets, which every reader of the
+/// resource root declares beside the live root's (`canwu.resource`
+/// `runtime`).
+#[must_use]
+pub fn resource_hot_terminal_state_key() -> StateKey {
+    DomainRecordSchema::for_record::<crate::ResourceHotTerminalBucketRecord>().state_key()
 }
 
 fn decode<T: serde::de::DeserializeOwned>(value: &Value, label: &str) -> Result<T, CanwuError> {

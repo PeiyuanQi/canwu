@@ -201,6 +201,7 @@ impl SimulationPlugin for ForceSupplyReferencePlugin {
             StateKey::core_decisions(),
             StateKey::new(PLUGIN_NAMESPACE, "runtime"),
             StateKey::new("canwu.resource", "runtime"),
+            canwu_resource::resource_hot_terminal_state_key(),
             StateKey::new(PLUGIN_NAMESPACE, "externality-completion-participant"),
             StateKey::new(PLUGIN_NAMESPACE, "externality-outcome"),
         ];
@@ -222,6 +223,7 @@ impl SimulationPlugin for ForceSupplyReferencePlugin {
         resource_dispatch.reads = vec![
             StateKey::new(PLUGIN_NAMESPACE, "runtime"),
             StateKey::new("canwu.resource", "runtime"),
+            canwu_resource::resource_hot_terminal_state_key(),
             StateKey::core_ingress(),
         ];
         resource_dispatch.plugin_ingress_targets = vec![canwu_api::PluginIngressTarget {
@@ -290,10 +292,24 @@ fn dispatch_pending_resource_consumptions(
     };
     let state = record.decode_payload::<ForceSupplyRuntimeRecord>()?;
     state.validate()?;
-    let resource_outcomes = view
-        .typed_domain_record(&resource_runtime_reference())?
-        .map(DomainRecord::decode_payload::<ResourceRuntimeRecord>)
-        .transpose()?;
+    // The outcome under each pending intent's key, if the resource root
+    // holds one, attached from its hot terminal bucket.
+    let resource_outcomes = canwu_resource::resource_root_in_view(
+        view,
+        state
+            .intents
+            .values()
+            .filter(|intent| {
+                intent.status == crate::ForceConsumptionIntentStatus::PendingResourceConsumption
+                    && intent.resource_outcome.is_none()
+            })
+            .map(|intent| {
+                canwu_resource::ResourceTerminalRecordKeyV1::Outcome(
+                    intent.resource_operation_key.clone(),
+                )
+            }),
+    )?
+    .map(|(_, resource)| resource);
     let in_flight = context
         .admitted_ingress
         .iter()
@@ -850,7 +866,10 @@ fn validate_force_observation_source(
                 {
                     false
                 } else {
-                    let resource = record.decode_payload::<ResourceRuntimeRecord>()?;
+                    // Account stock is in the live root.
+                    let resource = record
+                        .decode_payload::<ResourceRuntimeRecord>()?
+                        .into_live();
                     resource.validate().map_err(|error| {
                         invalid(format!(
                             "force resource observation source is invalid: {error}"
@@ -944,8 +963,10 @@ fn validate_completion_participant_source(
                 "resource completion participant source is not the resource runtime",
             ));
         }
+        // An active participant grant is in the live root.
         record
             .decode_payload::<ResourceRuntimeRecord>()?
+            .into_live()
             .external_completion_participants
             .grants
             .get(&participant.grant.acquisition)
@@ -1016,7 +1037,11 @@ fn resolve_resource_outcome(
             "force resource acknowledgement cites a non-resource provider",
         ));
     }
-    let resource_state = record.decode_payload::<ResourceRuntimeRecord>()?;
+    // The settlement finds the consumption's fulfillment among every hot
+    // fulfillment, so it reads the whole resource root: its live root and
+    // every hot terminal record.
+    let (_, resource_state) = canwu_resource::whole_resource_root_in_view(view)?
+        .ok_or_else(|| invalid("authoritative resource state is unavailable"))?;
     resource_state
         .validate()
         .map_err(|error| invalid(format!("authoritative resource state is invalid: {error}")))?;

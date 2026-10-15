@@ -534,7 +534,7 @@ fn gap_g12_resource_accept_local() {
             .iter()
             .chain([&transport])
             .map(evidence_record)
-            .chain([world.state.into_record().expect("resource record")])
+            .chain(world.state.into_records().expect("resource record"))
             .collect(),
     );
     let resource_plugin = ResourcePlugin::default();
@@ -608,7 +608,7 @@ fn gap_g12_resource_accept_local() {
                 .iter()
                 .chain([&transport])
                 .map(evidence_record)
-                .chain([live.clone().into_record().expect("resource record")])
+                .chain(live.clone().into_records().expect("resource record"))
                 .collect(),
         );
     let mut direct =

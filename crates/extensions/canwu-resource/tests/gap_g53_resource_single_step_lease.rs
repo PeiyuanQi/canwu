@@ -1202,7 +1202,7 @@ fn same_place_transfer_leaves_fifteen_records_and_nine_lookups() {
         handovers
             .iter()
             .map(evidence_record)
-            .chain([world().into_record().expect("resource record")])
+            .chain(world().into_records().expect("resource record"))
             .collect(),
     );
     let archive = CountingArchive::default();

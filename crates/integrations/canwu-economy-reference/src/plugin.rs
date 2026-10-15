@@ -24,10 +24,7 @@ use canwu_force_supply_reference::{
     ForceSupplyRuntimeRecord, force_externality_completion_participant_reference,
     force_externality_outcome_reference, force_supply_runtime_reference,
 };
-use canwu_resource::{
-    ResourceOperationStatus, ResourceRuntimeRecord, ResourceTransferState,
-    resource_runtime_reference,
-};
+use canwu_resource::{ResourceOperationStatus, ResourceTransferState, resource_runtime_reference};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -331,6 +328,7 @@ impl SimulationPlugin for EconomyReferencePlugin {
             StateKey::core_ingress(),
             economy_state_key(),
             StateKey::new(canwu_resource::PLUGIN_NAMESPACE, "runtime"),
+            canwu_resource::resource_hot_terminal_state_key(),
             StateKey::new(canwu_force_supply_reference::PLUGIN_NAMESPACE, "runtime"),
             StateKey::new(PLUGIN_NAMESPACE, "route-observation-provider"),
             StateKey::new(PLUGIN_NAMESPACE, "price-observation-provider"),
@@ -360,6 +358,7 @@ impl SimulationPlugin for EconomyReferencePlugin {
         externalities.reads = vec![
             economy_state_key(),
             StateKey::new(canwu_resource::PLUGIN_NAMESPACE, "runtime"),
+            canwu_resource::resource_hot_terminal_state_key(),
             StateKey::new(canwu_force_supply_reference::PLUGIN_NAMESPACE, "runtime"),
             externality_outcome_state_key(),
             externality_participant_state_key(),
@@ -849,7 +848,13 @@ fn apply_operation(
             if record.owner != canwu_resource::PLUGIN_NAME {
                 return Err(other_provider());
             }
-            let resource = record.decode_payload::<ResourceRuntimeRecord>()?;
+            let (_, resource) = canwu_resource::resource_root_in_view(
+                view,
+                [canwu_resource::ResourceTerminalRecordKeyV1::Outcome(
+                    authorized.operation_key.clone(),
+                )],
+            )?
+            .ok_or_else(|| missing("resource runtime is unavailable"))?;
             let outcome = resource_outcome(view, &resource, &authorized.operation_key)?
                 .ok_or_else(|| missing("resource consumption outcome is unavailable"))?;
             if &outcome.id != outcome_id
@@ -1220,10 +1225,22 @@ fn close_month(
     now: canwu_api::SimTime,
 ) -> Result<(), CanwuError> {
     validate_source_versions(view, &evidence.source_versions)?;
-    let resource_record = view
-        .typed_domain_record(&resource_runtime_reference())?
-        .ok_or_else(|| missing("resource runtime is unavailable"))?;
-    let resource_state = resource_record.decode_payload::<ResourceRuntimeRecord>()?;
+    // The three demands and the harvest credit, attached when they are
+    // hot terminal records.
+    let (_, resource_state) = canwu_resource::resource_root_in_view(
+        view,
+        [
+            &evidence.civilian_demand,
+            &evidence.relief_demand,
+            &evidence.force_demand,
+        ]
+        .into_iter()
+        .map(|demand| canwu_resource::ResourceTerminalRecordKeyV1::Demand(demand.clone()))
+        .chain(evidence.harvest_credit.iter().map(|exact| {
+            canwu_resource::ResourceTerminalRecordKeyV1::Outcome(exact.operation_key.clone())
+        })),
+    )?
+    .ok_or_else(|| missing("resource runtime is unavailable"))?;
     let civilian = resource_state
         .demands
         .get(&evidence.civilian_demand)
@@ -1385,10 +1402,13 @@ fn validate_resource_transfer(
     view: &SimulationView<'_>,
     attempt: &EconomyDeliveryAttemptV1,
 ) -> Result<(), CanwuError> {
-    let resource_record = view
-        .typed_domain_record(&resource_runtime_reference())?
-        .ok_or_else(|| missing("resource runtime is unavailable"))?;
-    let state = resource_record.decode_payload::<ResourceRuntimeRecord>()?;
+    let (_, state) = canwu_resource::resource_root_in_view(
+        view,
+        [canwu_resource::ResourceTerminalRecordKeyV1::Transfer(
+            attempt.resource_transfer.clone(),
+        )],
+    )?
+    .ok_or_else(|| missing("resource runtime is unavailable"))?;
     let transfer = state
         .transfers
         .get(&attempt.resource_transfer)
@@ -2135,15 +2155,33 @@ fn authoritative_force_externality_scope(
             "force externality resource provider version is unknown",
         ));
     }
-    let resource_record = view
-        .typed_domain_record(&resource_runtime_reference())?
+    let mut reader = canwu_resource::ResourceRootReader::load(view)?
         .ok_or_else(|| invalid("force externality resource runtime is unavailable"))?;
-    if resource_record.owner != canwu_resource::PLUGIN_NAME {
+    if reader.live_record().owner != canwu_resource::PLUGIN_NAME {
         return Err(invalid(
             "force externality resource provider is not resource-owned",
         ));
     }
-    let resource_state = resource_record.decode_payload::<ResourceRuntimeRecord>()?;
+    // The outcome and the consumed leg, then the consumption the outcome
+    // names, attached when they are hot terminal records.
+    reader.attach([
+        canwu_resource::ResourceTerminalRecordKeyV1::Outcome(externality.operation_key.clone()),
+        canwu_resource::ResourceTerminalRecordKeyV1::AllocationLeg(
+            consumption_intent.allocation.id.clone(),
+        ),
+    ])?;
+    if let Some(canwu_resource::ResourceRecordRefV1::Consumption(consumption)) = reader
+        .state()
+        .outcomes
+        .get(&externality.operation_key)
+        .and_then(|outcome| outcome.result_ref.clone())
+    {
+        reader.attach([canwu_resource::ResourceTerminalRecordKeyV1::Consumption(
+            consumption,
+        )])?;
+    }
+    let resource_record = reader.live_record().clone();
+    let resource_state = reader.into_state();
     resource_state.validate().map_err(|error| {
         invalid(format!(
             "force externality resource state is invalid: {error}"

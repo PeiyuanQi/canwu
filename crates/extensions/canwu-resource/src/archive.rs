@@ -18,7 +18,7 @@ pub const RESOURCE_ARCHIVE_LOOKUP_PAGE_NAMESPACE: &str = "canwu.resource.archive
 /// Terminal records one blob, membership page, or temporal page may hold.
 pub const MAX_RESOURCE_ARCHIVE_PAGE_ENTRIES: usize = 256;
 /// Blob, membership, and temporal pages one archive commit may carry.
-pub const MAX_RESOURCE_ARCHIVE_COMMIT_PAGES: usize = 16;
+pub const MAX_RESOURCE_ARCHIVE_COMMIT_PAGES: usize = 64;
 /// Terminal records one archive commit may carry: every page full. It equals
 /// [`crate::ResourceLimitsV1::MAX_ARCHIVE_CANDIDATES`], so one commit can
 /// always settle every hot terminal candidate of the resource root.
@@ -660,12 +660,23 @@ impl PreparedResourceArchiveBatchV1 {
 }
 
 impl ResourceState {
+    /// The digest that names the root an archive commit is prepared from.
+    /// A commit applies only to the root it names, so any change of the root
+    /// in between makes it stale.
+    ///
+    /// It commits to what the live root alone holds: the state revision and
+    /// the admitted sequence, which every change of the root advances; the
+    /// number of hot terminal records, which an applied commit lowers within
+    /// the boundary that applies it; and the archive head, which it moves.
+    /// The candidates themselves need not be read: the same revision of one
+    /// run's root always holds the same ones.
     pub fn archive_source_root(&self) -> Result<String, ResourceError> {
         canonical_digest(
-            "canwu.resource.archive-source-root.v1",
+            "canwu.resource.archive-source-root.v2",
             &(
                 self.state_revision,
-                &self.terminal_archive_candidates,
+                self.next_admitted_sequence,
+                self.hot_terminal.records,
                 &self.archive_head,
             ),
         )
@@ -691,6 +702,11 @@ impl ResourceState {
         if candidate_limit == 0 || candidate_limit > self.limits.max_archive_candidates {
             return Err(ResourceError::LimitExceeded(
                 "resource archive candidate budget is invalid".to_owned(),
+            ));
+        }
+        if !self.hot_terminal_records_attached() {
+            return Err(ResourceError::InvalidDefinition(
+                "a resource archive commit is prepared from the whole root".to_owned(),
             ));
         }
         let selected_entries: Vec<_> = self
@@ -890,12 +906,25 @@ impl ResourceState {
     ) -> Result<ResourceArchiveMaintenanceReceiptV1, ResourceError> {
         commit.validate()?;
         let disposition = if self.archive_source_root()? == commit.expected_source_root {
+            // One pass over the candidate index for the whole batch, so a
+            // commit of thousands of records stays linear in the candidates.
+            // Every selected record is a hot candidate of this root, and the
+            // resource plugin attaches each before it applies the commit.
+            let archived: BTreeSet<_> = commit.selected.iter().collect();
+            let attached = self
+                .terminal_archive_candidates
+                .values()
+                .filter(|candidate| archived.contains(candidate))
+                .count();
+            if attached != archived.len() || archived.len() != commit.selected.len() {
+                return Err(ResourceError::InvalidDefinition(
+                    "an applied resource archive commit selects a record that is not an attached hot candidate"
+                        .to_owned(),
+                ));
+            }
             for key in &commit.selected {
                 self.remove_hot_terminal(key)?;
             }
-            // One pass over the candidate index for the whole batch, so a
-            // commit of thousands of records stays linear in the candidates.
-            let archived: BTreeSet<_> = commit.selected.iter().collect();
             self.terminal_archive_candidates
                 .retain(|_, candidate| !archived.contains(candidate));
             self.archive_head.revision = self
@@ -933,10 +962,10 @@ impl ResourceState {
         self.archive_maintenance_receipts
             .insert(sequence, receipt.clone());
         if applied {
-            self.terminal_archive_candidates.insert(
+            self.add_hot_candidate(
                 sequence,
                 ResourceTerminalRecordKeyV1::ArchiveMaintenanceReceipt(sequence),
-            );
+            )?;
         }
         let mut handle = commit.retention.clone();
         handle.phase = if applied {
@@ -1045,17 +1074,6 @@ impl ResourceState {
             }
         }
         Ok(())
-    }
-
-    /// Hot maintenance receipts of applied archive commits: the ones the
-    /// receipt budget counts. Each of them is a terminal archive candidate.
-    pub(crate) fn applied_archive_maintenance_receipts(&self) -> usize {
-        self.archive_maintenance_receipts
-            .values()
-            .filter(|receipt| {
-                receipt.disposition == ResourceArchiveMaintenanceDispositionV1::Applied
-            })
-            .count()
     }
 
     pub(crate) fn terminal_archive_record(
@@ -1344,10 +1362,15 @@ impl ResourceState {
         })
     }
 
+    /// Archives the attached hot terminal record `key`: takes it out of the
+    /// ledger and the root, with what archiving it does to the live root (the
+    /// last receipt of a finished lease retires the lease). The caller
+    /// removes its candidate entry.
     fn remove_hot_terminal(
         &mut self,
         key: &ResourceTerminalRecordKeyV1,
     ) -> Result<(), ResourceError> {
+        self.drop_hot_candidate(key)?;
         match key {
             ResourceTerminalRecordKeyV1::Outcome(id) => {
                 self.outcomes.remove(id);
@@ -1396,11 +1419,12 @@ impl ResourceState {
                             | crate::CompletionLeaseReceiptActionV1::Expired
                             | crate::CompletionLeaseReceiptActionV1::Aborted
                     )
+                    // Every receipt is a hot terminal record, attached or
+                    // not, so the ledger knows whether another remains.
                     && !self
-                        .completion_leases
-                        .receipts
-                        .values()
-                        .any(|other| other.acquisition == receipt.acquisition)
+                        .hot_terminal
+                        .lease_receipt_acquisitions
+                        .contains_key(&receipt.acquisition)
                     && self
                         .completion_leases
                         .acquisitions
