@@ -1,0 +1,340 @@
+{
+  "benchmark": "production-archive-profile",
+  "lifetime_cases": [
+    {
+      "archived_records": 1000,
+      "commits": 1000,
+      "first_commit_executions": 1,
+      "first_execution_hit_bytes_read": 17395.0,
+      "first_execution_hit_microseconds": 204.97725409836067,
+      "first_execution_hit_objects_read": 5.0,
+      "live_lookup_bytes": 179063,
+      "live_lookup_pages": 297,
+      "lookup_bytes_written_per_commit": 2567.102,
+      "lookup_pages_superseded": 2699,
+      "lookup_pages_written": 2996,
+      "miss_bytes_read": 3575.9451603006596,
+      "miss_microseconds": 23.00977143733701,
+      "miss_objects_read": 3.994937873907041,
+      "other_bytes_written_per_commit": 2121.365,
+      "restore_audit_ms": 24.615499999999997,
+      "samples": [
+        {
+          "boundary_ms": 2.6941,
+          "commits": 1,
+          "enqueue_ms": 1.1397,
+          "hot_receipts": 1,
+          "journal_bytes_per_boundary": 25825,
+          "pending_handles": 1,
+          "prepare_ms": 0.3264,
+          "production_root_bytes": 4763
+        },
+        {
+          "boundary_ms": 1.0787,
+          "commits": 1000,
+          "enqueue_ms": 0.2039,
+          "hot_receipts": 1,
+          "journal_bytes_per_boundary": 12047,
+          "pending_handles": 1,
+          "prepare_ms": 0.0609,
+          "production_root_bytes": 4780
+        }
+      ]
+    },
+    {
+      "archived_records": 8193,
+      "commits": 8193,
+      "first_commit_executions": 1,
+      "first_execution_hit_bytes_read": 17969.0,
+      "first_execution_hit_microseconds": 175.3207359813084,
+      "first_execution_hit_objects_read": 6.0,
+      "live_lookup_bytes": 1607643,
+      "live_lookup_pages": 3826,
+      "lookup_bytes_written_per_commit": 3422.6045404613697,
+      "lookup_pages_superseded": 28423,
+      "lookup_pages_written": 32249,
+      "miss_bytes_read": 4312.774647887324,
+      "miss_microseconds": 31.771576829397436,
+      "miss_objects_read": 4.86370856719263,
+      "other_bytes_written_per_commit": 2114.020993531063,
+      "restore_audit_ms": 194.0703,
+      "samples": [
+        {
+          "boundary_ms": 1.7998999999999998,
+          "commits": 1,
+          "enqueue_ms": 0.6299,
+          "hot_receipts": 1,
+          "journal_bytes_per_boundary": 25825,
+          "pending_handles": 1,
+          "prepare_ms": 0.1137,
+          "production_root_bytes": 4763
+        },
+        {
+          "boundary_ms": 0.9512999999999999,
+          "commits": 1000,
+          "enqueue_ms": 0.1851,
+          "hot_receipts": 1,
+          "journal_bytes_per_boundary": 12047,
+          "pending_handles": 1,
+          "prepare_ms": 0.0571,
+          "production_root_bytes": 4780
+        },
+        {
+          "boundary_ms": 1.0149,
+          "commits": 2000,
+          "enqueue_ms": 0.2087,
+          "hot_receipts": 1,
+          "journal_bytes_per_boundary": 12054,
+          "pending_handles": 1,
+          "prepare_ms": 0.0635,
+          "production_root_bytes": 4781
+        },
+        {
+          "boundary_ms": 0.805,
+          "commits": 4000,
+          "enqueue_ms": 0.1695,
+          "hot_receipts": 1,
+          "journal_bytes_per_boundary": 12054,
+          "pending_handles": 1,
+          "prepare_ms": 0.056799999999999996,
+          "production_root_bytes": 4781
+        },
+        {
+          "boundary_ms": 1.4037,
+          "commits": 8192,
+          "enqueue_ms": 0.31110000000000004,
+          "hot_receipts": 1,
+          "journal_bytes_per_boundary": 12068,
+          "pending_handles": 1,
+          "prepare_ms": 0.0897,
+          "production_root_bytes": 4782
+        },
+        {
+          "boundary_ms": 3.0056000000000003,
+          "commits": 8193,
+          "enqueue_ms": 1.1284999999999998,
+          "hot_receipts": 1,
+          "journal_bytes_per_boundary": 12068,
+          "pending_handles": 1,
+          "prepare_ms": 0.074,
+          "production_root_bytes": 4782
+        }
+      ]
+    },
+    {
+      "archived_records": 30000,
+      "commits": 30000,
+      "first_commit_executions": 1,
+      "first_execution_hit_bytes_read": 18712.0,
+      "first_execution_hit_microseconds": 193.13294723294726,
+      "first_execution_hit_objects_read": 6.0,
+      "live_lookup_bytes": 5944733,
+      "live_lookup_pages": 14479,
+      "lookup_bytes_written_per_commit": 4068.639866666667,
+      "lookup_pages_superseded": 116054,
+      "lookup_pages_written": 130533,
+      "miss_bytes_read": 4996.791432477594,
+      "miss_microseconds": 45.57308218137627,
+      "miss_objects_read": 5.154185022026431,
+      "other_bytes_written_per_commit": 2115.9455,
+      "restore_audit_ms": 792.5634,
+      "samples": [
+        {
+          "boundary_ms": 2.1976,
+          "commits": 1,
+          "enqueue_ms": 0.7758,
+          "hot_receipts": 1,
+          "journal_bytes_per_boundary": 25825,
+          "pending_handles": 1,
+          "prepare_ms": 0.1505,
+          "production_root_bytes": 4763
+        },
+        {
+          "boundary_ms": 1.098,
+          "commits": 1000,
+          "enqueue_ms": 0.19340000000000002,
+          "hot_receipts": 1,
+          "journal_bytes_per_boundary": 12047,
+          "pending_handles": 1,
+          "prepare_ms": 0.0582,
+          "production_root_bytes": 4780
+        },
+        {
+          "boundary_ms": 0.9894000000000001,
+          "commits": 2000,
+          "enqueue_ms": 0.1888,
+          "hot_receipts": 1,
+          "journal_bytes_per_boundary": 12054,
+          "pending_handles": 1,
+          "prepare_ms": 0.0592,
+          "production_root_bytes": 4781
+        },
+        {
+          "boundary_ms": 1.0112999999999999,
+          "commits": 4000,
+          "enqueue_ms": 0.2216,
+          "hot_receipts": 1,
+          "journal_bytes_per_boundary": 12054,
+          "pending_handles": 1,
+          "prepare_ms": 0.0645,
+          "production_root_bytes": 4781
+        },
+        {
+          "boundary_ms": 0.9121999999999999,
+          "commits": 8192,
+          "enqueue_ms": 0.2317,
+          "hot_receipts": 1,
+          "journal_bytes_per_boundary": 12068,
+          "pending_handles": 1,
+          "prepare_ms": 0.0667,
+          "production_root_bytes": 4782
+        },
+        {
+          "boundary_ms": 2.6266000000000003,
+          "commits": 8193,
+          "enqueue_ms": 0.8771,
+          "hot_receipts": 1,
+          "journal_bytes_per_boundary": 12068,
+          "pending_handles": 1,
+          "prepare_ms": 0.0592,
+          "production_root_bytes": 4782
+        },
+        {
+          "boundary_ms": 1.0045,
+          "commits": 30000,
+          "enqueue_ms": 0.2934,
+          "hot_receipts": 1,
+          "journal_bytes_per_boundary": 12089,
+          "pending_handles": 1,
+          "prepare_ms": 0.0817,
+          "production_root_bytes": 4787
+        }
+      ]
+    }
+  ],
+  "machine": "local-windows-x86_64",
+  "multi_page_cases": [
+    {
+      "boundary_ms": 49.862700000000004,
+      "commit_pages": 2,
+      "commit_records": 70,
+      "early_hit_bytes_read": 16132.0,
+      "early_hit_microseconds": 175.47280701754386,
+      "early_hit_objects_read": 5.0,
+      "enqueue_ms": 25.578400000000002,
+      "executions": 70,
+      "hit_bytes_read": 754360.0857142857,
+      "hit_microseconds": 8780.361428571428,
+      "hit_objects_read": 4.242857142857143,
+      "hot_root_bytes": 964169,
+      "lookup_bytes_written": 15202,
+      "lookup_pages_written": 33,
+      "other_bytes_written": 930599,
+      "prepare_ms": 5.8786000000000005,
+      "prior_commits": 10,
+      "store_and_verify_ms": 16.049500000000002
+    },
+    {
+      "boundary_ms": 1377.3835000000001,
+      "commit_pages": 16,
+      "commit_records": 1023,
+      "early_hit_bytes_read": 20268.0,
+      "early_hit_microseconds": 199.87754830113258,
+      "early_hit_objects_read": 5.0,
+      "enqueue_ms": 493.0953,
+      "executions": 1023,
+      "hit_bytes_read": 845318.0351906158,
+      "hit_microseconds": 9970.488269794721,
+      "hit_objects_read": 5.066471163245357,
+      "hot_root_bytes": 14075550,
+      "lookup_bytes_written": 185514,
+      "lookup_pages_written": 317,
+      "other_bytes_written": 13773602,
+      "prepare_ms": 180.3147,
+      "prior_commits": 1,
+      "store_and_verify_ms": 200.7575
+    }
+  ],
+  "preset": "full",
+  "recorded_on": "2026-10-15",
+  "restore_cases": [
+    {
+      "archived_resource_records": 1001,
+      "bytes_read": 12484,
+      "objects_read": 10,
+      "records_per_commit": 27,
+      "resource_commits": 38,
+      "samples": 2000,
+      "validation_microseconds": 93.5
+    },
+    {
+      "archived_resource_records": 9992,
+      "bytes_read": 14451,
+      "objects_read": 12,
+      "records_per_commit": 27,
+      "resource_commits": 371,
+      "samples": 1977,
+      "validation_microseconds": 111.2
+    },
+    {
+      "archived_resource_records": 100010,
+      "bytes_read": 15973,
+      "objects_read": 14,
+      "records_per_commit": 27,
+      "resource_commits": 3705,
+      "samples": 2000,
+      "validation_microseconds": 122.7
+    },
+    {
+      "archived_resource_records": 9986,
+      "bytes_read": 14459,
+      "objects_read": 12,
+      "records_per_commit": 256,
+      "resource_commits": 40,
+      "samples": 2000,
+      "validation_microseconds": 108.7
+    },
+    {
+      "archived_resource_records": 100098,
+      "bytes_read": 15976,
+      "objects_read": 14,
+      "records_per_commit": 256,
+      "resource_commits": 392,
+      "samples": 2000,
+      "validation_microseconds": 123.39999999999999
+    },
+    {
+      "archived_resource_records": 102,
+      "bytes_read": 10450,
+      "objects_read": 8,
+      "records_per_commit": 1,
+      "resource_commits": 101,
+      "samples": 2000,
+      "validation_microseconds": 86.10000000000001
+    },
+    {
+      "archived_resource_records": 1002,
+      "bytes_read": 12480,
+      "objects_read": 10,
+      "records_per_commit": 1,
+      "resource_commits": 1001,
+      "samples": 2000,
+      "validation_microseconds": 105.60000000000001
+    },
+    {
+      "archived_resource_records": 10002,
+      "bytes_read": 14449,
+      "objects_read": 12,
+      "records_per_commit": 1,
+      "resource_commits": 10001,
+      "samples": 2000,
+      "validation_microseconds": 112.5
+    }
+  ],
+  "source": {
+    "content_hash": "c6e192a8ff798758eeb05cb28ca510dfab571274495f306f77c8d123f2d71489",
+    "git_commit": "0fc7aac555db4a6eb12667e454e1e89677713cb3",
+    "git_dirty": true,
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.0\nLLVM version: 23.1.1"
+  }
+}

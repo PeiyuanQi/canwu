@@ -1,4 +1,3 @@
-use crate::ProductionArchiveStore as _;
 use crate::model::{
     ProductionCommandEnvelope, ProductionOperationDisposition, ProductionOperationOutcome,
     ProductionOutputAcknowledgement, ProductionRuntimeRecord, ProductionState, invalid,
@@ -7,7 +6,7 @@ use crate::model::{
 use crate::{PLUGIN_NAME, PLUGIN_NAMESPACE};
 use canwu_api::{
     ArchiveReachabilityManifest, BoundaryContext, BoundaryDirective, BoundaryPhase,
-    BoundaryProposal, BoundarySystemContract, Canwu, CanwuError, Command, CommandContext,
+    BoundaryProposal, BoundarySystemContract, Canwu, CanwuError, CauseRef, Command, CommandContext,
     CommandIngress, DecisionAction, DecisionTicketState, DomainRecord, DomainRecordMutation,
     DomainRecordSchema, ErrorCode, EvidenceRef, IngressClass, IngressPayload, Issuer,
     KnowledgeHistoryView, KnowledgeHolderRef, KnowledgeOrigin, KnowledgeQuery,
@@ -25,6 +24,12 @@ use serde_json::Value;
 use std::{collections::BTreeSet, sync::OnceLock};
 
 pub const PRODUCTION_COMMAND: &str = "apply_production_operation_v1";
+/// Event of a production packet that settles nothing because it does not
+/// decode, or because an operation packet does not match an admitted tracked
+/// production command.
+const INGRESS_REFUSED_EVENT: &str = "canwu.production.ingress_refused.v1";
+/// Event of an output acknowledgement that settles nothing.
+const OUTPUT_ACK_REFUSED_EVENT: &str = "canwu.production.output_ack_refused.v1";
 const PRODUCTION_COMMAND_INGRESS: &str = "production_operation_v1";
 pub const PRODUCTION_OUTPUT_ACK_INGRESS: &str = "production_output_ack_v1";
 pub const PRODUCTION_COMPLETION_INGRESS: &str = "production_completion_operation_v1";
@@ -40,7 +45,7 @@ const OUTPUT_DISPATCH_SYSTEM: &str = "production_output_dispatch_v1";
 const REPORT_SYSTEM: &str = "production_holder_report_publish_v1";
 const PRODUCTION_REPORT_KNOWLEDGE: &str = "holder_report";
 pub const PRODUCTION_SEMANTIC_HASH: &str =
-    "c5f874654c76ba35232809d4cf69a517eb31c2f54eec92ecfc78612713237cb3";
+    "197b4a0e784ffdf94e0e87e021f9420d121171d76c840951572685802d6c85a4";
 const REPORT_SCHEMA_HASH: &str = "2e84d66c85841a251a94aa15fa4fd477d29136ed31c8434c5dd61dc92156fdf8";
 static PRODUCTION_ARCHIVE_COMMIT_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static PRODUCTION_ARCHIVE_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
@@ -300,6 +305,8 @@ impl SimulationPlugin for ProductionPlugin {
             "canwu.production.operation_applied.v1".to_owned(),
             "canwu.production.operation_rejected.v1".to_owned(),
             "canwu.production.output_settled.v1".to_owned(),
+            OUTPUT_ACK_REFUSED_EVENT.to_owned(),
+            INGRESS_REFUSED_EVENT.to_owned(),
             "canwu.production.archive_maintenance.v1".to_owned(),
         ];
         apply.visibility = StateVisibility::SameBoundary;
@@ -446,7 +453,7 @@ fn apply_production_ingress(
     };
     let mut changed = false;
     let mut directives = Vec::new();
-    for ingress_id in &context.admitted_ingress {
+    for ingress_id in &archive_commits_first(view, &context.admitted_ingress)? {
         let Some(ingress) = view.ingress(*ingress_id)? else {
             continue;
         };
@@ -465,7 +472,33 @@ fn apply_production_ingress(
         match packet_type.as_str() {
             PRODUCTION_COMMAND_INGRESS => {
                 let admitted: AdmittedProductionOperation =
-                    decode(payload, "admitted production operation")?;
+                    match decode(payload, "admitted production operation") {
+                        Ok(admitted) => admitted,
+                        Err(error) => {
+                            refuse_packet(
+                                &mut directives,
+                                INGRESS_REFUSED_EVENT,
+                                packet_type,
+                                &error,
+                            );
+                            continue;
+                        }
+                    };
+                // The packet type is public, so only a packet that the
+                // admission of a tracked production command queued settles:
+                // that admission checked the issuer's authority, the run
+                // policy, the outcome capacity, and any degraded-facility
+                // decision. Any other packet settles nothing.
+                if validate_admitted_command(view, ingress.cause.as_ref(), &admitted).is_err() {
+                    directives.push(BoundaryDirective::Emit {
+                        event_type: INGRESS_REFUSED_EVENT.to_owned(),
+                        summary: format!(
+                            "production packet {packet_type} was refused: it does not match an admitted tracked production command"
+                        ),
+                        affected: Vec::new(),
+                    });
+                    continue;
+                }
                 if state
                     .operation_outcomes
                     .contains_key(&admitted.envelope.operation_id)
@@ -566,20 +599,55 @@ fn apply_production_ingress(
             }
             PRODUCTION_OUTPUT_ACK_INGRESS => {
                 let acknowledgement: ProductionOutputAcknowledgement =
-                    decode(payload, "production output acknowledgement")?;
-                validate_output_ack_source(view, &acknowledgement)?;
+                    match decode(payload, "production output acknowledgement") {
+                        Ok(acknowledgement) => acknowledgement,
+                        Err(error) => {
+                            refuse_packet(
+                                &mut directives,
+                                OUTPUT_ACK_REFUSED_EVENT,
+                                packet_type,
+                                &error,
+                            );
+                            continue;
+                        }
+                    };
                 let mut candidate = state.clone();
-                let completion = candidate
-                    .executions
-                    .get(&acknowledgement.execution)
-                    .map(|execution| {
-                        (
-                            execution.completion_certificate.acquisition.clone(),
-                            execution.completion_certificate.operation_key.clone(),
-                        )
-                    })
-                    .ok_or_else(|| invalid("output acknowledgement execution is unavailable"))?;
-                if candidate.acknowledge_output(&acknowledgement, context.at)? {
+                // An acknowledgement that does not settle its execution
+                // exactly is refused with a trace and changes nothing; it
+                // never fails the boundary.
+                let accepted = validate_output_ack_source(view, &acknowledgement).and_then(|()| {
+                    let completion = candidate
+                        .executions
+                        .get(&acknowledgement.execution)
+                        .map(|execution| {
+                            (
+                                execution.completion_certificate.acquisition.clone(),
+                                execution.completion_certificate.operation_key.clone(),
+                            )
+                        })
+                        .ok_or_else(|| {
+                            invalid("output acknowledgement execution is unavailable")
+                        })?;
+                    candidate
+                        .acknowledge_output(&acknowledgement, context.at)
+                        .map(|changed| (changed, completion))
+                });
+                let (settled, completion) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) if expected_domain_rejection(&error) => {
+                        directives.push(BoundaryDirective::Emit {
+                            event_type: OUTPUT_ACK_REFUSED_EVENT.to_owned(),
+                            summary: format!(
+                                "production output acknowledgement for execution {} was refused: {}",
+                                acknowledgement.execution, error.message
+                            ),
+                            affected: Vec::new(),
+                        });
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                if settled {
                     state = candidate;
                     changed = true;
                     directives.push(BoundaryDirective::SchedulePluginIngress {
@@ -610,82 +678,72 @@ fn apply_production_ingress(
             }
             PRODUCTION_COMPLETION_INGRESS => {
                 let operation: crate::ProductionCompletionIngressV1 =
-                    decode(payload, "production completion operation")?;
-                validate_production_completion_ingress(view, context, &operation)?;
-                let mut candidate = state.clone();
-                if let crate::ProductionCompletionIngressV1::AcknowledgeParticipantCompleted {
-                    acquisition,
-                    participant: _,
-                } = &operation
-                {
-                    let resource_record = view
-                        .typed_domain_record(&canwu_resource::resource_runtime_reference())?
-                        .ok_or_else(|| invalid("resource completion runtime is unavailable"))?;
-                    let resource = resource_record
-                        .decode_payload::<canwu_resource::ResourceRuntimeRecord>()?;
-                    let authoritative = resource
-                        .external_completion_participants
-                        .participant(acquisition)
-                        .ok_or_else(|| invalid("completed resource participant is unavailable"))?;
-                    let provider_source = view
-                        .current_domain_record_version(
-                            &canwu_resource::resource_runtime_reference().into_untyped(),
-                        )?
-                        .ok_or_else(|| {
-                            invalid("completed resource participant exact source is unavailable")
-                        })?;
-                    if candidate.facility_projects.values().any(|project| {
-                        project.completion_certificate.acquisition == *acquisition
-                            && project.lifecycle
-                                == crate::FacilityProjectLifecycle::CompletionPending
-                    }) {
-                        candidate.finalize_facility_project_completion(
-                            acquisition,
-                            &provider_source,
-                            &authoritative.grant,
-                            context.at,
-                        )?;
-                    } else {
-                        candidate.finalize_execution_resource_completion(
-                            acquisition,
-                            &provider_source,
-                            &authoritative.grant,
-                        )?;
+                    match decode(payload, "production completion operation") {
+                        Ok(operation) => operation,
+                        Err(error) => {
+                            refuse_packet(
+                                &mut directives,
+                                INGRESS_REFUSED_EVENT,
+                                packet_type,
+                                &error,
+                            );
+                            continue;
+                        }
+                    };
+                // A step that production's checks refuse settles nothing and
+                // is recorded; the boundary settles.
+                match settle_completion_step(view, context, &state, &operation) {
+                    Ok(candidate) => {
+                        state = candidate;
+                        changed = true;
                     }
-                } else {
-                    candidate.apply_completion_ingress(&operation)?;
+                    Err(error) if expected_domain_rejection(&error) => {
+                        refuse_packet(&mut directives, INGRESS_REFUSED_EVENT, packet_type, &error);
+                    }
+                    Err(error) => return Err(error),
                 }
-                candidate.revision = candidate
-                    .revision
-                    .checked_add(1)
-                    .ok_or_else(|| invalid("production completion revision overflowed"))?;
-                candidate.validate()?;
-                state = candidate;
-                changed = true;
             }
             PRODUCTION_RESOURCE_CONTINUATION_INGRESS => {
                 let witness: crate::ProductionResourceContinuationWitnessV1 =
-                    decode(payload, "production resource continuation witness")?;
-                validate_resource_continuation_witness(view, &state, &witness)?;
-                let mut candidate = state.clone();
-                candidate
-                    .resource_continuation_witnesses
-                    .insert(witness.project.clone(), witness);
-                candidate.revision = candidate
-                    .revision
-                    .checked_add(1)
-                    .ok_or_else(|| invalid("production continuation revision overflowed"))?;
-                candidate.validate()?;
-                state = candidate;
-                changed = true;
+                    match decode(payload, "production resource continuation witness") {
+                        Ok(witness) => witness,
+                        Err(error) => {
+                            refuse_packet(
+                                &mut directives,
+                                INGRESS_REFUSED_EVENT,
+                                packet_type,
+                                &error,
+                            );
+                            continue;
+                        }
+                    };
+                // A witness that is stale or forged when it settles is refused
+                // and recorded; the boundary settles.
+                match settle_continuation_witness(view, &state, witness) {
+                    Ok(candidate) => {
+                        state = candidate;
+                        changed = true;
+                    }
+                    Err(error) if expected_domain_rejection(&error) => {
+                        refuse_packet(&mut directives, INGRESS_REFUSED_EVENT, packet_type, &error);
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             PRODUCTION_ARCHIVE_COMMIT_INGRESS => {
-                let commit: crate::VerifiedProductionArchiveCommitV1 = payload
+                let commit: crate::VerifiedProductionArchiveCommitV1 = match payload
                     .get("commit")
                     .cloned()
                     .ok_or_else(|| invalid("production archive commit payload is absent"))
-                    .and_then(|value| decode(&value, "production archive commit"))?;
-                let receipt = state.apply_production_archive_commit(&commit)?;
+                    .and_then(|value| decode(&value, "production archive commit"))
+                {
+                    Ok(commit) => commit,
+                    Err(error) => {
+                        refuse_packet(&mut directives, INGRESS_REFUSED_EVENT, packet_type, &error);
+                        continue;
+                    }
+                };
+                let receipt = state.apply_production_archive_commit(&commit, context.at)?;
                 changed = true;
                 directives.push(BoundaryDirective::Emit {
                     event_type: "canwu.production.archive_maintenance.v1".to_owned(),
@@ -698,7 +756,18 @@ fn apply_production_ingress(
             }
             PRODUCTION_ARCHIVE_RETENTION_ACK_INGRESS => {
                 let acknowledgement: ProductionArchiveRetentionAcknowledgementV1 =
-                    decode(payload, "production archive retention acknowledgement")?;
+                    match decode(payload, "production archive retention acknowledgement") {
+                        Ok(acknowledgement) => acknowledgement,
+                        Err(error) => {
+                            refuse_packet(
+                                &mut directives,
+                                INGRESS_REFUSED_EVENT,
+                                packet_type,
+                                &error,
+                            );
+                            continue;
+                        }
+                    };
                 state.acknowledge_production_archive_retention(&acknowledgement.handle_id)?;
                 changed = true;
             }
@@ -722,6 +791,180 @@ fn apply_production_ingress(
         directives,
         ..BoundaryProposal::default()
     })
+}
+
+/// Settles one completion coordinator step on a copy of `state` and returns
+/// the copy. The step may come from the resource plugin, from
+/// `enqueue_production_completion_operation`, which the host application
+/// calls with any step, or from another plugin.
+fn settle_completion_step(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    state: &ProductionState,
+    operation: &crate::ProductionCompletionIngressV1,
+) -> Result<ProductionState, CanwuError> {
+    validate_production_completion_ingress(view, context, operation)?;
+    let mut candidate = state.clone();
+    if let crate::ProductionCompletionIngressV1::AcknowledgeParticipantCompleted {
+        acquisition,
+        participant: _,
+    } = operation
+    {
+        let resource_record = view
+            .typed_domain_record(&canwu_resource::resource_runtime_reference())?
+            .ok_or_else(|| invalid("resource completion runtime is unavailable"))?;
+        let resource = resource_record.decode_payload::<canwu_resource::ResourceRuntimeRecord>()?;
+        let authoritative = resource
+            .external_completion_participants
+            .participant(acquisition)
+            .ok_or_else(|| invalid("completed resource participant is unavailable"))?;
+        let provider_source = view
+            .current_domain_record_version(
+                &canwu_resource::resource_runtime_reference().into_untyped(),
+            )?
+            .ok_or_else(|| invalid("completed resource participant exact source is unavailable"))?;
+        if candidate.facility_projects.values().any(|project| {
+            project.completion_certificate.acquisition == *acquisition
+                && project.lifecycle == crate::FacilityProjectLifecycle::CompletionPending
+        }) {
+            candidate.finalize_facility_project_completion(
+                acquisition,
+                &provider_source,
+                &authoritative.grant,
+                context.at,
+            )?;
+        } else {
+            candidate.finalize_execution_resource_completion(
+                acquisition,
+                &provider_source,
+                &authoritative.grant,
+            )?;
+        }
+    } else {
+        candidate.apply_completion_ingress(operation)?;
+    }
+    candidate.revision = candidate
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| invalid("production completion revision overflowed"))?;
+    candidate.validate()?;
+    Ok(candidate)
+}
+
+/// Records a continuation witness on a copy of `state` and returns the copy.
+/// A witness checked when it was queued can be stale when it settles: its
+/// project may have ended in between.
+fn settle_continuation_witness(
+    view: &SimulationView<'_>,
+    state: &ProductionState,
+    witness: crate::ProductionResourceContinuationWitnessV1,
+) -> Result<ProductionState, CanwuError> {
+    validate_resource_continuation_witness(view, state, &witness)?;
+    let mut candidate = state.clone();
+    candidate
+        .resource_continuation_witnesses
+        .insert(witness.project.clone(), witness);
+    candidate.revision = candidate
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| invalid("production continuation revision overflowed"))?;
+    candidate.validate()?;
+    Ok(candidate)
+}
+
+/// Records a production packet that does not decode, or that production's
+/// checks refuse: it settles nothing, and the boundary settles. The host
+/// application can queue the public packet types and completion steps, and
+/// another plugin can schedule any production packet type.
+fn refuse_packet(
+    directives: &mut Vec<BoundaryDirective>,
+    event_type: &str,
+    packet_type: &str,
+    error: &CanwuError,
+) {
+    directives.push(BoundaryDirective::Emit {
+        event_type: event_type.to_owned(),
+        summary: format!(
+            "production packet {packet_type} was refused: {}",
+            error.message
+        ),
+        affected: Vec::new(),
+    });
+}
+
+/// Whether an operation packet is the one the admission of a tracked
+/// production command queued: its cause is that command, and the command's
+/// payload is the packet's envelope. The check reads the command's retained
+/// record, which a seal keeps while the packet is queued.
+fn validate_admitted_command(
+    view: &SimulationView<'_>,
+    cause: Option<&CauseRef>,
+    admitted: &AdmittedProductionOperation,
+) -> Result<(), CanwuError> {
+    let Some(CauseRef::Command(command)) = cause else {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "production operation packet lacks command evidence",
+        ));
+    };
+    let record = view.command(*command)?.ok_or_else(|| {
+        CanwuError::new(
+            ErrorCode::EvidenceUnavailable,
+            "production command evidence is unavailable",
+        )
+    })?;
+    let matches = *command == admitted.command
+        && matches!(
+            &record.envelope.command,
+            Command::Plugin { plugin, command, payload }
+                if plugin == PLUGIN_NAME
+                    && command == PRODUCTION_COMMAND
+                    && decode::<ProductionCommandEnvelope>(payload, "production operation")
+                        .is_ok_and(|envelope| envelope == admitted.envelope)
+        )
+        && canonical_hash("canwu.production.operation-input.v1", &admitted.envelope)?
+            == admitted.input_hash;
+    if !matches {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "production operation packet does not match its tracked command",
+        ));
+    }
+    Ok(())
+}
+
+/// Orders the ingress one boundary admitted so that production archive
+/// commits settle before every other production packet, each group in its
+/// admitted order.
+///
+/// Every other production packet advances the runtime revision, which the
+/// archive source root binds. A commit prepared from the root the boundary
+/// started from therefore applies even when an operation or an
+/// acknowledgement was admitted ahead of it, instead of going stale behind
+/// it. A boundary that admits no archive commit keeps its order.
+fn archive_commits_first(
+    view: &SimulationView<'_>,
+    admitted: &[canwu_api::IngressId],
+) -> Result<Vec<canwu_api::IngressId>, CanwuError> {
+    let mut commits = Vec::new();
+    let mut others = Vec::new();
+    for ingress_id in admitted {
+        let is_commit = matches!(
+            view.ingress(*ingress_id)?.map(|ingress| &ingress.payload),
+            Some(IngressPayload::Plugin {
+                plugin,
+                packet_type,
+                ..
+            }) if plugin == PLUGIN_NAME && packet_type == PRODUCTION_ARCHIVE_COMMIT_INGRESS
+        );
+        if is_commit {
+            commits.push(*ingress_id);
+        } else {
+            others.push(*ingress_id);
+        }
+    }
+    commits.extend(others);
+    Ok(commits)
 }
 
 fn validate_production_candidate(
@@ -1224,77 +1467,83 @@ impl crate::ProductionArchiveStore for PluginProductionArchiveProvider<'_> {
     }
 }
 
+/// Marks every production archive object a restore, a replay, a fork, or a
+/// queued commit can still read: the commits reachable from the archive
+/// head, from each unacknowledged retention handle, and from each commit the
+/// kernel lists as queued, with their blobs, pages, and lookup pages. The
+/// archive is audited first, as at restore.
 fn production_archive_reachability(
     view: &SimulationView<'_>,
     provider: &dyn PluginArchiveObjectProvider,
     manifest: &mut ArchiveReachabilityManifest,
 ) -> Result<(), CanwuError> {
-    let Some((_, state)) = load_state(view)? else {
-        return Ok(());
-    };
     let provider = PluginProductionArchiveProvider(provider);
-    crate::validate_production_archive(&provider, &state)?;
-    for handle in state.archive.pending_handles.values() {
-        for (namespace, object_ids) in &handle.object_ids {
-            for object_id in object_ids {
-                manifest.insert_plugin_object(namespace.clone(), object_id.clone());
-            }
+    // Queued commits: the kernel marks the directory each queued archive
+    // commit retains. Each may become the head, so its index must be whole.
+    let queued = manifest
+        .plugin_objects
+        .get(crate::PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE)
+        .cloned()
+        .unwrap_or_default();
+    let mut roots = queued.clone();
+    let mut complete = queued;
+    let mut bound = roots.len();
+    if let Some((_, state)) = load_state(view)? {
+        crate::validate_production_archive(&provider, &state)?;
+        if let Some(root) = &state.archive.directory_root {
+            roots.insert(root.clone());
+            complete.insert(root.clone());
         }
+        roots.extend(
+            state
+                .archive
+                .pending_handles
+                .values()
+                .map(|handle| handle.target_directory_root.clone()),
+        );
+        bound = usize::try_from(state.archive.committed_batch_count)
+            .unwrap_or(usize::MAX)
+            .saturating_add(state.archive.pending_handles.len())
+            .saturating_add(bound);
     }
-    let mut next = state.archive.directory_root.clone();
-    let mut visited = std::collections::BTreeSet::new();
-    while let Some(root) = next {
-        if !visited.insert(root.clone())
-            || visited.len()
-                > usize::try_from(state.archive.committed_batch_count)
-                    .unwrap_or(usize::MAX)
-                    .saturating_add(1)
-        {
-            return Err(invalid(
-                "production archive directory chain is cyclic or exceeds its committed bound",
-            ));
+    if roots.is_empty() {
+        return Ok(());
+    }
+    let objects =
+        crate::archive::reachable_production_archive_objects(&provider, roots, &complete, bound)?;
+    for (namespace, ids) in objects {
+        for id in ids {
+            manifest.insert_plugin_object(namespace, id);
         }
-        let bytes = provider
-            .load_production_archive_object(
-                crate::PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE,
-                &root,
-            )?
-            .ok_or_else(|| invalid("production archive directory is unavailable"))?;
-        let directory: crate::ProductionArchiveIndexDirectoryV1 = serde_json::from_slice(&bytes)
-            .map_err(|error| {
-                invalid(format!(
-                    "production archive directory could not decode: {error}"
-                ))
-            })?;
-        crate::authenticate_production_archive_directory(&provider, &directory)?;
-        manifest.insert_plugin_object(crate::PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE, root);
-        for id in &directory.blob_ids {
-            manifest.insert_plugin_object(crate::PRODUCTION_ARCHIVE_BLOB_NAMESPACE, id.clone());
-        }
-        for id in &directory.membership_pages {
-            manifest.insert_plugin_object(
-                crate::PRODUCTION_ARCHIVE_MEMBERSHIP_PAGE_NAMESPACE,
-                id.clone(),
-            );
-        }
-        for id in &directory.temporal_pages {
-            manifest.insert_plugin_object(
-                crate::PRODUCTION_ARCHIVE_TEMPORAL_PAGE_NAMESPACE,
-                id.clone(),
-            );
-        }
-        next = directory.previous_root;
     }
     Ok(())
 }
 
 /// Stores, reads back, verifies, and queues a production cold-archive commit
 /// through a plugin-owned ingress capability.
+///
+/// The batch must equal what
+/// [`crate::ProductionState::prepare_production_archive`] derives from the
+/// current production root and `store` for the same number of records,
+/// including its lookup-index pages. The boundary that settles the commit
+/// reads no archive object: it applies the commit when the root still is the
+/// one the batch was prepared from, and otherwise records it as stale.
 pub fn enqueue_production_archive(
     canwu: &mut Canwu,
     prepared: &crate::PreparedProductionArchiveBatchV1,
     store: &dyn crate::ProductionArchiveStore,
 ) -> Result<ProductionArchiveIngressReceiptV1, CanwuError> {
+    let state = canwu
+        .typed_domain_record(&production_runtime_reference())
+        .ok_or_else(|| CanwuError::new(ErrorCode::PluginNotActive, "production runtime is absent"))?
+        .decode_payload::<ProductionRuntimeRecord>()?;
+    let canonical = state.prepare_production_archive(prepared.selected_count(), store)?;
+    if &canonical != prepared {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidArchive,
+            "production archive batch differs from the exact current terminal candidates",
+        ));
+    }
     let mut commit = prepared.store_and_verify(store)?;
     let permit = PRODUCTION_ARCHIVE_COMMIT_PERMIT.get().ok_or_else(|| {
         CanwuError::new(
@@ -1395,13 +1644,31 @@ pub fn enqueue_production_resource_continuation(
         .directory_root
         .clone()
         .ok_or_else(|| invalid("resource archive head is unavailable"))?;
-    canwu_resource::authenticate_reachable_resource_archive_directory(
-        &resource,
-        store,
-        &root,
-        resource.archive_head.archived_record_count,
-    )
-    .map_err(|error| invalid(format!("resource archive validation failed: {error}")))?;
+    // The witness names the archive head; authenticating that one commit is
+    // enough, because each compacted input below resolves through the head's
+    // lookup index, and a hit authenticates the blob and record it reads.
+    let head: canwu_resource::ResourceArchiveIndexDirectoryV1 = store
+        .load_resource_archive_object(
+            canwu_resource::RESOURCE_ARCHIVE_INDEX_DIRECTORY_NAMESPACE,
+            &root,
+        )
+        .map_err(|error| invalid(format!("resource archive validation failed: {error}")))?
+        .ok_or_else(|| invalid("resource archive head directory is unavailable"))
+        .and_then(|bytes| {
+            serde_json::from_slice(&bytes).map_err(|error| {
+                invalid(format!(
+                    "resource archive head directory could not decode: {error}"
+                ))
+            })
+        })?;
+    canwu_resource::authenticate_resource_archive_directory(store, &head)
+        .map_err(|error| invalid(format!("resource archive validation failed: {error}")))?;
+    if head.id != root || head.archived_record_count != resource.archive_head.archived_record_count
+    {
+        return Err(invalid(
+            "resource archive head directory differs from the resource archive head",
+        ));
+    }
     for input in &project.inputs {
         crate::validate_production_resource_continuation(&resource, store, input)?;
     }
@@ -1436,7 +1703,12 @@ pub fn enqueue_production_resource_continuation(
 }
 
 /// Finalizes a terminal production archive retention handle and queues the
-/// package-owned acknowledgement that clears it from authoritative hot state.
+/// package-owned acknowledgement that clears it, and every stale receipt
+/// recorded under it, from authoritative hot state.
+///
+/// The handle must still be in the production root when this is called. An
+/// acknowledgement that settles after another one retired the handle is a
+/// no-op, so calling this twice before the next boundary is harmless.
 pub fn finalize_production_archive_retention(
     canwu: &mut Canwu,
     store: &dyn crate::ProductionArchiveStore,
@@ -1697,6 +1969,109 @@ fn operation_project(operation: &crate::ProductionOperation) -> Option<crate::Fa
     }
 }
 
+/// The archive objects a boundary may read, seen as a read-only resource
+/// archive store.
+struct ViewResourceArchive<'a>(&'a SimulationView<'a>);
+
+impl canwu_resource::ResourceArchiveStore for ViewResourceArchive<'_> {
+    fn store_resource_archive_object(
+        &self,
+        _namespace: &str,
+        _object_id: &str,
+        _bytes: &[u8],
+    ) -> Result<(), canwu_resource::ResourceError> {
+        Err(canwu_resource::ResourceError::InvalidLifecycle(
+            "the boundary's resource archive view is read-only".to_owned(),
+        ))
+    }
+
+    fn load_resource_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, canwu_resource::ResourceError> {
+        self.0
+            .plugin_archive_object(namespace, object_id)
+            .map_err(|error| canwu_resource::ResourceError::InvalidDefinition(error.to_string()))
+    }
+
+    fn persist_resource_archive_retention(
+        &self,
+        _handle: &canwu_resource::ResourceArchiveRetentionHandleV1,
+    ) -> Result<(), canwu_resource::ResourceError> {
+        Err(canwu_resource::ResourceError::InvalidLifecycle(
+            "the boundary's resource archive view keeps no retention".to_owned(),
+        ))
+    }
+
+    fn finalize_resource_archive_retention(
+        &self,
+        _handle_id: &str,
+        _phase: canwu_resource::ResourceArchiveRetentionPhaseV1,
+    ) -> Result<(), canwu_resource::ResourceError> {
+        Err(canwu_resource::ResourceError::InvalidLifecycle(
+            "the boundary's resource archive view keeps no retention".to_owned(),
+        ))
+    }
+}
+
+/// Refuses an execution output the resource root could never settle: an
+/// output set larger than a batch the root can hold under its limits, even
+/// with an empty archive backlog (`InvalidPayload`), and an output key that a
+/// resource operation outcome already holds, in the resource root or in its
+/// archive (`IdempotencyConflict`). The resource plugin skips such a batch
+/// and settles nothing, so the execution could never settle.
+///
+/// The archive is read through the cumulative lookup index, as the resource
+/// plugin itself reads it for every operation: one directory, one page per
+/// index level, and one blob on a hit. A lookup that cannot read the archive
+/// fails the boundary, which settles once the store serves the object; it is
+/// never taken for a free key. A key that a resource operation queued by the
+/// host application takes after the execution started is not covered: the
+/// credit then settles nothing.
+fn refuse_output_keys_held_by_resource(
+    view: &SimulationView<'_>,
+    execution: &crate::ProductionExecution,
+) -> Result<(), CanwuError> {
+    let Some(record) = view.typed_domain_record(&canwu_resource::resource_runtime_reference())?
+    else {
+        return Ok(());
+    };
+    let resource = record.decode_payload::<canwu_resource::ResourceRuntimeRecord>()?;
+    // The output batch must be one the resource root can ever settle: one it
+    // can never hold is skipped and lost, and the execution would never
+    // settle.
+    if !resource.production_output_batch_can_fit(execution.output_requests.len()) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPayload,
+            "execution output is a batch the resource root can never hold under its limits",
+        ));
+    }
+    let archive = ViewResourceArchive(view);
+    for request in &execution.output_requests {
+        let held = resource.outcomes.contains_key(&request.operation_key)
+            || canwu_resource::archived_resource_operation_outcome(
+                &resource,
+                &archive,
+                &request.operation_key,
+            )
+            .map_err(|error| {
+                CanwuError::new(
+                    ErrorCode::InvalidArchive,
+                    format!("resource archive lookup of an output key failed: {error}"),
+                )
+            })?
+            .is_some();
+        if held {
+            return Err(CanwuError::new(
+                ErrorCode::IdempotencyConflict,
+                "execution output names an operation key a resource outcome already holds",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_external_operation_evidence(
     view: &SimulationView<'_>,
     holder: &KnowledgeHolderRef,
@@ -1751,6 +2126,13 @@ fn validate_external_operation_evidence(
     let crate::ProductionOperation::StartExecution { execution, .. } = operation else {
         return Ok(());
     };
+    // Output keys that could never settle are refused before any evidence is
+    // resolved: a key reserved for resource completion operations, one that
+    // another unsettled execution names, and one a resource outcome already
+    // holds, hot or archived.
+    crate::model::refuse_reserved_output_keys(execution)?;
+    production.refuse_output_keys_held_by_unsettled_executions(execution)?;
+    refuse_output_keys_held_by_resource(view, execution)?;
     let order = production
         .work_orders
         .get(&execution.work_order)
@@ -2749,42 +3131,9 @@ fn validate_output_ack_source(
             "production output acknowledgement differs from the resource-owned outcome",
         ));
     }
-    // Phase 12 dispatch pins a version its own boundary established, and the
-    // resource batch and this acknowledgement keep an ingress pending until
-    // now. A pending ingress blocks sealing, so the body is still retained.
-    let source_record = view
-        .domain_record_version(&acknowledgement.production_source)?
-        .ok_or_else(|| invalid("production output source body is unavailable"))?;
-    if !source_record
-        .reference
-        .kind
-        .matches_type::<ProductionRuntimeRecord>()
-    {
-        return Err(invalid(
-            "production output source is not an exact production runtime version",
-        ));
-    }
-    let source = source_record.decode_payload::<ProductionRuntimeRecord>()?;
-    let execution = source
-        .executions
-        .get(&acknowledgement.execution)
-        .ok_or_else(|| invalid("production output source lost its execution"))?;
-    if execution.lifecycle != crate::WorkOrderLifecycle::CompletedPendingOutputSettlement
-        || !execution.output_outcomes.is_empty()
-        || execution.output_requests.len() != acknowledgement.outcomes.len()
-        || execution
-            .output_requests
-            .iter()
-            .zip(&acknowledgement.outcomes)
-            .any(|(request, outcome)| {
-                request.operation_key != outcome.operation_key
-                    || outcome.exact_evidence != vec![acknowledgement.production_source.clone()]
-            })
-    {
-        return Err(invalid(
-            "production output source does not prove the exact pending settlement request",
-        ));
-    }
+    // The execution pinned this exact source when its output was dispatched,
+    // and the acknowledgement must name it (`acknowledge_output`), so no
+    // retained body of that version is read here.
     Ok(())
 }
 

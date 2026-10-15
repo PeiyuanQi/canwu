@@ -29,10 +29,32 @@ pub const MAX_EVIDENCE_BINDINGS: usize = 128;
 pub const MAX_REPORT_FACTS: usize = 256;
 pub const MAX_OBSERVATION_HEADS_PER_SCOPE: usize = 16;
 pub const MAX_HOT_RECEIPTS: usize = 8_192;
-pub const MAX_ARCHIVE_PREPARE_CANDIDATES: usize = 2_048;
-pub const MAX_ARCHIVE_OBJECTS_PER_BATCH: usize = 1_024;
-pub const MAX_ARCHIVE_BYTES_PER_BATCH: usize = 16 * 1024 * 1024;
-pub const MAX_ARCHIVE_PAGE_ENTRIES: usize = 512;
+/// Terminal records one archive blob, membership page, or temporal page may
+/// hold. A settled execution's record encodes to about 13 KB, so a full blob
+/// is about 0.8 MB: the most a lookup hit reads besides the index path.
+pub const MAX_ARCHIVE_PAGE_ENTRIES: usize = 64;
+/// Blobs, each with its own membership and temporal page, that one archive
+/// commit may carry.
+pub const MAX_ARCHIVE_COMMIT_PAGES: usize = 16;
+/// Terminal records one archive commit may carry, and the largest candidate
+/// budget [`ProductionState::prepare_production_archive`] accepts: every
+/// page of a commit full.
+pub const MAX_ARCHIVE_PREPARE_CANDIDATES: usize =
+    MAX_ARCHIVE_PAGE_ENTRIES * MAX_ARCHIVE_COMMIT_PAGES;
+/// Objects one prepared archive batch may write: its blobs, membership and
+/// temporal pages, directory, and new lookup-index pages. A full commit
+/// writes 49 objects besides its lookup pages, and about 3,300 lookup pages
+/// into an index of a million records; the bound leaves room for deeper
+/// indexes.
+pub const MAX_ARCHIVE_OBJECTS_PER_BATCH: usize = 8_192;
+/// Encoded bytes one prepared archive batch may write. A full commit of
+/// typical execution records writes about 14 MB of records and pages, and
+/// about 4 MB of lookup pages into an index of a million records.
+pub const MAX_ARCHIVE_BYTES_PER_BATCH: usize = 64 * 1024 * 1024;
+/// Retention handles of applied archive commits that the production root may
+/// hold before [`ProductionState::prepare_production_archive`] refuses to
+/// prepare another commit. A host application acknowledges each settled
+/// commit to free its handle.
 pub const MAX_PENDING_RETENTION_HANDLES: usize = 64;
 /// Realized-output ratio, in thousandths, that settles exactly the nominal
 /// process output. It is the implicit value of an absent realized per-mille.
@@ -434,6 +456,9 @@ pub struct ProductionOutputAcknowledgement {
     pub execution: ProductionExecutionId,
     pub production_source: DomainRecordVersionRef,
     pub outcomes: Vec<ResourceOperationOutcome>,
+    /// Instant the credits settled: the instant of their `at`, which is the
+    /// dispatch instant, or the instant a deferred batch came due.
+    pub settled_at: SimTime,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -465,6 +490,11 @@ pub struct ProductionExecution {
     /// Exact application record version that justified the realized output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realization_evidence: Option<DomainRecordVersionRef>,
+    /// Instant the resource plugin settled the output credits, recorded by
+    /// the output acknowledgement. Each outcome's request digest commits to
+    /// it, and it is set exactly when the execution is settled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_settled_at: Option<SimTime>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -703,6 +733,14 @@ pub enum ProductionArchiveRetentionPhaseV1 {
     Abandoned,
 }
 
+/// The store-side protection of one prepared archive batch, from preparation
+/// until its commit settles and the host application finalizes it.
+///
+/// It names the batch's blobs, membership pages, temporal pages, and
+/// directory; lookup-index pages are reached through the directory.
+/// Releasing a handle removes its protection and never deletes an object:
+/// two batches prepared from one root can share objects, so deletion is by
+/// reachability only.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProductionArchiveRetentionHandleV1 {
     pub handle_id: String,
@@ -713,15 +751,30 @@ pub struct ProductionArchiveRetentionHandleV1 {
     pub semantic_digest: String,
 }
 
+/// The terminal record of one settled archive commit.
+///
+/// The receipt of an applied commit (`disposition` `Committed`) is a terminal
+/// archive candidate: the next commit archives it before anything else, so
+/// the root holds at most one, the receipt of the commit at the archive head.
+/// The receipt of a stale commit (`RejectedStale`) is not a candidate: it
+/// stays in the root until the host application acknowledges the retention
+/// handle it names, and is then removed.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProductionArchiveMaintenanceReceiptV1 {
     pub id: ProductionArchiveReceiptId,
+    /// Retention handle of the settled commit, which the host application's
+    /// acknowledgement names.
+    pub retention_handle_id: String,
     pub source_root: String,
     pub directory_root: String,
     pub archived_executions: usize,
     #[serde(default)]
     pub archived_projects: usize,
+    /// Maintenance receipts of earlier commits that this commit archived.
+    pub archived_receipts: usize,
     pub disposition: ProductionArchiveRetentionPhaseV1,
+    /// Time of the boundary that settled the commit.
+    pub settled_at: SimTime,
     pub canonical_digest: String,
 }
 
@@ -730,6 +783,8 @@ pub struct ProductionArchiveMaintenanceReceiptV1 {
 pub enum ProductionTerminalArchiveKeyV1 {
     Execution(ProductionExecutionId),
     FacilityProject(FacilityProjectId),
+    /// The maintenance receipt of an applied archive commit.
+    ArchiveMaintenanceReceipt(ProductionArchiveReceiptId),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -775,13 +830,18 @@ pub struct ProductionFacilityProjectArchiveRecordV1 {
     pub canonical_digest: String,
 }
 
+/// One content-addressed page of archived terminal records. Ordinals run
+/// through `records`, then `project_records`, then `receipts`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProductionArchiveBlobV1 {
+    /// [`crate::PRODUCTION_ARCHIVE_BLOB_FORMAT_VERSION`].
     pub format_version: u32,
     pub expected_source_root: String,
     pub records: Vec<ProductionTerminalArchiveRecordV1>,
     #[serde(default)]
     pub project_records: Vec<ProductionFacilityProjectArchiveRecordV1>,
+    /// Maintenance receipts of applied commits archived by this commit.
+    pub receipts: Vec<ProductionArchiveMaintenanceReceiptV1>,
     pub content_id: String,
 }
 
@@ -813,39 +873,97 @@ pub struct ProductionArchiveTemporalPageV1 {
     pub semantic_digest: String,
 }
 
+/// One archive commit: the blobs and per-commit pages it added, the commit
+/// before it, cumulative record counts, and the root of the cumulative lookup
+/// index as of this commit.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProductionArchiveIndexDirectoryV1 {
     pub id: String,
     pub previous_root: Option<String>,
+    /// At most [`MAX_ARCHIVE_COMMIT_PAGES`] blobs of at most
+    /// [`MAX_ARCHIVE_PAGE_ENTRIES`] records each.
     pub blob_ids: Vec<String>,
+    /// One membership page per blob, in blob order.
     pub membership_pages: Vec<String>,
+    /// One temporal page per blob, in blob order.
     pub temporal_pages: Vec<String>,
     pub archived_execution_count: u64,
     #[serde(default)]
     pub archived_project_count: u64,
+    /// Maintenance receipts archived up to and including this commit.
+    pub archived_receipt_count: u64,
+    /// Root lookup page of the index over every terminal record archived up
+    /// to and including this commit, in the format of
+    /// [`canwu_resource::ResourceArchiveLookupPageV1`] and stored under
+    /// [`crate::PRODUCTION_ARCHIVE_LOOKUP_PAGE_NAMESPACE`].
+    pub lookup_root: String,
     pub semantic_digest: String,
 }
 
+/// One blob of a prepared archive batch with its membership and temporal
+/// pages.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PreparedProductionArchivePageV1 {
+    /// Up to [`MAX_ARCHIVE_PAGE_ENTRIES`] archived records.
+    pub blob: ProductionArchiveBlobV1,
+    /// The key, blob, ordinal, and digest of every record of `blob`.
+    pub membership_page: ProductionArchiveMembershipPageV1,
+    /// The records of `blob` ordered by terminal time.
+    pub temporal_page: ProductionArchiveTemporalPageV1,
+}
+
+/// One archive commit prepared from the terminal candidates of a production
+/// root, ready for [`Self::store_and_verify`].
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PreparedProductionArchiveBatchV1 {
     pub expected_source_root: String,
+    /// Selected maintenance receipts: at most one, the receipt of the commit
+    /// at the archive head, always selected first.
+    pub selected_receipts: Vec<ProductionArchiveReceiptId>,
     pub selected: Vec<ProductionExecutionId>,
     #[serde(default)]
     pub selected_projects: Vec<FacilityProjectId>,
+    /// First blob of the batch.
     pub blob: ProductionArchiveBlobV1,
     pub membership_page: ProductionArchiveMembershipPageV1,
     pub temporal_page: ProductionArchiveTemporalPageV1,
+    /// The following blobs and their pages, in order, when the batch holds
+    /// more records than one page. Empty for a single-page batch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_pages: Vec<PreparedProductionArchivePageV1>,
+    /// New pages of the cumulative lookup index, by page id.
+    pub lookup_pages: BTreeMap<String, canwu_resource::ResourceArchiveLookupPageV1>,
+    /// Lookup pages of the previous head's index that this batch's index no
+    /// longer reaches. The retention rule of
+    /// [`canwu_resource::PreparedResourceArchiveBatchV1::superseded_lookup_pages`]
+    /// applies unchanged: use the list only after the batch's commit settled
+    /// as applied, and only once no restore, replay, or fork needs a point of
+    /// the run that reads one of these pages.
+    pub superseded_lookup_pages: BTreeSet<String>,
     pub directory: ProductionArchiveIndexDirectoryV1,
     pub retention: ProductionArchiveRetentionHandleV1,
 }
 
+/// A stored and read-back archive batch, as the archive commit ingress
+/// carries it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct VerifiedProductionArchiveCommitV1 {
+    /// Source root the batch was prepared from; the commit applies only
+    /// against a root that still has it.
     pub expected_source_root: String,
+    /// The receipt of the head commit, archived first: at most one.
+    pub selected_receipts: Vec<ProductionArchiveReceiptId>,
+    /// Terminal executions archived, in identity order.
     pub selected: Vec<ProductionExecutionId>,
+    /// Completed facility projects archived, in identity order.
     #[serde(default)]
     pub selected_projects: Vec<FacilityProjectId>,
+    /// Directory of the commit, which becomes the archive head.
     pub directory_root: String,
+    /// Root of the lookup index the directory names. The boundary rebuilds
+    /// the directory from the root's records and this root, and requires it
+    /// to be `directory_root`.
+    pub lookup_root: String,
     pub retention: ProductionArchiveRetentionHandleV1,
 }
 
@@ -855,8 +973,19 @@ pub struct ProductionArchiveHeadStateV1 {
     pub archived_execution_count: u64,
     #[serde(default)]
     pub archived_project_count: u64,
+    /// Maintenance receipts archived up to and including the head commit.
+    pub archived_receipt_count: u64,
     pub committed_batch_count: u64,
+    /// Number of maintenance receipts this root has ever recorded. The next
+    /// receipt is `canwu.production:archive-receipt:{receipt_sequence + 1}`,
+    /// so receipt identities stay unique after receipts leave the root.
+    pub receipt_sequence: u64,
+    /// Retention handles of settled commits not yet acknowledged by the host
+    /// application.
     pub pending_handles: BTreeMap<String, ProductionArchiveRetentionHandleV1>,
+    /// The receipt of the commit at the archive head, if no commit has
+    /// archived it yet, and the receipts of stale commits not yet
+    /// acknowledged.
     pub maintenance_receipts:
         BTreeMap<ProductionArchiveReceiptId, ProductionArchiveMaintenanceReceiptV1>,
 }
@@ -1035,21 +1164,20 @@ impl ProductionState {
     pub(crate) fn draft(&self) -> Result<DomainRecordDraft, CanwuError> {
         self.validate()?;
         let mut draft = DomainRecordDraft::from_typed(production_runtime_reference(), self)?;
+        // Every hot execution and facility project, terminal ones included,
+        // declares the record versions that restore validation reads for it,
+        // so a seal keeps them until the archive removes the work. Restore
+        // compares an input's consumer evidence by reference only, so only
+        // work that has not ended declares it.
         let dependencies = self
             .executions
             .values()
-            .filter(|execution| {
-                matches!(
-                    execution.lifecycle,
-                    WorkOrderLifecycle::Running
-                        | WorkOrderLifecycle::CompletedPendingOutputSettlement
-                )
-            })
             .flat_map(|execution| {
                 execution
                     .evidence
                     .iter()
                     .map(|binding| binding.version.clone())
+                    .chain(execution.realization_evidence.iter().cloned())
                     .chain(std::iter::once(
                         execution.technology.technique_revision.clone(),
                     ))
@@ -1066,39 +1194,42 @@ impl ProductionState {
                         execution
                             .inputs
                             .iter()
+                            .filter(|_| {
+                                matches!(
+                                    execution.lifecycle,
+                                    WorkOrderLifecycle::Running
+                                        | WorkOrderLifecycle::CompletedPendingOutputSettlement
+                                )
+                            })
                             .map(|input| input.consumption.consumer_evidence.clone()),
                     )
             })
-            .chain(
-                self.facility_projects
-                    .values()
-                    .filter(|project| {
-                        !matches!(
-                            project.lifecycle,
-                            FacilityProjectLifecycle::Completed
-                                | FacilityProjectLifecycle::Cancelled
-                                | FacilityProjectLifecycle::Failed
-                        )
-                    })
-                    .flat_map(|project| {
+            .chain(self.facility_projects.values().flat_map(|project| {
+                project
+                    .evidence
+                    .iter()
+                    .map(|binding| binding.version.clone())
+                    .chain(std::iter::once(
+                        project.technology.technique_revision.clone(),
+                    ))
+                    .chain(project.technology.capability_qualification.iter().cloned())
+                    .chain(project.technology.implementation.iter().cloned())
+                    .chain(project.technology.adoption.iter().cloned())
+                    .chain(
                         project
-                            .evidence
+                            .inputs
                             .iter()
-                            .map(|binding| binding.version.clone())
-                            .chain(std::iter::once(
-                                project.technology.technique_revision.clone(),
-                            ))
-                            .chain(project.technology.capability_qualification.iter().cloned())
-                            .chain(project.technology.implementation.iter().cloned())
-                            .chain(project.technology.adoption.iter().cloned())
-                            .chain(
-                                project
-                                    .inputs
-                                    .iter()
-                                    .map(|input| input.consumption.consumer_evidence.clone()),
-                            )
-                    }),
-            )
+                            .filter(|_| {
+                                !matches!(
+                                    project.lifecycle,
+                                    FacilityProjectLifecycle::Completed
+                                        | FacilityProjectLifecycle::Cancelled
+                                        | FacilityProjectLifecycle::Failed
+                                )
+                            })
+                            .map(|input| input.consumption.consumer_evidence.clone()),
+                    )
+            }))
             .map(EvidenceRef::DomainRecordVersion)
             .chain(
                 self.incident_receipts
@@ -1230,14 +1361,13 @@ impl ProductionState {
                 "archive due entries",
             ),
             (
-                self.archive.pending_handles.len(),
+                self.archive
+                    .pending_handles
+                    .values()
+                    .filter(|handle| handle.phase == ProductionArchiveRetentionPhaseV1::Committed)
+                    .count(),
                 limits.max_pending_retention_handles,
-                "pending archive handles",
-            ),
-            (
-                self.archive.maintenance_receipts.len(),
-                limits.max_operation_outcomes,
-                "archive maintenance receipts",
+                "applied archive commit handles",
             ),
             (
                 self.production_completion_grants.len(),
@@ -1448,7 +1578,8 @@ impl ProductionState {
                 || process.work_units == 0
                 || process.outputs.is_empty()
                 || process.outputs.iter().any(|output| output.quantity == 0)
-                || process.outputs.len() > MAX_EVIDENCE_BINDINGS
+                // One resource output batch carries every output.
+                || process.outputs.len() > canwu_resource::MAX_PRODUCTION_OUTPUT_BATCH_CREDITS
                 || process
                     .effective_until
                     .is_some_and(|until| until <= process.effective_from)
@@ -1609,6 +1740,20 @@ impl ProductionState {
                 return Err(invalid(format!("work order {id} lost its execution")));
             }
         }
+        let mut unsettled_output_keys = BTreeSet::new();
+        for execution in self
+            .executions
+            .values()
+            .filter(|execution| output_is_unsettled(execution.lifecycle))
+        {
+            for request in &execution.output_requests {
+                if !unsettled_output_keys.insert(&request.operation_key) {
+                    return Err(invalid(
+                        "unsettled production executions name one output operation key twice",
+                    ));
+                }
+            }
+        }
         for (id, execution) in &self.executions {
             let order = self
                 .work_orders
@@ -1652,6 +1797,17 @@ impl ProductionState {
                 || execution.inputs.len() != process.inputs.len()
                 || execution.output_requests.len() != process.outputs.len()
                 || output_operation_keys.len() != execution.output_requests.len()
+                || match execution.lifecycle {
+                    WorkOrderLifecycle::Settled => {
+                        execution.output_settled_at.is_none_or(|settled| {
+                            execution.completed_at.is_none_or(|done| settled < done)
+                        })
+                    }
+                    _ => execution.output_settled_at.is_some(),
+                }
+                || output_operation_keys
+                    .iter()
+                    .any(|key| names_reserved_resource_operation_key(key))
                 || output_accounts.len() != execution.output_requests.len()
                 || execution.output_source.as_ref().is_some_and(|source| {
                     source.record != production_runtime_reference().into_untyped()
@@ -2044,23 +2200,71 @@ impl ProductionState {
                 "production archive due index contains a non-terminal facility project",
             ));
         }
+        let mut applied_receipts = 0_usize;
         for (id, receipt) in &self.archive.maintenance_receipts {
             let mut detached = receipt.clone();
             let recorded = std::mem::take(&mut detached.canonical_digest);
+            let applied = receipt.disposition == ProductionArchiveRetentionPhaseV1::Committed;
             if id != &receipt.id
                 || recorded
                     != canonical_hash("canwu.production.archive-maintenance-receipt.v1", &detached)?
+                || !matches!(
+                    receipt.disposition,
+                    ProductionArchiveRetentionPhaseV1::Committed
+                        | ProductionArchiveRetentionPhaseV1::RejectedStale
+                )
+                // The receipt of an applied commit names the archive head:
+                // the next applied commit archives it first.
+                || (applied && self.archive.directory_root.as_ref() != Some(&receipt.directory_root))
+                // A stale receipt is retired with the handle it names.
+                || (!applied
+                    && !self
+                        .archive
+                        .pending_handles
+                        .contains_key(&receipt.retention_handle_id))
             {
                 return Err(invalid("production archive maintenance receipt is invalid"));
             }
+            applied_receipts += usize::from(applied);
         }
-        for handle in self.archive.pending_handles.values() {
+        if applied_receipts > 1 {
+            return Err(invalid(
+                "production archive holds more than the receipt of its head commit",
+            ));
+        }
+        // Every applied commit left one receipt, which is either the hot one
+        // or archived; receipt identities come from the sequence.
+        if self
+            .archive
+            .archived_receipt_count
+            .checked_add(u64::try_from(applied_receipts).unwrap_or(u64::MAX))
+            != Some(self.archive.committed_batch_count)
+            || self.archive.maintenance_receipts.keys().any(|id| {
+                id.as_str()
+                    .strip_prefix("canwu.production:archive-receipt:")
+                    .and_then(|sequence| sequence.parse::<u64>().ok())
+                    .is_none_or(|sequence| {
+                        sequence == 0 || sequence > self.archive.receipt_sequence
+                    })
+            })
+        {
+            return Err(invalid(
+                "production archive receipts differ from the committed count or receipt sequence",
+            ));
+        }
+        for (id, handle) in &self.archive.pending_handles {
             let mut detached = handle.clone();
             let recorded = std::mem::take(&mut detached.semantic_digest);
             if handle.handle_id.is_empty()
+                || id != &handle.handle_id
                 || handle.source_root.is_empty()
                 || handle.target_directory_root.is_empty()
                 || handle.object_ids.is_empty()
+                || !matches!(
+                    handle.phase,
+                    ProductionArchiveRetentionPhaseV1::Committed
+                        | ProductionArchiveRetentionPhaseV1::RejectedStale
+                )
                 || recorded != canonical_hash("canwu.production.archive-retention.v1", &detached)?
             {
                 return Err(invalid("production archive retention handle is invalid"));
@@ -2653,6 +2857,8 @@ impl ProductionState {
                 "execution cannot start from the supplied lifecycle state",
             ));
         }
+        refuse_reserved_output_keys(execution)?;
+        self.refuse_output_keys_held_by_unsettled_executions(execution)?;
         let process = self
             .processes
             .get(&order.process)
@@ -3176,6 +3382,7 @@ impl ProductionState {
         if execution.lifecycle == WorkOrderLifecycle::Settled {
             if execution.output_outcomes == acknowledgement.outcomes
                 && execution.output_source.as_ref() == Some(&acknowledgement.production_source)
+                && execution.output_settled_at == Some(acknowledgement.settled_at)
             {
                 return Ok(false);
             }
@@ -3184,11 +3391,35 @@ impl ProductionState {
                 "settled production output received a different resource outcome",
             ));
         }
+        // Each credit's request commits to the instant it settled, which
+        // the resource plugin moves to the due instant of a deferred batch.
+        let expected_request_digests = execution
+            .output_requests
+            .iter()
+            .map(|request| {
+                canwu_resource::canonical_digest(
+                    "canwu.resource.operation-request.v1",
+                    &canwu_resource::ResourceOperationRequestV1::Credit(
+                        request.resource_credit_request(
+                            acknowledgement.production_source.clone(),
+                            execution.completion_certificate.clone(),
+                            acknowledgement.settled_at,
+                        ),
+                    ),
+                )
+                .map_err(|error| invalid(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         if execution.lifecycle != WorkOrderLifecycle::CompletedPendingOutputSettlement
+            || execution.output_source.as_ref() != Some(&acknowledgement.production_source)
             || execution
-                .output_source
-                .as_ref()
-                .is_some_and(|source| source != &acknowledgement.production_source)
+                .completed_at
+                .is_none_or(|completed| acknowledgement.settled_at < completed)
+            || acknowledgement
+                .outcomes
+                .iter()
+                .zip(&expected_request_digests)
+                .any(|(outcome, expected)| &outcome.request_digest != expected)
             || acknowledgement.outcomes.len() != execution.output_requests.len()
             || acknowledgement
                 .outcomes
@@ -3226,6 +3457,7 @@ impl ProductionState {
             .output_outcomes
             .clone_from(&acknowledgement.outcomes);
         execution_mut.output_source = Some(acknowledgement.production_source.clone());
+        execution_mut.output_settled_at = Some(acknowledgement.settled_at);
         execution_mut.output_ack_digest = Some(canonical_hash(
             "canwu.production.output-ack.v1",
             acknowledgement,
@@ -4271,4 +4503,84 @@ fn canonical_text(value: &str, label: &str) -> Result<(), CanwuError> {
 
 pub(crate) fn invalid(message: impl Into<String>) -> CanwuError {
     CanwuError::new(ErrorCode::InvalidDomainRecord, message)
+}
+
+/// Whether `key` lies under the prefix `canwu-resource` reserves for its
+/// completion operations. The resource plugin settles nothing for any other
+/// request that names such a key.
+pub(crate) fn names_reserved_resource_operation_key(key: &ResourceOperationKey) -> bool {
+    key.as_str()
+        .starts_with(canwu_resource::RESOURCE_COMPLETION_OPERATION_KEY_PREFIX)
+}
+
+/// Refuses an execution whose output names a resource operation key reserved
+/// for completion operations, as an expected domain rejection.
+///
+/// The resource plugin settles nothing for an output batch that names such a
+/// key, so an execution started with one could never settle its output: it
+/// would hold its capacity, its completion grants, and their locks for good.
+/// A production completion lease refuses such a key as well
+/// ([`ProductionState::request_completion_acquisition`]), because its key is
+/// the key of the first output; every other key a production operation names
+/// is that of an exact outcome that already settled.
+pub(crate) fn refuse_reserved_output_keys(
+    execution: &ProductionExecution,
+) -> Result<(), CanwuError> {
+    if execution.output_requests.len() > canwu_resource::MAX_PRODUCTION_OUTPUT_BATCH_CREDITS {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPayload,
+            "execution output exceeds the credits one resource output batch carries",
+        ));
+    }
+    if execution
+        .output_requests
+        .iter()
+        .any(|request| names_reserved_resource_operation_key(&request.operation_key))
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPayload,
+            "execution output names an operation key reserved for resource completion operations",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether an execution's outputs still wait for their resource credit: it
+/// runs or waits for its output acknowledgement, so the keys it names are not
+/// yet held by resource outcomes.
+pub(crate) const fn output_is_unsettled(lifecycle: WorkOrderLifecycle) -> bool {
+    matches!(
+        lifecycle,
+        WorkOrderLifecycle::Running | WorkOrderLifecycle::CompletedPendingOutputSettlement
+    )
+}
+
+impl ProductionState {
+    /// Refuses, as an idempotency conflict, an execution whose output names an
+    /// operation key that another unsettled execution names. Both credits
+    /// would take one key, and the resource plugin settles only the first.
+    pub(crate) fn refuse_output_keys_held_by_unsettled_executions(
+        &self,
+        execution: &ProductionExecution,
+    ) -> Result<(), CanwuError> {
+        let keys = execution
+            .output_requests
+            .iter()
+            .map(|request| &request.operation_key)
+            .collect::<BTreeSet<_>>();
+        if self.executions.values().any(|other| {
+            other.id != execution.id
+                && output_is_unsettled(other.lifecycle)
+                && other
+                    .output_requests
+                    .iter()
+                    .any(|request| keys.contains(&request.operation_key))
+        }) {
+            return Err(CanwuError::new(
+                ErrorCode::IdempotencyConflict,
+                "execution output names an operation key that another unsettled execution names",
+            ));
+        }
+        Ok(())
+    }
 }

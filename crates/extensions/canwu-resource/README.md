@@ -302,13 +302,16 @@ acquisition and the grant. Such an operation is refused at admission or at
 `enqueue_resource_completion_operation`, and one that reaches settlement is a
 recorded `invalid_identifier` rejection.
 
-`canwu-production` does not yet refuse an output request whose operation key
-lies under the reserved prefix, or is already used, when an execution
-starts: the output batch of such an execution is skipped with
-`reserved_operation_key` or `operation_key_taken`, nothing is credited, and
-the execution never receives its acknowledgement; its resource participant
-grant stays `Consumed`, holding its completion units, target locks, and 16
-reserved outcome slots.
+`canwu-production` refuses, when an execution starts, an output request whose
+operation key lies under the reserved prefix or is already used, more outputs
+than `MAX_PRODUCTION_OUTPUT_BATCH_CREDITS` (64, the most one batch carries),
+and an output set that `ResourceState::production_output_batch_can_fit` says
+the root can never hold under its limits. A key that a host-queued operation
+takes between the start and the dispatch is not caught: the output batch is
+skipped with `operation_key_taken`, nothing is credited, and the execution
+never receives its acknowledgement; its resource participant grant stays
+`Consumed`, holding its completion units, target locks, and 16 reserved
+outcome slots.
 
 ## Protected floors
 
@@ -555,7 +558,11 @@ record. `prepare_resource_archive` reads the lookup pages on the paths of the
 new keys from the store and prepares their replacements. A lookup trusts the
 head directory to name a faithful index: `enqueue_resource_archive` and the
 checked restore wrappers establish that, and a root assembled by hand is not
-checked.
+checked. The index functions themselves take key digests, not resource keys
+(`prepare_resource_archive_lookup_entries`, `find_resource_archive_lookup_entry`,
+`verify_resource_archive_lookup_entries`, `collect_resource_archive_lookup_pages`,
+`audit_resource_archive_lookup_index`), so another archive can keep its own
+index in this format: the production archive does, under its own namespace.
 
 A restore, an exact replay, or a fork reads the index of every head it passes
 through, so the store must keep the lookup pages those heads reach. The

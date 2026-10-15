@@ -93,10 +93,22 @@ impl ProductionCompletionIngressV1 {
 }
 
 impl ProductionState {
+    /// Admits one production completion lease request.
+    ///
+    /// The lease's operation key becomes the key under which the resource
+    /// plugin credits the first output of the execution the lease activates,
+    /// so a key under the prefix `canwu-resource` reserves for its completion
+    /// operations is refused as an expected domain rejection.
     pub fn request_completion_acquisition(
         &mut self,
         request: RequestCompletionLeaseV1,
     ) -> Result<CompletionLeaseAcquisitionV1, CanwuError> {
+        if crate::model::names_reserved_resource_operation_key(&request.operation_key) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPayload,
+                "production completion lease names an operation key reserved for resource completion operations",
+            ));
+        }
         let budget = self.production_budget()?.clone();
         budget.validate().map_err(resource_error)?;
         request

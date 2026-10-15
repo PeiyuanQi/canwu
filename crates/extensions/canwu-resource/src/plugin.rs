@@ -1528,7 +1528,7 @@ fn settle_output_batch_packet(
         );
         return Ok(());
     }
-    if packet.requests.len() > 64 {
+    if packet.requests.len() > crate::MAX_PRODUCTION_OUTPUT_BATCH_CREDITS {
         out.skip(
             ingress.id,
             crate::ResourceIngressSkipReasonV1::FailedSettlementChecks,

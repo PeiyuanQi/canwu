@@ -132,12 +132,24 @@ dependencies = [
  "canwu-fiscal",
  "canwu-history-research",
  "canwu-information",
+ "canwu-production",
  "canwu-resource",
  "canwu-technology",
  "libc",
  "serde",
  "serde_json",
  "windows-sys",
+]
+
+[[package]]
+name = "canwu-production"
+version = "0.15.0"
+dependencies = [
+ "canwu-api",
+ "canwu-resource",
+ "canwu-technology",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

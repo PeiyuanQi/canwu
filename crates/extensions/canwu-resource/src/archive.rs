@@ -1739,7 +1739,7 @@ pub fn prepare_resource_archive_lookup<'a>(
     previous_root: Option<&str>,
     memberships: impl IntoIterator<Item = &'a ResourceArchiveMembershipV1>,
 ) -> Result<PreparedResourceArchiveLookupV1, ResourceError> {
-    let mut entries = memberships
+    let entries = memberships
         .into_iter()
         .map(|membership| {
             Ok(ResourceArchiveLookupEntryV1 {
@@ -1749,6 +1749,25 @@ pub fn prepare_resource_archive_lookup<'a>(
             })
         })
         .collect::<Result<Vec<_>, ResourceError>>()?;
+    prepare_resource_archive_lookup_entries(store, previous_root, entries)
+}
+
+/// [`prepare_resource_archive_lookup`] for entries whose key digests the
+/// caller computed: extends the index `previous_root` with `entries`, in any
+/// order, and returns the new root, the pages to store, and the previous
+/// pages the new root no longer reaches.
+///
+/// The index format does not depend on what a key is, only on its digest, so
+/// another archive can keep its own cumulative index in this format: it
+/// digests its keys under its own domain, and its store serves the pages
+/// under [`RESOURCE_ARCHIVE_LOOKUP_PAGE_NAMESPACE`]. Each key digest must be
+/// a 64-character lowercase hexadecimal digest and appear once, and each
+/// blob id must be one too.
+pub fn prepare_resource_archive_lookup_entries(
+    store: &dyn ResourceArchiveStore,
+    previous_root: Option<&str>,
+    mut entries: Vec<ResourceArchiveLookupEntryV1>,
+) -> Result<PreparedResourceArchiveLookupV1, ResourceError> {
     entries.sort();
     if entries.is_empty()
         || entries
@@ -1756,7 +1775,7 @@ pub fn prepare_resource_archive_lookup<'a>(
             .any(|pair| pair[0].key_digest == pair[1].key_digest)
         || entries
             .iter()
-            .any(|entry| !is_lookup_digest(&entry.blob_id))
+            .any(|entry| !is_lookup_digest(&entry.key_digest) || !is_lookup_digest(&entry.blob_id))
     {
         return Err(ResourceError::InvalidDefinition(
             "resource archive lookup extension is empty, repeats a key, or names no blob"
@@ -1904,12 +1923,23 @@ fn merge_lookup_entries(
 }
 
 /// Walks the lookup index from `root` to the entry for `key_digest`, reading
-/// one page per level.
-fn find_resource_archive_lookup_entry(
+/// one page per level, each authenticated by its id and checked against the
+/// prefix it was reached by.
+///
+/// It reads at most [`MAX_RESOURCE_ARCHIVE_LOOKUP_DEPTH`]` + 1` pages. A key
+/// the index does not hold is `None`; a missing, forged, oversized, or
+/// malformed page is an error, never a miss. `key_digest` must be a
+/// 64-character lowercase hexadecimal digest.
+pub fn find_resource_archive_lookup_entry(
     store: &dyn ResourceArchiveStore,
     root: &str,
     key_digest: &str,
 ) -> Result<Option<ResourceArchiveLookupEntryV1>, ResourceError> {
+    if !is_lookup_digest(key_digest) {
+        return Err(ResourceError::InvalidDefinition(
+            "resource archive lookup key digest is malformed".to_owned(),
+        ));
+    }
     let mut page_id = root.to_owned();
     for depth in 0..=MAX_RESOURCE_ARCHIVE_LOOKUP_DEPTH {
         let page = load_resource_archive_lookup_page(store, &page_id, &key_digest[..depth])?;
@@ -1932,13 +1962,25 @@ fn find_resource_archive_lookup_entry(
 
 /// Checks that every entry of `expected`, ordered by key digest and all under
 /// `prefix`, is exactly what the lookup index below `page_id` holds for its
-/// key, reading each page on their paths once.
-fn verify_resource_archive_lookup_entries(
+/// key, reading each page on their paths once. Call it with the root page and
+/// the empty prefix to check that a stored index resolves every record of a
+/// commit.
+pub fn verify_resource_archive_lookup_entries(
     store: &dyn ResourceArchiveStore,
     page_id: &str,
     prefix: &str,
     expected: &[ResourceArchiveLookupEntryV1],
 ) -> Result<(), ResourceError> {
+    if !expected.windows(2).all(|pair| pair[0] < pair[1])
+        || expected.iter().any(|entry| {
+            !is_lookup_digest(&entry.key_digest) || !entry.key_digest.starts_with(prefix)
+        })
+    {
+        return Err(ResourceError::InvalidDefinition(
+            "resource archive lookup entries are unordered, malformed, or outside their prefix"
+                .to_owned(),
+        ));
+    }
     let unresolved = || {
         ResourceError::InvalidDefinition(
             "resource archive lookup index does not resolve every record of its commit".to_owned(),
@@ -1962,15 +2004,35 @@ fn verify_resource_archive_lookup_entries(
 
 /// One archived record as the restore audit holds it while it walks the
 /// directory chain: the key digest, the index of its blob among the blobs
-/// seen so far, and its ordinal.
-#[derive(Clone, Copy)]
-struct ResourceArchiveAuditEntry {
+/// seen so far, and its ordinal. About 40 bytes, so an audit can hold one per
+/// archived record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResourceArchiveAuditEntry {
     key_digest: [u8; 32],
     blob: u32,
     ordinal: u16,
 }
 
 impl ResourceArchiveAuditEntry {
+    /// An entry for the record at `ordinal` of the blob at position `blob` of
+    /// the blob list passed to [`audit_resource_archive_lookup_index`].
+    /// `key_digest` is the 64-character lowercase hexadecimal digest the
+    /// index files the record's key under.
+    pub fn new(key_digest: &str, blob: u32, ordinal: u16) -> Result<Self, ResourceError> {
+        if !is_lookup_digest(key_digest) {
+            return Err(ResourceError::InvalidDefinition(
+                "resource archive audit key digest is malformed".to_owned(),
+            ));
+        }
+        let key_digest = blake3::Hash::from_hex(key_digest)
+            .map_err(|error| ResourceError::InvalidDefinition(error.to_string()))?;
+        Ok(Self {
+            key_digest: *key_digest.as_bytes(),
+            blob,
+            ordinal,
+        })
+    }
+
     fn nibble(&self, depth: usize) -> u8 {
         let byte = self.key_digest[depth / 2];
         if depth & 1 == 0 {
@@ -2039,6 +2101,40 @@ fn audit_resource_archive_lookup_page(
     Ok(id)
 }
 
+/// Rebuilds the canonical lookup index over `entries` and requires `store`
+/// to hold every page of it. Returns its root page id, or `None` when there
+/// are no entries.
+///
+/// `entries` lists every archived record of a directory chain, newest commit
+/// first; the first entry of each key digest is the one the index must name,
+/// as a key archived again resolves to its newest record. `blob_ids` holds
+/// the blob ids the entries' `blob` positions refer to. Because the index is
+/// a function of its entries, a stored index agrees with the chain exactly
+/// when the returned root is the root the head directory names. The cost is
+/// linear in the entries, and the pages are rebuilt and compared one at a
+/// time, so the audit holds the entries and one path of pages.
+pub fn audit_resource_archive_lookup_index(
+    store: &dyn ResourceArchiveStore,
+    blob_ids: &[String],
+    mut entries: Vec<ResourceArchiveAuditEntry>,
+) -> Result<Option<String>, ResourceError> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    if entries.iter().any(|entry| {
+        usize::try_from(entry.blob)
+            .ok()
+            .is_none_or(|blob| blob >= blob_ids.len())
+    }) {
+        return Err(ResourceError::InvalidDefinition(
+            "resource archive audit entry names a blob outside its list".to_owned(),
+        ));
+    }
+    entries.sort_by_key(|entry| entry.key_digest);
+    entries.dedup_by(|later, earlier| later.key_digest == earlier.key_digest);
+    audit_resource_archive_lookup_page(store, blob_ids, &mut String::new(), &entries).map(Some)
+}
+
 /// Adds to `pages` the id of every lookup page reachable from `page_id`.
 ///
 /// With `complete`, a missing page is an error: the index of the head, or of
@@ -2046,8 +2142,8 @@ fn audit_resource_archive_lookup_page(
 /// that branch: the index of an earlier commit may have been pruned by a host
 /// application that no longer restores or replays through it. A page already
 /// in `pages` is not walked again, so indexes that share pages are walked
-/// once.
-pub(crate) fn collect_resource_archive_lookup_pages(
+/// once. Call it with the root page and the empty prefix.
+pub fn collect_resource_archive_lookup_pages(
     store: &dyn ResourceArchiveStore,
     page_id: &str,
     prefix: &str,

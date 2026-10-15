@@ -23,12 +23,13 @@ use canwu_resource::{
     ResourceArchiveRetentionHandleV1, ResourceArchiveRetentionPhaseV1, ResourceArchiveStore,
     ResourceCompletionOperationV1, ResourceConsumption, ResourceConsumptionId,
     ResourceConsumptionVersionV1, ResourceDefinitionId, ResourceDefinitionRevision,
-    ResourceDefinitionRevisionId, ResourceDemandId, ResourceLimitsV1, ResourceOperationKey,
-    ResourceOperationKind, ResourceOperationOutcome, ResourceOperationOutcomeId,
-    ResourceOperationOutcomeVersionV1, ResourceOperationRequestV1, ResourceOperationStatus,
-    ResourcePlugin, ResourceQualityId, ResourceReportGrantId, ResourceReportGrantV1,
-    ResourceReservationId, ResourceRevision, ResourceRuntimeRecord, ResourceScopeId, ResourceState,
-    ResourceTieBreakKey, ResourceUnitRevision, ResourceUnitRevisionId, RunBudgetRevisionV1,
+    ResourceDefinitionRevisionId, ResourceDemandId, ResourceIngressSkipReasonV1,
+    ResourceIngressSkipV1, ResourceLimitsV1, ResourceOperationKey, ResourceOperationKind,
+    ResourceOperationOutcome, ResourceOperationOutcomeId, ResourceOperationOutcomeVersionV1,
+    ResourceOperationRequestV1, ResourceOperationStatus, ResourcePlugin, ResourceQualityId,
+    ResourceReportGrantId, ResourceReportGrantV1, ResourceReservationId, ResourceRevision,
+    ResourceRuntimeRecord, ResourceScopeId, ResourceState, ResourceTieBreakKey,
+    ResourceUnitRevision, ResourceUnitRevisionId, RunBudgetRevisionV1,
     enqueue_resource_completion_operation,
 };
 use std::{
@@ -1225,6 +1226,7 @@ fn start_execution(
         resource_completion_grant: resource_grant,
         realized_output_per_mille: None,
         realization_evidence: None,
+        output_settled_at: None,
     };
     let allocation = ProductionCapacityAllocation {
         id: allocation_id,
@@ -2375,11 +2377,17 @@ fn settled_state_for_archive() -> (ProductionState, ProductionExecutionId) {
         canwu_resource::canonical_digest("canwu.resource.operation-outcome.v1", &outcome)
             .expect("archive output outcome digest");
     state
+        .executions
+        .get_mut(&execution)
+        .expect("archive execution")
+        .output_source = Some(source.clone());
+    state
         .acknowledge_output(
             &ProductionOutputAcknowledgement {
                 execution: execution.clone(),
                 production_source: source.clone(),
                 outcomes: vec![outcome],
+                settled_at: SimTime::from_minutes(20),
             },
             SimTime::from_minutes(30),
         )
@@ -2660,15 +2668,42 @@ fn capacity_cannot_overlap_and_a_consumed_slot_releases_only_after_output_ack() 
         canwu_resource::canonical_digest("canwu.resource.operation-outcome.v1", &outcome)
             .expect("resource output outcome digest");
     state
+        .executions
+        .get_mut(&first)
+        .expect("completed execution")
+        .output_source = Some(production_source.clone());
+    // The credits' requests commit to the instant they settled. An
+    // acknowledgement naming another instant does not settle the execution:
+    // it is refused and changes nothing.
+    let pending = state.clone();
+    let error = state
+        .acknowledge_output(
+            &ProductionOutputAcknowledgement {
+                execution: first.clone(),
+                production_source: production_source.clone(),
+                outcomes: vec![outcome.clone()],
+                settled_at: SimTime::from_minutes(20),
+            },
+            SimTime::from_minutes(30),
+        )
+        .expect_err("an acknowledgement naming another settlement instant is refused");
+    assert_eq!(error.code, canwu_api::ErrorCode::InvalidDomainRecord);
+    assert_eq!(state, pending);
+    state
         .acknowledge_output(
             &ProductionOutputAcknowledgement {
                 execution: first.clone(),
                 production_source,
                 outcomes: vec![outcome],
+                settled_at: SimTime::from_minutes(30),
             },
             SimTime::from_minutes(30),
         )
         .expect("exact resource outcome should settle production");
+    assert_eq!(
+        state.executions[&first].output_settled_at,
+        Some(SimTime::from_minutes(30))
+    );
     assert_eq!(
         state.executions[&first].lifecycle,
         WorkOrderLifecycle::Settled
@@ -3262,7 +3297,7 @@ fn canonical_commissioning_closes_resource_and_local_grants_before_project_archi
     );
     let commission_outcome_id = commission_outcome.id.clone();
     let authentic_project_archive = completed
-        .prepare_production_archive(1)
+        .prepare_production_archive(1, &())
         .expect("authentic project archive fixture");
     let forged_result_store = TestProductionArchiveStore::default();
     let forged_result_directory = store_rehashed_forged_project_archive(
@@ -3303,7 +3338,7 @@ fn canonical_commissioning_closes_resource_and_local_grants_before_project_archi
         .validate()
         .expect("the exact operation-outcome cap remains valid");
     let prepared = under_cap_pressure
-        .prepare_production_archive(1)
+        .prepare_production_archive(1, &())
         .expect("project archive remains progressable under outcome cap pressure");
     assert_eq!(prepared.selected_projects, vec![project_id.clone()]);
     assert_eq!(prepared.blob.project_records[0].operation_outcomes.len(), 1);
@@ -4717,7 +4752,7 @@ fn archive_commit_survives_restart_and_authenticates_damage_waste_and_output_evi
     );
     state.validate().expect("archive command origin validates");
     let prepared = state
-        .prepare_production_archive(1)
+        .prepare_production_archive(1, &())
         .expect("bounded archive preparation");
     assert_eq!(prepared.selected, vec![execution.clone()]);
     assert_eq!(prepared.blob.records[0].non_recoverable_waste_quantity, 3);
@@ -4795,9 +4830,12 @@ fn archive_commit_survives_restart_and_authenticates_damage_waste_and_output_evi
 
     let (mut chained, _) = settled_state_for_archive();
     chained.archive = acknowledged.archive.clone();
+    // The second commit archives the first commit's receipt, then the
+    // execution.
     let prepared_second = chained
-        .prepare_production_archive(1)
+        .prepare_production_archive(2, &store)
         .expect("second archive batch");
+    assert_eq!(prepared_second.selected_receipts.len(), 1);
     let second_commit = prepared_second
         .store_and_verify(&store)
         .expect("second archive verification");
@@ -4810,6 +4848,7 @@ fn archive_commit_survives_restart_and_authenticates_damage_waste_and_output_evi
             .expect("pending retention digest");
     chained.archive.directory_root = Some(second_root.clone());
     chained.archive.archived_execution_count += 1;
+    chained.archive.archived_receipt_count += 1;
     chained.archive.committed_batch_count += 1;
     chained
         .archive
@@ -5331,14 +5370,19 @@ fn gap_g14_production_realized_output() {
     );
 }
 
-/// A running execution completed by a live `CompleteExecution` command
-/// settles its resource output. Every production record change after the
-/// completion lease locked the production runtime (here a live advance and the
-/// completion itself) advances that record's version; the output credit cites
-/// the production version that proves the completion, never the older locked
-/// version, and still settles, conserves, and replays exactly.
-#[test]
-fn live_completion_settles_output() {
+/// The production and resource roots of one running household execution
+/// whose resource output participant is granted and prepared, for a live run
+/// of both plugins.
+struct LiveCompletionFixture {
+    production: ProductionState,
+    resource: ResourceState,
+    holder: KnowledgeHolderRef,
+    execution: ProductionExecutionId,
+    acquisition: CompletionLeaseAcquisitionId,
+    locked_production: DomainRecordVersionRef,
+}
+
+fn live_completion_fixture() -> LiveCompletionFixture {
     let (mut production, holder, _site, facility) = base_state();
     let process_id = ProcessRevisionId::new("production:household-process:v1").expect("process ID");
     let order = work_order(
@@ -5408,9 +5452,18 @@ fn live_completion_settles_output() {
         .expect("the certificate locks the production runtime");
     let resource = resource_state_for_execution(&production, &running);
     // The harness builds the resource participant directly; mirror its exact
-    // consumed grant in the coordinator, as the live coordinator's consumed
-    // acknowledgement does, so the completion lease can close after output.
+    // prepared grant in the coordinator and acknowledge its consumption, as
+    // the live coordinator does, so the completion lease can close after
+    // output with every receipt an archived execution carries.
     let acquisition = running.completion_certificate.acquisition.clone();
+    let provider_source = version::<ResourceRuntimeRecord>("resource:runtime:v1");
+    let consumed = resource.external_completion_participants.grants[&acquisition]
+        .grant
+        .clone();
+    let mut prepared = consumed.clone();
+    prepared.state = CompletionGrantStateV1::Prepared;
+    prepared.revision =
+        ResourceRevision::new(consumed.revision.get() - 1).expect("prepared grant revision");
     production
         .completion_participant_grants
         .get_mut(&acquisition)
@@ -5419,33 +5472,48 @@ fn live_completion_settles_output() {
             canwu_resource::PLUGIN_NAME.to_owned(),
             ProductionCompletionParticipantGrantV1 {
                 participant: canwu_resource::PLUGIN_NAME.to_owned(),
-                provider_source: version::<ResourceRuntimeRecord>("resource:runtime:v1"),
-                grant: resource.external_completion_participants.grants[&acquisition]
-                    .grant
-                    .clone(),
+                provider_source: provider_source.clone(),
+                grant: prepared,
             },
         );
+    production
+        .apply_completion_ingress(
+            &ProductionCompletionIngressV1::AcknowledgeParticipantConsumed {
+                acquisition: acquisition.clone(),
+                expected_acquisition_revision: production.completion_acquisitions[&acquisition]
+                    .revision,
+                participant: canwu_resource::PLUGIN_NAME.to_owned(),
+                provider_source,
+                grant: consumed,
+            },
+        )
+        .expect("coordinator acknowledges the consumed participant");
     production.observation_dirty_index.clear();
     production.observation_due_index.clear();
-    let mut scenario = scenario_with_production(production);
-    scenario
-        .domain_records
-        .push(resource.into_record().expect("resource output root"));
-    let production_plugin = ProductionPlugin;
-    let resource_plugin = ResourcePlugin::default();
-    let plugins: [&dyn canwu_api::SimulationPlugin; 2] = [&production_plugin, &resource_plugin];
-    let mut canwu =
-        Canwu::new_with_plugins(216, scenario, &plugins).expect("live-completion runtime");
+    LiveCompletionFixture {
+        production,
+        resource,
+        holder,
+        execution,
+        acquisition,
+        locked_production,
+    }
+}
 
-    // Both the progress and the completion arrive as live tracked commands,
-    // half an hour after the execution started.
-    let later = SimTime::from_minutes(30);
+/// Advances to `later`, then advances and completes the fixture's execution
+/// there with live tracked commands, half an hour after it started.
+fn complete_live_execution(
+    canwu: &mut Canwu,
+    holder: &KnowledgeHolderRef,
+    execution: &ProductionExecutionId,
+    later: SimTime,
+) {
     canwu
         .settle_boundary(BoundaryRequest::at(later))
         .expect("advance to the completion time");
     enqueue_tracked_production_operation(
-        &mut canwu,
-        &holder,
+        canwu,
+        holder,
         1,
         "production:live-completion:advance",
         ProductionOperation::AdvanceExecution {
@@ -5462,8 +5530,8 @@ fn live_completion_settles_output() {
             .unwrap_or_else(|error| panic!("{label}: {error}"));
     }
     enqueue_tracked_production_operation(
-        &mut canwu,
-        &holder,
+        canwu,
+        holder,
         2,
         "production:live-completion:complete",
         ProductionOperation::CompleteExecution {
@@ -5472,6 +5540,35 @@ fn live_completion_settles_output() {
             realization_evidence: None,
         },
     );
+}
+
+/// A running execution completed by a live `CompleteExecution` command
+/// settles its resource output. Every production record change after the
+/// completion lease locked the production runtime (here a live advance and the
+/// completion itself) advances that record's version; the output credit cites
+/// the production version that proves the completion, never the older locked
+/// version, and still settles, conserves, and replays exactly.
+#[test]
+fn live_completion_settles_output() {
+    let LiveCompletionFixture {
+        production,
+        resource,
+        holder,
+        execution,
+        acquisition,
+        locked_production,
+    } = live_completion_fixture();
+    let mut scenario = scenario_with_production(production);
+    scenario
+        .domain_records
+        .push(resource.into_record().expect("resource output root"));
+    let production_plugin = ProductionPlugin;
+    let resource_plugin = ResourcePlugin::default();
+    let plugins: [&dyn canwu_api::SimulationPlugin; 2] = [&production_plugin, &resource_plugin];
+    let mut canwu =
+        Canwu::new_with_plugins(216, scenario, &plugins).expect("live-completion runtime");
+    let later = SimTime::from_minutes(30);
+    complete_live_execution(&mut canwu, &holder, &execution, later);
     // Settle the output, then let the resource participant and the
     // production coordinator close the completion lease.
     for boundary in 0..12 {
@@ -5550,6 +5647,316 @@ fn live_completion_settles_output() {
     assert_eq!(
         replayed.snapshot_json().expect("replayed snapshot"),
         snapshot
+    );
+}
+
+/// An output batch the resource plugin defers settles at the instant it came
+/// due, not at the completion instant, so its credits' requests commit to
+/// that later instant. The output acknowledgement records it, and the
+/// archive rebuilds the request digests with it: the execution archives.
+/// Before, the archive rebuilt them with the completion instant and refused
+/// every execution whose output had waited. An acknowledgement that names
+/// another instant is refused with a trace and never fails its boundary.
+#[test]
+fn deferred_output_batch_settles_and_its_execution_archives() {
+    let LiveCompletionFixture {
+        production,
+        mut resource,
+        holder,
+        execution,
+        acquisition,
+        ..
+    } = live_completion_fixture();
+    // The resource root holds its hot records and nothing more, so the
+    // output batch finds no room until an archive commit clears the backlog.
+    let credits = production.executions[&execution].output_requests.len();
+    let hot_records = resource.terminal_archive_candidates.len();
+    assert!(
+        hot_records > credits,
+        "after an archive commit the batch must fit beside its receipt"
+    );
+    resource.limits.max_archive_candidates = hot_records;
+    let mut scenario = scenario_with_production(production);
+    scenario
+        .domain_records
+        .push(resource.into_record().expect("resource output root"));
+    let production_plugin = ProductionPlugin;
+    let resource_plugin = ResourcePlugin::default();
+    let plugins: [&dyn canwu_api::SimulationPlugin; 2] = [&production_plugin, &resource_plugin];
+    let store = TestProductionArchiveStore::default();
+    let mut canwu =
+        Canwu::new_with_plugins(217, scenario, &plugins).expect("deferred-output runtime");
+    canwu.set_plugin_archive_object_provider(Rc::new(store.clone()));
+    let completed_at = SimTime::from_minutes(30);
+    complete_live_execution(&mut canwu, &holder, &execution, completed_at);
+
+    // The completion dispatches the output batch, which is deferred a minute.
+    let mut deferred = Vec::new();
+    for boundary in 0..4 {
+        let events = canwu.events().len();
+        canwu
+            .settle_boundary(BoundaryRequest::at(completed_at))
+            .unwrap_or_else(|error| panic!("output dispatch boundary {boundary}: {error}"));
+        deferred.extend(
+            canwu.events()[events..]
+                .iter()
+                .filter_map(ResourceIngressSkipV1::from_event),
+        );
+        if !deferred.is_empty() {
+            break;
+        }
+    }
+    let due = SimTime::from_minutes(31);
+    assert_eq!(deferred.len(), 1, "{deferred:?}");
+    assert_eq!(
+        deferred[0].reason,
+        ResourceIngressSkipReasonV1::ArchiveBacklog
+    );
+    assert_eq!(deferred[0].deferred_until, Some(due));
+    assert_eq!(
+        production_state(&canwu).executions[&execution].lifecycle,
+        WorkOrderLifecycle::CompletedPendingOutputSettlement
+    );
+
+    // A resource archive commit makes room, and the batch settles when it
+    // comes due.
+    commit_resource_archive(&mut canwu, &store, completed_at);
+    // The participant's completion step that follows the acknowledgement
+    // waits for room in the same way.
+    let closed_at = SimTime::from_minutes(32);
+    let mut waiting = Vec::new();
+    for boundary in 0..8 {
+        let events = canwu.events().len();
+        canwu
+            .settle_boundary(BoundaryRequest::at(due))
+            .unwrap_or_else(|error| panic!("deferred output boundary {boundary}: {error}"));
+        waiting.extend(
+            canwu.events()[events..]
+                .iter()
+                .filter_map(ResourceIngressSkipV1::from_event),
+        );
+        if !waiting.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(
+        production_state(&canwu).executions[&execution].lifecycle,
+        WorkOrderLifecycle::Settled
+    );
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    assert_eq!(
+        waiting[0].reason,
+        ResourceIngressSkipReasonV1::ArchiveBacklog
+    );
+    assert_eq!(waiting[0].deferred_until, Some(closed_at));
+    // After another commit the coordinator closes the completion lease.
+    commit_resource_archive(&mut canwu, &store, due);
+    for boundary in 0..8 {
+        canwu
+            .settle_boundary(BoundaryRequest::at(closed_at))
+            .unwrap_or_else(|error| panic!("lease closing boundary {boundary}: {error}"));
+        if production_state(&canwu).completion_acquisitions[&acquisition].state
+            == canwu_resource::CompletionLeaseAcquisitionStateV1::Released
+        {
+            break;
+        }
+    }
+    let settled = production_state(&canwu);
+    let settled_execution = settled.executions[&execution].clone();
+    assert_eq!(settled_execution.lifecycle, WorkOrderLifecycle::Settled);
+    assert_eq!(settled_execution.completed_at, Some(completed_at));
+    assert_eq!(settled_execution.output_settled_at, Some(due));
+    assert!(settled.archive_due_index.contains(&execution));
+    assert_eq!(
+        settled.completion_acquisitions[&acquisition].state,
+        canwu_resource::CompletionLeaseAcquisitionStateV1::Released
+    );
+
+    // Restore rebuilds a settled execution's outcomes and acknowledgement at
+    // the instant its output settled, before it reads anything else, so a
+    // root that names another instant is refused although the root alone
+    // validates.
+    let (_, resource_now) = canwu_resource::resource_state(&canwu)
+        .expect("resource state query")
+        .expect("resource state");
+    let restore_with_settlement_at = |settled_at: SimTime| {
+        let mut production = settled.clone();
+        production
+            .executions
+            .get_mut(&execution)
+            .expect("settled execution")
+            .output_settled_at = Some(settled_at);
+        let mut scenario = scenario_with_production(production);
+        scenario
+            .domain_records
+            .push(resource_now.clone().into_record().expect("resource root"));
+        let rebuilt =
+            Canwu::new_with_plugins(219, scenario, &plugins).expect("rebuilt settled runtime");
+        validate_production_runtime_with_archives(&rebuilt, &store, &store)
+    };
+    let error = restore_with_settlement_at(completed_at)
+        .expect_err("a settled output named at another instant is refused at restore");
+    assert!(
+        error
+            .message
+            .starts_with("settled production output does not rebuild at restore"),
+        "{}",
+        error.message
+    );
+    // The recorded instant passes that check. This fixture's evidence
+    // bindings name stand-in bodies, so that restore stops later, at the
+    // first of them.
+    let error = restore_with_settlement_at(due)
+        .expect_err("the fixture's stand-in evidence bodies are absent");
+    assert!(
+        error.message.contains("evidence") && !error.message.contains("settled production output"),
+        "{}",
+        error.message
+    );
+    // An acknowledgement naming another instant does not match the credits'
+    // requests: it is refused with a trace, changes nothing, and the
+    // boundary settles.
+    let events = canwu.events().len();
+    canwu
+        .enqueue_plugin_ingress(PluginIngressRequest::new(
+            PLUGIN_NAME,
+            PRODUCTION_OUTPUT_ACK_INGRESS,
+            closed_at,
+            serde_json::to_value(ProductionOutputAcknowledgement {
+                execution: execution.clone(),
+                production_source: settled_execution
+                    .output_source
+                    .clone()
+                    .expect("settled output source"),
+                outcomes: settled_execution.output_outcomes.clone(),
+                settled_at: completed_at,
+            })
+            .expect("acknowledgement payload"),
+        ))
+        .expect("enqueue a mismatched acknowledgement");
+    for boundary in 0..2 {
+        canwu
+            .settle_boundary(BoundaryRequest::at(closed_at))
+            .unwrap_or_else(|error| panic!("refused acknowledgement boundary {boundary}: {error}"));
+    }
+    assert!(
+        canwu.events()[events..]
+            .iter()
+            .any(|event| event.kind.plugin_identity()
+                == Some((PLUGIN_NAME, "canwu.production.output_ack_refused.v1"))),
+        "the mismatched acknowledgement is refused with a trace"
+    );
+    assert_eq!(production_state(&canwu), settled);
+
+    // The execution archives: the archive rebuilds each request digest with
+    // the recorded settlement instant.
+    let prepared = settled
+        .prepare_production_archive(1, &store)
+        .expect("the settled execution prepares for the archive");
+    enqueue_production_archive(&mut canwu, &prepared, &store)
+        .expect("enqueue the production archive");
+    canwu
+        .settle_boundary(BoundaryRequest::at(closed_at))
+        .expect("production archive boundary");
+    let archived = production_state(&canwu);
+    assert!(!archived.executions.contains_key(&execution));
+    assert_eq!(archived.archive.archived_execution_count, 1);
+    validate_production_archive(&store, &archived).expect("archive head validates");
+
+    // Restore and exact replay agree with the run.
+    let snapshot = canwu.snapshot_json().expect("archived snapshot");
+    let restored = from_production_snapshot_json_with_archives(
+        &snapshot,
+        &plugins,
+        Rc::new(store.clone()),
+        Rc::new(store.clone()),
+    )
+    .expect("restored run");
+    assert_eq!(production_state(&restored), archived);
+    assert_eq!(
+        restored.snapshot_json().expect("restored snapshot"),
+        snapshot
+    );
+    let replayed = replay_production_from_journal_with_archives(
+        &plugins,
+        &canwu.replay_journal(),
+        Rc::new(store.clone()),
+        Rc::new(store),
+    )
+    .expect("exact replay");
+    assert_eq!(production_state(&replayed), archived);
+    assert_eq!(
+        replayed.snapshot_json().expect("replayed snapshot"),
+        snapshot
+    );
+}
+
+/// Commits every hot record of the resource root to the archive at `at`.
+fn commit_resource_archive(canwu: &mut Canwu, store: &TestProductionArchiveStore, at: SimTime) {
+    let (_, backlog) = canwu_resource::resource_state(canwu)
+        .expect("resource state query")
+        .expect("resource state");
+    let batch = backlog
+        .prepare_resource_archive(backlog.terminal_archive_candidates.len(), store)
+        .expect("resource archive batch");
+    canwu_resource::enqueue_resource_archive(canwu, &batch, store)
+        .expect("enqueue resource archive");
+    canwu
+        .settle_boundary(BoundaryRequest::at(at))
+        .expect("resource archive boundary");
+}
+
+/// A process with more outputs than one resource output batch carries could
+/// never settle its output, so the scenario that defines it is refused.
+#[test]
+fn process_with_more_outputs_than_one_batch_carries_is_refused_at_scenario_time() {
+    let (mut production, ..) = base_state();
+    let process_id = production
+        .processes
+        .keys()
+        .next()
+        .expect("fixture process")
+        .clone();
+    let template = production.processes[&process_id].outputs[0].clone();
+    let outputs = (0..=canwu_resource::MAX_PRODUCTION_OUTPUT_BATCH_CREDITS)
+        .map(|index| {
+            let mut output = template.clone();
+            output.resource = ResourceDefinitionRevisionId::new(format!(
+                "resource:bounded-output-definition:{index}"
+            ))
+            .expect("output definition ID");
+            output
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        outputs.len(),
+        canwu_resource::MAX_PRODUCTION_OUTPUT_BATCH_CREDITS + 1
+    );
+    let mut bounded = production.clone();
+    bounded
+        .processes
+        .get_mut(&process_id)
+        .expect("fixture process")
+        .outputs = outputs[..canwu_resource::MAX_PRODUCTION_OUTPUT_BATCH_CREDITS].to_vec();
+    let production_plugin = ProductionPlugin;
+    Canwu::new_with_plugins(
+        218,
+        scenario_with_production(bounded),
+        &[&production_plugin],
+    )
+    .expect("a process with as many outputs as one batch carries is admitted");
+    production
+        .processes
+        .get_mut(&process_id)
+        .expect("fixture process")
+        .outputs = outputs;
+    let refused = production
+        .into_initial_record()
+        .expect_err("a process with more outputs than one batch carries is refused");
+    assert_eq!(refused.code, canwu_api::ErrorCode::InvalidDomainRecord);
+    assert_eq!(
+        refused.message,
+        format!("process revision {process_id} is invalid")
     );
 }
 
@@ -6322,6 +6729,7 @@ fn sealed_run_admits_only_current_production_evidence_and_replays_exactly() {
             resource_completion_grant: resource_grant.clone(),
             realized_output_per_mille: None,
             realization_evidence: None,
+            output_settled_at: None,
         },
         allocations: vec![ProductionCapacityAllocation {
             id: allocation_id.clone(),

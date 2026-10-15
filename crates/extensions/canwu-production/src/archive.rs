@@ -1,16 +1,18 @@
 use crate::{
-    MAX_ARCHIVE_BYTES_PER_BATCH, MAX_ARCHIVE_OBJECTS_PER_BATCH, MAX_ARCHIVE_PAGE_ENTRIES,
-    MAX_ARCHIVE_PREPARE_CANDIDATES, PreparedProductionArchiveBatchV1, ProductionArchiveBlobV1,
-    ProductionArchiveIndexDirectoryV1, ProductionArchiveMaintenanceReceiptV1,
-    ProductionArchiveMembershipPageV1, ProductionArchiveMembershipV1, ProductionArchiveReceiptId,
-    ProductionArchiveRetentionHandleV1, ProductionArchiveRetentionPhaseV1,
-    ProductionArchiveTemporalEntryV1, ProductionArchiveTemporalPageV1, ProductionExecutionId,
+    MAX_ARCHIVE_BYTES_PER_BATCH, MAX_ARCHIVE_COMMIT_PAGES, MAX_ARCHIVE_OBJECTS_PER_BATCH,
+    MAX_ARCHIVE_PAGE_ENTRIES, MAX_ARCHIVE_PREPARE_CANDIDATES, PreparedProductionArchiveBatchV1,
+    PreparedProductionArchivePageV1, ProductionArchiveBlobV1, ProductionArchiveIndexDirectoryV1,
+    ProductionArchiveMaintenanceReceiptV1, ProductionArchiveMembershipPageV1,
+    ProductionArchiveMembershipV1, ProductionArchiveReceiptId, ProductionArchiveRetentionHandleV1,
+    ProductionArchiveRetentionPhaseV1, ProductionArchiveTemporalEntryV1,
+    ProductionArchiveTemporalPageV1, ProductionExecutionId,
     ProductionFacilityProjectArchiveRecordV1, ProductionState, ProductionTerminalArchiveKeyV1,
     ProductionTerminalArchiveRecordV1, VerifiedProductionArchiveCommitV1, WorkInProgressId,
     WorkOrderLifecycle, invalid,
 };
-use canwu_api::{CanwuError, ErrorCode, canonical_hash};
-use serde::{Serialize, de::DeserializeOwned};
+use canwu_api::{CanwuError, ErrorCode, SimTime, canonical_hash};
+use canwu_resource::{ResourceArchiveLookupEntryV1, ResourceError};
+use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const PRODUCTION_ARCHIVE_BLOB_NAMESPACE: &str = "canwu.production.archive.blob";
@@ -20,6 +22,18 @@ pub const PRODUCTION_ARCHIVE_TEMPORAL_PAGE_NAMESPACE: &str =
     "canwu.production.archive.temporal-page";
 pub const PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE: &str =
     "canwu.production.archive.index-directory";
+/// Namespace of the pages of the production archive's cumulative lookup
+/// index. A page has the format and content id of
+/// [`canwu_resource::ResourceArchiveLookupPageV1`]; only the namespace and
+/// the key digests (see [`production_archive_lookup_key_digest`]) are the
+/// production archive's own.
+pub const PRODUCTION_ARCHIVE_LOOKUP_PAGE_NAMESPACE: &str = "canwu.production.archive.lookup-page";
+
+const PRODUCTION_ARCHIVE_LOOKUP_KEY_DOMAIN: &str = "canwu.production.archive-lookup-key.v1";
+
+/// Format of [`ProductionArchiveBlobV1`]. Version 2 adds the archived
+/// maintenance receipts; a blob of any other version is refused.
+pub const PRODUCTION_ARCHIVE_BLOB_FORMAT_VERSION: u32 = 2;
 
 pub trait ProductionArchiveStore {
     fn store_production_archive_object(
@@ -47,61 +61,347 @@ pub trait ProductionArchiveStore {
     ) -> Result<(), CanwuError>;
 }
 
+/// The absent store: it holds no object and accepts none. It is enough to
+/// prepare the first archive commit of a production root, which reads
+/// nothing, and it fails every read of a root that already has an archive
+/// head.
+impl ProductionArchiveStore for () {
+    fn store_production_archive_object(
+        &self,
+        _namespace: &str,
+        _object_id: &str,
+        _bytes: &[u8],
+    ) -> Result<(), CanwuError> {
+        Err(invalid("no production archive store is attached"))
+    }
+
+    fn load_production_archive_object(
+        &self,
+        _namespace: &str,
+        _object_id: &str,
+    ) -> Result<Option<Vec<u8>>, CanwuError> {
+        Ok(None)
+    }
+
+    fn persist_production_archive_retention(
+        &self,
+        _handle: &ProductionArchiveRetentionHandleV1,
+    ) -> Result<(), CanwuError> {
+        Err(invalid("no production archive store is attached"))
+    }
+
+    fn finalize_production_archive_retention(
+        &self,
+        _handle_id: &str,
+        _phase: ProductionArchiveRetentionPhaseV1,
+    ) -> Result<(), CanwuError> {
+        Err(invalid("no production archive store is attached"))
+    }
+}
+
+/// One archived terminal record, as [`archived_production_terminal_record`]
+/// returns it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub enum ProductionArchivedRecordV1 {
+    /// A settled, cancelled, or failed execution with its work.
+    Execution(ProductionTerminalArchiveRecordV1),
+    /// A completed facility project.
+    FacilityProject(ProductionFacilityProjectArchiveRecordV1),
+    /// The maintenance receipt of an applied archive commit.
+    ArchiveMaintenanceReceipt(ProductionArchiveMaintenanceReceiptV1),
+}
+
+/// The production store seen as a store of lookup-index pages, so that the
+/// lookup-index functions of `canwu-resource` read and audit the production
+/// index. It serves the resource lookup-page namespace from the production
+/// one, refuses every other namespace, and writes nothing.
+struct ProductionLookupPages<'a>(&'a dyn ProductionArchiveStore);
+
+impl canwu_resource::ResourceArchiveStore for ProductionLookupPages<'_> {
+    fn store_resource_archive_object(
+        &self,
+        _namespace: &str,
+        _object_id: &str,
+        _bytes: &[u8],
+    ) -> Result<(), ResourceError> {
+        Err(ResourceError::InvalidLifecycle(
+            "the production lookup-page view is read-only".to_owned(),
+        ))
+    }
+
+    fn load_resource_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, ResourceError> {
+        if namespace != canwu_resource::RESOURCE_ARCHIVE_LOOKUP_PAGE_NAMESPACE {
+            return Err(ResourceError::InvalidDefinition(format!(
+                "the production lookup-page view serves no {namespace} object"
+            )));
+        }
+        self.0
+            .load_production_archive_object(PRODUCTION_ARCHIVE_LOOKUP_PAGE_NAMESPACE, object_id)
+            .map_err(|error| {
+                ResourceError::InvalidDefinition(format!(
+                    "production archive store failed: {error}"
+                ))
+            })
+    }
+
+    fn persist_resource_archive_retention(
+        &self,
+        _handle: &canwu_resource::ResourceArchiveRetentionHandleV1,
+    ) -> Result<(), ResourceError> {
+        Err(ResourceError::InvalidLifecycle(
+            "the production lookup-page view keeps no retention".to_owned(),
+        ))
+    }
+
+    fn finalize_resource_archive_retention(
+        &self,
+        _handle_id: &str,
+        _phase: canwu_resource::ResourceArchiveRetentionPhaseV1,
+    ) -> Result<(), ResourceError> {
+        Err(ResourceError::InvalidLifecycle(
+            "the production lookup-page view keeps no retention".to_owned(),
+        ))
+    }
+}
+
+fn lookup_error(error: &ResourceError) -> CanwuError {
+    invalid(format!("production archive lookup index: {error}"))
+}
+
+/// Digest under which the production lookup index files one terminal record
+/// key: a domain-separated BLAKE3 hash, whose hexadecimal nibbles are the
+/// key's path through the index.
+pub fn production_archive_lookup_key_digest(
+    key: &ProductionTerminalArchiveKeyV1,
+) -> Result<String, CanwuError> {
+    canonical_hash(PRODUCTION_ARCHIVE_LOOKUP_KEY_DOMAIN, key)
+}
+
+/// One terminal archive candidate of a production root, in selection order.
+enum ArchiveCandidate<'a> {
+    Receipt(&'a ProductionArchiveReceiptId),
+    Execution(&'a ProductionExecutionId),
+    FacilityProject(&'a crate::FacilityProjectId),
+}
+
 impl PreparedProductionArchiveBatchV1 {
+    /// Every blob of the batch with its membership and temporal page, in
+    /// order.
+    fn pages(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &ProductionArchiveBlobV1,
+            &ProductionArchiveMembershipPageV1,
+            &ProductionArchiveTemporalPageV1,
+        ),
+    > {
+        std::iter::once((&self.blob, &self.membership_page, &self.temporal_page)).chain(
+            self.additional_pages
+                .iter()
+                .map(|page| (&page.blob, &page.membership_page, &page.temporal_page)),
+        )
+    }
+
+    /// Terminal records the batch archives.
+    #[must_use]
+    pub fn selected_count(&self) -> usize {
+        self.selected_receipts.len() + self.selected.len() + self.selected_projects.len()
+    }
+
+    /// Checks that the batch is self-consistent before anything is stored:
+    /// page shape and bounds, the selection lists against the blobs, the
+    /// directory's object lists, the lookup page ids, and the retention
+    /// handle. [`Self::store_and_verify`] authenticates the records and the
+    /// stored index after writing them.
+    pub fn validate(&self) -> Result<(), CanwuError> {
+        let mut selected_receipts = Vec::new();
+        let mut selected = Vec::new();
+        let mut selected_projects = Vec::new();
+        let mut blob_ids = Vec::new();
+        let mut membership_page_ids = Vec::new();
+        let mut temporal_page_ids = Vec::new();
+        let mut pages_bind_their_blobs = true;
+        for (blob, membership_page, temporal_page) in self.pages() {
+            let records = blob.records.len() + blob.project_records.len() + blob.receipts.len();
+            selected.extend(blob.records.iter().map(|record| match &record.key {
+                ProductionTerminalArchiveKeyV1::Execution(id) => Some(id.clone()),
+                _ => None,
+            }));
+            selected_projects.extend(blob.project_records.iter().map(|record| match &record.key {
+                ProductionTerminalArchiveKeyV1::FacilityProject(id) => Some(id.clone()),
+                _ => None,
+            }));
+            selected_receipts.extend(blob.receipts.iter().map(|receipt| receipt.id.clone()));
+            pages_bind_their_blobs &= records > 0
+                && records <= MAX_ARCHIVE_PAGE_ENTRIES
+                && blob.expected_source_root == self.expected_source_root
+                && membership_page.memberships.len() == records
+                && temporal_page.entries.len() == records;
+            blob_ids.push(blob.content_id.clone());
+            membership_page_ids.push(membership_page.id.clone());
+            temporal_page_ids.push(temporal_page.id.clone());
+        }
+        let selected = selected.into_iter().collect::<Option<Vec<_>>>();
+        let selected_projects = selected_projects.into_iter().collect::<Option<Vec<_>>>();
+        let expected_object_ids = expected_retention_objects(
+            &blob_ids,
+            &membership_page_ids,
+            &temporal_page_ids,
+            &self.directory.id,
+        );
+        if self.selected_count() == 0
+            || self.selected_count() > MAX_ARCHIVE_PREPARE_CANDIDATES
+            || self.selected_receipts.len() > 1
+            || blob_ids.len() > MAX_ARCHIVE_COMMIT_PAGES
+            || selected.as_ref() != Some(&self.selected)
+            || selected_projects.as_ref() != Some(&self.selected_projects)
+            || selected_receipts != self.selected_receipts
+            || !pages_bind_their_blobs
+            || self.expected_source_root.len() != 64
+            || self.directory.previous_root.as_ref() == Some(&self.directory.id)
+            || self.directory.blob_ids != blob_ids
+            || self.directory.membership_pages != membership_page_ids
+            || self.directory.temporal_pages != temporal_page_ids
+            || !self.lookup_pages.contains_key(&self.directory.lookup_root)
+            || self.retention.phase != ProductionArchiveRetentionPhaseV1::Prepared
+            || self.retention.source_root != self.expected_source_root
+            || self.retention.target_directory_root != self.directory.id
+            || self.retention.object_ids != expected_object_ids
+            || self.retention.handle_id
+                != canonical_hash(
+                    "canwu.production.archive-retention-id.v1",
+                    &(&self.expected_source_root, &self.directory.id),
+                )?
+        {
+            return Err(invalid(
+                "prepared production archive batch is forged or lacks exact closure",
+            ));
+        }
+        for (id, page) in &self.lookup_pages {
+            if &page.id().map_err(|error| lookup_error(&error))? != id {
+                return Err(invalid("prepared production archive lookup page is forged"));
+            }
+        }
+        let mut detached = self.retention.clone();
+        let digest = std::mem::take(&mut detached.semantic_digest);
+        if digest != canonical_hash("canwu.production.archive-retention.v1", &detached)? {
+            return Err(invalid(
+                "prepared production archive retention handle is forged",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Stores every object of the batch, reads each back, and authenticates
+    /// the commit: its directory, blobs, typed records, and pages bind
+    /// exactly the selected records, and each of them resolves through the
+    /// stored lookup index to its own blob position.
+    ///
+    /// The batch is refused before anything is written when it would write
+    /// more than [`MAX_ARCHIVE_OBJECTS_PER_BATCH`] objects or
+    /// [`MAX_ARCHIVE_BYTES_PER_BATCH`] bytes; prepare a smaller one.
     pub fn store_and_verify(
         &self,
         store: &dyn ProductionArchiveStore,
     ) -> Result<VerifiedProductionArchiveCommitV1, CanwuError> {
-        store.persist_production_archive_retention(&self.retention)?;
-        let objects = [
-            (
-                PRODUCTION_ARCHIVE_BLOB_NAMESPACE,
-                self.blob.content_id.as_str(),
-                serde_json::to_vec(&self.blob),
-            ),
-            (
-                PRODUCTION_ARCHIVE_MEMBERSHIP_PAGE_NAMESPACE,
-                self.membership_page.id.as_str(),
-                serde_json::to_vec(&self.membership_page),
-            ),
-            (
-                PRODUCTION_ARCHIVE_TEMPORAL_PAGE_NAMESPACE,
-                self.temporal_page.id.as_str(),
-                serde_json::to_vec(&self.temporal_page),
-            ),
-            (
-                PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE,
-                self.directory.id.as_str(),
-                serde_json::to_vec(&self.directory),
-            ),
-        ];
-        if objects.len() > MAX_ARCHIVE_OBJECTS_PER_BATCH {
-            return Err(invalid("production archive object budget was exceeded"));
-        }
-        let mut byte_count = 0_usize;
-        for (namespace, object_id, encoded) in objects {
-            let bytes = encoded.map_err(|error| {
+        self.validate()?;
+        let encode = |value: Result<Vec<u8>, serde_json::Error>| {
+            value.map_err(|error| {
                 invalid(format!(
                     "production archive object could not be encoded: {error}"
                 ))
-            })?;
-            byte_count = byte_count
-                .checked_add(bytes.len())
-                .ok_or_else(|| invalid("production archive byte count overflowed"))?;
-            if byte_count > MAX_ARCHIVE_BYTES_PER_BATCH {
-                return Err(invalid("production archive byte budget was exceeded"));
-            }
-            store.store_production_archive_object(namespace, object_id, &bytes)?;
+            })
+        };
+        let mut objects = Vec::new();
+        for (blob, membership_page, temporal_page) in self.pages() {
+            objects.push((
+                PRODUCTION_ARCHIVE_BLOB_NAMESPACE,
+                blob.content_id.as_str(),
+                encode(serde_json::to_vec(blob))?,
+            ));
+            objects.push((
+                PRODUCTION_ARCHIVE_MEMBERSHIP_PAGE_NAMESPACE,
+                membership_page.id.as_str(),
+                encode(serde_json::to_vec(membership_page))?,
+            ));
+            objects.push((
+                PRODUCTION_ARCHIVE_TEMPORAL_PAGE_NAMESPACE,
+                temporal_page.id.as_str(),
+                encode(serde_json::to_vec(temporal_page))?,
+            ));
+        }
+        for (id, page) in &self.lookup_pages {
+            objects.push((
+                PRODUCTION_ARCHIVE_LOOKUP_PAGE_NAMESPACE,
+                id.as_str(),
+                encode(serde_json::to_vec(page))?,
+            ));
+        }
+        // The directory goes last: once it is stored, everything it names is.
+        objects.push((
+            PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE,
+            self.directory.id.as_str(),
+            encode(serde_json::to_vec(&self.directory))?,
+        ));
+        let bytes = objects
+            .iter()
+            .try_fold(0_usize, |total, (_, _, bytes)| {
+                total.checked_add(bytes.len())
+            })
+            .ok_or_else(|| invalid("production archive byte count overflowed"))?;
+        if objects.len() > MAX_ARCHIVE_OBJECTS_PER_BATCH {
+            return Err(invalid("production archive object budget was exceeded"));
+        }
+        if bytes > MAX_ARCHIVE_BYTES_PER_BATCH {
+            return Err(invalid("production archive byte budget was exceeded"));
+        }
+        store.persist_production_archive_retention(&self.retention)?;
+        for (namespace, object_id, bytes) in &objects {
+            store.store_production_archive_object(namespace, object_id, bytes)?;
             let loaded = store
                 .load_production_archive_object(namespace, object_id)?
                 .ok_or_else(|| invalid("production archive readback object is unavailable"))?;
-            if loaded != bytes {
+            if &loaded != bytes {
                 return Err(invalid(
                     "production archive readback bytes differ from the stored object",
                 ));
             }
         }
-        authenticate_production_archive_directory(store, &self.directory)?;
+        let loaded: ProductionArchiveIndexDirectoryV1 = load_encoded(
+            store,
+            PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE,
+            &self.directory.id,
+        )?
+        .ok_or_else(|| invalid("production archive directory readback is unavailable"))?;
+        if loaded != self.directory {
+            return Err(invalid("production archive directory readback differs"));
+        }
+        let closure = authenticate_production_archive_directory_closure(store, &loaded)?;
+        let mut expected = closure
+            .records
+            .into_iter()
+            .map(|(key, blob_id, ordinal)| {
+                Ok(ResourceArchiveLookupEntryV1 {
+                    key_digest: production_archive_lookup_key_digest(&key)?,
+                    blob_id,
+                    ordinal,
+                })
+            })
+            .collect::<Result<Vec<_>, CanwuError>>()?;
+        expected.sort();
+        canwu_resource::verify_resource_archive_lookup_entries(
+            &ProductionLookupPages(store),
+            &loaded.lookup_root,
+            "",
+            &expected,
+        )
+        .map_err(|error| lookup_error(&error))?;
         let mut retention = self.retention.clone();
         retention.phase = ProductionArchiveRetentionPhaseV1::Verified;
         retention.semantic_digest.clear();
@@ -110,15 +410,103 @@ impl PreparedProductionArchiveBatchV1 {
         store.persist_production_archive_retention(&retention)?;
         Ok(VerifiedProductionArchiveCommitV1 {
             expected_source_root: self.expected_source_root.clone(),
+            selected_receipts: self.selected_receipts.clone(),
             selected: self.selected.clone(),
             selected_projects: self.selected_projects.clone(),
             directory_root: self.directory.id.clone(),
+            lookup_root: self.directory.lookup_root.clone(),
             retention,
         })
     }
 }
 
+impl VerifiedProductionArchiveCommitV1 {
+    /// Terminal records the commit archives when it applies.
+    #[must_use]
+    pub fn selected_count(&self) -> usize {
+        self.selected_receipts.len() + self.selected.len() + self.selected_projects.len()
+    }
+
+    /// Checks that the commit is self-consistent: between one and
+    /// [`MAX_ARCHIVE_PREPARE_CANDIDATES`] distinct selected records with at
+    /// most one receipt, and a verified retention handle bound to the same
+    /// source root and directory. It reads no store.
+    pub fn validate(&self) -> Result<(), CanwuError> {
+        let mut detached = self.retention.clone();
+        let digest = std::mem::take(&mut detached.semantic_digest);
+        let unique = |count: usize, distinct: usize| count == distinct;
+        if self.selected_count() == 0
+            || self.selected_count() > MAX_ARCHIVE_PREPARE_CANDIDATES
+            || self.selected_receipts.len() > 1
+            || !unique(
+                self.selected.len(),
+                self.selected.iter().collect::<BTreeSet<_>>().len(),
+            )
+            || !unique(
+                self.selected_projects.len(),
+                self.selected_projects.iter().collect::<BTreeSet<_>>().len(),
+            )
+            || self.expected_source_root.len() != 64
+            || self.directory_root.len() != 64
+            || !is_digest(&self.lookup_root)
+            || digest != canonical_hash("canwu.production.archive-retention.v1", &detached)?
+            || !matches!(
+                self.retention.phase,
+                ProductionArchiveRetentionPhaseV1::Verified
+                    | ProductionArchiveRetentionPhaseV1::DurableIngress
+            )
+            || self.retention.source_root != self.expected_source_root
+            || self.retention.target_directory_root != self.directory_root
+            || self.retention.handle_id
+                != canonical_hash(
+                    "canwu.production.archive-retention-id.v1",
+                    &(&self.expected_source_root, &self.directory_root),
+                )?
+            || self
+                .retention
+                .object_ids
+                .get(PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE)
+                != Some(&BTreeSet::from([self.directory_root.clone()]))
+        {
+            return Err(invalid(
+                "production archive commit is forged or incompletely bound",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn expected_retention_objects(
+    blob_ids: &[String],
+    membership_pages: &[String],
+    temporal_pages: &[String],
+    directory: &str,
+) -> BTreeMap<String, BTreeSet<String>> {
+    BTreeMap::from([
+        (
+            PRODUCTION_ARCHIVE_BLOB_NAMESPACE.to_owned(),
+            blob_ids.iter().cloned().collect(),
+        ),
+        (
+            PRODUCTION_ARCHIVE_MEMBERSHIP_PAGE_NAMESPACE.to_owned(),
+            membership_pages.iter().cloned().collect(),
+        ),
+        (
+            PRODUCTION_ARCHIVE_TEMPORAL_PAGE_NAMESPACE.to_owned(),
+            temporal_pages.iter().cloned().collect(),
+        ),
+        (
+            PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE.to_owned(),
+            BTreeSet::from([directory.to_owned()]),
+        ),
+    ])
+}
+
 impl ProductionState {
+    /// The digest an archive batch is prepared from and applies against:
+    /// the runtime revision, which every production transition advances, and
+    /// the archive head and candidate indexes. A commit whose source root is
+    /// not the root's current one settles as stale.
     pub fn archive_source_root(&self) -> Result<String, CanwuError> {
         canonical_hash(
             "canwu.production.archive-source-root.v1",
@@ -130,150 +518,127 @@ impl ProductionState {
                 self.archive.archived_project_count,
                 self.archive.committed_batch_count,
                 &self.project_archive_due_index,
+                self.archive.archived_receipt_count,
+                self.archive.receipt_sequence,
             ),
         )
     }
 
+    /// The hot receipt of an applied commit, which the next commit archives
+    /// first: at most one, the receipt of the commit at the archive head.
+    fn applied_archive_receipts(&self) -> impl Iterator<Item = &ProductionArchiveReceiptId> {
+        self.archive
+            .maintenance_receipts
+            .values()
+            .filter(|receipt| receipt.disposition == ProductionArchiveRetentionPhaseV1::Committed)
+            .map(|receipt| &receipt.id)
+    }
+
+    /// Prepares one archive commit of the first `candidate_limit` terminal
+    /// candidates: the receipt of the commit at the archive head, then
+    /// terminal executions, then completed facility projects, each in
+    /// identity order.
+    ///
+    /// The batch is cut into blobs of at most [`MAX_ARCHIVE_PAGE_ENTRIES`]
+    /// records, each with its own membership and temporal page, so one commit
+    /// carries up to [`MAX_ARCHIVE_PREPARE_CANDIDATES`] records. Its directory
+    /// also commits to the cumulative lookup index extended by those records.
+    /// Extending the index reads the archive head's directory and the lookup
+    /// pages on the paths of the new keys from `store`; nothing is written
+    /// until [`PreparedProductionArchiveBatchV1::store_and_verify`]. The
+    /// result is a function of this state and the stored index alone.
+    ///
+    /// The receipt of the head commit is always a candidate, so once the
+    /// archive has a head this succeeds even when nothing else is terminal: a
+    /// batch whose `selected` and `selected_projects` are empty archives only
+    /// that receipt. A host application commits when `archive_due_index` or
+    /// `project_archive_due_index` holds records.
+    ///
+    /// It refuses, as `archive_backpressure`, while the root holds
+    /// [`crate::ProductionLimitsV1::max_pending_retention_handles`] retention
+    /// handles that the host application has not acknowledged.
     pub fn prepare_production_archive(
         &self,
         candidate_limit: usize,
+        store: &dyn ProductionArchiveStore,
     ) -> Result<PreparedProductionArchiveBatchV1, CanwuError> {
         if candidate_limit == 0 || candidate_limit > MAX_ARCHIVE_PREPARE_CANDIDATES {
             return Err(invalid("production archive candidate budget is invalid"));
         }
         if self.archive.pending_handles.len()
             >= crate::ProductionLimitsV1::canonical().max_pending_retention_handles
-            || self.archive.maintenance_receipts.len()
-                >= crate::ProductionLimitsV1::canonical().max_operation_outcomes
         {
             return Err(CanwuError::new(
                 ErrorCode::ValueOutOfRange,
                 "archive_backpressure: production archive retention capacity is exhausted",
             ));
         }
-        let selected = self
-            .archive_due_index
-            .iter()
+        let candidates = self
+            .applied_archive_receipts()
+            .map(ArchiveCandidate::Receipt)
+            .chain(
+                self.archive_due_index
+                    .iter()
+                    .map(ArchiveCandidate::Execution),
+            )
+            .chain(
+                self.project_archive_due_index
+                    .iter()
+                    .map(ArchiveCandidate::FacilityProject),
+            )
             .take(candidate_limit)
-            .cloned()
             .collect::<Vec<_>>();
-        let remaining = candidate_limit.saturating_sub(selected.len());
-        let selected_projects = self
-            .project_archive_due_index
-            .iter()
-            .take(remaining)
-            .cloned()
-            .collect::<Vec<_>>();
-        if selected.is_empty() && selected_projects.is_empty() {
+        if candidates.is_empty() {
             return Err(CanwuError::new(
                 ErrorCode::DomainRecordNotFound,
-                "production archive has no eligible terminal execution or facility project",
+                "production archive has no eligible terminal record",
             ));
         }
-        if selected
-            .len()
-            .checked_add(selected_projects.len())
-            .is_none_or(|count| count > candidate_limit || count > MAX_ARCHIVE_PAGE_ENTRIES)
-        {
-            return Err(invalid("production archive due-work budget was exceeded"));
-        }
         let expected_source_root = self.archive_source_root()?;
-        let records = selected
-            .iter()
-            .map(|execution| self.terminal_archive_record(execution))
-            .collect::<Result<Vec<_>, _>>()?;
-        let project_records = selected_projects
-            .iter()
-            .map(|project| self.facility_project_archive_record(project))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut blob = ProductionArchiveBlobV1 {
-            format_version: 1,
-            expected_source_root: expected_source_root.clone(),
-            records,
-            project_records,
-            content_id: String::new(),
+        let mut selected_receipts = Vec::new();
+        let mut selected = Vec::new();
+        let mut selected_projects = Vec::new();
+        for candidate in &candidates {
+            match candidate {
+                ArchiveCandidate::Receipt(id) => selected_receipts.push((*id).clone()),
+                ArchiveCandidate::Execution(id) => selected.push((*id).clone()),
+                ArchiveCandidate::FacilityProject(id) => selected_projects.push((*id).clone()),
+            }
+        }
+        let pages = self.archive_pages(&expected_source_root, &candidates)?;
+        let previous_lookup_root = match &self.archive.directory_root {
+            Some(root) => {
+                let previous = load_production_archive_directory(store, root)?;
+                if previous.archived_execution_count != self.archive.archived_execution_count
+                    || previous.archived_project_count != self.archive.archived_project_count
+                    || previous.archived_receipt_count != self.archive.archived_receipt_count
+                {
+                    return Err(invalid(
+                        "production archive head directory differs from the head record counts",
+                    ));
+                }
+                Some(previous.lookup_root)
+            }
+            None => None,
         };
-        blob.content_id = canonical_hash("canwu.production.archive-blob.v1", &blob)?;
-        let mut membership_page = ProductionArchiveMembershipPageV1 {
-            id: String::new(),
-            memberships: blob
-                .records
-                .iter()
-                .map(|record| (&record.key, &record.canonical_digest))
-                .chain(
-                    blob.project_records
-                        .iter()
-                        .map(|record| (&record.key, &record.canonical_digest)),
-                )
-                .enumerate()
-                .map(|(ordinal, (key, digest))| {
-                    Ok(ProductionArchiveMembershipV1 {
-                        key: key.clone(),
-                        blob_id: blob.content_id.clone(),
-                        ordinal: u16::try_from(ordinal).map_err(|_| {
-                            invalid("production archive membership ordinal overflowed")
-                        })?,
-                        semantic_digest: digest.clone(),
-                    })
+        let entries = pages
+            .iter()
+            .flat_map(|page| &page.membership_page.memberships)
+            .map(|membership| {
+                Ok(ResourceArchiveLookupEntryV1 {
+                    key_digest: production_archive_lookup_key_digest(&membership.key)?,
+                    blob_id: membership.blob_id.clone(),
+                    ordinal: membership.ordinal,
                 })
-                .collect::<Result<Vec<_>, CanwuError>>()?,
-            semantic_digest: String::new(),
-        };
-        membership_page.semantic_digest = canonical_hash(
-            "canwu.production.archive-membership-page.v1",
-            &membership_page,
-        )?;
-        membership_page.id = membership_page.semantic_digest.clone();
-        let mut temporal_page = ProductionArchiveTemporalPageV1 {
-            id: String::new(),
-            entries: blob
-                .records
-                .iter()
-                .map(|record| (record.terminal_at, record.key.clone()))
-                .chain(
-                    blob.project_records
-                        .iter()
-                        .map(|record| (record.terminal_at, record.key.clone())),
-                )
-                .map(|(terminal_at, key)| ProductionArchiveTemporalEntryV1 { terminal_at, key })
-                .collect(),
-            semantic_digest: String::new(),
-        };
-        temporal_page
-            .entries
-            .sort_by_key(|entry| (entry.terminal_at, entry.key.clone()));
-        temporal_page.semantic_digest =
-            canonical_hash("canwu.production.archive-temporal-page.v1", &temporal_page)?;
-        temporal_page.id = temporal_page.semantic_digest.clone();
-        let archived_execution_count = self
-            .archive
-            .archived_execution_count
-            .checked_add(
-                u64::try_from(selected.len())
-                    .map_err(|_| invalid("production archive count overflowed"))?,
-            )
-            .ok_or_else(|| invalid("production archive count overflowed"))?;
-        let archived_project_count = self
-            .archive
-            .archived_project_count
-            .checked_add(
-                u64::try_from(selected_projects.len())
-                    .map_err(|_| invalid("production project archive count overflowed"))?,
-            )
-            .ok_or_else(|| invalid("production project archive count overflowed"))?;
-        let mut directory = ProductionArchiveIndexDirectoryV1 {
-            id: String::new(),
-            previous_root: self.archive.directory_root.clone(),
-            blob_ids: vec![blob.content_id.clone()],
-            membership_pages: vec![membership_page.id.clone()],
-            temporal_pages: vec![temporal_page.id.clone()],
-            archived_execution_count,
-            archived_project_count,
-            semantic_digest: String::new(),
-        };
-        directory.semantic_digest =
-            canonical_hash("canwu.production.archive-directory.v1", &directory)?;
-        directory.id = directory.semantic_digest.clone();
+            })
+            .collect::<Result<Vec<_>, CanwuError>>()?;
+        let lookup = canwu_resource::prepare_resource_archive_lookup_entries(
+            &ProductionLookupPages(store),
+            previous_lookup_root.as_deref(),
+            entries,
+        )
+        .map_err(|error| lookup_error(&error))?;
+        let directory = self.archive_directory(&pages, lookup.root)?;
         let handle_id = canonical_hash(
             "canwu.production.archive-retention-id.v1",
             &(&expected_source_root, &directory.id),
@@ -282,91 +647,191 @@ impl ProductionState {
             handle_id,
             source_root: expected_source_root.clone(),
             target_directory_root: directory.id.clone(),
-            object_ids: BTreeMap::from([
-                (
-                    PRODUCTION_ARCHIVE_BLOB_NAMESPACE.to_owned(),
-                    BTreeSet::from([blob.content_id.clone()]),
-                ),
-                (
-                    PRODUCTION_ARCHIVE_MEMBERSHIP_PAGE_NAMESPACE.to_owned(),
-                    BTreeSet::from([membership_page.id.clone()]),
-                ),
-                (
-                    PRODUCTION_ARCHIVE_TEMPORAL_PAGE_NAMESPACE.to_owned(),
-                    BTreeSet::from([temporal_page.id.clone()]),
-                ),
-                (
-                    PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE.to_owned(),
-                    BTreeSet::from([directory.id.clone()]),
-                ),
-            ]),
+            object_ids: expected_retention_objects(
+                &directory.blob_ids,
+                &directory.membership_pages,
+                &directory.temporal_pages,
+                &directory.id,
+            ),
             phase: ProductionArchiveRetentionPhaseV1::Prepared,
             semantic_digest: String::new(),
         };
         retention.semantic_digest =
             canonical_hash("canwu.production.archive-retention.v1", &retention)?;
+        let mut pages = pages.into_iter();
+        let first = pages
+            .next()
+            .ok_or_else(|| invalid("production archive batch has no page"))?;
         Ok(PreparedProductionArchiveBatchV1 {
             expected_source_root,
+            selected_receipts,
             selected,
             selected_projects,
-            blob,
-            membership_page,
-            temporal_page,
+            blob: first.blob,
+            membership_page: first.membership_page,
+            temporal_page: first.temporal_page,
+            additional_pages: pages.collect(),
+            lookup_pages: lookup.pages,
+            superseded_lookup_pages: lookup.superseded,
             directory,
             retention,
         })
     }
 
+    /// The blobs, with their membership and temporal pages, of a commit of
+    /// `candidates` prepared from `source_root`, cut into pages of
+    /// [`MAX_ARCHIVE_PAGE_ENTRIES`] in order.
+    fn archive_pages(
+        &self,
+        source_root: &str,
+        candidates: &[ArchiveCandidate<'_>],
+    ) -> Result<Vec<PreparedProductionArchivePageV1>, CanwuError> {
+        let mut pages = Vec::with_capacity(candidates.len().div_ceil(MAX_ARCHIVE_PAGE_ENTRIES));
+        for chunk in candidates.chunks(MAX_ARCHIVE_PAGE_ENTRIES) {
+            let mut blob = ProductionArchiveBlobV1 {
+                format_version: PRODUCTION_ARCHIVE_BLOB_FORMAT_VERSION,
+                expected_source_root: source_root.to_owned(),
+                records: Vec::new(),
+                project_records: Vec::new(),
+                receipts: Vec::new(),
+                content_id: String::new(),
+            };
+            for candidate in chunk {
+                match candidate {
+                    ArchiveCandidate::Receipt(id) => {
+                        blob.receipts.push(
+                            self.archive
+                                .maintenance_receipts
+                                .get(*id)
+                                .ok_or_else(|| {
+                                    invalid("production archive candidate receipt is unavailable")
+                                })?
+                                .clone(),
+                        );
+                    }
+                    ArchiveCandidate::Execution(id) => {
+                        blob.records.push(self.terminal_archive_record(id)?);
+                    }
+                    ArchiveCandidate::FacilityProject(id) => {
+                        blob.project_records
+                            .push(self.facility_project_archive_record(id)?);
+                    }
+                }
+            }
+            blob.content_id = canonical_hash("canwu.production.archive-blob.v1", &blob)?;
+            pages.push(prepare_archive_page(blob)?);
+        }
+        Ok(pages)
+    }
+
+    /// The directory of a commit of `pages` on top of this root's archive
+    /// head, naming the lookup index `lookup_root`.
+    fn archive_directory(
+        &self,
+        pages: &[PreparedProductionArchivePageV1],
+        lookup_root: String,
+    ) -> Result<ProductionArchiveIndexDirectoryV1, CanwuError> {
+        let add = |total: u64, value: usize| {
+            u64::try_from(value)
+                .ok()
+                .and_then(|value| total.checked_add(value))
+                .ok_or_else(|| invalid("production archive count overflowed"))
+        };
+        let (executions, projects, receipts) =
+            pages
+                .iter()
+                .fold((0_usize, 0_usize, 0_usize), |totals, page| {
+                    (
+                        totals.0 + page.blob.records.len(),
+                        totals.1 + page.blob.project_records.len(),
+                        totals.2 + page.blob.receipts.len(),
+                    )
+                });
+        let mut directory = ProductionArchiveIndexDirectoryV1 {
+            id: String::new(),
+            previous_root: self.archive.directory_root.clone(),
+            blob_ids: pages
+                .iter()
+                .map(|page| page.blob.content_id.clone())
+                .collect(),
+            membership_pages: pages
+                .iter()
+                .map(|page| page.membership_page.id.clone())
+                .collect(),
+            temporal_pages: pages
+                .iter()
+                .map(|page| page.temporal_page.id.clone())
+                .collect(),
+            archived_execution_count: add(self.archive.archived_execution_count, executions)?,
+            archived_project_count: add(self.archive.archived_project_count, projects)?,
+            archived_receipt_count: add(self.archive.archived_receipt_count, receipts)?,
+            lookup_root,
+            semantic_digest: String::new(),
+        };
+        directory.semantic_digest =
+            canonical_hash("canwu.production.archive-directory.v1", &directory)?;
+        directory.id.clone_from(&directory.semantic_digest);
+        Ok(directory)
+    }
+
+    /// Settles one verified archive commit against this root and records its
+    /// maintenance receipt and retention handle.
+    ///
+    /// A commit prepared from the current root is applied: its records leave
+    /// the root and the archive head moves to its directory. Any other commit
+    /// is stale and changes nothing else. Neither reads the archive store,
+    /// and neither can fail for capacity: an applied commit archives the
+    /// receipt of the commit before it, so the root holds one applied
+    /// receipt; a stale receipt is not an archive candidate and stays only
+    /// until the host application acknowledges its retention handle. The
+    /// batch an applied commit names was checked against this root and the
+    /// store when it was queued ([`crate::enqueue_production_archive`]).
     pub(crate) fn apply_production_archive_commit(
         &mut self,
         commit: &VerifiedProductionArchiveCommitV1,
+        at: SimTime,
     ) -> Result<ProductionArchiveMaintenanceReceiptV1, CanwuError> {
-        let mut detached_retention = commit.retention.clone();
-        let retention_digest = std::mem::take(&mut detached_retention.semantic_digest);
-        if retention_digest
-            != canonical_hash("canwu.production.archive-retention.v1", &detached_retention)?
-            || !matches!(
-                commit.retention.phase,
-                ProductionArchiveRetentionPhaseV1::Verified
-                    | ProductionArchiveRetentionPhaseV1::DurableIngress
-            )
-            || commit.retention.source_root != commit.expected_source_root
-            || commit.retention.target_directory_root != commit.directory_root
-            || commit
-                .retention
-                .object_ids
-                .get(PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE)
-                != Some(&BTreeSet::from([commit.directory_root.clone()]))
-        {
-            return Err(invalid(
-                "production archive commit retention handle is forged or incompletely bound",
-            ));
-        }
-        let selected_count = commit
-            .selected
-            .len()
-            .checked_add(commit.selected_projects.len())
-            .ok_or_else(|| invalid("production archive selection count overflowed"))?;
+        commit.validate()?;
         let applied = self.archive_source_root()? == commit.expected_source_root;
         if applied {
-            if selected_count == 0 || selected_count > MAX_ARCHIVE_PREPARE_CANDIDATES {
+            let head_receipts = self.applied_archive_receipts().cloned().collect::<Vec<_>>();
+            if commit.selected_receipts != head_receipts {
                 return Err(invalid(
-                    "production archive commit selection is empty or exceeds its bound",
+                    "production archive commit does not archive the receipt of the head commit first",
                 ));
             }
-            let expected = self.prepare_production_archive(selected_count)?;
-            if expected.selected != commit.selected
-                || expected.selected_projects != commit.selected_projects
-                || expected.directory.id != commit.directory_root
-                || expected.retention.handle_id != commit.retention.handle_id
-                || expected.retention.source_root != commit.retention.source_root
-                || expected.retention.target_directory_root
-                    != commit.retention.target_directory_root
-                || expected.retention.object_ids != commit.retention.object_ids
+            // The blobs, pages, and directory of the selection are rebuilt
+            // from this root, with the lookup root the commit names, and must
+            // be the ones the commit stored. This reads no store.
+            let candidates = commit
+                .selected_receipts
+                .iter()
+                .map(ArchiveCandidate::Receipt)
+                .chain(commit.selected.iter().map(ArchiveCandidate::Execution))
+                .chain(
+                    commit
+                        .selected_projects
+                        .iter()
+                        .map(ArchiveCandidate::FacilityProject),
+                )
+                .collect::<Vec<_>>();
+            let pages = self.archive_pages(&commit.expected_source_root, &candidates)?;
+            let directory = self.archive_directory(&pages, commit.lookup_root.clone())?;
+            if directory.id != commit.directory_root
+                || commit.retention.object_ids
+                    != expected_retention_objects(
+                        &directory.blob_ids,
+                        &directory.membership_pages,
+                        &directory.temporal_pages,
+                        &directory.id,
+                    )
             {
                 return Err(invalid(
-                    "production archive commit does not bind the exact selected blob, pages, directory, and retention objects",
+                    "production archive commit does not bind the exact records of its selection",
                 ));
+            }
+            for receipt in &commit.selected_receipts {
+                self.archive.maintenance_receipts.remove(receipt);
             }
             for execution_id in &commit.selected {
                 self.remove_hot_terminal_execution(execution_id)?;
@@ -374,23 +839,23 @@ impl ProductionState {
             for project_id in &commit.selected_projects {
                 self.remove_hot_terminal_project(project_id)?;
             }
+            let add = |total: u64, value: usize| {
+                u64::try_from(value)
+                    .ok()
+                    .and_then(|value| total.checked_add(value))
+                    .ok_or_else(|| invalid("production archive count overflowed"))
+            };
             self.archive.directory_root = Some(commit.directory_root.clone());
-            self.archive.archived_execution_count = self
-                .archive
-                .archived_execution_count
-                .checked_add(
-                    u64::try_from(commit.selected.len())
-                        .map_err(|_| invalid("production archive count overflowed"))?,
-                )
-                .ok_or_else(|| invalid("production archive count overflowed"))?;
-            self.archive.archived_project_count = self
-                .archive
-                .archived_project_count
-                .checked_add(
-                    u64::try_from(commit.selected_projects.len())
-                        .map_err(|_| invalid("production project archive count overflowed"))?,
-                )
-                .ok_or_else(|| invalid("production project archive count overflowed"))?;
+            self.archive.archived_execution_count =
+                add(self.archive.archived_execution_count, commit.selected.len())?;
+            self.archive.archived_project_count = add(
+                self.archive.archived_project_count,
+                commit.selected_projects.len(),
+            )?;
+            self.archive.archived_receipt_count = add(
+                self.archive.archived_receipt_count,
+                commit.selected_receipts.len(),
+            )?;
             self.archive.committed_batch_count = self
                 .archive
                 .committed_batch_count
@@ -402,17 +867,18 @@ impl ProductionState {
         } else {
             ProductionArchiveRetentionPhaseV1::RejectedStale
         };
-        let receipt_sequence = self
+        self.archive.receipt_sequence = self
             .archive
-            .maintenance_receipts
-            .len()
+            .receipt_sequence
             .checked_add(1)
             .ok_or_else(|| invalid("production archive receipt sequence overflowed"))?;
         let id = ProductionArchiveReceiptId::new(format!(
-            "canwu.production:archive-receipt:{receipt_sequence}"
+            "canwu.production:archive-receipt:{}",
+            self.archive.receipt_sequence
         ))?;
         let mut receipt = ProductionArchiveMaintenanceReceiptV1 {
             id: id.clone(),
+            retention_handle_id: commit.retention.handle_id.clone(),
             source_root: commit.expected_source_root.clone(),
             directory_root: commit.directory_root.clone(),
             archived_executions: if applied { commit.selected.len() } else { 0 },
@@ -421,7 +887,13 @@ impl ProductionState {
             } else {
                 0
             },
+            archived_receipts: if applied {
+                commit.selected_receipts.len()
+            } else {
+                0
+            },
             disposition,
+            settled_at: at,
             canonical_digest: String::new(),
         };
         receipt.canonical_digest =
@@ -433,9 +905,13 @@ impl ProductionState {
         handle.phase = disposition;
         handle.semantic_digest.clear();
         handle.semantic_digest = canonical_hash("canwu.production.archive-retention.v1", &handle)?;
-        self.archive
-            .pending_handles
-            .insert(handle.handle_id.clone(), handle);
+        // The same batch queued twice shares one handle id: its stale
+        // duplicate must not overwrite the handle of the applied commit.
+        if applied || !self.archive.pending_handles.contains_key(&handle.handle_id) {
+            self.archive
+                .pending_handles
+                .insert(handle.handle_id.clone(), handle);
+        }
         self.revision = self
             .revision
             .checked_add(1)
@@ -444,26 +920,40 @@ impl ProductionState {
         Ok(receipt)
     }
 
+    /// Retires the recovery metadata of one settled archive commit after the
+    /// host application finalized its store-side retention: the retention
+    /// handle, and every stale receipt recorded under it.
+    ///
+    /// The same batch queued twice settles once as applied and once as stale
+    /// under one handle id, so stale receipts are retired by handle. A handle
+    /// that is already gone, because the acknowledgement arrived twice, makes
+    /// this a no-op that still advances the runtime revision. The receipt of
+    /// an applied commit is not retired here: the next commit archives it.
     pub fn acknowledge_production_archive_retention(
         &mut self,
         handle_id: &str,
     ) -> Result<(), CanwuError> {
-        let handle = self
+        if self
             .archive
             .pending_handles
             .get(handle_id)
-            .ok_or_else(|| invalid("production archive retention handle is unavailable"))?;
-        if !matches!(
-            handle.phase,
-            ProductionArchiveRetentionPhaseV1::Committed
-                | ProductionArchiveRetentionPhaseV1::RejectedStale
-                | ProductionArchiveRetentionPhaseV1::Abandoned
-        ) {
+            .is_some_and(|handle| {
+                !matches!(
+                    handle.phase,
+                    ProductionArchiveRetentionPhaseV1::Committed
+                        | ProductionArchiveRetentionPhaseV1::RejectedStale
+                )
+            })
+        {
             return Err(invalid(
                 "production archive retention is not terminal and cannot be acknowledged",
             ));
         }
         self.archive.pending_handles.remove(handle_id);
+        self.archive.maintenance_receipts.retain(|_, receipt| {
+            receipt.disposition != ProductionArchiveRetentionPhaseV1::RejectedStale
+                || receipt.retention_handle_id != handle_id
+        });
         self.revision = self
             .revision
             .checked_add(1)
@@ -748,80 +1238,198 @@ impl ProductionState {
     }
 }
 
+/// Every record of a blob as (key, canonical digest, terminal time), in
+/// ordinal order: executions, facility projects, receipts.
+fn blob_entries(
+    blob: &ProductionArchiveBlobV1,
+) -> impl Iterator<Item = (ProductionTerminalArchiveKeyV1, &str, SimTime)> {
+    blob.records
+        .iter()
+        .map(|record| {
+            (
+                record.key.clone(),
+                record.canonical_digest.as_str(),
+                record.terminal_at,
+            )
+        })
+        .chain(blob.project_records.iter().map(|record| {
+            (
+                record.key.clone(),
+                record.canonical_digest.as_str(),
+                record.terminal_at,
+            )
+        }))
+        .chain(blob.receipts.iter().map(|receipt| {
+            (
+                ProductionTerminalArchiveKeyV1::ArchiveMaintenanceReceipt(receipt.id.clone()),
+                receipt.canonical_digest.as_str(),
+                receipt.settled_at,
+            )
+        }))
+}
+
+/// The membership and temporal pages of one prepared blob.
+fn prepare_archive_page(
+    blob: ProductionArchiveBlobV1,
+) -> Result<PreparedProductionArchivePageV1, CanwuError> {
+    let mut membership_page = ProductionArchiveMembershipPageV1 {
+        id: String::new(),
+        memberships: blob_entries(&blob)
+            .enumerate()
+            .map(|(ordinal, (key, digest, _))| {
+                Ok(ProductionArchiveMembershipV1 {
+                    key,
+                    blob_id: blob.content_id.clone(),
+                    ordinal: u16::try_from(ordinal)
+                        .map_err(|_| invalid("production archive membership ordinal overflowed"))?,
+                    semantic_digest: digest.to_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>, CanwuError>>()?,
+        semantic_digest: String::new(),
+    };
+    membership_page.semantic_digest = canonical_hash(
+        "canwu.production.archive-membership-page.v1",
+        &membership_page,
+    )?;
+    membership_page.id = membership_page.semantic_digest.clone();
+    let mut temporal_page = ProductionArchiveTemporalPageV1 {
+        id: String::new(),
+        entries: blob_entries(&blob)
+            .map(|(key, _, terminal_at)| ProductionArchiveTemporalEntryV1 { terminal_at, key })
+            .collect(),
+        semantic_digest: String::new(),
+    };
+    temporal_page
+        .entries
+        .sort_by(|left, right| (left.terminal_at, &left.key).cmp(&(right.terminal_at, &right.key)));
+    temporal_page.semantic_digest =
+        canonical_hash("canwu.production.archive-temporal-page.v1", &temporal_page)?;
+    temporal_page.id = temporal_page.semantic_digest.clone();
+    Ok(PreparedProductionArchivePageV1 {
+        blob,
+        membership_page,
+        temporal_page,
+    })
+}
+
+/// What one authenticated archive commit holds.
+struct ProductionArchiveCommitClosure {
+    /// Every archived key with the blob and ordinal its membership binds.
+    records: Vec<(ProductionTerminalArchiveKeyV1, String, u16)>,
+    executions: u64,
+    projects: u64,
+    receipts: u64,
+}
+
+/// Authenticates one archive commit: the directory's own identity, every
+/// blob and typed record it names, and the membership and temporal pages
+/// that must cover exactly those records. An archived maintenance receipt
+/// must be the receipt of the commit before this one.
+///
+/// The cumulative lookup index is not read here, only the shape of
+/// `lookup_root`: a historical directory stays authentic after the lookup
+/// pages that only it reaches are gone. [`validate_production_archive`]
+/// audits the index of the head.
 pub fn authenticate_production_archive_directory(
     store: &dyn ProductionArchiveStore,
+    directory: &ProductionArchiveIndexDirectoryV1,
+) -> Result<(), CanwuError> {
+    authenticate_production_archive_directory_closure(store, directory).map(|_| ())
+}
+
+fn authenticate_production_archive_directory_identity(
     directory: &ProductionArchiveIndexDirectoryV1,
 ) -> Result<(), CanwuError> {
     let mut detached = directory.clone();
     let id = std::mem::take(&mut detached.id);
     let digest = std::mem::take(&mut detached.semantic_digest);
     let expected = canonical_hash("canwu.production.archive-directory.v1", &detached)?;
+    if id != expected || digest != expected || !is_digest(&directory.lookup_root) {
+        return Err(invalid("production archive directory root is forged"));
+    }
+    Ok(())
+}
+
+fn is_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Loads one directory by id and authenticates its identity only: the single
+/// directory read of a lookup and of an archive preparation.
+fn load_production_archive_directory(
+    store: &dyn ProductionArchiveStore,
+    root: &str,
+) -> Result<ProductionArchiveIndexDirectoryV1, CanwuError> {
+    let directory: ProductionArchiveIndexDirectoryV1 =
+        load_encoded(store, PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE, root)?
+            .ok_or_else(|| invalid("production archive directory is unavailable"))?;
+    authenticate_production_archive_directory_identity(&directory)?;
+    if directory.id != root {
+        return Err(invalid("production archive directory identity differs"));
+    }
+    Ok(directory)
+}
+
+#[allow(clippy::too_many_lines)]
+fn authenticate_production_archive_directory_closure(
+    store: &dyn ProductionArchiveStore,
+    directory: &ProductionArchiveIndexDirectoryV1,
+) -> Result<ProductionArchiveCommitClosure, CanwuError> {
+    authenticate_production_archive_directory_identity(directory)?;
     let unique_blobs = directory.blob_ids.iter().collect::<BTreeSet<_>>();
     let unique_memberships = directory.membership_pages.iter().collect::<BTreeSet<_>>();
     let unique_temporal = directory.temporal_pages.iter().collect::<BTreeSet<_>>();
-    if id != expected
-        || digest != expected
-        || directory.blob_ids.is_empty()
-        || directory.membership_pages.is_empty()
-        || directory.temporal_pages.is_empty()
-        || directory.blob_ids.len() > MAX_ARCHIVE_PAGE_ENTRIES
-        || directory.membership_pages.len() > MAX_ARCHIVE_PAGE_ENTRIES
-        || directory.temporal_pages.len() > MAX_ARCHIVE_PAGE_ENTRIES
+    if directory.blob_ids.is_empty()
+        || directory.blob_ids.len() > MAX_ARCHIVE_COMMIT_PAGES
+        || directory.membership_pages.len() != directory.blob_ids.len()
+        || directory.temporal_pages.len() != directory.blob_ids.len()
         || unique_blobs.len() != directory.blob_ids.len()
         || unique_memberships.len() != directory.membership_pages.len()
         || unique_temporal.len() != directory.temporal_pages.len()
         || directory.previous_root.as_ref() == Some(&directory.id)
     {
-        return Err(invalid("production archive directory root is forged"));
+        return Err(invalid(
+            "production archive directory object lists are empty, duplicated, cyclic, or unbounded",
+        ));
     }
     let mut archived_records = BTreeMap::new();
     let mut source_root: Option<String> = None;
+    let (mut executions, mut projects, mut receipts) = (0_u64, 0_u64, 0_u64);
     for blob_id in &directory.blob_ids {
         let blob: ProductionArchiveBlobV1 =
             load_encoded(store, PRODUCTION_ARCHIVE_BLOB_NAMESPACE, blob_id)?.ok_or_else(|| {
                 invalid("production archive blob referenced by the directory is missing")
             })?;
-        let mut detached = blob.clone();
-        detached.content_id.clear();
-        if blob.content_id != *blob_id
-            || blob.content_id != canonical_hash("canwu.production.archive-blob.v1", &detached)?
-            || blob.format_version != 1
-            || blob
-                .records
-                .len()
-                .saturating_add(blob.project_records.len())
-                == 0
-            || blob
-                .records
-                .len()
-                .saturating_add(blob.project_records.len())
-                > MAX_ARCHIVE_PAGE_ENTRIES
-            || blob.expected_source_root.len() != 64
-            || source_root
-                .as_ref()
-                .is_some_and(|expected| expected != &blob.expected_source_root)
+        authenticate_production_archive_blob(&blob, blob_id)?;
+        if source_root
+            .as_ref()
+            .is_some_and(|expected| expected != &blob.expected_source_root)
         {
-            return Err(invalid("production archive blob content ID is forged"));
+            return Err(invalid(
+                "production archive blobs of one commit differ in their source root",
+            ));
         }
         source_root.get_or_insert_with(|| blob.expected_source_root.clone());
-        for (ordinal, record) in blob.records.iter().enumerate() {
-            let mut detached = record.clone();
-            let digest = std::mem::take(&mut detached.canonical_digest);
-            if digest != canonical_hash("canwu.production.terminal-archive-record.v1", &detached)? {
-                return Err(invalid("production archive terminal record is forged"));
-            }
-            validate_terminal_execution_archive_record(record)?;
+        for receipt in &blob.receipts {
+            validate_archived_maintenance_receipt(receipt, directory)?;
+        }
+        executions += u64::try_from(blob.records.len())
+            .map_err(|_| invalid("production archive count overflowed"))?;
+        projects += u64::try_from(blob.project_records.len())
+            .map_err(|_| invalid("production archive count overflowed"))?;
+        receipts += u64::try_from(blob.receipts.len())
+            .map_err(|_| invalid("production archive count overflowed"))?;
+        for (ordinal, (key, digest, terminal_at)) in blob_entries(&blob).enumerate() {
             let ordinal = u16::try_from(ordinal)
                 .map_err(|_| invalid("production archive record ordinal overflowed"))?;
             if archived_records
                 .insert(
-                    record.key.clone(),
-                    (
-                        blob_id.clone(),
-                        ordinal,
-                        record.canonical_digest.clone(),
-                        record.terminal_at,
-                    ),
+                    key,
+                    (blob_id.clone(), ordinal, digest.to_owned(), terminal_at),
                 )
                 .is_some()
             {
@@ -830,51 +1438,21 @@ pub fn authenticate_production_archive_directory(
                 ));
             }
         }
-        let ordinal_offset = blob.records.len();
-        for (index, record) in blob.project_records.iter().enumerate() {
-            let mut detached = record.clone();
-            let digest = std::mem::take(&mut detached.canonical_digest);
-            if digest
-                != canonical_hash(
-                    "canwu.production.facility-project-archive-record.v1",
-                    &detached,
-                )?
-            {
-                return Err(invalid(
-                    "production facility-project archive record is forged",
-                ));
-            }
-            validate_facility_project_archive_record(record)?;
-            let ordinal = ordinal_offset
-                .checked_add(index)
-                .and_then(|value| u16::try_from(value).ok())
-                .ok_or_else(|| invalid("production archive record ordinal overflowed"))?;
-            if archived_records
-                .insert(
-                    record.key.clone(),
-                    (
-                        blob_id.clone(),
-                        ordinal,
-                        record.canonical_digest.clone(),
-                        record.terminal_at,
-                    ),
-                )
-                .is_some()
-            {
-                return Err(invalid(
-                    "production archive contains a duplicate terminal key",
-                ));
-            }
-        }
+    }
+    // A commit archives at most the receipt of the commit before it.
+    if receipts > 1 {
+        return Err(invalid(
+            "production archive commit archives more than one maintenance receipt",
+        ));
     }
     let mut membership_keys = BTreeSet::new();
     for page_id in &directory.membership_pages {
         let page: ProductionArchiveMembershipPageV1 =
             load_encoded(store, PRODUCTION_ARCHIVE_MEMBERSHIP_PAGE_NAMESPACE, page_id)?
                 .ok_or_else(|| invalid("production archive membership page is missing"))?;
-        if page.memberships.len() > MAX_ARCHIVE_PAGE_ENTRIES {
+        if page.memberships.is_empty() || page.memberships.len() > MAX_ARCHIVE_PAGE_ENTRIES {
             return Err(invalid(
-                "production archive membership page exceeds its cap",
+                "production archive membership page is empty or exceeds its cap",
             ));
         }
         let mut detached = page.clone();
@@ -906,8 +1484,10 @@ pub fn authenticate_production_archive_directory(
         let page: ProductionArchiveTemporalPageV1 =
             load_encoded(store, PRODUCTION_ARCHIVE_TEMPORAL_PAGE_NAMESPACE, page_id)?
                 .ok_or_else(|| invalid("production archive temporal page is missing"))?;
-        if page.entries.len() > MAX_ARCHIVE_PAGE_ENTRIES {
-            return Err(invalid("production archive temporal page exceeds its cap"));
+        if page.entries.is_empty() || page.entries.len() > MAX_ARCHIVE_PAGE_ENTRIES {
+            return Err(invalid(
+                "production archive temporal page is empty or exceeds its cap",
+            ));
         }
         let mut detached = page.clone();
         let id = std::mem::take(&mut detached.id);
@@ -936,10 +1516,93 @@ pub fn authenticate_production_archive_directory(
             }
         }
     }
-    let archived_keys = archived_records.keys().cloned().collect::<BTreeSet<_>>();
-    if membership_keys != archived_keys || temporal_keys != archived_keys {
+    if membership_keys.len() != archived_records.len()
+        || temporal_keys.len() != archived_records.len()
+    {
         return Err(invalid(
             "production archive indexes do not cover the complete terminal blob set",
+        ));
+    }
+    Ok(ProductionArchiveCommitClosure {
+        records: archived_records
+            .into_iter()
+            .map(|(key, (blob_id, ordinal, _, _))| (key, blob_id, ordinal))
+            .collect(),
+        executions,
+        projects,
+        receipts,
+    })
+}
+
+/// Authenticates one blob read under `blob_id`: its content id, format, size,
+/// and the digest and typed closure of every record in it.
+fn authenticate_production_archive_blob(
+    blob: &ProductionArchiveBlobV1,
+    blob_id: &str,
+) -> Result<(), CanwuError> {
+    let mut detached = blob.clone();
+    detached.content_id.clear();
+    let records = blob.records.len() + blob.project_records.len() + blob.receipts.len();
+    if blob.content_id != blob_id
+        || blob.content_id != canonical_hash("canwu.production.archive-blob.v1", &detached)?
+        || blob.format_version != PRODUCTION_ARCHIVE_BLOB_FORMAT_VERSION
+        || records == 0
+        || records > MAX_ARCHIVE_PAGE_ENTRIES
+        || blob.expected_source_root.len() != 64
+    {
+        return Err(invalid("production archive blob content ID is forged"));
+    }
+    for record in &blob.records {
+        let mut detached = record.clone();
+        let digest = std::mem::take(&mut detached.canonical_digest);
+        if digest != canonical_hash("canwu.production.terminal-archive-record.v1", &detached)? {
+            return Err(invalid("production archive terminal record is forged"));
+        }
+        validate_terminal_execution_archive_record(record)?;
+    }
+    for record in &blob.project_records {
+        let mut detached = record.clone();
+        let digest = std::mem::take(&mut detached.canonical_digest);
+        if digest
+            != canonical_hash(
+                "canwu.production.facility-project-archive-record.v1",
+                &detached,
+            )?
+        {
+            return Err(invalid(
+                "production facility-project archive record is forged",
+            ));
+        }
+        validate_facility_project_archive_record(record)?;
+    }
+    for receipt in &blob.receipts {
+        let mut detached = receipt.clone();
+        let digest = std::mem::take(&mut detached.canonical_digest);
+        if digest != canonical_hash("canwu.production.archive-maintenance-receipt.v1", &detached)? {
+            return Err(invalid("production archive maintenance receipt is forged"));
+        }
+    }
+    Ok(())
+}
+
+/// An archived maintenance receipt is the receipt of the applied commit just
+/// before the commit `directory` that archived it.
+fn validate_archived_maintenance_receipt(
+    receipt: &ProductionArchiveMaintenanceReceiptV1,
+    directory: &ProductionArchiveIndexDirectoryV1,
+) -> Result<(), CanwuError> {
+    if receipt.disposition != ProductionArchiveRetentionPhaseV1::Committed
+        || directory.previous_root.as_ref() != Some(&receipt.directory_root)
+        || !is_digest(&receipt.retention_handle_id)
+        || !is_digest(&receipt.source_root)
+        || receipt
+            .archived_executions
+            .saturating_add(receipt.archived_projects)
+            .saturating_add(receipt.archived_receipts)
+            == 0
+    {
+        return Err(invalid(
+            "production archived maintenance receipt is not the receipt of the commit before",
         ));
     }
     Ok(())
@@ -1001,6 +1664,7 @@ fn validate_terminal_execution_archive_record(
         WorkOrderLifecycle::Settled
             if wip.completed_units == wip.total_units
                 && execution.completed_at.is_some()
+                && execution.output_settled_at >= execution.completed_at
                 && execution.output_outcomes.len() == execution.output_requests.len()
                 && !execution.output_outcomes.is_empty()
                 && execution.output_source.is_some()
@@ -1010,6 +1674,7 @@ fn validate_terminal_execution_archive_record(
         }
         WorkOrderLifecycle::Cancelled | WorkOrderLifecycle::Failed
             if execution.output_outcomes.is_empty()
+                && execution.output_settled_at.is_none()
                 && execution.output_source.is_none()
                 && execution.output_ack_digest.is_none() => {}
         _ => {
@@ -1276,16 +1941,18 @@ fn validate_terminal_execution_archive_record(
     Ok(())
 }
 
-fn validate_terminal_output_closure(
+pub(crate) fn validate_terminal_output_closure(
     execution: &crate::ProductionExecution,
 ) -> Result<(), CanwuError> {
     let source = execution
         .output_source
         .as_ref()
         .ok_or_else(|| invalid("settled production archive lost its exact output source"))?;
+    // The credits settled at the instant the acknowledgement recorded: the
+    // dispatch instant, or the instant a deferred batch came due.
     let at = execution
-        .completed_at
-        .ok_or_else(|| invalid("settled production archive lost its completion time"))?;
+        .output_settled_at
+        .ok_or_else(|| invalid("settled production archive lost its output settlement time"))?;
     let mut operation_keys = BTreeSet::new();
     for (request, outcome) in execution
         .output_requests
@@ -1336,6 +2003,7 @@ fn validate_terminal_output_closure(
         execution: execution.id.clone(),
         production_source: source.clone(),
         outcomes: execution.output_outcomes.clone(),
+        settled_at: at,
     };
     let expected_ack_digest = canonical_hash("canwu.production.output-ack.v1", &acknowledgement)?;
     if execution.output_ack_digest.as_deref() != Some(expected_ack_digest.as_str()) {
@@ -1661,66 +2329,39 @@ fn outcome_matches_project(
     }
 }
 
+/// Authenticates every archive object reachable from the persisted production
+/// archive head and every unacknowledged retention handle. Restore callers
+/// must provide the durable store that owns those objects; a snapshot alone
+/// is not enough to trust archive-backed state.
+///
+/// The directory chain is walked to its first commit, bounded by the root's
+/// committed commit count, and each commit's blobs, typed records, and pages
+/// are authenticated; the cumulative record counts must close. The lookup
+/// index of the head is then rebuilt from the chain's records (a key
+/// archived more than once counts by its newest record) and must be exactly
+/// what the store holds: every page present and equal, and the same root.
+/// The cost is linear in the archive, and the audit holds about 40 bytes per
+/// archived record while it runs, so this is a restore and audit step, never
+/// part of a boundary.
 pub fn validate_production_archive(
     store: &dyn ProductionArchiveStore,
     state: &ProductionState,
 ) -> Result<(), CanwuError> {
     let mut next = state.archive.directory_root.clone();
-    let mut expected_execution_count = state.archive.archived_execution_count;
-    let mut expected_project_count = state.archive.archived_project_count;
+    let mut expected = (
+        state.archive.archived_execution_count,
+        state.archive.archived_project_count,
+        state.archive.archived_receipt_count,
+    );
     let mut visited = BTreeSet::new();
     let mut directories = 0_u64;
+    let mut lookup_root = None;
+    let mut blob_ids = Vec::new();
+    let mut entries = Vec::new();
     while let Some(root) = next {
         if !visited.insert(root.clone()) {
             return Err(invalid("production archive directory chain is cyclic"));
         }
-        let directory: ProductionArchiveIndexDirectoryV1 =
-            load_encoded(store, PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE, &root)?
-                .ok_or_else(|| invalid("production archive head directory is unavailable"))?;
-        authenticate_production_archive_directory(store, &directory)?;
-        if directory.id != root
-            || directory.archived_execution_count != expected_execution_count
-            || directory.archived_project_count != expected_project_count
-        {
-            return Err(invalid(
-                "production archive directory chain count differs from its authoritative closure",
-            ));
-        }
-        let batch_execution_count =
-            directory
-                .blob_ids
-                .iter()
-                .try_fold(0_u64, |total, blob_id| {
-                    let blob: ProductionArchiveBlobV1 =
-                        load_encoded(store, PRODUCTION_ARCHIVE_BLOB_NAMESPACE, blob_id)?
-                            .ok_or_else(|| invalid("production archive blob is unavailable"))?;
-                    total
-                        .checked_add(u64::try_from(blob.records.len()).map_err(|_| {
-                            invalid("production archive execution count overflowed")
-                        })?)
-                        .ok_or_else(|| invalid("production archive execution count overflowed"))
-                })?;
-        let batch_project_count = directory
-            .blob_ids
-            .iter()
-            .try_fold(0_u64, |total, blob_id| {
-                let blob: ProductionArchiveBlobV1 =
-                    load_encoded(store, PRODUCTION_ARCHIVE_BLOB_NAMESPACE, blob_id)?
-                        .ok_or_else(|| invalid("production archive blob is unavailable"))?;
-                total
-                    .checked_add(
-                        u64::try_from(blob.project_records.len())
-                            .map_err(|_| invalid("production archive project count overflowed"))?,
-                    )
-                    .ok_or_else(|| invalid("production archive project count overflowed"))
-            })?;
-        expected_execution_count = expected_execution_count
-            .checked_sub(batch_execution_count)
-            .ok_or_else(|| invalid("production archive execution count underflowed"))?;
-        expected_project_count = expected_project_count
-            .checked_sub(batch_project_count)
-            .ok_or_else(|| invalid("production archive project count underflowed"))?;
-        next = directory.previous_root;
         directories = directories
             .checked_add(1)
             .ok_or_else(|| invalid("production archive directory count overflowed"))?;
@@ -1729,13 +2370,80 @@ pub fn validate_production_archive(
                 "production archive directory chain exceeds its committed batch bound",
             ));
         }
+        let directory: ProductionArchiveIndexDirectoryV1 =
+            load_encoded(store, PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE, &root)?
+                .ok_or_else(|| invalid("production archive head directory is unavailable"))?;
+        let closure = authenticate_production_archive_directory_closure(store, &directory)?;
+        if directory.id != root
+            || (
+                directory.archived_execution_count,
+                directory.archived_project_count,
+                directory.archived_receipt_count,
+            ) != expected
+        {
+            return Err(invalid(
+                "production archive directory chain count differs from its authoritative closure",
+            ));
+        }
+        // The first commit archives no receipt, and every later one archives
+        // the receipt of the commit before it.
+        if closure.receipts != u64::from(directory.previous_root.is_some()) {
+            return Err(invalid(
+                "production archive commit does not archive the receipt of the commit before it",
+            ));
+        }
+        lookup_root.get_or_insert_with(|| directory.lookup_root.clone());
+        // Newest commit first, so the first entry kept for a key is the one
+        // the index must name.
+        let first_blob = blob_ids.len();
+        blob_ids.extend(directory.blob_ids.iter().cloned());
+        for (key, blob_id, ordinal) in closure.records {
+            let blob = directory
+                .blob_ids
+                .iter()
+                .position(|candidate| candidate == &blob_id)
+                .and_then(|offset| first_blob.checked_add(offset))
+                .and_then(|index| u32::try_from(index).ok())
+                .ok_or_else(|| invalid("production archive blob position overflowed"))?;
+            entries.push(
+                canwu_resource::ResourceArchiveAuditEntry::new(
+                    &production_archive_lookup_key_digest(&key)?,
+                    blob,
+                    ordinal,
+                )
+                .map_err(|error| lookup_error(&error))?,
+            );
+        }
+        expected = (
+            expected
+                .0
+                .checked_sub(closure.executions)
+                .ok_or_else(|| invalid("production archive execution count underflowed"))?,
+            expected
+                .1
+                .checked_sub(closure.projects)
+                .ok_or_else(|| invalid("production archive project count underflowed"))?,
+            expected
+                .2
+                .checked_sub(closure.receipts)
+                .ok_or_else(|| invalid("production archive receipt count underflowed"))?,
+        );
+        next = directory.previous_root;
     }
-    if expected_execution_count != 0
-        || expected_project_count != 0
-        || directories != state.archive.committed_batch_count
-    {
+    if expected != (0, 0, 0) || directories != state.archive.committed_batch_count {
         return Err(invalid(
             "production archive directory chain does not close its authoritative counts",
+        ));
+    }
+    let rebuilt = canwu_resource::audit_resource_archive_lookup_index(
+        &ProductionLookupPages(store),
+        &blob_ids,
+        entries,
+    )
+    .map_err(|error| lookup_error(&error))?;
+    if rebuilt != lookup_root {
+        return Err(invalid(
+            "production archive lookup index differs from its directory chain",
         ));
     }
     for handle in state.archive.pending_handles.values() {
@@ -1758,24 +2466,12 @@ pub fn validate_production_archive(
         )?
         .ok_or_else(|| invalid("production pending retention directory is unavailable"))?;
         authenticate_production_archive_directory(store, &target)?;
-        let expected_objects = BTreeMap::from([
-            (
-                PRODUCTION_ARCHIVE_BLOB_NAMESPACE.to_owned(),
-                target.blob_ids.iter().cloned().collect(),
-            ),
-            (
-                PRODUCTION_ARCHIVE_MEMBERSHIP_PAGE_NAMESPACE.to_owned(),
-                target.membership_pages.iter().cloned().collect(),
-            ),
-            (
-                PRODUCTION_ARCHIVE_TEMPORAL_PAGE_NAMESPACE.to_owned(),
-                target.temporal_pages.iter().cloned().collect(),
-            ),
-            (
-                PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE.to_owned(),
-                BTreeSet::from([target.id.clone()]),
-            ),
-        ]);
+        let expected_objects = expected_retention_objects(
+            &target.blob_ids,
+            &target.membership_pages,
+            &target.temporal_pages,
+            &target.id,
+        );
         if handle.object_ids != expected_objects || handle.target_directory_root != target.id {
             return Err(invalid(
                 "production pending retention handle does not close its exact archive objects and prior root",
@@ -1783,6 +2479,200 @@ pub fn validate_production_archive(
         }
     }
     Ok(())
+}
+
+/// Resolves one archived terminal record through the cumulative lookup index
+/// of the production archive head.
+///
+/// The lookup reads the head directory and one lookup page per index level,
+/// each authenticated by its content id, and nothing else when the key was
+/// never archived. Its cost follows the depth of the index, which grows with
+/// the logarithm of the archived records and not at all with the number of
+/// archive commits. A hit also reads the one blob that holds the record,
+/// authenticates that blob, and validates the record's digest and typed
+/// closure. A key archived more than once resolves to its newest record.
+///
+/// The number of objects read is bounded whatever the store returns: one
+/// directory, at most
+/// [`canwu_resource::MAX_RESOURCE_ARCHIVE_LOOKUP_DEPTH`]` + 1` lookup pages,
+/// and one blob. A missing, forged, oversized, or malformed object is an
+/// error, never a miss.
+///
+/// The lookup trusts the head directory to name an index that holds every
+/// archived key. [`crate::enqueue_production_archive`] establishes that for
+/// each commit it queues, and [`validate_production_archive`] checks it for
+/// the head of a restored root.
+pub fn archived_production_terminal_record(
+    state: &ProductionState,
+    store: &dyn ProductionArchiveStore,
+    key: &ProductionTerminalArchiveKeyV1,
+) -> Result<Option<ProductionArchivedRecordV1>, CanwuError> {
+    let Some(root) = &state.archive.directory_root else {
+        return Ok(None);
+    };
+    let directory = load_production_archive_directory(store, root)?;
+    let Some(entry) = canwu_resource::find_resource_archive_lookup_entry(
+        &ProductionLookupPages(store),
+        &directory.lookup_root,
+        &production_archive_lookup_key_digest(key)?,
+    )
+    .map_err(|error| lookup_error(&error))?
+    else {
+        return Ok(None);
+    };
+    let blob: ProductionArchiveBlobV1 =
+        load_encoded(store, PRODUCTION_ARCHIVE_BLOB_NAMESPACE, &entry.blob_id)?
+            .ok_or_else(|| invalid("production archive lookup blob is missing"))?;
+    authenticate_production_archive_blob(&blob, &entry.blob_id)?;
+    let ordinal = usize::from(entry.ordinal);
+    let (executions, projects) = (blob.records.len(), blob.project_records.len());
+    let record = if ordinal < executions {
+        blob.records
+            .into_iter()
+            .nth(ordinal)
+            .map(ProductionArchivedRecordV1::Execution)
+    } else if ordinal - executions < projects {
+        blob.project_records
+            .into_iter()
+            .nth(ordinal - executions)
+            .map(ProductionArchivedRecordV1::FacilityProject)
+    } else {
+        blob.receipts
+            .into_iter()
+            .nth(ordinal - executions - projects)
+            .map(ProductionArchivedRecordV1::ArchiveMaintenanceReceipt)
+    }
+    .ok_or_else(|| invalid("production archive lookup ordinal is outside its blob"))?;
+    let found = match &record {
+        ProductionArchivedRecordV1::Execution(record) => record.key.clone(),
+        ProductionArchivedRecordV1::FacilityProject(record) => record.key.clone(),
+        ProductionArchivedRecordV1::ArchiveMaintenanceReceipt(receipt) => {
+            ProductionTerminalArchiveKeyV1::ArchiveMaintenanceReceipt(receipt.id.clone())
+        }
+    };
+    if &found != key {
+        return Err(invalid(
+            "production archive lookup entry differs from its typed record",
+        ));
+    }
+    Ok(Some(record))
+}
+
+/// The lookup pages a live run reads: the pages reachable from the index of
+/// the archive head and of each named queued commit.
+///
+/// A commit is queued when its store-side retention handle is
+/// `DurableIngress` and the root holds no retention handle with its id. A
+/// queued commit may become the head, so its pages are live; one the caller
+/// does not name is not covered. Every page of a named index must be
+/// present: a missing one is an error. A host application that lost the
+/// `superseded_lookup_pages` of a batch uses this to recompute what is live;
+/// whether a page outside the result may be deleted is still decided by the
+/// retention rule of
+/// [`PreparedProductionArchiveBatchV1::superseded_lookup_pages`].
+pub fn live_production_archive_lookup_pages<'a>(
+    state: &ProductionState,
+    store: &dyn ProductionArchiveStore,
+    queued_directory_roots: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeSet<String>, CanwuError> {
+    let mut pages = BTreeSet::new();
+    let mut collect = |root: &str| {
+        let directory = load_production_archive_directory(store, root)?;
+        canwu_resource::collect_resource_archive_lookup_pages(
+            &ProductionLookupPages(store),
+            &directory.lookup_root,
+            "",
+            true,
+            &mut pages,
+        )
+        .map_err(|error| lookup_error(&error))
+    };
+    if let Some(root) = &state.archive.directory_root {
+        collect(root)?;
+    }
+    for root in queued_directory_roots {
+        collect(root)?;
+    }
+    Ok(pages)
+}
+
+/// Every production archive object reachable from `roots` (the head, the
+/// directories of unacknowledged retention handles, and the directories of
+/// queued commits) and from the commits before them, for an offline
+/// collection's mark set: directories, blobs, membership and temporal pages,
+/// and lookup pages.
+///
+/// The index of each root in `complete_roots` (the head and every queued
+/// commit, which may become the head) must be whole. The index of any other
+/// directory is marked as far as the store still holds it, so a collection
+/// never drops a page that a restore, replay, or fork through that commit
+/// could read, and a host application that deleted superseded pages is not
+/// refused.
+pub(crate) fn reachable_production_archive_objects(
+    store: &dyn ProductionArchiveStore,
+    mut roots: BTreeSet<String>,
+    complete_roots: &BTreeSet<String>,
+    directory_bound: usize,
+) -> Result<BTreeMap<&'static str, BTreeSet<String>>, CanwuError> {
+    let mut objects = BTreeMap::<&'static str, BTreeSet<String>>::new();
+    let mut lookup_roots = Vec::new();
+    let mut visited = BTreeSet::new();
+    while let Some(root) = roots.pop_first() {
+        if !visited.insert(root.clone()) {
+            continue;
+        }
+        if visited.len() > directory_bound {
+            return Err(invalid(
+                "production archive directory graph exceeds its committed bound",
+            ));
+        }
+        let directory: ProductionArchiveIndexDirectoryV1 =
+            load_encoded(store, PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE, &root)?
+                .ok_or_else(|| invalid("production archive directory is unavailable"))?;
+        if directory.id != root {
+            return Err(invalid("production archive directory identity differs"));
+        }
+        authenticate_production_archive_directory(store, &directory)?;
+        lookup_roots.push((
+            !complete_roots.contains(&root),
+            directory.lookup_root.clone(),
+        ));
+        objects
+            .entry(PRODUCTION_ARCHIVE_BLOB_NAMESPACE)
+            .or_default()
+            .extend(directory.blob_ids.iter().cloned());
+        objects
+            .entry(PRODUCTION_ARCHIVE_MEMBERSHIP_PAGE_NAMESPACE)
+            .or_default()
+            .extend(directory.membership_pages.iter().cloned());
+        objects
+            .entry(PRODUCTION_ARCHIVE_TEMPORAL_PAGE_NAMESPACE)
+            .or_default()
+            .extend(directory.temporal_pages.iter().cloned());
+        objects
+            .entry(PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE)
+            .or_default()
+            .insert(root);
+        if let Some(previous) = directory.previous_root {
+            roots.insert(previous);
+        }
+    }
+    // Complete indexes first: a page they share with another index is then
+    // already known to be whole.
+    lookup_roots.sort();
+    let mut lookup_pages = BTreeSet::new();
+    for (earlier, lookup_root) in &lookup_roots {
+        canwu_resource::collect_resource_archive_lookup_pages(
+            &ProductionLookupPages(store),
+            lookup_root,
+            "",
+            !earlier,
+            &mut lookup_pages,
+        )
+        .map_err(|error| lookup_error(&error))?;
+    }
+    objects.insert(PRODUCTION_ARCHIVE_LOOKUP_PAGE_NAMESPACE, lookup_pages);
+    Ok(objects)
 }
 
 fn load_encoded<T: DeserializeOwned>(
@@ -1800,11 +2690,4 @@ fn load_encoded<T: DeserializeOwned>(
             })
         })
         .transpose()
-}
-
-#[allow(dead_code)]
-fn encoded_size<T: Serialize>(value: &T) -> Result<usize, CanwuError> {
-    serde_json::to_vec(value)
-        .map(|bytes| bytes.len())
-        .map_err(|error| invalid(format!("production archive sizing failed: {error}")))
 }

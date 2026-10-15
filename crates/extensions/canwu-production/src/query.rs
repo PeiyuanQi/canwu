@@ -84,6 +84,16 @@ fn validate_production_runtime_with_archive_providers(
         })?;
         crate::validate_production_archive(store, &state)?;
     }
+    // With an archive provider, the resource archive this production root reads
+    // through is audited as the resource restore wrappers audit it, so a lookup
+    // below never trusts an index the store does not hold.
+    if let Some(store) = resource_archive
+        && let Some((_, resource)) = canwu_resource::resource_state(canwu)?
+        && resource.archive_head.directory_root.is_some()
+    {
+        canwu_resource::validate_resource_archive_store(&resource, store)
+            .map_err(|error| resource_archive_error(&error))?;
+    }
     let resource_state = if state.executions.is_empty() && state.facility_projects.is_empty() {
         None
     } else {
@@ -101,26 +111,31 @@ fn validate_production_runtime_with_archive_providers(
     for project in state.facility_projects.values() {
         validate_project_restore(canwu, resource_state.as_ref(), resource_archive, project)?;
     }
-    for (project_id, witness) in &state.resource_continuation_witnesses {
+    if !state.resource_continuation_witnesses.is_empty() {
         let resource = resource_state.as_ref().ok_or_else(|| {
             invalid("production continuation witness requires the resource runtime")
         })?;
         let store = resource_archive.ok_or_else(|| {
             invalid("production continuation witness requires its resource archive provider")
         })?;
-        let project = state
-            .facility_projects
-            .get(project_id)
-            .ok_or_else(|| invalid("production continuation witness lost its project"))?;
-        canwu_resource::authenticate_reachable_resource_archive_directory(
-            resource,
-            store,
-            &witness.resource_archive_directory_root,
-            witness.resource_archive_record_count,
-        )
-        .map_err(|error| resource_archive_error(&error))?;
-        for input in &project.inputs {
-            validate_resource_input_restore(resource, Some(store), input)?;
+        // Each witness names a commit of the resource archive chain, which was
+        // audited above; it is walked once for every witness together.
+        let chain = resource_archive_chain_counts(resource, store)?;
+        for (project_id, witness) in &state.resource_continuation_witnesses {
+            let project = state
+                .facility_projects
+                .get(project_id)
+                .ok_or_else(|| invalid("production continuation witness lost its project"))?;
+            if chain.get(&witness.resource_archive_directory_root)
+                != Some(&witness.resource_archive_record_count)
+            {
+                return Err(invalid(
+                    "production continuation witness names no commit of the resource archive chain",
+                ));
+            }
+            for input in &project.inputs {
+                validate_resource_input_restore(resource, Some(store), input)?;
+            }
         }
     }
     validate_production_decisions(canwu, &state)?;
@@ -239,6 +254,17 @@ fn validate_execution_restore(
     resource_archive: Option<&dyn canwu_resource::ResourceArchiveStore>,
     execution: &ProductionExecution,
 ) -> Result<(), CanwuError> {
+    // A settled execution's outcomes and acknowledgement digest are rebuilt
+    // at the instant its output settled, as the archive rebuilds them, before
+    // anything else is read.
+    if execution.lifecycle == WorkOrderLifecycle::Settled {
+        crate::archive::validate_terminal_output_closure(execution).map_err(|error| {
+            invalid(format!(
+                "settled production output does not rebuild at restore: {}",
+                error.message
+            ))
+        })?;
+    }
     let resource_state =
         resource_state.ok_or_else(|| invalid("production resource state is unavailable"))?;
     resource_state
@@ -355,7 +381,6 @@ fn validate_execution_restore(
         .zip(&execution.output_outcomes)
     {
         validate_settled_output_restore(
-            canwu,
             resource_state,
             resource_archive,
             execution,
@@ -585,6 +610,10 @@ fn validate_resource_outcome_restore(
     Ok(())
 }
 
+/// Resolves one compacted resource record through the lookup index of the
+/// resource archive head: the head directory, one lookup page per index
+/// level, and the one blob that holds the record, each authenticated. Its
+/// cost follows the depth of the index, not the length of the archive chain.
 fn exact_resource_archive_record(
     resource_state: &canwu_resource::ResourceState,
     resource_archive: Option<&dyn canwu_resource::ResourceArchiveStore>,
@@ -595,13 +624,30 @@ fn exact_resource_archive_record(
             "production continuation requires the resource archive provider after evidence compaction",
         )
     })?;
+    canwu_resource::archived_resource_terminal_record(resource_state, store, key)
+        .map_err(|error| resource_archive_error(&error))?
+        .ok_or_else(|| {
+            invalid("exact production resource evidence is unavailable in hot or archive storage")
+        })
+}
+
+/// Every commit of the resource archive chain, by directory id, with the
+/// record count it closes. Walks the chain once, bounded by the head
+/// revision; the caller has audited it.
+fn resource_archive_chain_counts(
+    resource_state: &canwu_resource::ResourceState,
+    store: &dyn canwu_resource::ResourceArchiveStore,
+) -> Result<std::collections::BTreeMap<String, u64>, CanwuError> {
+    let mut chain = std::collections::BTreeMap::new();
     let mut next = resource_state.archive_head.directory_root.clone();
-    let mut remaining = resource_state.archive_head.archived_record_count;
-    let mut visited = std::collections::BTreeSet::new();
-    let mut found = None;
     while let Some(root) = next {
-        if !visited.insert(root.clone()) {
-            return Err(invalid("resource archive directory chain is cyclic"));
+        if u64::try_from(chain.len())
+            .ok()
+            .is_none_or(|walked| walked >= resource_state.archive_head.revision)
+        {
+            return Err(invalid(
+                "resource archive directory chain exceeds its committed head revision",
+            ));
         }
         let bytes = store
             .load_resource_archive_object(
@@ -616,61 +662,30 @@ fn exact_resource_archive_record(
                     "resource archive directory could not decode: {error}"
                 ))
             })?;
-        canwu_resource::authenticate_resource_archive_directory(store, &directory)
-            .map_err(|error| resource_archive_error(&error))?;
-        if directory.id != root || directory.archived_record_count != remaining {
+        if directory.id != root
+            || chain
+                .insert(root, directory.archived_record_count)
+                .is_some()
+        {
             return Err(invalid(
-                "resource archive directory chain count differs from its authoritative head",
+                "resource archive directory chain is forged or cyclic",
             ));
         }
-        let mut batch_count = 0_u64;
-        for blob_id in &directory.blob_ids {
-            let bytes = store
-                .load_resource_archive_object(
-                    canwu_resource::RESOURCE_ARCHIVE_BLOB_NAMESPACE,
-                    blob_id,
-                )
-                .map_err(|error| resource_archive_error(&error))?
-                .ok_or_else(|| invalid("resource archive blob is unavailable"))?;
-            let blob: canwu_resource::ResourceArchiveBlobV1 = serde_json::from_slice(&bytes)
-                .map_err(|error| {
-                    invalid(format!("resource archive blob could not decode: {error}"))
-                })?;
-            batch_count = batch_count
-                .checked_add(
-                    u64::try_from(blob.records.len())
-                        .map_err(|_| invalid("resource archive record count overflowed"))?,
-                )
-                .ok_or_else(|| invalid("resource archive record count overflowed"))?;
-            for record in blob.records {
-                if &record.key == key && found.replace(record).is_some() {
-                    return Err(invalid(
-                        "resource archive repeats one exact continuation record",
-                    ));
-                }
-            }
-        }
-        remaining = remaining
-            .checked_sub(batch_count)
-            .ok_or_else(|| invalid("resource archive record count underflowed"))?;
         next = directory.previous_root;
     }
-    if remaining != 0 {
-        return Err(invalid(
-            "resource archive directory chain does not close its authoritative count",
-        ));
-    }
-    found.ok_or_else(|| {
-        invalid("exact production resource evidence is unavailable in hot or archive storage")
-    })
+    Ok(chain)
 }
 
 fn resource_archive_error(error: &canwu_resource::ResourceError) -> CanwuError {
     invalid(format!("resource archive validation failed: {error}"))
 }
 
+/// Checks one settled output against its exact resource outcome, hot or
+/// archived, which must cite the exact production source the execution pinned
+/// when it dispatched the output. The body of that source version is not
+/// read: the production root no longer declares it once the output settled,
+/// so a seal may drop it, and the exact outcome already binds it.
 fn validate_settled_output_restore(
-    canwu: &Canwu,
     resource_state: &canwu_resource::ResourceState,
     resource_archive: Option<&dyn canwu_resource::ResourceArchiveStore>,
     execution: &ProductionExecution,
@@ -681,45 +696,20 @@ fn validate_settled_output_restore(
         .output_source
         .as_ref()
         .ok_or_else(|| invalid("settled production output lost its exact production source"))?;
+    if request.operation_key != expected.operation_key
+        || source.record != production_runtime_reference().into_untyped()
+    {
+        return Err(invalid(
+            "settled production output does not bind its request and production source",
+        ));
+    }
     validate_resource_outcome_restore(
         resource_state,
         resource_archive,
         &canwu_resource::ResourceOperationOutcomeVersionV1::from(expected),
         request.quantity,
         std::slice::from_ref(source),
-    )?;
-    let source_record = canwu.domain_record_version(source).ok_or_else(|| {
-        invalid("settled production output exact source is unavailable at restore")
-    })?;
-    if !source_record
-        .reference
-        .kind
-        .matches_type::<ProductionRuntimeRecord>()
-    {
-        return Err(invalid(
-            "settled production output source has the wrong record kind",
-        ));
-    }
-    let source_state = source_record.decode_payload::<ProductionRuntimeRecord>()?;
-    source_state.validate()?;
-    let source_execution = source_state
-        .executions
-        .get(&execution.id)
-        .ok_or_else(|| invalid("settled production output source lost the execution"))?;
-    if source_execution.lifecycle != WorkOrderLifecycle::CompletedPendingOutputSettlement
-        || !source_execution.output_outcomes.is_empty()
-        || source_execution.output_source.is_some()
-        || !source_execution
-            .output_requests
-            .iter()
-            .any(|source_request| source_request == request)
-        || request.operation_key != expected.operation_key
-    {
-        return Err(invalid(
-            "settled production output source is not the exact pending execution version",
-        ));
-    }
-    Ok(())
+    )
 }
 
 fn validate_production_knowledge(canwu: &Canwu, state: &ProductionState) -> Result<(), CanwuError> {

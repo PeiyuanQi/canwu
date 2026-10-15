@@ -122,35 +122,133 @@ Use `validate_production_runtime_with_archives`,
 `from_production_snapshot_json_with_archives`,
 `from_production_checkpoint_journal_with_archives`, and
 `replay_production_from_journal_with_archives` whenever production or resource
-archive state is present. Validation authenticates the complete production
-archive head/prior chain and every pending-retention object, resolves active
-resource consumption/outcome evidence from either hot state or its authenticated
-resource archive, resolves exact technology bodies, and verifies output
-acknowledgement identity and digest before replacing live authority. The
+archive state is present. Validation audits the production archive (the whole
+directory chain, every pending-retention object, and the head's lookup index,
+rebuilt from the chain), resolves active resource consumption/outcome evidence
+from either hot state or the resource archive's lookup index, resolves exact
+technology bodies, and verifies output acknowledgement identity and digest
+before replacing live authority. Each compacted resource record costs one
+index path and one blob, however long the resource archive chain is. The
 provider-free helpers reject archive-bearing candidates rather than silently
 accepting an unauthenticated root. Terminal production records retain exact
 identity/digest receipts; this crate does not reconstruct missing material
 evidence or invent a migration.
 
-Terminal executions and commissioned facility projects can move through the
+Terminal executions and commissioned facility projects move through the
 package-owned archive protocol:
-`prepare_production_archive`, `PreparedProductionArchiveBatchV1::store_and_verify`,
+`prepare_production_archive(candidate_limit, store)`,
+`PreparedProductionArchiveBatchV1::store_and_verify`,
 `enqueue_production_archive`, and `finalize_production_archive_retention`.
-Candidate/page/object/byte budgets, source-root compare-and-swap, durable
-ingress retention, readback authentication, directory/membership/temporal
-closure, stale receipts, and hot-state backpressure are all explicit. Active
-WIP and output-pending executions remain hot and keep their payload-required
-technology/resource dependencies until the terminal resource ACK.
+
+- One commit carries up to `MAX_ARCHIVE_PREPARE_CANDIDATES` (1,024) records
+  as up to `MAX_ARCHIVE_COMMIT_PAGES` (16) blobs of up to
+  `MAX_ARCHIVE_PAGE_ENTRIES` (64), each with its own membership and temporal
+  page, within the object and byte budgets of one batch.
+- Each commit directory names the root of a cumulative lookup index over every
+  archived record (`lookup_root`), in the page format of the resource
+  archive's index and stored under `PRODUCTION_ARCHIVE_LOOKUP_PAGE_NAMESPACE`.
+  `archived_production_terminal_record` reads the head directory, one page per
+  index level, and on a hit one blob, whatever the number of commits.
+- The maintenance receipt of an applied commit is an archive candidate, and
+  the next commit archives it first, so the root holds at most one and a run
+  can make any number of commits. The receipt of a stale commit is not a
+  candidate; the acknowledgement of its retention handle retires it, and a
+  repeated acknowledgement settles as a no-op.
+- `enqueue_production_archive` requires the batch to equal what the current
+  root and the store derive. The boundary reads no archive object: it settles
+  archive commits before the plugin's other packets, applies a commit whose
+  source root still matches after rebuilding its blobs and directory from the
+  root's records, and records any other as stale without failing.
+- The host application acknowledges each settled commit;
+  `prepare_production_archive` refuses as `archive_backpressure` while 64
+  retention handles wait for it. The head commit's receipt is always a
+  candidate, so a host application commits when `archive_due_index` or
+  `project_archive_due_index` holds records; a batch that selects no
+  execution and no project archives only that receipt.
+- Building an execution's archive record scans the root's hot operation
+  outcomes and completion receipts, so preparing, enqueueing, and settling a
+  commit costs time in proportion to the records it selects times the hot
+  outcomes of the root. A host application that commits small batches often
+  keeps both small.
+
+Every hot execution and facility project, terminal ones included, declares in
+its payload-required evidence continuation the record versions restore
+validation reads for it, until the archive removes it, so a seal never drops
+them first. An ended execution or project no longer declares its inputs'
+consumer evidence, which restore compares by reference only. A settled
+output's pinned production source is not read back: the acknowledgement must
+name exactly the source the dispatch pinned, and the exact resource outcome
+cites it. Restore rebuilds a hot settled execution's request digests and
+acknowledgement digest at `output_settled_at`, as the archive does.
+
+The host application can queue the public packet types, the operation packet
+and the output acknowledgement among them, and any completion coordinator
+step through `enqueue_production_completion_operation`; another plugin can
+schedule any production packet type. A packet that does not decode settles
+nothing and emits `canwu.production.ingress_refused.v1`
+(`canwu.production.output_ack_refused.v1` for an acknowledgement); its
+boundary settles. An operation packet settles only when the admission of a
+tracked production command queued it, which checked the issuer's authority,
+the run policy, the outcome capacity, and any degraded-facility decision: its
+cause must be that command and the command's payload its envelope. Any other
+operation packet is refused the same way, and so is a completion step or a
+continuation witness that production's checks refuse with an expected domain
+rejection.
+
+A production boundary can still fail on an archive commit or retention
+acknowledgement whose content is forged but decodes (only another plugin can
+send one), on a failed read of the evidence or archive stores, which settles
+once the store serves the object, on counter overflow, and on the 256 MiB
+byte cap of the root. Any admitted production packet, a refused one
+included, also triggers the incident and report systems, so a host
+application that queues junk public packets causes incident draws; that
+behavior is older than this crate's 0.16.0 changes.
+
+The resource plugin may defer an output batch that finds no room and settle
+it later. The acknowledgement carries `settled_at`, the instant the credits
+settled; every outcome's request digest must commit to it, and the execution
+records it as `output_settled_at`, from which the archive rebuilds those
+digests. An acknowledgement that does not settle its execution exactly is
+refused with a `canwu.production.output_ack_refused.v1` event and changes
+nothing; it never fails the boundary.
+
+`StartExecution` refuses, as a recorded rejection, an output whose operation
+key the resource plugin would never credit: a key under the prefix
+`canwu-resource` reserves for its completion operations (`invalid_payload`), a
+key another running or output-pending execution names, or a key a resource
+outcome already holds in the resource root or its archive
+(`idempotency_conflict`). A production completion lease refuses a reserved key
+too, because its key is its execution's first output key. The resource
+plugin settles all of an execution's outputs in one batch, so a process may
+declare at most `canwu_resource::MAX_PRODUCTION_OUTPUT_BATCH_CREDITS` (64)
+outputs, `StartExecution` refuses more output requests (`invalid_payload`),
+and it refuses an output set the resource root can never hold under its
+limits (`invalid_payload`). A resource operation that the host application
+queues under an output key after the execution started is not caught, nor is
+a credit the resource root rejects or a batch that meets its byte cap after
+the longest deferral: the resource plugin then skips the batch, and the
+execution waits.
 
 The `g3_contract` tests demonstrate:
 
 - the same schema expressing household hand work and a machine/fuel process;
 - exact fuel, maintenance, access, and organization blockers;
 - rejection of overlapping capacity;
-- WIP completion followed by later resource-owned output settlement;
+- WIP completion followed by later resource-owned output settlement, and
+  an output batch the resource plugin deferred that settles later and whose
+  execution archives;
 - evidence-bounded realized output that floor-scales output settlement;
 - real persisted/forked/replayed degraded-facility decision branches;
 - operation-keyed incident draws with snapshot/replay/tamper checks;
 - distinct operator and delayed remote-owner observation cuts; and
 - archive restart, retention acknowledgement, damage/waste/output evidence,
   and archive-object tamper rejection.
+
+The `production_archive_volume` tests show a commit of several pages whose
+every record resolves through the lookup index, a chain of commits that keeps
+one receipt and one handle in the root, stale commits that settle as no-ops
+against a full handle budget or as a duplicate of the same batch, and a
+commit that applies although an operation was admitted before it.
+`production-archive-profile` in the performance harness runs the chain past
+8,192 commits. The `production_output_key_admission` tests show the refused
+output keys and output sets.

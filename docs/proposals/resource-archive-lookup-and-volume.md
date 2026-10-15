@@ -458,20 +458,31 @@ What the change costs:
 
 ## Other archives
 
-`canwu-production` has its own archive code, which this change does not touch.
+`canwu-production` has its own archive code, which this change did not touch.
+In 0.15.0:
 
-- No production boundary reads the production archive, so no production
-  operation pays a lookup.
-- A production commit carries one page of at most 512 records.
-- A production run can make at most 8,192 archive commits: each commit leaves a
-  maintenance receipt in the production root, receipts never leave it, and
-  `prepare_production_archive` refuses once the root holds
-  `max_operation_outcomes` of them. This is a lifetime limit of the same kind
-  as the one removed here and is still open.
-- Production restore validation finds each compacted resource input by walking
-  the resource archive chain, which costs time in proportion to the archive
-  for each input. It runs only at restore and when a continuation witness is
-  queued, and it reads multi-page commits unchanged.
+- No production boundary read the production archive, so no production
+  operation paid a lookup.
+- A production commit carried one page of at most 512 records.
+- A production run could make at most 8,192 archive commits: each commit left a
+  maintenance receipt in the production root, receipts never left it, and
+  `prepare_production_archive` refused once the root held
+  `max_operation_outcomes` of them. This was a lifetime limit of the same kind
+  as the one removed here.
+- Production restore validation found each compacted resource input by
+  walking the resource archive chain, which cost time in proportion to the
+  archive for each input. It ran only at restore and when a continuation
+  witness was queued, and it read multi-page commits unchanged.
+
+0.16.0 gives the production archive the same lookup index, commits of several
+pages, and receipts that leave the root, and moves production restore
+validation onto the resource archive's lookup index; see
+[production archive volume](production-archive-volume.md). To serve it, the
+resource crate makes its lookup-index functions public:
+`prepare_resource_archive_lookup_entries`, `find_resource_archive_lookup_entry`,
+`verify_resource_archive_lookup_entries`, `collect_resource_archive_lookup_pages`,
+and `audit_resource_archive_lookup_index` with `ResourceArchiveAuditEntry`.
+The resource archive's own formats and behavior are unchanged.
 
 The package archive of `canwu-force-supply-reference`, which the economy
 reference integration also uses, resolves a record the way the 0.14.0 resource

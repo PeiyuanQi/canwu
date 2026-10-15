@@ -424,6 +424,10 @@ pub enum ResourceCompletionOperationV1 {
 /// boundary.
 pub const RESOURCE_COMPLETION_OPERATION_KEY_PREFIX: &str = "resource:completion:";
 
+/// Credits one production output batch may carry. A batch with more settles
+/// nothing, so a producer bounds its outputs by it.
+pub const MAX_PRODUCTION_OUTPUT_BATCH_CREDITS: usize = 64;
+
 impl ResourceCompletionOperationV1 {
     /// The key this operation derives from its identities, which is valid
     /// only when [`Self::has_canonical_operation_key`].
@@ -1439,13 +1443,27 @@ impl ResourceState {
         }
     }
 
+    /// Whether a production output batch of `credits` credits can ever
+    /// settle in this root: it carries at most
+    /// [`MAX_PRODUCTION_OUTPUT_BATCH_CREDITS`] credits, and with an empty
+    /// archive backlog and every reservation free its outcomes, and the
+    /// receipt of the archive commit that emptied the backlog, fit the
+    /// root's limits. A batch that cannot is skipped as permanently short of
+    /// room, so a producer refuses such an output set before it starts.
+    #[must_use]
+    pub fn production_output_batch_can_fit(&self, credits: usize) -> bool {
+        (1..=MAX_PRODUCTION_OUTPUT_BATCH_CREDITS).contains(&credits)
+            && credits.saturating_add(1) <= self.limits.max_archive_candidates
+            && credits <= self.limits.max_operation_outcomes
+    }
+
     /// Settles one production output batch on a detached candidate, so the
     /// root changes only when every credit applies.
     pub(crate) fn settle_production_output_batch(
         &mut self,
         requests: &[ResourceCreditRequestV1],
     ) -> Result<OutputBatchSettlement, ResourceError> {
-        if requests.is_empty() || requests.len() > 64 {
+        if requests.is_empty() || requests.len() > MAX_PRODUCTION_OUTPUT_BATCH_CREDITS {
             return Err(ResourceError::LimitExceeded(
                 "production output batch must contain 1..=64 credits".to_owned(),
             ));

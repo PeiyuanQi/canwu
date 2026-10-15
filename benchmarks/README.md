@@ -267,6 +267,53 @@ cargo run --release \
   --output benchmarks/baselines/YYYY-MM-DD-resource-archive-full.json
 ```
 
+## Production archive profile
+
+The standalone `production-archive-profile` binary measures the terminal
+archive of `canwu-production` and its reads of the resource archive:
+
+- what restore validation pays for one execution input whose resource
+  consumption and outcome were archived, as the resource archive grows in
+  records and in commits (`validate_production_resource_continuation`, with
+  the objects and bytes it reads);
+- a chain of archive commits through the production plugin, each archiving
+  the maintenance receipt of the commit before it and acknowledging that
+  commit in the same boundary: what preparing, queueing, and settling one
+  commit costs at a given chain length, the journal bytes of that boundary,
+  the size of the production root, a lookup miss and a hit on the first
+  execution, the bytes the commits wrote, and the restore audit
+  (`validate_production_archive`);
+- one commit of several pages of settled executions on top of an archive of
+  earlier commits: what it costs and writes, and what a lookup hit reads.
+
+Every production record is real: settled executions are built through the
+public state API. The store is in memory and copies the bytes of every object
+it serves. The chain runs unsealed, so the kernel keeps the evidence of every
+boundary in memory; the `full` preset's longest chain is 30,000 commits, and
+the run peaked at 2.4 GiB of working set. A chain longer than that is better
+measured on a sealed run.
+
+The recorded 2026-10-15 results are in
+[`baselines/2026-10-15-production-archive-full.json`](baselines/2026-10-15-production-archive-full.json),
+and the [production archive proposal](../docs/proposals/production-archive-volume.md)
+compares them with 0.15.0. The baseline's `source.git_commit` names the commit
+the run was built on, an earlier state of the commit that adds the profile, and
+`git_dirty` says the tree had changed since; `source.content_hash`, the BLAKE3
+of the production and resource sources and the profile, identifies the
+measured code. As with the resource archive profile, the binary
+does not compile against 0.15.0; the before-run used a copy with the 0.15.0
+API that is not kept in the tree.
+
+```console
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml \
+  --bin production-archive-profile -- \
+  --preset full \
+  --machine YOUR-STABLE-MACHINE-LABEL \
+  --recorded-on YYYY-MM-DD \
+  --output benchmarks/baselines/YYYY-MM-DD-production-archive-full.json
+```
+
 ## Fiscal boundary profile
 
 The standalone `fiscal-profile` binary measures what `canwu-fiscal` adds to a
