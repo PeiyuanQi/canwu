@@ -3,8 +3,8 @@
 use crate::invalid_reference;
 use canwu_api::{BoundaryReceipt, BoundaryRecord, Canwu, CanwuError, ErrorCode, SimTime};
 use canwu_fiscal::{
-    FiscalHistoricalMode, FiscalProjection, FiscalState, FiscalStateRecord,
-    fiscal_reports_of_holder, fiscal_state_reference,
+    FiscalHistoricalMode, FiscalProjection, FiscalState, fiscal_reports_of_holder,
+    load_fiscal_state,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -13,7 +13,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-pub const TRACE_FORMAT_VERSION: u32 = 1;
+pub const TRACE_FORMAT_VERSION: u32 = 2;
 pub const DEFAULT_TRACE_DIRECTORY: &str = "artifacts/traces";
 pub const TRACE_MANIFEST_FILE: &str = "manifest.json";
 pub const TRACE_STEPS_FILE: &str = "steps.jsonl";
@@ -57,7 +57,6 @@ pub struct MingFiscalTraceCounts {
     pub audits: usize,
     pub recent_outcomes: usize,
     pub transition_candidates: usize,
-    pub aggregates: usize,
 }
 
 impl From<&FiscalState> for MingFiscalTraceCounts {
@@ -82,20 +81,30 @@ impl From<&FiscalState> for MingFiscalTraceCounts {
                 )
                 .chain(
                     state
-                        .observer_bindings
+                        .jurisdictions
+                        .values()
+                        .map(|jurisdiction| jurisdiction.outcomes.recent.len()),
+                )
+                .chain(
+                    state
+                        .observers
                         .values()
                         .map(|observer| observer.outcomes.recent.len()),
                 )
                 .sum(),
-            transition_candidates: state.transition_candidates.len(),
-            aggregates: state.aggregates.len(),
+            transition_candidates: state
+                .jurisdictions
+                .values()
+                .map(|jurisdiction| jurisdiction.transition_candidates.len())
+                .sum(),
         }
     }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MingFiscalTraceFiscalState {
-    pub procedure_revision: u64,
+    /// The revision of the historical context.
+    pub context_revision: u64,
     pub historical_year: i32,
     pub historical_mode: FiscalHistoricalMode,
     pub counts: MingFiscalTraceCounts,
@@ -269,10 +278,8 @@ pub fn capture_ming_fiscal_trace_frame(
         .find(|record| record.id == receipt.boundary_id)
         .cloned()
         .ok_or_else(|| invalid_reference("trace receipt has no persisted boundary record"))?;
-    let state_record = canwu
-        .typed_domain_record(&fiscal_state_reference())
+    let state = load_fiscal_state(canwu)?
         .ok_or_else(|| invalid_reference("Ming fiscal state is unavailable for trace capture"))?;
-    let state = state_record.decode_payload::<FiscalStateRecord>()?;
     let projections = collect_projections(canwu, &state);
     Ok(MingFiscalTraceFrame {
         format_version: TRACE_FORMAT_VERSION,
@@ -283,9 +290,9 @@ pub fn capture_ming_fiscal_trace_frame(
         revision: canwu.revision(),
         checkpoint_hash: canwu.checkpoint_hash().to_owned(),
         fiscal: MingFiscalTraceFiscalState {
-            procedure_revision: state.procedure_revision,
-            historical_year: state.historical_context.year,
-            historical_mode: state.historical_context.mode,
+            context_revision: state.root.context_revision,
+            historical_year: state.root.historical_context.year,
+            historical_mode: state.root.historical_context.mode,
             counts: MingFiscalTraceCounts::from(&state),
             state,
             projections,
@@ -319,8 +326,9 @@ pub fn default_trace_directory() -> PathBuf {
 /// observer the run has published no report to is left out.
 fn collect_projections(canwu: &Canwu, state: &FiscalState) -> BTreeMap<String, FiscalProjection> {
     state
-        .observer_bindings
+        .observers
         .iter()
+        .map(|(observer_id, observer)| (observer_id, &observer.binding))
         .filter_map(|(observer_id, binding)| {
             let report = fiscal_reports_of_holder(canwu, &binding.knowledge_holder)
                 .ok()?

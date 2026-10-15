@@ -5,9 +5,9 @@
 //! controlling institution can be re-pointed to another holder, who gets the
 //! whole report at the next publication, while the old holder gets one last
 //! summary marked withdrawn and keeps what it was told; or removed, after
-//! which nothing is published to it. A binding's lines are numbered from the
-//! slot the scenario gave it, once: re-pointing or removing one binding moves
-//! no other binding's lines, and two bindings never share a slot.
+//! which nothing is published to it. A binding's lines are named on its own
+//! observer record: re-pointing or removing one binding moves no other
+//! binding's lines, and two bindings never share a line.
 
 mod support;
 
@@ -36,10 +36,10 @@ fn government() -> KnowledgeHolderRef {
     KnowledgeHolderRef::Entity(EntityRef::Government(GovernmentId::new(1)))
 }
 
-fn controlled(id: &str, slot: u16, actor: PersonId) -> FiscalObserverBinding {
+fn controlled(id: &str, actor: PersonId) -> FiscalObserverBinding {
     FiscalObserverBinding {
         controlled_by: Some(treasury()),
-        ..observer_binding(id, slot, actor, BTreeSet::from([treasury()]))
+        ..observer_binding(id, actor, BTreeSet::from([treasury()]))
     }
 }
 
@@ -48,15 +48,15 @@ fn bindings_scenario() -> canwu_api::Scenario {
         let held_by_government = FiscalObserverBinding {
             actor: None,
             knowledge_holder: government(),
-            ..observer_binding(GOVERNMENT, 2, PRINCIPAL, BTreeSet::from([treasury()]))
+            ..observer_binding(GOVERNMENT, PRINCIPAL, BTreeSet::from([treasury()]))
         };
         for binding in [
-            controlled(CONTROLLED, 1, DEPUTY),
+            controlled(CONTROLLED, DEPUTY),
             held_by_government,
-            observer_binding(OTHER, 3, AUDITOR, BTreeSet::from([treasury()])),
-            controlled(REVIVED, 4, GRANARY_PRINCIPAL),
+            observer_binding(OTHER, AUDITOR, BTreeSet::from([treasury()])),
+            controlled(REVIVED, GRANARY_PRINCIPAL),
         ] {
-            state.observer_bindings.insert(binding.id.clone(), binding);
+            state.add_observer(binding);
         }
     })
 }
@@ -182,9 +182,11 @@ fn bindings_are_held_by_governments_re_pointed_and_removed_keeping_every_line() 
         published_report_records(&canwu, AUDITOR).len(),
         auditor_records
     );
-    let binding = &fiscal_state(&canwu).observer_bindings[CONTROLLED];
+    let state = fiscal_state(&canwu);
+    let binding = state
+        .observer_binding(CONTROLLED)
+        .expect("the controlled binding");
     assert_eq!(binding.actor, Some(SUCCESSOR));
-    assert_eq!(binding.line_slot, 1);
     assert_eq!(
         binding.rebound_by.as_ref().map(|by| by.action_id.as_str()),
         Some("rebind")
@@ -209,7 +211,7 @@ fn bindings_are_held_by_governments_re_pointed_and_removed_keeping_every_line() 
     assert_eq!(reports(&canwu, AUDITOR)[OTHER].projection.facts.len(), 2);
 
     // Removed: the successor gets a withdrawn summary and nothing after it;
-    // the binding stays, keeping its slot, and cannot be re-pointed again.
+    // the binding stays, keeping its record, and cannot be re-pointed again.
     submit(&mut canwu, vec![(PRINCIPAL, remove("remove", CONTROLLED))]);
     assert!(applied(&canwu, "remove"));
     assert!(!reports(&canwu, SUCCESSOR).contains_key(CONTROLLED));
@@ -220,8 +222,12 @@ fn bindings_are_held_by_governments_re_pointed_and_removed_keeping_every_line() 
         successor_records
     );
     let state = fiscal_state(&canwu);
-    assert!(!state.observer_bindings[CONTROLLED].is_active());
-    assert_eq!(state.observer_bindings[CONTROLLED].line_slot, 1);
+    assert!(
+        !state
+            .observer_binding(CONTROLLED)
+            .expect("the removed binding")
+            .is_active()
+    );
     assert!(
         state
             .recent_outcome(
@@ -245,7 +251,7 @@ fn bindings_are_held_by_governments_re_pointed_and_removed_keeping_every_line() 
     );
     let error = admission_rejection(&canwu, "rebind.removed").expect("refused");
     assert_eq!(error.code, ErrorCode::InvalidPayload);
-    assert_eq!(error.message, FISCAL_OBSERVER_REMOVED);
+    assert_eq!(error.message, format!("entry 0: {FISCAL_OBSERVER_REMOVED}"));
 
     // Only the controlling institution re-points a binding, and a binding
     // without one changes only with the scenario.
@@ -338,9 +344,9 @@ fn bindings_are_held_by_governments_re_pointed_and_removed_keeping_every_line() 
     assert!(published_report_records(&canwu, SECOND_AUDITOR).is_empty());
     assert!(
         fiscal_state(&canwu)
-            .report_plan
-            .deferred
-            .contains_key(REVIVED)
+            .report_queue
+            .get(REVIVED)
+            .is_some_and(|entry| entry.whole && entry.parked)
     );
     enqueue_life(&mut canwu, SECOND_AUDITOR, true);
     settle(&mut canwu);
@@ -351,31 +357,56 @@ fn bindings_are_held_by_governments_re_pointed_and_removed_keeping_every_line() 
     fixture.assert_restore_and_replay(&canwu);
 }
 
-/// Line slots are the scenario's, once per binding: a state in which two
-/// bindings share a slot, or a slot lies past the last one, is refused when
-/// the run is created.
+/// Each binding's lines are named on its own observer record: two bindings
+/// that show the same institution publish the same line numbers, and their
+/// records still never share a line, since every subject targets the
+/// binding's own record.
 #[test]
-fn two_bindings_never_share_a_line_slot() {
+fn every_binding_names_its_lines_on_its_own_record() {
     let fixture = Fixture::new();
-    let valid = scenario(|state| {
-        let binding = observer_binding("observer.second", 1, DEPUTY, BTreeSet::from([treasury()]));
-        state.observer_bindings.insert(binding.id.clone(), binding);
-    });
-    assert!(fixture.try_runtime(valid.clone()).is_ok());
-    for slot in [0, 64] {
-        let mut scenario = valid.clone();
-        let record = scenario
-            .domain_records
-            .iter_mut()
-            .find(|record| {
-                record.reference == canwu_fiscal::fiscal_state_reference().into_untyped()
+    let mut canwu = fixture.runtime(scenario(|state| {
+        state.add_observer(observer_binding(
+            "observer.second",
+            PRINCIPAL,
+            BTreeSet::from([treasury()]),
+        ));
+    }));
+    submit(&mut canwu, assess("first", 0, "2026"));
+    let first = lines(&canwu, PRINCIPAL, support::OBSERVER);
+    let second = lines(&canwu, PRINCIPAL, "observer.second");
+    assert_eq!(first.len(), 2);
+    assert_eq!(second.len(), 2);
+    assert!(first.is_disjoint(&second));
+    let roles = |lines: &BTreeSet<(Option<u32>, Vec<KnowledgeSubject>)>| {
+        lines
+            .iter()
+            .map(|(part, subjects)| {
+                (
+                    *part,
+                    subjects
+                        .iter()
+                        .map(|subject| subject.role.clone())
+                        .collect::<Vec<_>>(),
+                )
             })
-            .expect("the fiscal state record");
-        record.payload["observer_bindings"]["observer.second"]["line_slot"] = slot.into();
-        let error = fixture
-            .try_runtime(scenario)
-            .err()
-            .unwrap_or_else(|| panic!("slot {slot} is refused"));
-        assert!(error.message.contains("line slot"), "{error}");
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(roles(&first), roles(&second));
+    for (lines, observer) in [(&first, support::OBSERVER), (&second, "observer.second")] {
+        let target = canwu_api::KnowledgeSubjectTarget::DomainRecord(
+            canwu_fiscal::fiscal_observer_reference(observer).into_untyped(),
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|(_, subjects)| subjects.iter().all(|subject| subject.target == target))
+        );
     }
+    let reports = reports(&canwu, PRINCIPAL);
+    assert_eq!(reports.len(), 2);
+    assert_eq!(
+        reports[support::OBSERVER].projection.facts,
+        reports["observer.second"].projection.facts
+    );
+    fixture.assert_restore_and_replay(&canwu);
 }

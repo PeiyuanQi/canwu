@@ -11,14 +11,22 @@
 mod support;
 
 use canwu_api::{BoundaryRequest, Canwu, CompactedCanwu, KnowledgeHolderRef, KnowledgeRecord};
-use canwu_fiscal::{FiscalReportRecord, compute_projections};
+use canwu_fiscal::{FiscalReportRecord, compute_projection};
 use support::{
-    Fixture, OBSERVER, PRINCIPAL, TREASURY_AUTHORITY, assessment, fiscal_report, fiscal_state,
-    published_report_records, scenario, submit, submit_sealed, treasury_scope,
+    Fixture, MemoryEvidenceArchive, OBSERVER, PRINCIPAL, TREASURY_AUTHORITY, assessment,
+    fiscal_report, fiscal_state, published_report_records, scenario, sealed_fiscal_state, submit,
+    submit_sealed, treasury_scope,
 };
 
-fn assess(action_id: &str, cycle: &str) -> support::Draft {
-    assessment(action_id, TREASURY_AUTHORITY, &treasury_scope(0), cycle)
+/// An assessment of one cycle in the treasury's `scope`-th scope; the
+/// treasury's scopes are rows of one report part.
+fn assess(action_id: &str, scope: usize) -> support::Draft {
+    assessment(
+        action_id,
+        TREASURY_AUTHORITY,
+        &treasury_scope(scope),
+        "cycle.1",
+    )
 }
 
 /// The observer's ledger, oldest record first.
@@ -46,10 +54,7 @@ fn a_sealed_run_supersedes_the_report_it_published_before_the_seal() {
 
     // The first fiscal change publishes the observer's report: its summary
     // and its one part.
-    submit(
-        &mut base,
-        vec![(PRINCIPAL, assess("before-seal", "cycle.1"))],
-    );
+    submit(&mut base, vec![(PRINCIPAL, assess("before-seal", 0))]);
     let before_seal = published_report_records(&base, PRINCIPAL);
     assert_eq!(before_seal.len(), 2);
     assert!(
@@ -89,7 +94,7 @@ fn a_sealed_run_supersedes_the_report_it_published_before_the_seal() {
     assert_eq!(from_sealed.checkpoint_hash(), sealed.checkpoint_hash());
 
     // The fiscal state changes again in all three runs.
-    let after_seal = vec![(PRINCIPAL, assess("after-seal", "cycle.2"))];
+    let after_seal = vec![(PRINCIPAL, assess("after-seal", 1))];
     submit(&mut unsealed, after_seal.clone());
     submit_sealed(&mut sealed, after_seal.clone());
     submit_sealed(&mut from_sealed, after_seal);
@@ -117,7 +122,9 @@ fn a_sealed_run_supersedes_the_report_it_published_before_the_seal() {
     assert_eq!(report.projection.facts.len(), 2);
     assert_eq!(
         report.projection,
-        compute_projections(&fiscal_state(&unsealed), report.projection.as_of)[OBSERVER]
+        compute_projection(&fiscal_state(&unsealed), OBSERVER, report.projection.as_of)
+            .expect("projection")
+            .expect("the observer's projection")
     );
 
     // Exact replay of the sealed run regenerates every boundary, the one
@@ -134,4 +141,43 @@ fn a_sealed_run_supersedes_the_report_it_published_before_the_seal() {
             .expect("the sealed run reconstructs a full snapshot")
     );
     assert_eq!(replayed.snapshot(), unsealed.snapshot());
+}
+
+/// A fiscal run seals before its first boundary, with its scenario's records
+/// and nothing settled (there is no settled evidence yet, so the seal has
+/// nothing to take), and after each boundary, and settles exactly as the
+/// run that never sealed.
+#[test]
+fn a_fiscal_run_seals_before_its_first_boundary() {
+    use canwu_api::ArchiveStore;
+    let fixture = Fixture::new();
+    let canwu = fixture.runtime(scenario(|_| {}));
+    let mut unsealed = canwu.fork();
+    let mut sealed = canwu.into_compacted().expect("compact interface");
+    let archive = MemoryEvidenceArchive::default();
+    let seal = |sealed: &mut CompactedCanwu| {
+        let prepared = sealed.prepare_evidence_seal().expect("a seal prepares");
+        let sealed_any = prepared.is_some();
+        if let Some(prepared) = prepared {
+            archive
+                .store_evidence_segment(&prepared.segment)
+                .expect("the segment is stored");
+            sealed
+                .commit_evidence_seal(&prepared.token, &archive)
+                .expect("the seal commits");
+        }
+        sealed_any
+    };
+    assert!(
+        !seal(&mut sealed),
+        "nothing is settled before the first boundary"
+    );
+    for (action, scope) in [("first", 0), ("second", 1)] {
+        submit_sealed(&mut sealed, vec![(PRINCIPAL, assess(action, scope))]);
+        submit(&mut unsealed, vec![(PRINCIPAL, assess(action, scope))]);
+        assert!(seal(&mut sealed), "the settled boundaries seal");
+        assert_eq!(sealed.checkpoint_hash(), unsealed.checkpoint_hash());
+        assert_eq!(sealed_fiscal_state(&sealed), fiscal_state(&unsealed));
+    }
+    assert_eq!(sealed_fiscal_state(&sealed).assessments().count(), 2);
 }

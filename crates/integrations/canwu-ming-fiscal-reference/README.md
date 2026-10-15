@@ -64,7 +64,7 @@ cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu
 ```
 
 Each JSONL row contains the canonical boundary receipt, the persisted boundary
-evidence, the complete fiscal state snapshot, and any holder-relative fiscal
+evidence, the complete fiscal state (assembled from its records), and any holder-relative fiscal
 projections that are available at that boundary. This layout is intentionally
 stable so the HTML viewer can scan the manifest and incrementally tail `steps.jsonl`
 without understanding the Rust runtime.

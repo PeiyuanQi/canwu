@@ -478,11 +478,11 @@ impl DebugApp {
                     frame.receipt.allocations.len()
                 ));
                 ui.label(format!(
-                    "fiscal assessments={} requests={} receipts={} aggregates={}",
+                    "fiscal books={} assessments={} requests={} receipts={}",
+                    frame.fiscal.counts.books,
                     frame.fiscal.counts.assessments,
                     frame.fiscal.counts.execution_requests,
-                    frame.fiscal.counts.execution_receipts,
-                    frame.fiscal.counts.aggregates
+                    frame.fiscal.counts.execution_receipts
                 ));
             });
         }
@@ -719,12 +719,12 @@ impl DebugApp {
                     frame.sequence, frame.phase, frame.fiscal.historical_year, frame.revision
                 ));
                 ui.label(format!(
-                    "assessments={} requests={} receipts={} audits={} aggregates={}",
+                    "books={} assessments={} requests={} receipts={} audits={}",
+                    counts.books,
                     counts.assessments,
                     counts.execution_requests,
                     counts.execution_receipts,
-                    counts.audits,
-                    counts.aggregates
+                    counts.audits
                 ));
             });
         }

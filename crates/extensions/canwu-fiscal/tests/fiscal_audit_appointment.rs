@@ -52,35 +52,29 @@ fn council() -> EntityRef {
 /// institution.
 fn appointment_scenario(configure: impl FnOnce(&mut FiscalState)) -> Scenario {
     let mut scenario = scenario(|state| {
-        state.authority_bindings.insert(
-            COUNCIL_AUTHORITY.to_owned(),
-            FiscalAuthorityBinding {
-                id: COUNCIL_AUTHORITY.to_owned(),
-                institution: council(),
-                authorized_actor: Some(COUNCIL_PRINCIPAL),
-                acting_actor: None,
-                authority_basis: None,
-                rebound_by: None,
-            },
-        );
+        state.add_authority_binding(FiscalAuthorityBinding {
+            id: COUNCIL_AUTHORITY.to_owned(),
+            institution: council(),
+            authorized_actor: Some(COUNCIL_PRINCIPAL),
+            acting_actor: None,
+            authority_basis: None,
+            rebound_by: None,
+        });
         let listed = BTreeSet::from([
             FiscalAppointmentParty::Institution {
                 institution: granary(),
             },
             FiscalAppointmentParty::Actor { actor: DEPUTY },
         ]);
-        state.audit_appointment_policies.insert(
-            POLICY.to_owned(),
-            FiscalAppointmentPolicy {
-                id: POLICY.to_owned(),
-                institution: treasury(),
-                appointer: council(),
-                nominators: listed.clone(),
-                petitioners: listed,
-                appoints_without_nomination: true,
-                removes_without_petition: false,
-            },
-        );
+        state.add_appointment_policy(FiscalAppointmentPolicy {
+            id: POLICY.to_owned(),
+            institution: treasury(),
+            appointer: council(),
+            nominators: listed.clone(),
+            petitioners: listed,
+            appoints_without_nomination: true,
+            removes_without_petition: false,
+        });
         state
             .add_assessment(FiscalAssessment {
                 id: ASSESSMENT.to_owned(),
@@ -103,17 +97,14 @@ fn appointment_scenario(configure: impl FnOnce(&mut FiscalState)) -> Scenario {
 
 /// The treasury's audit binding as the scenario installs it.
 fn installed_auditor(state: &mut FiscalState) {
-    state.audit_bindings.insert(
-        AUDIT.to_owned(),
-        FiscalAuditBinding {
-            id: AUDIT.to_owned(),
-            institution: treasury(),
-            auditor: AUDITOR,
-            authority_basis: initial_commission(AUDITOR_COMMISSION),
-            rebound_by: None,
-            nomination: None,
-        },
-    );
+    state.add_audit_binding(FiscalAuditBinding {
+        id: AUDIT.to_owned(),
+        institution: treasury(),
+        auditor: AUDITOR,
+        authority_basis: initial_commission(AUDITOR_COMMISSION),
+        rebound_by: None,
+        nomination: None,
+    });
 }
 
 fn nominate(
@@ -249,7 +240,10 @@ fn assert_unauthorized(canwu: &Canwu, action_id: &str, message: &str) {
 }
 
 fn proposal(canwu: &Canwu, id: &str) -> FiscalAuditProposal {
-    fiscal_state(canwu).audit_proposals[id].clone()
+    fiscal_state(canwu)
+        .audit_proposal(id)
+        .expect("audit proposal")
+        .clone()
 }
 
 /// Asserts how a proposal was resolved, and by which action.
@@ -316,7 +310,7 @@ fn the_appointer_appoints_an_auditor_with_and_without_a_nomination() {
             institution: granary(),
         }
     );
-    assert!(!fiscal_state(&canwu).audit_bindings.contains_key(AUDIT));
+    assert!(fiscal_state(&canwu).audit_binding(AUDIT).is_none());
 
     // The council accepts the person's nomination. The binding names who
     // decided and who nominated, and the other nomination is superseded.
@@ -334,7 +328,10 @@ fn the_appointer_appoints_an_auditor_with_and_without_a_nomination() {
         )],
     );
     assert!(applied(&canwu, "decide.accept"));
-    let binding = fiscal_state(&canwu).audit_bindings[AUDIT].clone();
+    let binding = fiscal_state(&canwu)
+        .audit_binding(AUDIT)
+        .expect("audit binding")
+        .clone();
     assert_eq!(binding.institution, treasury());
     assert_eq!(binding.auditor, AUDITOR);
     let decided = binding
@@ -396,8 +393,11 @@ fn the_appointer_appoints_an_auditor_with_and_without_a_nomination() {
     assert_unauthorized(&canwu, "decide.displace", FISCAL_PETITION_REQUIRED);
     assert!(applied(&canwu, "decide.direct"));
     let state = fiscal_state(&canwu);
-    assert_eq!(state.audit_bindings[AUDIT].auditor, AUDITOR);
-    let second = &state.audit_bindings[SECOND_AUDIT];
+    assert_eq!(
+        state.audit_binding(AUDIT).expect("audit binding").auditor,
+        AUDITOR
+    );
+    let second = &state.audit_binding(SECOND_AUDIT).expect("audit binding");
     assert_eq!(second.auditor, SECOND_AUDITOR);
     assert_eq!(second.nomination, None);
     assert_eq!(
@@ -461,8 +461,8 @@ fn a_nomination_from_a_party_the_policy_does_not_list_is_refused() {
         "admits only the nominations and removal petitions",
     );
     let state = fiscal_state(&canwu);
-    assert!(state.audit_proposals.is_empty());
-    assert!(state.audit_bindings.is_empty());
+    assert!(state.audit_proposals().next().is_none());
+    assert!(state.audit_bindings().next().is_none());
 
     fixture.assert_restore_and_replay(&canwu);
 }
@@ -574,7 +574,7 @@ fn a_petitioner_impeaches_the_auditor_and_the_appointer_removes_him() {
         )],
     );
     assert!(applied(&canwu, "decide.remove"));
-    assert!(!fiscal_state(&canwu).audit_bindings.contains_key(AUDIT));
+    assert!(fiscal_state(&canwu).audit_binding(AUDIT).is_none());
     let granted = proposal(&canwu, "petition.granary.petition");
     assert_eq!(granted.proposed_by.issuer, granary_issuer);
     let resolution = granted.resolution.expect("the decision");
@@ -641,7 +641,13 @@ fn the_appointer_dismisses_a_petition() {
         FiscalProposalOutcome::Dismissed,
         "decide.dismiss",
     );
-    assert_eq!(fiscal_state(&canwu).audit_bindings[AUDIT].auditor, AUDITOR);
+    assert_eq!(
+        fiscal_state(&canwu)
+            .audit_binding(AUDIT)
+            .expect("audit binding")
+            .auditor,
+        AUDITOR
+    );
 
     // A dismissed petition cannot be granted later, and the auditor keeps
     // recording findings.
@@ -674,12 +680,13 @@ fn the_appointer_dismisses_a_petition() {
         vec![(DEPUTY, petition("petition.third", POLICY))],
     );
     let state = fiscal_state(&canwu);
+    assert!(state.audit_proposal("petition.second.petition").is_none());
     assert!(
-        !state
-            .audit_proposals
-            .contains_key("petition.second.petition")
+        state
+            .audit_proposal("petition.third.petition")
+            .expect("audit proposal")
+            .is_pending()
     );
-    assert!(state.audit_proposals["petition.third.petition"].is_pending());
 
     fixture.assert_restore_and_replay(&canwu);
 }
@@ -717,8 +724,7 @@ fn one_party_cannot_exhaust_the_room_for_proposals() {
     };
     let pending_of = |canwu: &Canwu, party: &FiscalAppointmentParty| -> Vec<(String, String)> {
         fiscal_state(canwu)
-            .audit_proposals
-            .values()
+            .audit_proposals()
             .filter(|proposal| proposal.is_pending() && proposal.party == *party)
             .map(|proposal| (proposal.audit_binding_id.clone(), proposal.id.clone()))
             .collect()
@@ -763,9 +769,9 @@ fn one_party_cannot_exhaust_the_room_for_proposals() {
     assert!(applied(&canwu, "nominate.renewed"));
     assert!(applied(&canwu, "petition.granary"));
     assert!(
-        !fiscal_state(&canwu)
-            .audit_proposals
-            .contains_key("nominate.00.0.nomination")
+        fiscal_state(&canwu)
+            .audit_proposal("nominate.00.0.nomination")
+            .is_none()
     );
     assert_eq!(
         pending_of(&canwu, &deputy).len(),
@@ -818,21 +824,20 @@ fn one_party_cannot_exhaust_the_room_for_proposals() {
     }
     let state = fiscal_state(&canwu);
     let resolved = state
-        .audit_proposals
-        .values()
+        .audit_proposals()
         .filter(|proposal| !proposal.is_pending())
         .count();
     assert_eq!(resolved, MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY);
     // The first round's are gone and the last round's are kept.
     assert!(
-        !state
-            .audit_proposals
-            .contains_key("nominate.renewed.nomination")
+        state
+            .audit_proposal("nominate.renewed.nomination")
+            .is_none()
     );
     assert!(
         state
-            .audit_proposals
-            .contains_key(&format!("nominate.{:02}.0.nomination", rounds - 1))
+            .audit_proposal(&format!("nominate.{:02}.0.nomination", rounds - 1))
+            .is_some()
     );
     submit(
         &mut canwu,
@@ -856,18 +861,15 @@ fn an_appointment_on_one_institution_leaves_another_institutions_proposals_alone
     const SHARED: &str = "audit.shared";
     let fixture = Fixture::new();
     let mut canwu = fixture.runtime(appointment_scenario(|state| {
-        state.audit_appointment_policies.insert(
-            "appointment.granary".to_owned(),
-            FiscalAppointmentPolicy {
-                id: "appointment.granary".to_owned(),
-                institution: granary(),
-                appointer: council(),
-                nominators: BTreeSet::new(),
-                petitioners: BTreeSet::new(),
-                appoints_without_nomination: true,
-                removes_without_petition: true,
-            },
-        );
+        state.add_appointment_policy(FiscalAppointmentPolicy {
+            id: "appointment.granary".to_owned(),
+            institution: granary(),
+            appointer: council(),
+            nominators: BTreeSet::new(),
+            petitioners: BTreeSet::new(),
+            appoints_without_nomination: true,
+            removes_without_petition: true,
+        });
     }));
     submit(
         &mut canwu,
@@ -900,7 +902,10 @@ fn an_appointment_on_one_institution_leaves_another_institutions_proposals_alone
     );
     assert!(applied(&canwu, "decide.granary"));
     assert_eq!(
-        fiscal_state(&canwu).audit_bindings[SHARED].institution,
+        fiscal_state(&canwu)
+            .audit_binding(SHARED)
+            .expect("audit binding")
+            .institution,
         granary()
     );
     assert!(proposal(&canwu, "nominate.treasury.nomination").is_pending());
@@ -996,8 +1001,11 @@ fn the_audited_institution_cannot_appoint_or_remove_its_own_auditor() {
         FISCAL_APPOINTMENT_POLICY_MISSING,
     );
     let state = fiscal_state(&canwu);
-    assert_eq!(state.audit_bindings.len(), 1);
-    assert_eq!(state.audit_bindings[AUDIT].auditor, AUDITOR);
+    assert_eq!(state.audit_bindings().count(), 1);
+    assert_eq!(
+        state.audit_binding(AUDIT).expect("audit binding").auditor,
+        AUDITOR
+    );
 
     fixture.assert_restore_and_replay(&canwu);
 }

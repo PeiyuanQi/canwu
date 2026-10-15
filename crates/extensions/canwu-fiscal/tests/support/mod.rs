@@ -27,8 +27,8 @@ use canwu_api::{
     SystemCadence, Territory, TerritoryId, TypedDomainRecordRef, WorldSnapshot,
 };
 use canwu_fiscal::{
-    CompiledFiscalCatalog, FiscalAction, FiscalActionRequest, FiscalAdoptionStage,
-    FiscalAdoptionState, FiscalArchiveError, FiscalArchiveIngressReceiptV1,
+    CompiledFiscalCatalog, FiscalAction, FiscalActionBatch, FiscalActionEntry, FiscalActionTarget,
+    FiscalAdoptionStage, FiscalAdoptionState, FiscalArchiveError, FiscalArchiveIngressReceiptV1,
     FiscalArchiveRetentionHandleV1, FiscalArchiveRetentionPhaseV1, FiscalArchiveStore,
     FiscalAssessmentBasis, FiscalAuthorityBinding, FiscalCommutationPolicy, FiscalContentPack,
     FiscalContentSelection, FiscalCoverageDeclaration, FiscalCoverageSelector,
@@ -36,10 +36,10 @@ use canwu_fiscal::{
     FiscalExecutionReceiptPacket, FiscalHistoricalMode, FiscalMechanism, FiscalObserverBinding,
     FiscalPackManifest, FiscalPaymentForm, FiscalPeriodDefinition, FiscalPlugin, FiscalProvenance,
     FiscalReceiptDisposition, FiscalRegionDefinition, FiscalReport, FiscalReportRecord,
-    FiscalRuleDefinition, FiscalScopeBinding, FiscalSettledAction, FiscalState, FiscalStateRecord,
-    HistoricalConfidence, HistoricalYearWindow, compile_fiscal_content, enqueue_fiscal_archive,
-    finalize_fiscal_archive_retention, fiscal_action_command, fiscal_reports,
-    fiscal_state_reference, recompute_derived,
+    FiscalRuleDefinition, FiscalScopeBinding, FiscalSettledAction, FiscalState,
+    FiscalTransitionDefinition, HistoricalConfidence, HistoricalYearWindow, audit_fiscal_records,
+    compile_fiscal_content, enqueue_fiscal_archive, finalize_fiscal_archive_retention,
+    fiscal_action_command, fiscal_action_target, fiscal_reports, fiscal_target_revision,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -59,6 +59,10 @@ pub const GRANARY_SCOPE: &str = "scope.granary.0";
 pub const PENDING_SCOPE: &str = "scope.treasury.pending";
 pub const TREASURY_SCOPES: usize = 4;
 pub const RULE: &str = "rule.land";
+/// The rule the fixture's one transition implements in place of [`RULE`].
+pub const REFORMED_RULE: &str = "rule.land.reformed";
+/// The fixture's one transition, eligible from year 160.
+pub const REFORM: &str = "reform.land";
 pub const OBSERVER: &str = "observer.principal";
 
 pub const DEPUTY_COMMISSION: &str = "commission.deputy";
@@ -428,22 +432,45 @@ pub fn catalog() -> CompiledFiscalCatalog {
             label: "Fixture region".to_owned(),
         }],
         institutions: Vec::new(),
-        rules: vec![FiscalRuleDefinition {
-            id: RULE.to_owned(),
-            revision: 1,
-            label: "Land levy".to_owned(),
-            mechanism: FiscalMechanism::LandTax,
-            legal_window: window,
+        rules: [(RULE, "Land levy"), (REFORMED_RULE, "Reformed land levy")]
+            .into_iter()
+            .map(|(id, label)| FiscalRuleDefinition {
+                id: id.to_owned(),
+                revision: 1,
+                label: label.to_owned(),
+                mechanism: FiscalMechanism::LandTax,
+                legal_window: window.clone(),
+                jurisdiction_ids: BTreeSet::from(["region.a".to_owned()]),
+                subject_scope: "registered_land".to_owned(),
+                assessment_basis: FiscalAssessmentBasis::RegisteredLand,
+                payment_forms: BTreeSet::from([FiscalPaymentForm::Grain]),
+                commutation: FiscalCommutationPolicy::Disabled,
+                earmark_ids: BTreeSet::new(),
+                provenance_ids: provenance.clone(),
+                confidence: HistoricalConfidence::Medium,
+            })
+            .collect(),
+        // Eligible only from year 160, so a run at the fixture's year 150 has
+        // no transition candidate until its historical context moves on.
+        transitions: vec![FiscalTransitionDefinition {
+            id: REFORM.to_owned(),
+            label: "Land reform".to_owned(),
+            from_rule_ids: BTreeSet::from([RULE.to_owned()]),
+            to_rule_ids: BTreeSet::from([REFORMED_RULE.to_owned()]),
+            observed_window: HistoricalYearWindow {
+                start: 180,
+                end: 200,
+            },
+            eligibility_window: HistoricalYearWindow {
+                start: 160,
+                end: 200,
+            },
             jurisdiction_ids: BTreeSet::from(["region.a".to_owned()]),
-            subject_scope: "registered_land".to_owned(),
-            assessment_basis: FiscalAssessmentBasis::RegisteredLand,
-            payment_forms: BTreeSet::from([FiscalPaymentForm::Grain]),
-            commutation: FiscalCommutationPolicy::Disabled,
-            earmark_ids: BTreeSet::new(),
+            supersedes_or_suspends: BTreeSet::from([RULE.to_owned()]),
+            prerequisite_ids: BTreeSet::new(),
             provenance_ids: provenance.clone(),
             confidence: HistoricalConfidence::Medium,
         }],
-        transitions: Vec::new(),
         coverage: vec![FiscalCoverageDeclaration {
             id: "coverage.a".to_owned(),
             priority: 1,
@@ -453,7 +480,11 @@ pub fn catalog() -> CompiledFiscalCatalog {
                 mechanisms: BTreeSet::new(),
             },
             status: FiscalCoverageStatus::Supported,
-            definition_ids: BTreeSet::from([RULE.to_owned()]),
+            definition_ids: BTreeSet::from([
+                RULE.to_owned(),
+                REFORMED_RULE.to_owned(),
+                REFORM.to_owned(),
+            ]),
             provenance_ids: provenance,
         }],
         provenance: vec![FiscalProvenance {
@@ -506,7 +537,7 @@ pub fn base_state() -> FiscalState {
         principal_binding(TREASURY_AUTHORITY, treasury(), PRINCIPAL),
         principal_binding(GRANARY_AUTHORITY, granary(), GRANARY_PRINCIPAL),
     ] {
-        state.authority_bindings.insert(binding.id.clone(), binding);
+        state.add_authority_binding(binding);
     }
     let mut operational_scopes: Vec<_> = (0..TREASURY_SCOPES)
         .map(|index| scope(&treasury_scope(index), treasury()))
@@ -530,21 +561,22 @@ pub fn base_state() -> FiscalState {
     }
     state.add_scope(scope(PENDING_SCOPE, treasury()));
     state
+        .root
         .execution_evidence_kinds
         .insert(DomainRecordKind::for_type::<ExecutionResult>());
-    state.observer_bindings.insert(
-        OBSERVER.to_owned(),
-        observer_binding(OBSERVER, 0, PRINCIPAL, BTreeSet::from([treasury()])),
-    );
+    state.add_observer(observer_binding(
+        OBSERVER,
+        PRINCIPAL,
+        BTreeSet::from([treasury()]),
+    ));
     state
 }
 
-/// An observer binding of `actor`'s person holder on report line slot
-/// `slot`, which no scenario action may change.
+/// An observer binding of `actor`'s person holder, which no scenario action
+/// may change.
 #[must_use]
 pub fn observer_binding(
     id: &str,
-    slot: u16,
     actor: PersonId,
     visible_institutions: BTreeSet<EntityRef>,
 ) -> FiscalObserverBinding {
@@ -554,26 +586,24 @@ pub fn observer_binding(
         knowledge_holder: KnowledgeHolderRef::Person(actor),
         visible_institutions,
         confidence_per_mille: 1_000,
-        line_slot: slot,
         controlled_by: None,
         rebound_by: None,
         removed: None,
-        outcomes: canwu_fiscal::FiscalOutcomeRing::default(),
     }
 }
 
-/// The world, the commission records, and the given fiscal state exactly as
-/// authored.
+/// The world, the commission records, and the records the given fiscal state
+/// partitions into.
 #[must_use]
 pub fn scenario_from_state(state: FiscalState) -> Scenario {
     let catalog = catalog();
-    let state = state.into_record(&catalog).expect("fiscal state record");
-    scenario_from_records(catalog.into_record().expect("catalog record"), state)
+    let records = state.into_records(&catalog).expect("fiscal records");
+    scenario_from_records(catalog.into_record().expect("catalog record"), records)
 }
 
 /// The world and the commission records around already encoded fiscal records.
 #[must_use]
-pub fn scenario_from_records(catalog: DomainRecord, state: DomainRecord) -> Scenario {
+pub fn scenario_from_records(catalog: DomainRecord, fiscal: Vec<DomainRecord>) -> Scenario {
     let government = GovernmentId::new(1);
     let territory = TerritoryId::new(1);
     let world = WorldSnapshot {
@@ -630,7 +660,8 @@ pub fn scenario_from_records(catalog: DomainRecord, state: DomainRecord) -> Scen
             }
         })
         .collect();
-    domain_records.extend([catalog, state]);
+    domain_records.push(catalog);
+    domain_records.extend(fiscal);
     Scenario {
         start_time: SimTime::EPOCH,
         entities,
@@ -640,36 +671,48 @@ pub fn scenario_from_records(catalog: DomainRecord, state: DomainRecord) -> Scen
     }
 }
 
-/// A scenario whose fiscal state is the base state after `configure`, with
-/// its derived fields computed.
+/// A scenario whose fiscal state is the base state after `configure`; its
+/// derived fields are computed when it is partitioned.
 #[must_use]
 pub fn scenario(configure: impl FnOnce(&mut FiscalState)) -> Scenario {
     let mut state = base_state();
     configure(&mut state);
-    recompute_derived(&mut state, &catalog(), SimTime::EPOCH).expect("derived fiscal fields");
     scenario_from_state(state)
 }
 
+/// The run's fiscal state, assembled from its records after checking that
+/// they are exactly the partition of a valid state.
 #[must_use]
 pub fn fiscal_state(canwu: &Canwu) -> FiscalState {
-    canwu
-        .typed_domain_record(&fiscal_state_reference())
-        .expect("fiscal state record")
-        .decode_payload::<FiscalStateRecord>()
-        .expect("fiscal state payload")
+    audit_fiscal_records(canwu).expect("fiscal records audit")
 }
 
+/// The version of every fiscal record of the run, by record: what a
+/// boundary that writes no fiscal record leaves unchanged.
 #[must_use]
-pub fn fiscal_record_version(canwu: &Canwu) -> u64 {
+pub fn fiscal_record_versions(canwu: &Canwu) -> BTreeMap<String, u64> {
     canwu
-        .typed_domain_record(&fiscal_state_reference())
-        .expect("fiscal state record")
-        .version
+        .domain_records()
+        .filter(|record| record.reference.kind.namespace == "canwu.fiscal")
+        .map(|record| (record.reference.to_string(), record.version))
+        .collect()
 }
 
+/// The revision of one action target now.
 #[must_use]
-pub fn procedure_revision(canwu: &Canwu) -> u64 {
-    fiscal_state(canwu).procedure_revision
+pub fn target_revision<R: canwu_api::CanwuRun + ?Sized>(
+    runtime: &R,
+    target: &FiscalActionTarget,
+) -> u64 {
+    fiscal_target_revision(runtime, target)
+        .expect("target revision read")
+        .expect("an existing target")
+}
+
+/// The revision of a scope's ledger now.
+#[must_use]
+pub fn ledger_revision(canwu: &Canwu, scope: &str) -> u64 {
+    target_revision(canwu, &FiscalActionTarget::Ledger(scope.to_owned()))
 }
 
 /// The one fiscal report `actor` holds, assembled from its parts.
@@ -702,24 +745,52 @@ pub fn published_report_records(
         .collect()
 }
 
-/// One fiscal action that has not been stamped with a procedure revision yet.
+/// One fiscal action that has not been stamped with its target's revision
+/// yet.
 #[derive(Clone)]
 pub struct Draft {
-    action_id: String,
-    binding: String,
-    action: FiscalAction,
+    pub action_id: String,
+    pub binding: String,
+    pub action: FiscalAction,
 }
 
 impl Draft {
-    /// The request an issuer who decided against `revision` sends.
+    /// The one-entry batch an issuer who decided against `revision` of the
+    /// action's target sends.
     #[must_use]
-    pub fn against(self, revision: u64) -> FiscalActionRequest {
-        FiscalActionRequest {
+    pub fn against(self, revision: u64) -> FiscalActionBatch {
+        let binding = self.binding.clone();
+        FiscalActionBatch::single(binding, self.entry(revision))
+    }
+
+    /// The entry an issuer who decided against `revision` sends.
+    #[must_use]
+    pub fn entry(self, revision: u64) -> FiscalActionEntry {
+        FiscalActionEntry {
             action_id: self.action_id,
-            authority_binding_id: self.binding,
-            expected_procedure_revision: revision,
+            expected_revision: revision,
             action: self.action,
         }
+    }
+
+    /// The action's target, as admission resolves it on `runtime` now.
+    #[must_use]
+    pub fn target<R: canwu_api::CanwuRun + ?Sized>(&self, runtime: &R) -> FiscalActionTarget {
+        fiscal_action_target(runtime, &self.binding, &self.action).expect("the draft's target")
+    }
+
+    /// The one-entry batch stamped with its target's revision on `runtime`
+    /// now. An action whose target admission cannot resolve, which admission
+    /// will refuse, is stamped with revision 1.
+    #[must_use]
+    pub fn current<R: canwu_api::CanwuRun + ?Sized>(self, runtime: &R) -> FiscalActionBatch {
+        let revision = fiscal_action_target(runtime, &self.binding, &self.action)
+            .ok()
+            .and_then(|target| {
+                fiscal_target_revision(runtime, &target).expect("target revision read")
+            })
+            .unwrap_or(1);
+        self.against(revision)
     }
 }
 
@@ -751,9 +822,9 @@ pub fn assessment(action_id: &str, binding: &str, scope: &str, cycle: &str) -> D
     )
 }
 
-/// Enqueues the requests as tracked commands due now, in order, so that one
+/// Enqueues the batches as tracked commands due now, in order, so that one
 /// boundary admits all of them and the next settles their actions.
-pub fn enqueue_requests(canwu: &mut Canwu, commands: &[(PersonId, FiscalActionRequest)]) {
+pub fn enqueue_requests(canwu: &mut Canwu, commands: &[(PersonId, FiscalActionBatch)]) {
     let revision = canwu.revision();
     for (offset, (issuer, request)) in (0_u64..).zip(commands) {
         canwu
@@ -774,15 +845,38 @@ pub fn enqueue_requests(canwu: &mut Canwu, commands: &[(PersonId, FiscalActionRe
     }
 }
 
-/// Enqueues the drafts, every one against the procedure revision the run has
-/// now, as issuers who all read the same state would send them.
+/// Enqueues the drafts, each a one-entry batch against the revision its
+/// target has now, as issuers who all read the same records would send them.
 pub fn enqueue(canwu: &mut Canwu, commands: Vec<(PersonId, Draft)>) {
-    let revision = procedure_revision(canwu);
     let commands: Vec<_> = commands
         .into_iter()
-        .map(|(issuer, draft)| (issuer, draft.against(revision)))
+        .map(|(issuer, draft)| (issuer, draft.current(canwu)))
         .collect();
     enqueue_requests(canwu, &commands);
+}
+
+/// Enqueues the drafts as batches: consecutive drafts of one issuer under
+/// one binding go into one batch command, in order, each entry against the
+/// revision its target has now.
+pub fn enqueue_batches(canwu: &mut Canwu, commands: Vec<(PersonId, Draft)>) {
+    let mut batches: Vec<(PersonId, FiscalActionBatch)> = Vec::new();
+    for (issuer, draft) in commands {
+        let revision = fiscal_action_target(canwu, &draft.binding, &draft.action)
+            .ok()
+            .and_then(|target| {
+                fiscal_target_revision(canwu, &target).expect("target revision read")
+            })
+            .unwrap_or(1);
+        match batches.last_mut() {
+            Some((last, batch))
+                if *last == issuer && batch.authority_binding_id == draft.binding =>
+            {
+                batch.entries.push(draft.entry(revision));
+            }
+            _ => batches.push((issuer, draft.against(revision))),
+        }
+    }
+    enqueue_requests(canwu, &batches);
 }
 
 /// Settles everything due and returns the receipts of the boundaries it took.
@@ -800,21 +894,21 @@ pub fn submit(canwu: &mut Canwu, commands: Vec<(PersonId, Draft)>) -> Vec<Bounda
 
 #[must_use]
 pub fn sealed_fiscal_state(sealed: &CompactedCanwu) -> FiscalState {
-    sealed
-        .typed_domain_record(&fiscal_state_reference())
-        .expect("fiscal state record")
-        .decode_payload::<FiscalStateRecord>()
-        .expect("fiscal state payload")
+    canwu_fiscal::load_fiscal_state(sealed)
+        .expect("fiscal state")
+        .expect("a fiscal state")
 }
 
 /// Admits and settles the drafts on a compacted run, as `submit` does on a
 /// full one.
 pub fn submit_sealed(sealed: &mut CompactedCanwu, commands: Vec<(PersonId, Draft)>) {
-    let procedure_revision = sealed_fiscal_state(sealed).procedure_revision;
+    let batches: Vec<_> = commands
+        .into_iter()
+        .map(|(issuer, draft)| (issuer, draft.current(&*sealed)))
+        .collect();
     let revision = sealed.revision();
-    for (offset, (issuer, draft)) in (0_u64..).zip(commands) {
-        let command =
-            fiscal_action_command(&draft.against(procedure_revision)).expect("fiscal command");
+    for (offset, (issuer, batch)) in (0_u64..).zip(batches) {
+        let command = fiscal_action_command(&batch).expect("fiscal command");
         sealed
             .enqueue_command(
                 sealed.time(),
@@ -870,7 +964,10 @@ pub fn admission_rejection(canwu: &Canwu, action_id: &str) -> Option<CanwuError>
         let canwu_api::Command::Plugin { payload, .. } = &attempt.envelope.command else {
             return None;
         };
-        if payload["action_id"] != action_id {
+        if !payload["entries"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| entry["action_id"] == action_id))
+        {
             return None;
         }
         match &attempt.outcome {

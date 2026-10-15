@@ -26,9 +26,9 @@ use canwu_fiscal::{
 use support::{
     DEPUTY, DEPUTY_COMMISSION, Draft, Fixture, PRINCIPAL, SUCCESSOR, SUCCESSOR_COMMISSION,
     TREASURY_AUTHORITY, admission_rejection, assessment, current_commission, draft,
-    enqueue_renewal, fiscal_state, initial_commission, initial_warrant, outcome,
-    procedure_revision, scenario, sealed_fiscal_state, settle, settled_at, submit, submit_sealed,
-    tick_at, treasury, treasury_scope,
+    enqueue_renewal, fiscal_state, initial_commission, initial_warrant, outcome, scenario,
+    sealed_fiscal_state, settle, settled_at, submit, submit_sealed, tick_at, treasury,
+    treasury_scope,
 };
 
 /// A decision controller that decides for the treasury.
@@ -138,8 +138,7 @@ fn register_offices(canwu: &mut Canwu) {
 /// Has the treasury decide the action through one of its controllers: a
 /// ticket offers the command, and the controller selects it.
 fn decide_as_institution(canwu: &mut Canwu, office: &Office, ticket: u64, action: Draft) {
-    let command =
-        fiscal_action_command(&action.against(procedure_revision(canwu))).expect("fiscal command");
+    let command = fiscal_action_command(&action.current(canwu)).expect("fiscal command");
     let now = canwu.time();
     canwu
         .enqueue_decision(
@@ -214,8 +213,7 @@ fn gap_g48_fiscal_rebind_authority() {
     let fixture = Fixture::new();
     let mut canwu = fixture.runtime(scenario(|state| {
         let binding = state
-            .authority_bindings
-            .get_mut(TREASURY_AUTHORITY)
+            .authority_binding_mut(TREASURY_AUTHORITY)
             .expect("treasury binding");
         binding.acting_actor = Some(DEPUTY);
         binding.authority_basis = Some(initial_commission(DEPUTY_COMMISSION));
@@ -351,7 +349,9 @@ fn gap_g48_fiscal_rebind_authority() {
     );
     assert!(applied(&canwu, "rebind.renewed"));
     let state = fiscal_state(&canwu);
-    let binding = &state.authority_bindings[TREASURY_AUTHORITY];
+    let binding = &state
+        .authority_binding(TREASURY_AUTHORITY)
+        .expect("authority binding");
     assert_eq!(binding.authority_basis.as_ref(), Some(&renewed));
     let rebound_by = binding.rebound_by.as_ref().expect("rebinding provenance");
     assert_eq!(rebound_by.action_id, "rebind.renewed");
@@ -434,7 +434,9 @@ fn gap_g48_fiscal_rebind_authority() {
             .ends_with(FISCAL_AUTHORITY_BASIS_NOT_CURRENT)
     );
     assert_eq!(
-        fiscal_state(&canwu).authority_bindings[TREASURY_AUTHORITY]
+        fiscal_state(&canwu)
+            .authority_binding(TREASURY_AUTHORITY)
+            .expect("authority binding")
             .rebound_by
             .as_ref()
             .expect("rebinding provenance")
@@ -484,7 +486,9 @@ fn gap_g48_fiscal_rebind_authority() {
     );
     assert!(applied(&canwu, "rebind.by-institution"));
     let state = fiscal_state(&canwu);
-    let binding = &state.authority_bindings[TREASURY_AUTHORITY];
+    let binding = &state
+        .authority_binding(TREASURY_AUTHORITY)
+        .expect("authority binding");
     assert_eq!(binding.authorized_actor, Some(PRINCIPAL));
     assert_eq!(
         binding
@@ -520,14 +524,14 @@ fn gap_g48_fiscal_rebind_authority() {
 /// boundary exactly as its full-retention replay does. Each decision reads the
 /// current-version provenance index, never evidence the seal removed.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn sealed_run_rebinds_and_idles_like_its_replay() {
     let fixture = Fixture::new();
     let mut canwu = fixture.runtime(scenario(|state| {
         // A published report would keep its evidence from sealing.
-        state.observer_bindings.clear();
+        state.remove_observer(support::OBSERVER);
         let binding = state
-            .authority_bindings
-            .get_mut(TREASURY_AUTHORITY)
+            .authority_binding_mut(TREASURY_AUTHORITY)
             .expect("treasury binding");
         binding.acting_actor = Some(DEPUTY);
         binding.authority_basis = Some(initial_commission(DEPUTY_COMMISSION));
@@ -611,7 +615,10 @@ fn sealed_run_rebinds_and_idles_like_its_replay() {
         FiscalActionDisposition::Applied
     );
     assert_eq!(
-        state.authority_bindings[TREASURY_AUTHORITY].authority_basis,
+        state
+            .authority_binding(TREASURY_AUTHORITY)
+            .expect("authority binding")
+            .authority_basis,
         Some(current)
     );
 

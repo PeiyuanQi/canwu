@@ -885,14 +885,8 @@ impl SimulationView<'_> {
         &self,
         reference: &DomainRecordRef,
     ) -> Option<DomainRecordVersionRef> {
-        self.proposal_evidence.and_then(|evidence| {
-            evidence.iter().find_map(|item| match item {
-                EvidenceRef::DomainRecordVersion(version) if version.record == *reference => {
-                    Some(version.clone())
-                }
-                _ => None,
-            })
-        })
+        self.proposal_evidence
+            .and_then(|evidence| first_proposed_version(evidence, reference, 0))
     }
 
     /// Returns the exact evidence reference for the currently visible version
@@ -915,14 +909,8 @@ impl SimulationView<'_> {
             return Ok(None);
         };
         if let Some(proposed) = self.proposal_evidence.and_then(|evidence| {
-            evidence.iter().find_map(|item| match item {
-                EvidenceRef::DomainRecordVersion(version)
-                    if version.record == *reference && version.version == record.version =>
-                {
-                    Some(version.clone())
-                }
-                _ => None,
-            })
+            first_proposed_version(evidence, reference, record.version)
+                .filter(|proposed| proposed.version == record.version)
         }) {
             return Ok(Some(proposed));
         }
@@ -1551,4 +1539,28 @@ impl super::PluginArchiveObjectProvider for SimulationView<'_> {
 /// an ID was committed and exists; only its payload is gone.
 const fn archived_ordinal(id: u64, archived_count: u64) -> bool {
     id != 0 && id <= archived_count
+}
+
+/// The first domain-record version evidence of `reference` in `evidence`, at
+/// `version` or above, in evidence order. The evidence of one record is
+/// contiguous and ordered by version, and `InitialScenario` orders first, so
+/// a range from that key finds it in logarithmic time where a scan of a
+/// boundary's whole evidence would take time proportional to the boundary's
+/// changes.
+fn first_proposed_version(
+    evidence: &BTreeSet<EvidenceRef>,
+    reference: &DomainRecordRef,
+    version: u64,
+) -> Option<DomainRecordVersionRef> {
+    let from = EvidenceRef::DomainRecordVersion(DomainRecordVersionRef {
+        record: reference.clone(),
+        version,
+        established_by: DomainRecordVersionSource::InitialScenario,
+    });
+    match evidence.range(from..).next() {
+        Some(EvidenceRef::DomainRecordVersion(found)) if found.record == *reference => {
+            Some(found.clone())
+        }
+        _ => None,
+    }
 }

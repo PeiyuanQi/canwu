@@ -2,9 +2,9 @@
 //!
 //! Measures, through the public API, what `canwu-fiscal` adds to a boundary:
 //! one that admits no fiscal ingress, and a pair that admits and then settles a
-//! batch of fiscal actions. The fiscal state is built in the scenario with a
+//! batch of fiscal actions. The fiscal records are built in the scenario with a
 //! history of settled assessments and execution requests, so every decode and
-//! validation pays for a mid-campaign record rather than an empty one.
+//! validation pays for a mid-campaign ledger rather than an empty one.
 //!
 //! `--mode allocations`, in a build with the `allocation-counting` feature,
 //! counts the allocator calls each measured operation makes instead of timing
@@ -12,26 +12,24 @@
 //! `*_ms`.
 
 use canwu_api::{
-    BoundaryRequest, Canwu, CanwuError, CommandEnvelope, CommandRequest,
-    CommandRequestId, EntityRef, Government, GovernmentId, IngressClass, Issuer,
-    KnowledgeHolderRef, KnowledgeSnapshot, MapPoint, OrganizationId, PayloadSchema, Person,
-    PersonId, PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar, ResourceId, Scenario,
-    SimTime, SimulationGranularity, SimulationPlugin, Territory, TerritoryId, WorldSnapshot,
+    BoundaryRequest, Canwu, CanwuError, CommandEnvelope, CommandRequest, CommandRequestId,
+    EntityRef, Government, GovernmentId, IngressClass, Issuer, KnowledgeHolderRef,
+    KnowledgeSnapshot, MapPoint, OrganizationId, PayloadSchema, Person, PersonId,
+    PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar, ResourceId, Scenario, SimTime,
+    SimulationGranularity, SimulationPlugin, Territory, TerritoryId, WorldSnapshot,
 };
 use canwu_fiscal::{
-    CompiledFiscalCatalog, FISCAL_RECENT_OUTCOMES, FiscalAction, FiscalActionDisposition,
-    FiscalActionRequest, FiscalAdoptionStage, FiscalAdoptionState, FiscalAssessment,
-    FiscalAssessmentBasis, FiscalAuthorityBinding, FiscalCommutationPolicy, FiscalContentPack,
-    FiscalContentSelection, FiscalCoverageDeclaration, FiscalCoverageSelector,
-    FiscalCoverageStatus, FiscalExecutionKind, FiscalExecutionRequest, FiscalHistoricalMode,
-    FiscalMechanism, FiscalObserverBinding, FiscalOutcomeRing, FiscalPackManifest,
-    FiscalPaymentForm, FiscalPeriodDefinition, FiscalPlugin, FiscalProvenance,
-    FiscalRecentOutcome, FiscalRegionDefinition, FiscalRuleDefinition, FiscalScopeBinding,
-    FiscalSettledAction, FiscalState, FiscalStateRecord, HistoricalConfidence,
-    HistoricalYearWindow, MAX_FISCAL_HOT_BOOKS_PER_LEDGER, compile_fiscal_content,
-    compute_aggregates,
-    compute_transition_candidates, fiscal_action_command, fiscal_state_reference,
-    recompute_derived,
+    CompiledFiscalCatalog, FISCAL_RECENT_OUTCOMES, FiscalAction, FiscalActionBatch,
+    FiscalActionDisposition, FiscalActionEntry, FiscalActionTarget, FiscalAdoptionStage,
+    FiscalAdoptionState, FiscalAssessment, FiscalAssessmentBasis, FiscalAuthorityBinding,
+    FiscalCommutationPolicy, FiscalContentPack, FiscalContentSelection, FiscalCoverageDeclaration,
+    FiscalCoverageSelector, FiscalCoverageStatus, FiscalExecutionKind, FiscalExecutionRequest,
+    FiscalHistoricalMode, FiscalLedgerRecord, FiscalMechanism, FiscalObserverBinding,
+    FiscalOutcomeRing, FiscalPackManifest, FiscalPaymentForm, FiscalPeriodDefinition, FiscalPlugin,
+    FiscalProvenance, FiscalRecentOutcome, FiscalRegionDefinition, FiscalRuleDefinition,
+    FiscalScopeBinding, FiscalSettledAction, FiscalState, HistoricalConfidence,
+    HistoricalYearWindow, MAX_FISCAL_HOT_BOOKS_PER_LEDGER, audit_fiscal_records,
+    compile_fiscal_content, fiscal_action_command, fiscal_ledger_reference, fiscal_target_revision,
 };
 use serde_json::{Value, json};
 #[cfg(feature = "allocation-counting")]
@@ -207,9 +205,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut floor = Canwu::new_with_plugins(PROFILE_SEED, scenario(&options, false)?, &plugins)?;
     let floor_ms = measure_idle(&mut floor, &options)?;
 
-    // A fiscal state no boundary has written yet.
+    // Fiscal records no boundary has written yet.
     let mut initial = Canwu::new_with_plugins(PROFILE_SEED, scenario(&options, true)?, &plugins)?;
-    let state_bytes = serde_json::to_vec(&fiscal_state(&initial)?)?.len();
+    let state_bytes = fiscal_record_bytes(&initial);
     let components = state_component_costs(&initial, &options)?;
     let idle_initial_ms = measure_idle(&mut initial, &options)?;
 
@@ -256,13 +254,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             "execution_requests": options.institutions * options.cycles,
             "observers": options.observers,
             "observed_institutions": options.observed_institutions,
-            "fiscal_state_json_bytes": state_bytes,
+            "fiscal_records_json_bytes": state_bytes,
             "report_facts_per_observer": options.observed_institutions * options.cycles,
             "report_records_per_observer": report_records,
             "report_json_bytes_per_observer": report_bytes,
         },
         "samples": options.samples,
-        "fiscal_state_component_ms": components,
+        "fiscal_ledger_component_ms": components,
         "idle_boundary_ms": {
             "without_fiscal_records": summary(&floor_ms),
             "initial_fiscal_state": summary(&idle_initial_ms),
@@ -288,22 +286,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Times the operations a fiscal handler can perform on the whole state, so
-/// a boundary time can be read as a count of them.
+/// Times the operations a fiscal handler performs on the one ledger record
+/// an action writes, so a boundary time can be read as a count of them, and
+/// the host's audit of every fiscal record.
 fn state_component_costs(canwu: &Canwu, options: &Options) -> Result<Value, Box<dyn Error>> {
     let catalog = catalog()?;
     let record = canwu
-        .typed_domain_record(&fiscal_state_reference())
-        .ok_or("the profile run has no fiscal state")?;
-    let state = record.decode_payload::<FiscalStateRecord>()?;
+        .typed_domain_record(&fiscal_ledger_reference(&scope_id(0)))
+        .ok_or("the profile run has no fiscal ledger")?;
+    let ledger = record.decode_payload::<FiscalLedgerRecord>()?;
     let mut decode = Vec::with_capacity(options.samples);
     let mut clone = Vec::with_capacity(options.samples);
     let mut validate = Vec::with_capacity(options.samples);
     let mut encode = Vec::with_capacity(options.samples);
-    let mut measure = Vec::with_capacity(options.samples);
+    let mut audit = Vec::with_capacity(options.samples);
     for _ in 0..options.samples {
         let started = Meter::start();
-        let decoded = record.decode_payload::<FiscalStateRecord>()?;
+        let decoded = record.decode_payload::<FiscalLedgerRecord>()?;
         decode.push(started.finish());
         let started = Meter::start();
         let copy = decoded.clone();
@@ -312,31 +311,33 @@ fn state_component_costs(canwu: &Canwu, options: &Options) -> Result<Value, Box<
         copy.validate(&catalog)?;
         validate.push(started.finish());
         let started = Meter::start();
-        let encoded = serde_json::to_value(&state)?;
+        let encoded = serde_json::to_value(&ledger)?;
         encode.push(started.finish());
-        // What settlement adds to its one encoding of the state to measure the
-        // records the derived systems of its boundary will write: the derived
-        // candidates and aggregates, and the encoded size of those fields
-        // before and after.
         let started = Meter::start();
-        let candidates = compute_transition_candidates(&state, &catalog, SimTime::EPOCH);
-        let aggregates = compute_aggregates(&state, &catalog)?;
-        let sizes = [
-            serde_json::to_vec(&state.transition_candidates)?.len(),
-            serde_json::to_vec(&candidates)?.len(),
-            serde_json::to_vec(&state.aggregates)?.len(),
-            serde_json::to_vec(&aggregates)?.len(),
-        ];
-        measure.push(started.finish());
-        drop((decoded, copy, encoded, candidates, aggregates, sizes));
+        let state = audit_fiscal_records(canwu)?;
+        audit.push(started.finish());
+        drop((decoded, copy, encoded, state));
     }
     Ok(json!({
+        "ledger_json_bytes": serde_json::to_vec(&record.payload)?.len(),
         "decode": summary(&decode),
         "clone": summary(&clone),
         "validate": summary(&validate),
         "encode": summary(&encode),
-        "settlement_measure": summary(&measure),
+        "audit_every_record": summary(&audit),
     }))
+}
+
+/// The bytes of every fiscal record of a run, the catalog aside.
+fn fiscal_record_bytes(canwu: &Canwu) -> usize {
+    canwu
+        .domain_records()
+        .filter(|record| {
+            record.reference.kind.namespace == "canwu.fiscal"
+                && record.reference.kind.name != "catalog"
+        })
+        .map(|record| serde_json::to_vec(&record.payload).map_or(0, |bytes| bytes.len()))
+        .sum()
 }
 
 /// Times boundaries that admit one tick and no fiscal ingress.
@@ -360,21 +361,23 @@ fn measure_idle(canwu: &mut Canwu, options: &Options) -> Result<Vec<f64>, Box<dy
 }
 
 /// Enqueues one assessment action per institution in `first..first + count`,
-/// each from that institution's own principal, then times the boundary that
-/// admits the commands and the boundary that settles their actions.
+/// each from that institution's own principal as a one-entry batch against
+/// its scope's revision, then times the boundary that admits the commands and
+/// the boundary that settles their actions.
 fn settle_actions(
     canwu: &mut Canwu,
     first: usize,
     count: usize,
     cycle: &str,
 ) -> Result<(f64, f64), Box<dyn Error>> {
-    let procedure_revision = fiscal_state(canwu)?.procedure_revision;
     let revision = canwu.revision();
     for (offset, institution) in (first..first + count).enumerate() {
-        let request = FiscalActionRequest {
+        let expected_revision =
+            fiscal_target_revision(canwu, &FiscalActionTarget::Ledger(scope_id(institution)))?
+                .ok_or("the profile scope has no ledger")?;
+        let entry = FiscalActionEntry {
             action_id: format!("profile.{cycle}.{institution}"),
-            authority_binding_id: authority_id(institution),
-            expected_procedure_revision: procedure_revision,
+            expected_revision,
             action: FiscalAction::OpenAssessment {
                 assessment_id: format!("assess.{institution}.{cycle}"),
                 rule_id: "rule.land".to_owned(),
@@ -386,6 +389,7 @@ fn settle_actions(
                 commutation_quote: None,
             },
         };
+        let request = FiscalActionBatch::single(authority_id(institution), entry);
         let offset = u64::try_from(offset)?;
         canwu.enqueue_command(
             canwu.time(),
@@ -421,13 +425,6 @@ fn observer_reports(canwu: &Canwu, observers: usize) -> Result<(usize, usize), B
         }
     }
     Ok(held)
-}
-
-fn fiscal_state(canwu: &Canwu) -> Result<FiscalState, Box<dyn Error>> {
-    Ok(canwu
-        .typed_domain_record(&fiscal_state_reference())
-        .ok_or("the profile run has no fiscal state")?
-        .decode_payload::<FiscalStateRecord>()?)
 }
 
 fn authority_id(institution: usize) -> String {
@@ -489,7 +486,7 @@ fn scenario(options: &Options, with_fiscal_records: bool) -> Result<Scenario, Bo
         let catalog = catalog()?;
         let state = fiscal_history(options, &catalog)?;
         domain_records.push(catalog.clone().into_record()?);
-        domain_records.push(state.into_record(&catalog)?);
+        domain_records.extend(state.into_records(&catalog)?);
     }
     Ok(Scenario {
         start_time: SimTime::EPOCH,
@@ -515,7 +512,7 @@ fn fiscal_history(
             "institution": entity,
             "authorized_actor": principal(institution)?,
         }))?;
-        state.authority_bindings.insert(binding.id.clone(), binding);
+        state.add_authority_binding(binding);
         state.add_scope(FiscalScopeBinding {
             id: scope_id(institution),
             institution: entity.clone(),
@@ -571,8 +568,8 @@ fn fiscal_history(
     }
     // A lived-in state: every scope's ring of recent outcomes is full.
     let outcomes = u64::try_from(FISCAL_RECENT_OUTCOMES)?;
-    state.procedure_revision = outcomes + 1;
     for ledger in state.ledgers.values_mut() {
+        ledger.revision = outcomes + 1;
         let mut ring = FiscalOutcomeRing::default();
         for revision in 1..=outcomes {
             ring.recent.push(FiscalRecentOutcome {
@@ -589,25 +586,20 @@ fn fiscal_history(
         let actor = principal(observer)?;
         let id = format!("observer.{observer}");
         let first = observer * options.observed_institutions;
-        state.observer_bindings.insert(
-            id.clone(),
-            FiscalObserverBinding {
-                id,
-                actor: Some(actor),
-                knowledge_holder: KnowledgeHolderRef::Person(actor),
-                visible_institutions: (first..first + options.observed_institutions)
-                    .map(institution_entity)
-                    .collect::<Result<_, _>>()?,
-                confidence_per_mille: 850,
-                line_slot: u16::try_from(observer)?,
-                controlled_by: None,
-                rebound_by: None,
-                removed: None,
-                outcomes: FiscalOutcomeRing::default(),
-            },
-        );
+        state.add_observer(FiscalObserverBinding {
+            id,
+            actor: Some(actor),
+            knowledge_holder: KnowledgeHolderRef::Person(actor),
+            visible_institutions: (first..first + options.observed_institutions)
+                .map(institution_entity)
+                .collect::<Result<_, _>>()?,
+            confidence_per_mille: 850,
+            controlled_by: None,
+            rebound_by: None,
+            removed: None,
+        });
     }
-    recompute_derived(&mut state, catalog, SimTime::EPOCH)?;
+    state.recompute_derived(catalog, SimTime::EPOCH);
     Ok(state)
 }
 

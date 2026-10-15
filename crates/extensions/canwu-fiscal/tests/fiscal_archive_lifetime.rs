@@ -2,20 +2,17 @@
 //! outcomes, execution requests and receipts, and auditor proposals than the
 //! 0.15.0 state could ever hold, and nothing is refused for lifetime.
 //!
-//! The run is a pipeline of rounds, one accounting cycle each, in which every
-//! command batch fills the boundary's action limit. A round's batch assesses
-//! the next cycle, authorizes collections in this one, closes the cycle
-//! before last, and nominates auditors, the appointment policy's listed party
+//! The run is a pipeline of rounds, one accounting cycle each, of
+//! [`ROUND_ACTIONS`] actions in two batch commands. A round's actions assess
+//! the next cycle, authorize collections in this one, close the cycle before
+//! last, and nominate auditors, the appointment policy's listed party
 //! replacing its pending nomination each time and the appointer dismissing
-//! the last one of the round before. The boundary that admits the batch
+//! the last one of the round before. The boundary that admits the batches
 //! records the execution results of the last cycle's collections; the one
-//! that settles it settles their receipts and the archive commit of the books
-//! closed a round earlier. What the state holds stays bounded by a few
-//! cycles, while the archive keeps every book and every cycle's totals.
-//!
-//! The run past every cap takes a release build:
-//! `cargo test --release -p canwu-fiscal --test fiscal_archive_lifetime -- --ignored`.
-//! The debug suite runs the same pipeline for a few rounds.
+//! that settles them settles their receipts, in one receipt batch, and the
+//! archive commit of the books closed a round earlier. What the records hold
+//! stays bounded by a few cycles, round after round, while the archive keeps
+//! every book and every cycle's totals.
 
 mod support;
 
@@ -24,16 +21,16 @@ use canwu_fiscal::{
     FiscalAction, FiscalActionDisposition, FiscalAppointmentDecision, FiscalAppointmentParty,
     FiscalAppointmentPolicy, FiscalArchiveIngressReceiptV1, FiscalArchiveKeyV1,
     FiscalArchivedRecordV1, FiscalExecutionEvidence, FiscalExecutionKind, FiscalPaymentForm,
-    FiscalSettledAction, MAX_FISCAL_ACTIONS_PER_BOUNDARY, PLUGIN_NAME, archived_fiscal_record,
-    audit_fiscal_archive, enqueue_execution_receipt, enqueue_fiscal_archive,
-    finalize_fiscal_archive_retention, fiscal_state_reference,
+    FiscalSettledAction, FiscalState, MAX_FISCAL_ARCHIVE_COMMIT_RECORDS, archived_fiscal_record,
+    audit_fiscal_archive, enqueue_execution_receipts, enqueue_fiscal_archive,
+    finalize_fiscal_archive_retention,
 };
 use std::collections::BTreeSet;
 use support::{
-    AUDITOR, AUDITOR_COMMISSION, DEPUTY, Draft, Fixture, MemoryArchiveStore, PRINCIPAL, RULE,
-    TREASURY_AUTHORITY, close, draft, enqueue, enqueue_results, execution_claim, fiscal_state,
-    initial_commission, receipt_packet, refusals, result_versions, scenario, settle, submit,
-    treasury, treasury_scope,
+    AUDITOR, AUDITOR_COMMISSION, DEPUTY, Draft, Fixture, MemoryArchiveStore, OBSERVER, PRINCIPAL,
+    RULE, TREASURY_AUTHORITY, close, draft, enqueue_batches, enqueue_results, execution_claim,
+    fiscal_state, initial_commission, receipt_packet, refusals, result_versions, scenario, settle,
+    submit, treasury, treasury_scope,
 };
 
 /// The 0.15.0 lifetime caps: on assessments, on kept action outcomes, on
@@ -47,28 +44,29 @@ const OLD_PROPOSAL_CAP: usize = 4_096;
 /// The scopes of the treasury the run assesses.
 const SCOPES: usize = 3;
 /// Assessments per scope and cycle, each of a unit of its own, with two
-/// collections of half its quantity against each.
-const UNITS: usize = 5;
+/// collections of half its quantity against each: as many as one
+/// institution's books of a cycle may use partition keys.
+const UNITS: usize = 4;
+/// Actions one round settles: its assessments, collections, closes, and
+/// dismissal, and nominations for the rest.
+const ROUND_ACTIONS: usize = 64;
 const POLICY: &str = "policy.treasury";
 const AUDIT: &str = "audit.lifetime";
 
 fn lifetime_scenario() -> canwu_api::Scenario {
     scenario(|state| {
-        // Reports are covered elsewhere; this run is about what the state
-        // holds.
-        state.observer_bindings.clear();
-        state.audit_appointment_policies.insert(
-            POLICY.to_owned(),
-            FiscalAppointmentPolicy {
-                id: POLICY.to_owned(),
-                institution: treasury(),
-                appointer: treasury(),
-                nominators: BTreeSet::from([FiscalAppointmentParty::Actor { actor: DEPUTY }]),
-                petitioners: BTreeSet::new(),
-                appoints_without_nomination: true,
-                removes_without_petition: true,
-            },
-        );
+        // Reports are covered elsewhere; this run is about what the records
+        // hold.
+        state.remove_observer(OBSERVER);
+        state.add_appointment_policy(FiscalAppointmentPolicy {
+            id: POLICY.to_owned(),
+            institution: treasury(),
+            appointer: treasury(),
+            nominators: BTreeSet::from([FiscalAppointmentParty::Actor { actor: DEPUTY }]),
+            petitioners: BTreeSet::new(),
+            appoints_without_nomination: true,
+            removes_without_petition: true,
+        });
     })
 }
 
@@ -165,7 +163,7 @@ fn other_actions(round: usize) -> usize {
 /// The appointer's dismissal of the nomination `round` left pending, its
 /// last.
 fn dismiss(round: usize) -> (PersonId, Draft) {
-    let last = MAX_FISCAL_ACTIONS_PER_BOUNDARY - other_actions(round) - 1;
+    let last = ROUND_ACTIONS - other_actions(round) - 1;
     (
         PRINCIPAL,
         draft(
@@ -225,19 +223,19 @@ fn queue_maintenance(
 ) -> Option<FiscalArchiveIngressReceiptV1> {
     if let Some((round, results)) = recorded {
         let now = canwu.time();
-        for ((_, claim), version) in results.iter().zip(result_versions(canwu, results)) {
-            enqueue_execution_receipt(
-                canwu,
-                now,
-                &receipt_packet(
+        let receipts: Vec<_> = results
+            .iter()
+            .zip(result_versions(canwu, results))
+            .map(|((_, claim), version)| {
+                receipt_packet(
                     &format!("receipt.{round}.{}", claim.id),
                     &claim.scope_binding_id,
                     &claim.request_id,
                     [version],
-                ),
-            )
-            .expect("receipt");
-        }
+                )
+            })
+            .collect();
+        enqueue_execution_receipts(canwu, now, &receipts).expect("receipts");
     }
     if let Some(commit) = commit {
         finalize_fiscal_archive_retention(canwu, store, &commit).expect("finalized");
@@ -247,16 +245,17 @@ fn queue_maintenance(
         return None;
     }
     let prepared = state
-        .prepare_fiscal_archive(MAX_FISCAL_ACTIONS_PER_BOUNDARY, store, None)
+        .prepare_fiscal_archive(MAX_FISCAL_ARCHIVE_COMMIT_RECORDS, store, None)
         .expect("the closed books");
     Some(enqueue_fiscal_archive(canwu, &prepared, store, None).expect("queued"))
 }
 
-/// Settles a batch of commands in two boundaries: the first admits it and
-/// records `results`, if any; the second settles the batch, then the
-/// receipts of those results and the archive maintenance queued between the
-/// two. Every command names the procedure revision the run has before the
-/// first boundary, which only admits and records, so none is stale.
+/// Settles a round's commands in two boundaries: the first admits them, as
+/// one batch for each issuer and binding, and records `results`, if any; the
+/// second settles the batches, then the receipts of those results and the
+/// archive maintenance queued between the two. Every entry names the
+/// revision its target has before the first boundary, which only admits and
+/// records, so none is stale.
 fn batch(
     canwu: &mut Canwu,
     store: &MemoryArchiveStore,
@@ -264,7 +263,7 @@ fn batch(
     results: Option<(usize, &[(bool, FiscalExecutionEvidence)])>,
     commit: Option<FiscalArchiveIngressReceiptV1>,
 ) -> Option<FiscalArchiveIngressReceiptV1> {
-    enqueue(canwu, commands);
+    enqueue_batches(canwu, commands);
     if let Some((_, results)) = results {
         enqueue_results(canwu, results);
     }
@@ -285,21 +284,113 @@ fn round_batch(round: usize) -> Vec<(PersonId, Draft)> {
     }
     batch.extend(collections().map(|(scope, index, half)| authorize(round, scope, index, half)));
     batch.extend(partitions().map(|(scope, index)| assess(round + 1, scope, index)));
-    let nominations = MAX_FISCAL_ACTIONS_PER_BOUNDARY - batch.len();
-    assert_eq!(
-        nominations,
-        MAX_FISCAL_ACTIONS_PER_BOUNDARY - other_actions(round)
-    );
+    let nominations = ROUND_ACTIONS - batch.len();
+    assert_eq!(nominations, ROUND_ACTIONS - other_actions(round));
     batch.extend((0..nominations).map(|index| nominate(round, index)));
     batch
 }
 
-/// A run of the pipeline: what it settled, and the fiscal state's size after
-/// each round, without its resolved proposals.
+/// What the fiscal records hold that a long run could grow: the most hot
+/// books one ledger holds, the hot cycles of the treasury's office, the most
+/// recent outcomes any ring holds, and the archive head's retention handles
+/// and maintenance receipts. The auditor proposals the office keeps, and
+/// their directory entries, grow by one resolved proposal a round to the
+/// policy's bound, and are checked against it apart.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Shape {
+    hot_books: usize,
+    office_cycles: usize,
+    ring: usize,
+    handles: usize,
+    receipts: usize,
+    proposals: usize,
+    directory: usize,
+}
+
+impl Shape {
+    /// The shape without the proposals and their directory entries.
+    fn fixed(&self) -> Shape {
+        Shape {
+            proposals: 0,
+            directory: 0,
+            ..self.clone()
+        }
+    }
+
+    /// Whether the proposals are within the policy's bounds: its resolved
+    /// proposals and the one party's pending ones, each with one directory
+    /// entry beside the three binding and policy IDs.
+    fn proposals_bounded(&self) -> bool {
+        self.proposals
+            <= canwu_fiscal::MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY
+                + canwu_fiscal::MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY
+            && self.directory == 3 + self.proposals
+    }
+}
+
+fn shape(canwu: &Canwu, state: &FiscalState) -> Shape {
+    let rings = state
+        .ledgers
+        .values()
+        .map(|ledger| &ledger.outcomes)
+        .chain(state.offices.values().map(|office| &office.outcomes))
+        .chain(
+            state
+                .jurisdictions
+                .values()
+                .map(|jurisdiction| &jurisdiction.outcomes),
+        );
+    Shape {
+        hot_books: state
+            .ledgers
+            .values()
+            .map(|ledger| ledger.books.len())
+            .max()
+            .unwrap_or_default(),
+        office_cycles: state
+            .office(&treasury())
+            .map_or(0, |office| office.cycles.len()),
+        ring: rings
+            .map(|ring| ring.recent.len())
+            .max()
+            .unwrap_or_default(),
+        handles: state.archive.pending_handles.len(),
+        receipts: state.archive.maintenance_receipts.len(),
+        proposals: state.audit_proposals().count(),
+        directory: canwu
+            .domain_records()
+            .filter(|record| record.reference.kind.name == "directory")
+            .map(|record| {
+                ["bindings", "proposals"]
+                    .iter()
+                    .filter_map(|key| record.payload.get(*key).and_then(|map| map.as_object()))
+                    .map(serde_json::Map::len)
+                    .sum::<usize>()
+            })
+            .sum(),
+    }
+}
+
+/// The bytes of the largest fiscal record of a run, the catalog aside.
+fn largest_record(canwu: &Canwu) -> usize {
+    canwu
+        .domain_records()
+        .filter(|record| {
+            record.reference.kind.namespace == "canwu.fiscal"
+                && record.reference.kind.name != "catalog"
+        })
+        .map(|record| serde_json::to_vec(&record.payload).expect("payload").len())
+        .max()
+        .unwrap_or_default()
+}
+
+/// A run of the pipeline: what it settled, and the shape of its records and
+/// its largest record after each round.
 struct Run {
     fixture: Fixture,
     canwu: Canwu,
-    state_bytes: Vec<usize>,
+    shapes: Vec<Shape>,
+    largest: Vec<usize>,
 }
 
 /// Runs `rounds` rounds of the pipeline, then the receipts of the last, then
@@ -312,20 +403,6 @@ fn run(rounds: usize) -> Run {
     let fixture = Fixture::new();
     let mut canwu = fixture.runtime(lifetime_scenario());
     let store = MemoryArchiveStore::default();
-    // The state's bytes, without the resolved proposals, which grow by one
-    // dismissal a round to their bound of 64.
-    let state_bytes = |canwu: &Canwu| {
-        let mut payload = canwu
-            .typed_domain_record(&fiscal_state_reference())
-            .expect("the fiscal state")
-            .payload
-            .clone();
-        payload
-            .as_object_mut()
-            .expect("an object")
-            .remove("audit_proposals");
-        serde_json::to_vec(&payload).expect("payload").len()
-    };
 
     submit(
         &mut canwu,
@@ -334,12 +411,14 @@ fn run(rounds: usize) -> Run {
             .collect(),
     );
     let mut commit = None;
-    let mut sizes = Vec::with_capacity(rounds);
+    let mut shapes = Vec::with_capacity(rounds);
+    let mut largest = Vec::with_capacity(rounds);
     for round in 0..rounds {
         let recorded = (round > 0).then(|| results(round - 1));
         let recorded = recorded.as_deref().map(|results| (round - 1, results));
         commit = batch(&mut canwu, &store, round_batch(round), recorded, commit);
-        sizes.push(state_bytes(&canwu));
+        shapes.push(shape(&canwu, &fiscal_state(&canwu)));
+        largest.push(largest_record(&canwu));
     }
     let last = std::iter::once(dismiss(rounds - 1)).chain(closes(rounds - 2));
     let recorded = results(rounds - 1);
@@ -365,9 +444,6 @@ fn run(rounds: usize) -> Run {
         "{:?}",
         refusals(&canwu).first()
     );
-    assert!(!canwu.events().iter().any(|event| {
-        event.kind.plugin_identity() == Some((PLUGIN_NAME, "canwu.fiscal.action_dropped.v1"))
-    }));
 
     let state = fiscal_state(&canwu);
     assert!(state.books().next().is_none());
@@ -382,7 +458,7 @@ fn run(rounds: usize) -> Run {
     );
     assert!(state.archive.pending_handles.is_empty());
     assert!(
-        state.audit_proposals.len() <= 64,
+        state.audit_proposals().count() <= 64,
         "resolved proposals stay bounded"
     );
     for index in 0..cycles {
@@ -409,23 +485,29 @@ fn run(rounds: usize) -> Run {
     Run {
         fixture,
         canwu,
-        state_bytes: sizes,
+        shapes,
+        largest,
     }
 }
 
-/// The pipeline, in the debug suite: once it is full, from its fourth round,
-/// the state holds the same few cycles every round, differing only in the
-/// digits of its counters and identifiers.
+/// The pipeline: once it is full, from its fourth round, every round leaves
+/// the records the same shape (hot books per ledger, the office's hot
+/// cycles, rings, retention handles and receipts, proposals, and directory
+/// entries), and its largest record stays bounded.
 #[test]
-fn the_lifetime_pipeline_holds_a_state_bounded_by_a_few_cycles() {
+fn the_lifetime_pipeline_holds_records_of_a_fixed_shape() {
     let run = run(8);
-    let full = &run.state_bytes[3..];
-    let (least, most) = (
-        full.iter().min().expect("rounds"),
-        full.iter().max().expect("rounds"),
+    let full = &run.shapes[3..];
+    assert!(
+        full.iter()
+            .all(|shape| shape.fixed() == full[0].fixed() && shape.proposals_bounded()),
+        "{full:#?}"
     );
-    assert!(most - least < 512, "{full:?}");
-    assert!(run.state_bytes[0] < *least);
+    assert!(full[0].hot_books <= 4, "{:?}", full[0]);
+    assert!(full[0].ring <= canwu_fiscal::FISCAL_RECENT_OUTCOMES);
+    assert!(full[0].handles <= 1);
+    let largest = run.largest.iter().max().expect("rounds");
+    assert!(*largest < 64 * 1024, "{largest} bytes");
     let restored = Canwu::from_snapshot_json_with_plugins(
         &run.canwu.snapshot_json().expect("snapshot"),
         &run.fixture.plugins(),
@@ -434,14 +516,9 @@ fn the_lifetime_pipeline_holds_a_state_bounded_by_a_few_cycles() {
     assert_eq!(restored.checkpoint_hash(), run.canwu.checkpoint_hash());
 }
 
-/// Past every 0.15.0 lifetime cap. Release only: in Phase 1 every boundary
-/// rewrites the whole fiscal state record, which a debug build takes about
-/// 0.3 s a boundary to do at this run's 170 KB, about six minutes for its
-/// 560 boundaries; a release build runs it in under a minute. (Restoring it
-/// would load the whole retained history of an unsealed run, which the
-/// pipeline's debug test restores at a smaller size.)
+/// Past every 0.15.0 lifetime cap, in the debug suite: every record keeps
+/// the shape it has from the pipeline's fourth round on.
 #[test]
-#[ignore = "release-only lifetime run past every 0.15.0 cap"]
 fn a_long_run_passes_every_old_lifetime_cap_without_a_refusal() {
     // Enough rounds for more requests and receipts than 0.15.0 could hold,
     // which is also more assessments, outcomes, and proposals.
@@ -461,6 +538,13 @@ fn a_long_run_passes_every_old_lifetime_cap_without_a_refusal() {
     // Every collection was settled by one receipt, and every cycle's totals
     // record it.
     assert!(rounds * 2 * SCOPES * UNITS > OLD_RECEIPT_CAP);
-    let largest = run.state_bytes.iter().max().expect("rounds");
-    assert!(*largest < 192 * 1024, "{largest} bytes");
+    let full = &run.shapes[3..];
+    assert!(
+        full.iter()
+            .all(|shape| shape.fixed() == full[0].fixed() && shape.proposals_bounded()),
+        "{:?}",
+        full[0]
+    );
+    let largest = run.largest.iter().max().expect("rounds");
+    assert!(*largest < 64 * 1024, "{largest} bytes");
 }

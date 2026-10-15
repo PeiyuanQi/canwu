@@ -11,13 +11,14 @@ use crate::model::{
     FISCAL_NOMINATION_REQUIRED, FISCAL_PETITION_REQUIRED, FISCAL_PROPOSAL_NOT_PENDING,
     FiscalAction, FiscalActionIssuer, FiscalActionRequest, FiscalAppointmentDecision,
     FiscalAppointmentParty, FiscalAppointmentPolicy, FiscalAuditBinding, FiscalAuditProposal,
-    FiscalAuditProposalKind, FiscalIssuerRole, FiscalProposalOutcome, FiscalProposalRef,
-    FiscalProposalResolution, FiscalRebinding, FiscalState, MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY,
-    MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY, invalid,
+    FiscalAuditProposalKind, FiscalIssuerRole, FiscalOffice, FiscalProposalOutcome,
+    FiscalProposalRef, FiscalProposalResolution, FiscalRebinding, FiscalState,
+    MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY, MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY, invalid,
 };
-use crate::plugin::{invalid_authority, invalid_payload, not_found, rebinding};
+use crate::plugin::{invalid_authority, invalid_payload, not_found};
+use crate::settle::rebinding;
 use canwu_api::{CanwuError, DomainRecordVersionRef, EntityRef, ErrorCode, SimTime};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 /// Whether an action changes who holds a binding, or takes part in deciding
 /// that: the rebinds, the appointment actions, and re-pointing or removing an
@@ -74,7 +75,7 @@ pub(crate) fn installed_basis<'a>(
         FiscalAction::DecideAuditAppointment {
             decision: FiscalAppointmentDecision::AcceptNomination { nomination_id },
             ..
-        } => match state.audit_proposals.get(nomination_id).map(|p| &p.kind) {
+        } => match state.audit_proposal(nomination_id).map(|p| &p.kind) {
             Some(FiscalAuditProposalKind::Nomination {
                 authority_basis, ..
             }) => Some(authority_basis),
@@ -184,7 +185,7 @@ fn require_tenure(
     audit_binding_id: &str,
     auditor: canwu_api::PersonId,
 ) -> Result<(), CanwuError> {
-    match state.audit_bindings.get(audit_binding_id) {
+    match state.audit_binding(audit_binding_id) {
         Some(seated) if seated.auditor != auditor && !policy.removes_without_petition => {
             Err(invalid_authority(FISCAL_PETITION_REQUIRED))
         }
@@ -220,7 +221,10 @@ pub(crate) fn admit_proposal_capacity(
     let policy = policy_for(state, institution)?;
     let party = issuer_party(state, policy, issuer)
         .ok_or_else(|| invalid_authority(FISCAL_ISSUER_NOT_LISTED))?;
-    replaced_proposal(state, institution, &party, binding_id, nominates).map(drop)
+    let office = state
+        .office(institution)
+        .ok_or_else(|| invalid_authority(FISCAL_APPOINTMENT_POLICY_MISSING))?;
+    replaced_proposal(office, institution, &party, binding_id, nominates).map(drop)
 }
 
 /// Applies a current, authorized appointment action to `state`: records a
@@ -388,7 +392,7 @@ fn open_proposal(
     (id, audit_binding_id, institution): (&String, &String, EntityRef),
     kind: FiscalAuditProposalKind,
 ) -> Result<(), CanwuError> {
-    if state.audit_proposals.contains_key(id) {
+    if state.audit_proposal(id).is_some() {
         return Err(CanwuError::new(
             ErrorCode::IdempotencyConflict,
             "fiscal nomination or petition identity already exists",
@@ -398,12 +402,13 @@ fn open_proposal(
     let party = issuer_party(state, policy, issuer)
         .ok_or_else(|| invalid_authority(FISCAL_ISSUER_NOT_LISTED))?;
     let nominates = matches!(kind, FiscalAuditProposalKind::Nomination { .. });
+    let office = state.office_mut(&institution);
     if let Some(replaced) =
-        replaced_proposal(state, &institution, &party, audit_binding_id, nominates)?
+        replaced_proposal(office, &institution, &party, audit_binding_id, nominates)?
     {
-        state.audit_proposals.remove(&replaced);
+        office.audit_proposals.remove(&replaced);
     }
-    state.audit_proposals.insert(
+    office.audit_proposals.insert(
         id.clone(),
         FiscalAuditProposal {
             id: id.clone(),
@@ -422,13 +427,13 @@ fn open_proposal(
 /// `institution`, which a new one replaces; or, when it has none, room for
 /// the new one among the party's pending proposals of that institution.
 fn replaced_proposal(
-    state: &FiscalState,
+    office: &FiscalOffice,
     institution: &EntityRef,
     party: &FiscalAppointmentParty,
     audit_binding_id: &str,
     nominates: bool,
 ) -> Result<Option<String>, CanwuError> {
-    let mut own = state.audit_proposals.values().filter(|proposal| {
+    let mut own = office.audit_proposals.values().filter(|proposal| {
         proposal.is_pending() && proposal.institution == *institution && proposal.party == *party
     });
     let mut count = 0_usize;
@@ -456,8 +461,7 @@ fn replaced_proposal(
 /// they name is replaced. Proposals of other institutions are untouched.
 fn install(state: &mut FiscalState, binding: FiscalAuditBinding, decided: &FiscalRebinding) {
     let replaced = state
-        .audit_bindings
-        .get(&binding.id)
+        .audit_binding(&binding.id)
         .is_some_and(|seated| seated.auditor != binding.auditor);
     supersede(
         state,
@@ -469,7 +473,10 @@ fn install(state: &mut FiscalState, binding: FiscalAuditBinding, decided: &Fisca
             FiscalAuditProposalKind::RemovalPetition { .. } => replaced,
         },
     );
-    state.audit_bindings.insert(binding.id.clone(), binding);
+    state
+        .office_mut(&binding.institution)
+        .audit_bindings
+        .insert(binding.id.clone(), binding);
 }
 
 /// Removes an audit binding, superseding every other petition pending on it.
@@ -479,7 +486,12 @@ fn remove(
     audit_binding_id: &str,
     decided: &FiscalRebinding,
 ) -> Result<(), CanwuError> {
+    let institution = state
+        .audit_binding(audit_binding_id)
+        .map(|binding| binding.institution.clone())
+        .ok_or_else(|| not_found("fiscal audit binding is unavailable"))?;
     let removed = state
+        .office_mut(&institution)
         .audit_bindings
         .remove(audit_binding_id)
         .ok_or_else(|| not_found("fiscal audit binding is unavailable"))?;
@@ -502,12 +514,17 @@ fn supersede(
     decided: &FiscalRebinding,
     applies: impl Fn(&FiscalAuditProposalKind) -> bool,
 ) {
-    for proposal in state.audit_proposals.values_mut().filter(|proposal| {
-        proposal.is_pending()
-            && proposal.audit_binding_id == audit_binding_id
-            && proposal.institution == *institution
-            && applies(&proposal.kind)
-    }) {
+    for proposal in state
+        .office_mut(institution)
+        .audit_proposals
+        .values_mut()
+        .filter(|proposal| {
+            proposal.is_pending()
+                && proposal.audit_binding_id == audit_binding_id
+                && proposal.institution == *institution
+                && applies(&proposal.kind)
+        })
+    {
         proposal.resolution = Some(FiscalProposalResolution {
             outcome: FiscalProposalOutcome::Superseded,
             resolved_by: decided.clone(),
@@ -516,32 +533,28 @@ fn supersede(
 }
 
 /// Keeps at most [`MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY`] resolved
-/// proposals of each policy, dropping the oldest: the earliest resolved,
-/// then the lowest ID.
+/// proposals in each office, under its one policy, dropping the oldest: the
+/// earliest resolved, then the lowest ID.
 fn prune_resolved(state: &mut FiscalState) {
-    let mut resolved = BTreeMap::<&EntityRef, Vec<(SimTime, &String)>>::new();
-    for proposal in state.audit_proposals.values() {
-        if let Some(resolution) = &proposal.resolution {
-            resolved
-                .entry(&proposal.institution)
-                .or_default()
-                .push((resolution.resolved_by.rebound_at, &proposal.id));
+    for office in state.offices.values_mut() {
+        let mut resolved: Vec<(SimTime, String)> = office
+            .audit_proposals
+            .values()
+            .filter_map(|proposal| {
+                proposal
+                    .resolution
+                    .as_ref()
+                    .map(|resolution| (resolution.resolved_by.rebound_at, proposal.id.clone()))
+            })
+            .collect();
+        if resolved.len() <= MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY {
+            continue;
         }
-    }
-    let dropped: Vec<String> = resolved
-        .into_values()
-        .filter(|kept| kept.len() > MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY)
-        .flat_map(|mut kept| {
-            kept.sort();
-            let excess = kept.len() - MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY;
-            kept.into_iter()
-                .take(excess)
-                .map(|(_, id)| id.clone())
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    for id in dropped {
-        state.audit_proposals.remove(&id);
+        resolved.sort();
+        let excess = resolved.len() - MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY;
+        for (_, id) in resolved.into_iter().take(excess) {
+            office.audit_proposals.remove(&id);
+        }
     }
 }
 
@@ -551,7 +564,17 @@ fn resolve(
     outcome: FiscalProposalOutcome,
     decided: &FiscalRebinding,
 ) {
-    if let Some(proposal) = state.audit_proposals.get_mut(proposal_id) {
+    let Some(institution) = state
+        .audit_proposal(proposal_id)
+        .map(|proposal| proposal.institution.clone())
+    else {
+        return;
+    };
+    if let Some(proposal) = state
+        .office_mut(&institution)
+        .audit_proposals
+        .get_mut(proposal_id)
+    {
         proposal.resolution = Some(FiscalProposalResolution {
             outcome,
             resolved_by: decided.clone(),
@@ -565,9 +588,7 @@ fn policy_for<'a>(
     institution: &EntityRef,
 ) -> Result<&'a FiscalAppointmentPolicy, CanwuError> {
     state
-        .audit_appointment_policies
-        .values()
-        .find(|policy| policy.institution == *institution)
+        .appointment_policy_of(institution)
         .ok_or_else(|| invalid_authority(FISCAL_APPOINTMENT_POLICY_MISSING))
 }
 
@@ -581,7 +602,7 @@ fn acting_institution<'a>(
         issuer.role,
         FiscalIssuerRole::Principal | FiscalIssuerRole::Institution
     )
-    .then(|| state.authority_bindings.get(&issuer.binding_id))
+    .then(|| state.authority_binding(&issuer.binding_id))
     .flatten()
     .map(|binding| &binding.institution)
 }
@@ -623,18 +644,15 @@ fn require_binding_slot(
     audit_binding_id: &str,
     institution: &EntityRef,
 ) -> Result<(), CanwuError> {
-    if state.authority_bindings.contains_key(audit_binding_id)
-        || state
-            .audit_appointment_policies
-            .contains_key(audit_binding_id)
+    if state.authority_binding(audit_binding_id).is_some()
+        || state.appointment_policy(audit_binding_id).is_some()
     {
         return Err(invalid_payload(
             "a fiscal audit binding takes an ID no authority binding uses and no appointment policy has",
         ));
     }
     if state
-        .audit_bindings
-        .get(audit_binding_id)
+        .audit_binding(audit_binding_id)
         .is_some_and(|binding| binding.institution != *institution)
     {
         return Err(invalid_authority(
@@ -649,8 +667,7 @@ pub(crate) fn audit_binding<'a>(
     audit_binding_id: &str,
 ) -> Result<&'a FiscalAuditBinding, CanwuError> {
     state
-        .audit_bindings
-        .get(audit_binding_id)
+        .audit_binding(audit_binding_id)
         .ok_or_else(|| not_found("fiscal audit binding is unavailable"))
 }
 
@@ -680,8 +697,7 @@ fn pending_proposal<'a>(
     audit_binding_id: &str,
 ) -> Result<&'a FiscalAuditProposal, CanwuError> {
     let proposal = state
-        .audit_proposals
-        .get(proposal_id)
+        .audit_proposal(proposal_id)
         .ok_or_else(|| not_found("fiscal nomination or petition is unavailable"))?;
     if !proposal.is_pending() || proposal.audit_binding_id != audit_binding_id {
         return Err(invalid_payload(FISCAL_PROPOSAL_NOT_PENDING));

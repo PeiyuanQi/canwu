@@ -13,7 +13,7 @@ mod support;
 use canwu_api::{
     BoundaryReceipt, Canwu, CanwuError, ErrorCode, PersonId, PluginArchiveObjectProvider,
 };
-use canwu_fiscal::{FiscalArchiveStore, enqueue_execution_receipt};
+use canwu_fiscal::{FiscalArchiveStore, enqueue_execution_receipts};
 use std::rc::Rc;
 use support::{
     Draft, Fixture, MemoryArchiveStore, PRINCIPAL, TREASURY_AUTHORITY, archive, assessment, close,
@@ -82,10 +82,15 @@ fn run(canwu: &mut Canwu, store: &MemoryArchiveStore) -> Vec<BoundaryReceipt> {
                 )],
             );
             let now = canwu.time();
-            enqueue_execution_receipt(
+            enqueue_execution_receipts(
                 canwu,
                 now,
-                &receipt_packet(&format!("{prefix}.receipt"), &scope, &request, evidence),
+                &[receipt_packet(
+                    &format!("{prefix}.receipt"),
+                    &scope,
+                    &request,
+                    evidence,
+                )],
             )
             .expect("receipt");
             receipts.extend(settle(canwu));

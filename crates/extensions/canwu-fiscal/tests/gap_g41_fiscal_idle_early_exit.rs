@@ -5,8 +5,9 @@
 //! (`benchmarks/performance-harness`, `fiscal-profile`). This fixture pins the
 //! contract that makes skipping the decode safe: a fiscal record is validated
 //! where it enters a run, an idle boundary proposes nothing, and the only work
-//! that does not depend on fiscal ingress, deriving the fields of a state no
-//! boundary has written yet, still happens.
+//! that does not depend on fiscal ingress, publishing the report work the
+//! queue holds (here the first report of an authored observer), still
+//! happens.
 
 mod support;
 
@@ -14,7 +15,7 @@ use canwu_api::{BoundaryReceipt, Canwu, SimTime};
 use canwu_fiscal::{FiscalActionDisposition, FiscalAssessment, FiscalPaymentForm, FiscalState};
 use support::{
     Fixture, PRINCIPAL, RULE, TREASURY_AUTHORITY, assessment, base_state, catalog, enqueue_tick,
-    fiscal_record_version, fiscal_report, fiscal_state, outcome, scenario_from_records,
+    fiscal_record_versions, fiscal_report, fiscal_state, outcome, scenario_from_records,
     scenario_from_state, settle, submit, treasury_scope,
 };
 
@@ -64,9 +65,13 @@ fn gap_g41_fiscal_idle_early_exit() {
     // a boundary.
     let catalog = catalog();
     let mut invalid = authored_state()
-        .into_record(&catalog)
-        .expect("fiscal state record");
-    invalid.payload["procedure_revision"] = serde_json::json!(0);
+        .into_records(&catalog)
+        .expect("fiscal records");
+    let ledger = invalid
+        .iter_mut()
+        .find(|record| record.reference.kind.name == "ledger")
+        .expect("a ledger record");
+    ledger.payload["revision"] = serde_json::json!(0);
     assert!(
         fixture
             .try_runtime(scenario_from_records(
@@ -74,12 +79,13 @@ fn gap_g41_fiscal_idle_early_exit() {
                 invalid,
             ))
             .is_err(),
-        "an invalid fiscal state must be refused at activation"
+        "an invalid fiscal record must be refused at activation"
     );
     // So is a state that approves an execution evidence kind the plugin was
     // not configured to read: settlement could read none of its receipts.
     let mut unread_evidence = authored_state();
     unread_evidence
+        .root
         .execution_evidence_kinds
         .insert(canwu_api::DomainRecordKind::new(
             "fixture.execution",
@@ -96,29 +102,29 @@ fn gap_g41_fiscal_idle_early_exit() {
     );
 
     let mut canwu = fixture.runtime(scenario_from_state(authored_state()));
-    assert!(fiscal_state(&canwu).aggregates.is_empty());
-    let authored_version = fiscal_record_version(&canwu);
+    assert_eq!(fiscal_state(&canwu).report_queue.len(), 1);
 
-    // The derived fields of an authored state do not wait for fiscal ingress:
-    // the first event-bearing boundary computes them and reports them, as it
-    // always has. The report is its summary and its one part.
-    assert_eq!(changes(&idle_boundary(&mut canwu)), (1, 2));
-    let derived = fiscal_state(&canwu);
-    assert_eq!(derived.aggregates.len(), 1);
-    assert_eq!(fiscal_record_version(&canwu), authored_version + 1);
+    // The first report of an authored observer does not wait for fiscal
+    // ingress: the first event-bearing boundary publishes the work the queue
+    // holds, its summary and its one part, and writes the observer record,
+    // the emptied queue page, and the root's queue index.
+    assert_eq!(changes(&idle_boundary(&mut canwu)), (3, 2));
+    let published = fiscal_state(&canwu);
+    assert!(published.report_queue.is_empty());
     assert_eq!(fiscal_report(&canwu, PRINCIPAL).projection.facts.len(), 1);
+    let versions = fiscal_record_versions(&canwu);
 
-    // From then on a boundary without fiscal ingress changes no record,
-    // publishes no report, and leaves the procedure revision alone.
+    // From then on a boundary without fiscal ingress changes no record and
+    // publishes no report.
     for _ in 0..3 {
         assert_eq!(changes(&idle_boundary(&mut canwu)), (0, 0));
     }
-    assert_eq!(fiscal_state(&canwu), derived);
-    assert_eq!(fiscal_record_version(&canwu), authored_version + 1);
+    assert_eq!(fiscal_state(&canwu), published);
+    assert_eq!(fiscal_record_versions(&canwu), versions);
 
-    // Fiscal ingress still runs every system: the action settles, the
-    // aggregate follows in the same boundary, and the observer gets the part
-    // that changed with a new summary.
+    // Fiscal ingress still runs every system: the action settles, and the
+    // observer gets the part that changed with a new summary in the same
+    // boundary.
     let action = assessment(
         "action.assess",
         TREASURY_AUTHORITY,
@@ -134,15 +140,15 @@ fn gap_g41_fiscal_idle_early_exit() {
             .disposition,
         FiscalActionDisposition::Applied
     );
-    assert_eq!(settled.aggregates.len(), 2);
+    assert_eq!(settled.assessments().count(), 2);
     assert_eq!(fiscal_report(&canwu, PRINCIPAL).projection.facts.len(), 2);
 
-    let settled_version = fiscal_record_version(&canwu);
+    let versions = fiscal_record_versions(&canwu);
     for _ in 0..3 {
         assert_eq!(changes(&idle_boundary(&mut canwu)), (0, 0));
     }
     assert_eq!(fiscal_state(&canwu), settled);
-    assert_eq!(fiscal_record_version(&canwu), settled_version);
+    assert_eq!(fiscal_record_versions(&canwu), versions);
 
     fixture.assert_restore_and_replay(&canwu);
 }

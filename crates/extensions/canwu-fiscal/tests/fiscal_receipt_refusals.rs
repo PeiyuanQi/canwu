@@ -1,30 +1,31 @@
 //! No execution receipt or historical-context change fails a boundary.
 //!
 //! Each one settlement cannot accept is refused with one
-//! `canwu.fiscal.ingress_rejected.v1` event whose summary names the packet
-//! and ends with a stable reason; it changes nothing and consumes nothing,
+//! `canwu.fiscal.ingress_rejected.v1` event whose summary names the packet,
+//! and for a receipt the receipt, and ends with a stable reason; it changes
+//! nothing and consumes nothing, and the receipts after it in the same batch
 //! and the packets after it in the same boundary settle. (A receipt or change
-//! whose result would not fit the state's byte budget is refused the same
-//! way, with `state_budget_exhausted`; the crate's unit tests reach that
-//! budget on a small state.)
+//! whose result would not fit its record's byte budget is refused the same
+//! way, with `state_budget_exhausted`; `fiscal_record_budgets` reaches that
+//! budget.)
 
 mod support;
 
 use canwu_api::{Canwu, PersonId, PluginIngressRequest};
 use canwu_fiscal::{
-    FISCAL_CONTEXT_OUTSIDE_PACK, FISCAL_EXECUTION_RECEIPT_INGRESS,
+    FISCAL_CONTEXT_OUTSIDE_PACK, FISCAL_EXECUTION_RECEIPTS_INGRESS,
     FISCAL_HISTORICAL_CONTEXT_INGRESS, FISCAL_INGRESS_MALFORMED_REJECTION,
     FISCAL_RECEIPT_CLAIM_MISMATCH, FISCAL_RECEIPT_CYCLE_CLOSED, FISCAL_RECEIPT_EVIDENCE_COUNT,
     FISCAL_RECEIPT_EVIDENCE_KIND_UNAPPROVED, FISCAL_RECEIPT_EVIDENCE_NOT_CURRENT,
     FISCAL_RECEIPT_EVIDENCE_REUSED, FISCAL_RECEIPT_ID_CONFLICT, FISCAL_RECEIPT_OPERATION_REUSED,
     FISCAL_RECEIPT_QUANTITY_EXCEEDED, FISCAL_RECEIPT_REQUEST_UNKNOWN, FiscalExecutionReceiptPacket,
-    FiscalHistoricalContextPacket, FiscalHistoricalMode, PLUGIN_NAME, enqueue_execution_receipt,
+    FiscalHistoricalContextPacket, FiscalHistoricalMode, PLUGIN_NAME, enqueue_execution_receipts,
     fiscal_historical_context_ingress,
 };
 use support::{
     Draft, Fixture, MemoryArchiveStore, PRINCIPAL, TREASURY_AUTHORITY, archive, assessment, close,
-    collection, execution_claim, fiscal_state, receipt_packet, record_results, refusals, scenario,
-    settle, submit, treasury_scope,
+    collection, execution_claim, fiscal_state, ledger_revision, receipt_packet, record_results,
+    refusals, scenario, settle, submit, treasury_scope,
 };
 
 fn by_principal(drafts: impl IntoIterator<Item = Draft>) -> Vec<(PersonId, Draft)> {
@@ -38,18 +39,16 @@ fn enqueue_raw(canwu: &mut Canwu, payload: serde_json::Value) {
     canwu
         .enqueue_plugin_ingress(PluginIngressRequest::new(
             PLUGIN_NAME,
-            FISCAL_EXECUTION_RECEIPT_INGRESS,
+            FISCAL_EXECUTION_RECEIPTS_INGRESS,
             now,
             payload,
         ))
         .expect("receipt ingress");
 }
 
-fn enqueue_receipt(canwu: &mut Canwu, packet: &FiscalExecutionReceiptPacket) {
-    enqueue_raw(
-        canwu,
-        serde_json::to_value(packet).expect("receipt payload"),
-    );
+/// Queues the receipts as one raw batch packet.
+fn enqueue_batch(canwu: &mut Canwu, packets: &[FiscalExecutionReceiptPacket]) {
+    enqueue_raw(canwu, serde_json::json!({ "receipts": packets }));
 }
 
 /// Opens a book of `cycle` in `scope` with one assessment of 100 and the
@@ -147,71 +146,39 @@ fn every_refused_receipt_or_context_is_an_event_and_the_rest_settle() {
     ] = <[_; 8]>::try_from(evidence).expect("eight versions");
     let mut not_current = ok_2.clone();
     not_current.version = 99;
-    let revision = fiscal_state(&canwu).procedure_revision;
+    let revision = ledger_revision(&canwu, &open);
     let receipts_before = fiscal_state(&canwu).execution_receipts().count();
 
-    enqueue_receipt(
-        &mut canwu,
-        &receipt_packet("receipt.ok-1", &open, "request.1", [ok_1.clone()]),
-    );
+    // A packet that does not decode is refused as a whole; the receipts of
+    // a batch are each settled or refused on their own, in order.
     enqueue_raw(&mut canwu, serde_json::json!({ "receipt_id": "typo" }));
-    enqueue_receipt(
+    enqueue_batch(
         &mut canwu,
-        &receipt_packet(
-            "receipt.nowhere",
-            "scope.nowhere",
-            "request.1",
-            [ok_2.clone()],
-        ),
-    );
-    enqueue_receipt(
-        &mut canwu,
-        &receipt_packet("receipt.unknown", &open, "request.missing", [ok_2.clone()]),
-    );
-    enqueue_receipt(
-        &mut canwu,
-        &receipt_packet(
-            "receipt.archived",
-            &archived,
-            "request.archived",
-            [in_archived],
-        ),
-    );
-    enqueue_receipt(
-        &mut canwu,
-        &receipt_packet("receipt.closed", &closed, "request.closed", [in_closed]),
-    );
-    enqueue_receipt(
-        &mut canwu,
-        &receipt_packet("receipt.empty", &open, "request.1", []),
-    );
-    enqueue_receipt(
-        &mut canwu,
-        &receipt_packet("receipt.unapproved", &open, "request.1", [unapproved]),
-    );
-    enqueue_receipt(
-        &mut canwu,
-        &receipt_packet("receipt.stale", &open, "request.2", [not_current]),
-    );
-    enqueue_receipt(
-        &mut canwu,
-        &receipt_packet("receipt.mismatch", &open, "request.1", [mismatch]),
-    );
-    enqueue_receipt(
-        &mut canwu,
-        &receipt_packet("receipt.big", &open, "request.2", [big]),
-    );
-    enqueue_receipt(
-        &mut canwu,
-        &receipt_packet("receipt.twin", &open, "request.1", [twin]),
-    );
-    enqueue_receipt(
-        &mut canwu,
-        &receipt_packet("receipt.again", &open, "request.1", [ok_1]),
-    );
-    enqueue_receipt(
-        &mut canwu,
-        &receipt_packet("receipt.ok-1", &open, "request.2", [ok_2.clone()]),
+        &[
+            receipt_packet("receipt.ok-1", &open, "request.1", [ok_1.clone()]),
+            receipt_packet(
+                "receipt.nowhere",
+                "scope.nowhere",
+                "request.1",
+                [ok_2.clone()],
+            ),
+            receipt_packet("receipt.unknown", &open, "request.missing", [ok_2.clone()]),
+            receipt_packet(
+                "receipt.archived",
+                &archived,
+                "request.archived",
+                [in_archived],
+            ),
+            receipt_packet("receipt.closed", &closed, "request.closed", [in_closed]),
+            receipt_packet("receipt.empty", &open, "request.1", []),
+            receipt_packet("receipt.unapproved", &open, "request.1", [unapproved]),
+            receipt_packet("receipt.stale", &open, "request.2", [not_current]),
+            receipt_packet("receipt.mismatch", &open, "request.1", [mismatch]),
+            receipt_packet("receipt.big", &open, "request.2", [big]),
+            receipt_packet("receipt.twin", &open, "request.1", [twin]),
+            receipt_packet("receipt.again", &open, "request.1", [ok_1]),
+            receipt_packet("receipt.ok-1", &open, "request.2", [ok_2.clone()]),
+        ],
     );
     let now = canwu.time();
     canwu
@@ -234,10 +201,10 @@ fn every_refused_receipt_or_context_is_an_event_and_the_rest_settle() {
             serde_json::json!({ "year": "late" }),
         ))
         .expect("malformed context ingress");
-    enqueue_execution_receipt(
+    enqueue_execution_receipts(
         &mut canwu,
         now,
-        &receipt_packet("receipt.ok-2", &open, "request.2", [ok_2]),
+        &[receipt_packet("receipt.ok-2", &open, "request.2", [ok_2])],
     )
     .expect("the last receipt");
     let refused_before = refusals(&canwu).len();
@@ -245,7 +212,7 @@ fn every_refused_receipt_or_context_is_an_event_and_the_rest_settle() {
 
     let summaries = refusals(&canwu)[refused_before..].to_vec();
     let expected = [
-        ("receipt_v1)", FISCAL_INGRESS_MALFORMED_REJECTION),
+        ("receipts_v1)", FISCAL_INGRESS_MALFORMED_REJECTION),
         ("receipt.nowhere)", FISCAL_RECEIPT_REQUEST_UNKNOWN),
         ("receipt.unknown)", FISCAL_RECEIPT_REQUEST_UNKNOWN),
         ("receipt.archived)", FISCAL_RECEIPT_REQUEST_UNKNOWN),
@@ -273,16 +240,17 @@ fn every_refused_receipt_or_context_is_an_event_and_the_rest_settle() {
     }
 
     // The two valid receipts settled, around every refusal; nothing a
-    // refused packet named changed, and only the two advanced the revision.
+    // refused receipt named changed, and only the two advanced their
+    // ledger's revision.
     let state = fiscal_state(&canwu);
-    assert_eq!(state.procedure_revision, revision + 2);
+    assert_eq!(ledger_revision(&canwu, &open), revision + 2);
     assert_eq!(state.execution_receipts().count(), receipts_before + 2);
     let quantities: Vec<_> = state
         .execution_receipts()
         .map(|receipt| (receipt.id.as_str(), receipt.quantity))
         .collect();
     assert_eq!(quantities, [("receipt.ok-1", 20), ("receipt.ok-2", 30)]);
-    assert_eq!(state.historical_context.year, 150);
+    assert_eq!(state.root.historical_context.year, 150);
 
     // A refused receipt consumed nothing: its evidence settles a receipt of
     // its own later.
@@ -290,10 +258,10 @@ fn every_refused_receipt_or_context_is_an_event_and_the_rest_settle() {
     later.external_operation_id = "operation.result.later".to_owned();
     let later = record_results(&mut canwu, &[(false, later)]);
     let now = canwu.time();
-    enqueue_execution_receipt(
+    enqueue_execution_receipts(
         &mut canwu,
         now,
-        &receipt_packet("receipt.later", &open, "request.1", later),
+        &[receipt_packet("receipt.later", &open, "request.1", later)],
     )
     .expect("a later receipt");
     settle(&mut canwu);

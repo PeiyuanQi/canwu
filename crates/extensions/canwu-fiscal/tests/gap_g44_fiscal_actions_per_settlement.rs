@@ -1,53 +1,33 @@
 //! Downstream gap G-44: several fiscal actions settle in one boundary, in
-//! admission order, each validated against the state the previous one left.
+//! admission order, each validated against the records the previous one left.
 //!
-//! Every action of a boundary is compared with the procedure revision the
-//! state had when the boundary began. A rejected action leaves the actions
-//! after it alone, a later action may build on an earlier one but not
-//! overwrite what it changed, and the number applied per boundary is bounded.
-//! No action can fail the boundary for the others: not by its size, and not
-//! by reaching the state's byte budget, which the crate's unit tests cover,
-//! where a small state can reach it. Outcomes are no longer kept for the life
-//! of the state, so no action finds its outcome slots exhausted
-//! (`fiscal_action_idempotency` and `fiscal_archive_lifetime` hold that).
+//! Every action of a boundary is compared with the revision its target record
+//! had when the boundary began. A rejected action leaves the actions after it
+//! alone, a later action may build on an earlier one but not overwrite what
+//! it changed, and the number applied to one record per boundary is bounded
+//! (`fiscal_action_batches` holds the per-boundary limits). No action can
+//! fail the boundary for the others: not by its size, and not by reaching a
+//! record's byte budget (`fiscal_record_budgets` holds that). Outcomes are not
+//! kept for the life of a run, so no action finds its outcome slots
+//! exhausted (`fiscal_action_idempotency` and `fiscal_archive_lifetime` hold
+//! that).
 
 mod support;
 
 use canwu_api::{BoundaryReceipt, Canwu, ErrorCode, PersonId};
 use canwu_fiscal::{
-    FISCAL_BOUNDARY_ACTION_LIMIT, FiscalAction, FiscalActionDisposition, FiscalAdoptionStage,
-    FiscalAuditSeverity, FiscalPaymentForm, MAX_FISCAL_ACTION_TEXT_BYTES,
-    MAX_FISCAL_ACTIONS_PER_BOUNDARY,
+    FISCAL_RECORD_ACTION_LIMIT, FiscalAction, FiscalActionDisposition, FiscalAdoptionStage,
+    FiscalAuditSeverity, MAX_FISCAL_ACTION_TEXT_BYTES, MAX_FISCAL_ACTIONS_PER_RECORD_PER_BOUNDARY,
 };
 use std::collections::BTreeSet;
 use support::{
-    Draft, Fixture, GRANARY_AUTHORITY, GRANARY_PRINCIPAL, GRANARY_SCOPE, PENDING_SCOPE, PRINCIPAL,
-    RULE, TREASURY_AUTHORITY, TREASURY_SCOPES, admission_rejection, assessment, draft,
-    enqueue_requests, fiscal_state, outcome, procedure_revision, scenario, settle, settled_at,
-    submit, treasury_scope,
+    Draft, Fixture, PENDING_SCOPE, PRINCIPAL, RULE, TREASURY_AUTHORITY, TREASURY_SCOPES,
+    admission_rejection, assessment, draft, enqueue_requests, fiscal_state, ledger_revision,
+    outcome, scenario, settle, settled_at, submit, treasury_scope,
 };
 
 fn assess(action_id: &str, scope: &str, cycle: &str) -> Draft {
     assessment(action_id, TREASURY_AUTHORITY, scope, cycle)
-}
-
-/// An assessment of one cycle in a unit of its own, so that many share a
-/// book.
-fn assess_unit(action_id: &str, scope: &str, cycle: &str, unit: &str) -> Draft {
-    draft(
-        action_id,
-        TREASURY_AUTHORITY,
-        FiscalAction::OpenAssessment {
-            assessment_id: format!("{action_id}.assessment"),
-            rule_id: RULE.to_owned(),
-            scope_binding_id: scope.to_owned(),
-            accounting_cycle_id: cycle.to_owned(),
-            quantity: 100,
-            unit: unit.to_owned(),
-            payment_form: FiscalPaymentForm::Grain,
-            commutation_quote: None,
-        },
-    )
 }
 
 fn change_adoption(
@@ -84,20 +64,25 @@ fn reason(canwu: &Canwu, action_id: &str) -> String {
         .reason
 }
 
-/// A finding on `target` with a text of `finding_bytes` bytes.
-fn audit(action_id: &str, target: &str, finding_bytes: usize) -> Draft {
+/// A finding on `target` of `scope` with a text of `finding_bytes` bytes.
+fn audit_on(action_id: &str, scope: &str, target: &str, finding_bytes: usize) -> Draft {
     draft(
         action_id,
         TREASURY_AUTHORITY,
         FiscalAction::RecordAudit {
             audit_id: format!("{action_id}.finding"),
-            scope_binding_id: treasury_scope(0),
+            scope_binding_id: scope.to_owned(),
             target_id: target.to_owned(),
             severity: FiscalAuditSeverity::Concern,
             finding: "x".repeat(finding_bytes),
             evidence: BTreeSet::new(),
         },
     )
+}
+
+/// A finding on `target` of the treasury's first scope.
+fn audit(action_id: &str, target: &str, finding_bytes: usize) -> Draft {
+    audit_on(action_id, &treasury_scope(0), target, finding_bytes)
 }
 
 fn reports(receipts: &[BoundaryReceipt]) -> usize {
@@ -113,11 +98,11 @@ fn gap_g44_fiscal_actions_per_settlement() {
     let fixture = Fixture::new();
     let mut canwu = fixture.runtime(scenario(|_| {}));
 
-    // One issuer admits an assessment for every scope against the revision it
-    // read. All of them settle in the one boundary that follows, in admission
-    // order, and the observer's report is published once for the boundary, as
-    // a summary and one part, not once for each action.
-    let entry_revision = procedure_revision(&canwu);
+    // One issuer admits an assessment for every scope against the revision
+    // its ledger had. All of them settle in the one boundary that follows, in
+    // admission order, and the observer's report is published once for the
+    // boundary, as a summary and one part, not once for each action.
+    let entry_revision = ledger_revision(&canwu, &treasury_scope(0));
     let receipts = submit(
         &mut canwu,
         by_principal(
@@ -139,13 +124,16 @@ fn gap_g44_fiscal_actions_per_settlement() {
         );
     }
     assert_eq!(state.assessments().count(), TREASURY_SCOPES);
-    assert_eq!(state.aggregates.len(), TREASURY_SCOPES);
-    assert_eq!(
-        state.procedure_revision,
-        entry_revision + u64::try_from(TREASURY_SCOPES).expect("scope count")
-    );
+    // Each outcome advanced its own scope's revision only.
+    for index in 0..TREASURY_SCOPES {
+        assert_eq!(
+            ledger_revision(&canwu, &treasury_scope(index)),
+            entry_revision + 1
+        );
+    }
 
-    // An action decided against the revision before that boundary is stale.
+    // An action decided against its ledger's revision before that boundary
+    // is stale.
     enqueue_requests(
         &mut canwu,
         &[(
@@ -245,36 +233,41 @@ fn gap_g44_fiscal_actions_per_settlement() {
         FiscalAdoptionStage::Audited
     );
 
-    // One boundary applies a bounded number of actions. The action past the
-    // limit is rejected with a stable reason and consumes its identity; the
-    // same assessment under a new identity settles in a later boundary.
+    // One boundary applies a bounded number of actions to one record. The
+    // action past the limit is rejected with a stable reason and consumes its
+    // identity; the same finding under a new identity settles in a later
+    // boundary.
     submit(
         &mut canwu,
-        by_principal((0..=MAX_FISCAL_ACTIONS_PER_BOUNDARY).map(|index| {
-            assess_unit(
-                &format!("flood.{index}"),
-                &treasury_scope(2),
-                "flood.cycle",
-                &format!("grain.{index}"),
-            )
-        })),
+        by_principal(
+            (0..=MAX_FISCAL_ACTIONS_PER_RECORD_PER_BOUNDARY).map(|index| {
+                audit_on(
+                    &format!("flood.{index}"),
+                    &treasury_scope(2),
+                    "batch.2.assessment",
+                    8,
+                )
+            }),
+        ),
     );
-    assert!((0..MAX_FISCAL_ACTIONS_PER_BOUNDARY).all(|index| {
-        disposition(&canwu, &format!("flood.{index}")) == FiscalActionDisposition::Applied
-    }));
-    let over_limit = format!("flood.{MAX_FISCAL_ACTIONS_PER_BOUNDARY}");
+    assert!(
+        (0..MAX_FISCAL_ACTIONS_PER_RECORD_PER_BOUNDARY).all(|index| {
+            disposition(&canwu, &format!("flood.{index}")) == FiscalActionDisposition::Applied
+        })
+    );
+    let over_limit = format!("flood.{MAX_FISCAL_ACTIONS_PER_RECORD_PER_BOUNDARY}");
     assert_eq!(
         disposition(&canwu, &over_limit),
         FiscalActionDisposition::Rejected
     );
-    assert!(reason(&canwu, &over_limit).ends_with(FISCAL_BOUNDARY_ACTION_LIMIT));
+    assert!(reason(&canwu, &over_limit).ends_with(FISCAL_RECORD_ACTION_LIMIT));
     submit(
         &mut canwu,
-        by_principal([assess_unit(
+        by_principal([audit_on(
             "flood.retried",
             &treasury_scope(2),
-            "flood.cycle",
-            &format!("grain.{MAX_FISCAL_ACTIONS_PER_BOUNDARY}"),
+            "batch.2.assessment",
+            8,
         )]),
     );
     assert_eq!(
@@ -282,18 +275,18 @@ fn gap_g44_fiscal_actions_per_settlement() {
         FiscalActionDisposition::Applied
     );
 
-    // Only an action that reaches the state uses the limit. A full boundary's
-    // worth of stale actions from one institution leaves a current action of
-    // another institution untouched.
-    let revision = procedure_revision(&canwu);
-    let mut commands: Vec<_> = (0..MAX_FISCAL_ACTIONS_PER_BOUNDARY)
+    // Only an action that reaches its record uses the limit. A full record's
+    // worth of stale actions leaves a current action on the same record
+    // untouched.
+    let scope = treasury_scope(1);
+    let revision = ledger_revision(&canwu, &scope);
+    let mut commands: Vec<_> = (0..MAX_FISCAL_ACTIONS_PER_RECORD_PER_BOUNDARY)
         .map(|index| {
             (
-                GRANARY_PRINCIPAL,
-                assessment(
+                PRINCIPAL,
+                assess(
                     &format!("junk.{index}"),
-                    GRANARY_AUTHORITY,
-                    GRANARY_SCOPE,
+                    &scope,
                     &format!("junk.cycle.{index}"),
                 )
                 .against(revision - 1),
@@ -302,7 +295,7 @@ fn gap_g44_fiscal_actions_per_settlement() {
         .collect();
     commands.push((
         PRINCIPAL,
-        assess("after-junk", &treasury_scope(3), "cycle.3").against(revision),
+        assess("after-junk", &scope, "cycle.4").against(revision),
     ));
     enqueue_requests(&mut canwu, &commands);
     settle(&mut canwu);

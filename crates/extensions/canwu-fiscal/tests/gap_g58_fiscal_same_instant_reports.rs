@@ -10,14 +10,15 @@ use canwu_api::{
     Scenario, SimDuration, SimTime, SimulationGranularity, Territory, TerritoryId, WorldSnapshot,
 };
 use canwu_fiscal::{
-    FiscalAction, FiscalActionDisposition, FiscalActionRequest, FiscalActionTarget,
-    FiscalAdoptionStage, FiscalAdoptionState, FiscalAssessmentBasis, FiscalAuthorityBinding,
-    FiscalCommutationPolicy, FiscalContentPack, FiscalContentSelection, FiscalCoverageDeclaration,
-    FiscalCoverageSelector, FiscalCoverageStatus, FiscalHistoricalMode, FiscalMechanism,
-    FiscalObserverBinding, FiscalOutcomeRing, FiscalPackManifest, FiscalPaymentForm,
+    FiscalAction, FiscalActionBatch, FiscalActionDisposition, FiscalActionEntry,
+    FiscalActionTarget, FiscalAdoptionStage, FiscalAdoptionState, FiscalAssessmentBasis,
+    FiscalAuthorityBinding, FiscalCommutationPolicy, FiscalContentPack, FiscalContentSelection,
+    FiscalCoverageDeclaration, FiscalCoverageSelector, FiscalCoverageStatus, FiscalHistoricalMode,
+    FiscalMechanism, FiscalObserverBinding, FiscalPackManifest, FiscalPaymentForm,
     FiscalPeriodDefinition, FiscalPlugin, FiscalProvenance, FiscalRegionDefinition,
-    FiscalRuleDefinition, FiscalScopeBinding, FiscalState, FiscalStateRecord, HistoricalConfidence,
-    HistoricalYearWindow, compile_fiscal_content, fiscal_action_command, fiscal_state_reference,
+    FiscalRuleDefinition, FiscalScopeBinding, FiscalState, HistoricalConfidence,
+    HistoricalYearWindow, audit_fiscal_records, compile_fiscal_content, fiscal_action_command,
+    fiscal_target_revision,
 };
 use std::collections::BTreeSet;
 
@@ -130,17 +131,14 @@ fn scenario() -> Scenario {
     )
     .expect("fixture fiscal catalog");
     let mut state = FiscalState::new(150, FiscalHistoricalMode::Counterfactual, SimTime::EPOCH);
-    state.authority_bindings.insert(
-        AUTHORITY_ID.to_owned(),
-        FiscalAuthorityBinding {
-            id: AUTHORITY_ID.to_owned(),
-            institution: institution.clone(),
-            authorized_actor: Some(TREASURER),
-            acting_actor: None,
-            authority_basis: None,
-            rebound_by: None,
-        },
-    );
+    state.add_authority_binding(FiscalAuthorityBinding {
+        id: AUTHORITY_ID.to_owned(),
+        institution: institution.clone(),
+        authorized_actor: Some(TREASURER),
+        acting_actor: None,
+        authority_basis: None,
+        rebound_by: None,
+    });
     state.add_scope(FiscalScopeBinding {
         id: "scope.a".to_owned(),
         institution: institution.clone(),
@@ -149,21 +147,16 @@ fn scenario() -> Scenario {
         mechanism: FiscalMechanism::LandTax,
         authoritative_granularity: SimulationGranularity::Aggregate,
     });
-    state.observer_bindings.insert(
-        "observer.auditor".to_owned(),
-        FiscalObserverBinding {
-            id: "observer.auditor".to_owned(),
-            actor: Some(AUDITOR),
-            knowledge_holder: KnowledgeHolderRef::Person(AUDITOR),
-            visible_institutions: BTreeSet::from([institution]),
-            confidence_per_mille: 900,
-            line_slot: 0,
-            controlled_by: None,
-            rebound_by: None,
-            removed: None,
-            outcomes: FiscalOutcomeRing::default(),
-        },
-    );
+    state.add_observer(FiscalObserverBinding {
+        id: "observer.auditor".to_owned(),
+        actor: Some(AUDITOR),
+        knowledge_holder: KnowledgeHolderRef::Person(AUDITOR),
+        visible_institutions: BTreeSet::from([institution]),
+        confidence_per_mille: 900,
+        controlled_by: None,
+        rebound_by: None,
+        removed: None,
+    });
     state
         .add_adoption(FiscalAdoptionState {
             id: "adopt.a".to_owned(),
@@ -175,41 +168,42 @@ fn scenario() -> Scenario {
             source_action_id: None,
         })
         .expect("adoption of the scope");
+    let mut domain_records = vec![catalog.clone().into_record().expect("catalog record")];
+    domain_records.extend(state.into_records(&catalog).expect("fiscal records"));
     Scenario {
         start_time: SimTime::EPOCH,
         entities: world.entities(),
         world,
         knowledge: KnowledgeSnapshot::default(),
-        domain_records: vec![
-            catalog.clone().into_record().expect("catalog record"),
-            state.into_record(&catalog).expect("fiscal state record"),
-        ],
+        domain_records,
     }
 }
 
 fn fiscal_state(canwu: &Canwu) -> FiscalState {
-    canwu
-        .typed_domain_record(&fiscal_state_reference())
-        .expect("fiscal state record")
-        .decode_payload::<FiscalStateRecord>()
-        .expect("fiscal state payload")
+    audit_fiscal_records(canwu).expect("fiscal records audit")
 }
 
-/// Submits one assessment action and settles it at the current instant,
-/// without advancing time: one boundary admits the command and a second one
-/// settles the action and publishes the report.
+fn scope() -> FiscalActionTarget {
+    FiscalActionTarget::Ledger("scope.a".to_owned())
+}
+
+/// Submits one assessment action, of one more partition of the one book,
+/// and settles it at the current instant, without advancing time: one
+/// boundary admits the command and a second one settles the action and
+/// publishes the report.
 fn assess_now(canwu: &mut Canwu, action_id: &str) {
-    let request = FiscalActionRequest {
+    let request = FiscalActionEntry {
         action_id: action_id.to_owned(),
-        authority_binding_id: AUTHORITY_ID.to_owned(),
-        expected_procedure_revision: fiscal_state(canwu).procedure_revision,
+        expected_revision: fiscal_target_revision(canwu, &scope())
+            .expect("revision read")
+            .expect("the scope's ledger"),
         action: FiscalAction::OpenAssessment {
             assessment_id: format!("{action_id}.assessment"),
             rule_id: "rule.land".to_owned(),
             scope_binding_id: "scope.a".to_owned(),
-            accounting_cycle_id: action_id.to_owned(),
+            accounting_cycle_id: "cycle.1".to_owned(),
             quantity: 100,
-            unit: "grain".to_owned(),
+            unit: action_id.to_owned(),
             payment_form: FiscalPaymentForm::Grain,
             commutation_quote: None,
         },
@@ -224,7 +218,8 @@ fn assess_now(canwu: &mut Canwu, action_id: &str) {
                 canwu.revision(),
                 CommandEnvelope::new(
                     Issuer::Actor(TREASURER),
-                    fiscal_action_command(&request).expect("fiscal command"),
+                    fiscal_action_command(&FiscalActionBatch::single(AUTHORITY_ID, request))
+                        .expect("fiscal command"),
                 )
                 .at_time(now),
             ),
@@ -236,7 +231,7 @@ fn assess_now(canwu: &mut Canwu, action_id: &str) {
     assert_eq!(canwu.time(), now);
     assert_eq!(
         fiscal_state(canwu)
-            .recent_outcome(&FiscalActionTarget::Ledger("scope.a".to_owned()), action_id)
+            .recent_outcome(&scope(), action_id)
             .expect("the assessment's outcome")
             .disposition,
         FiscalActionDisposition::Applied

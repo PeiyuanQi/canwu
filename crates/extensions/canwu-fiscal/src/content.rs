@@ -689,13 +689,14 @@ mod tests {
 
     #[test]
     fn coverage_product_is_rejected_when_each_axis_is_individually_legal() {
-        let periods = 257;
-        let regions = 256;
+        let periods = 512;
+        let regions = 2_049;
         let mechanisms = BTreeSet::from([FiscalMechanism::LandTax]);
         assert!(periods <= MAX_FISCAL_CATALOG_PERIODS);
         assert!(regions <= MAX_FISCAL_CATALOG_REGIONS);
         assert_eq!(mechanisms.len(), 1);
-        assert_eq!(periods * regions * mechanisms.len(), 65_792);
+        assert_eq!(periods * regions * mechanisms.len(), 1_049_088);
+        assert!(periods * regions > MAX_FISCAL_CATALOG_COVERAGE_CELLS);
 
         let error = ensure_coverage_cell_capacity(periods, regions, mechanisms.len())
             .expect_err("the Cartesian product must fail before coverage materialization");

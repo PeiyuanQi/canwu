@@ -28,14 +28,14 @@ use canwu_fiscal::{
     FiscalArchiveRetentionPhaseV1, FiscalArchivedRecordV1, FiscalAuditSeverity, FiscalBookStatus,
     FiscalIssuerRole, FiscalObserverBinding, FiscalPaymentForm, FiscalRebinding,
     FiscalSettledAction, FiscalState, PLUGIN_NAME, archived_fiscal_record, audit_fiscal_archive,
-    enqueue_execution_receipt, enqueue_fiscal_archive, finalize_fiscal_archive_retention,
+    enqueue_execution_receipts, enqueue_fiscal_archive, finalize_fiscal_archive_retention,
 };
 use std::collections::BTreeSet;
 use support::{
     AUDITOR, AUDITOR_COMMISSION, DEPUTY, Draft, Fixture, GRANARY_PRINCIPAL, MemoryArchiveStore,
     MemoryEvidenceArchive, PRINCIPAL, RULE, SUCCESSOR, TREASURY_AUTHORITY, archive, assessment,
     close, collection, current_commission, draft, enqueue_archive, enqueue_renewal,
-    execution_claim, fiscal_report, fiscal_state, observer_binding, procedure_revision,
+    execution_claim, fiscal_report, fiscal_state, ledger_revision, observer_binding,
     published_report_records, receipt_packet, record_results, refusals, scenario, seal,
     sealed_fiscal_state, settle, submit, submit_sealed, treasury, treasury_scope,
 };
@@ -146,10 +146,10 @@ fn a_closed_book_takes_only_findings_and_leaves_the_state_with_its_totals() {
         &[(false, execution_claim("result.a", &scope, "request.a", 40))],
     );
     let now = canwu.time();
-    enqueue_execution_receipt(
+    enqueue_execution_receipts(
         &mut canwu,
         now,
-        &receipt_packet("receipt.a", &scope, "request.a", evidence),
+        &[receipt_packet("receipt.a", &scope, "request.a", evidence)],
     )
     .expect("receipt");
     settle(&mut canwu);
@@ -166,10 +166,15 @@ fn a_closed_book_takes_only_findings_and_leaves_the_state_with_its_totals() {
         )],
     );
     let now = canwu.time();
-    enqueue_execution_receipt(
+    enqueue_execution_receipts(
         &mut canwu,
         now,
-        &receipt_packet("receipt.late", &scope, "request.a", late_evidence),
+        &[receipt_packet(
+            "receipt.late",
+            &scope,
+            "request.a",
+            late_evidence,
+        )],
     )
     .expect("late receipt");
     submit(
@@ -240,11 +245,11 @@ fn a_closed_book_takes_only_findings_and_leaves_the_state_with_its_totals() {
     // Its scope's watermark and its office's rise to its cycle, and the
     // institution's totals of the cycle are archived with it.
     let store = MemoryArchiveStore::default();
-    let revision = procedure_revision(&canwu);
+    let revision = ledger_revision(&canwu, &scope);
     archive(&mut canwu, &store, 64);
     let state = fiscal_state(&canwu);
     assert_eq!(
-        procedure_revision(&canwu),
+        ledger_revision(&canwu, &scope),
         revision,
         "maintenance makes nothing stale"
     );
@@ -254,7 +259,6 @@ fn a_closed_book_takes_only_findings_and_leaves_the_state_with_its_totals() {
     let office = state.office(&treasury()).expect("the treasury's office");
     assert!(office.cycles.is_empty());
     assert_eq!(office.watermark.as_deref(), Some("2026"));
-    assert!(state.aggregates.is_empty());
     assert!(state.archive.pending_handles.is_empty());
     assert_eq!(state.archive.archived_book_count, 1);
     assert_eq!(state.archive.archived_totals_count, 1);
@@ -560,8 +564,8 @@ fn stale_and_duplicate_commits_terminate_and_commits_settle_first() {
 
     // An action admitted in one boundary settles in the next; a commit
     // queued in between settles first in that boundary, so the action, which
-    // advances the procedure revision, does not make it stale.
-    let revision = procedure_revision(&canwu);
+    // advances its scope's revision, does not make it stale.
+    let revision = ledger_revision(&canwu, &treasury_scope(3));
     support::enqueue_requests(
         &mut canwu,
         &[(
@@ -579,8 +583,9 @@ fn stale_and_duplicate_commits_terminate_and_commits_settle_first() {
         state.archive.pending_handles[&receipt.retention_handle_id].phase,
         FiscalArchiveRetentionPhaseV1::Committed
     );
-    // With no closed book left, a batch archives the head receipt alone. One
-    // prepared before a change of the state is refused at enqueue.
+    // With no closed book left, a batch archives the head receipt alone. An
+    // action on a book it does not select leaves it current: it binds the
+    // head and the books it selects, nothing else.
     let prepared = state
         .prepare_fiscal_archive(64, &store, None)
         .expect("the head receipt alone");
@@ -595,8 +600,20 @@ fn stale_and_duplicate_commits_terminate_and_commits_settle_first() {
             "2031",
         )]),
     );
+    assert!(applied(&canwu, "after"));
+    assert_eq!(
+        fiscal_state(&canwu)
+            .prepare_fiscal_archive(64, &store, None)
+            .expect("the same batch"),
+        prepared
+    );
+    enqueue_fiscal_archive(&mut canwu, &prepared, &store, None)
+        .expect("a batch that is still current");
+    settle(&mut canwu);
+    // Once a commit moved the head, the same batch is of an earlier head and
+    // is refused at enqueue.
     let error = enqueue_fiscal_archive(&mut canwu, &prepared, &store, None)
-        .expect_err("a batch of an earlier state");
+        .expect_err("a batch of an earlier head");
     assert!(matches!(error, FiscalArchiveError::Mismatch(_)), "{error}");
     fixture.assert_restore_and_replay(&canwu);
 }
@@ -655,8 +672,8 @@ fn stale_commits_past_the_heads_room_are_refused_without_failing_the_boundary() 
 
 /// A boundary whose only change of the state is archive maintenance, an
 /// acknowledgement or a commit of the head receipt alone, publishes no
-/// report: maintenance does not advance the procedure revision, and the
-/// report plan of an earlier boundary is not published again.
+/// report: maintenance changes no book an observer sees and advances no
+/// revision, and what an earlier boundary published is not published again.
 #[test]
 fn archive_maintenance_alone_publishes_no_report() {
     let fixture = Fixture::new();
@@ -790,10 +807,10 @@ fn a_book_citing_evidence_newer_than_the_last_seal_is_refused_until_it_is_sealed
         .expect("the acknowledgement settles");
     let state = sealed_fiscal_state(&sealed);
     assert!(state.books().next().is_none());
-    // The state no longer declares the quote as required evidence.
+    // The scope's ledger no longer declares the quote as required evidence.
     let record = sealed
-        .typed_domain_record(&canwu_fiscal::fiscal_state_reference())
-        .expect("the fiscal state record");
+        .typed_domain_record(&canwu_fiscal::fiscal_ledger_reference(&scope))
+        .expect("the scope's ledger record");
     assert!(
         !record.payload.to_string().contains(&quote.record.id),
         "the archived book's quote is no longer declared"
@@ -820,16 +837,15 @@ fn a_sealed_run_archives_as_its_fork_restore_and_replay_do() {
     let plugins = fixture.plugins();
     let government = KnowledgeHolderRef::Entity(EntityRef::Government(GovernmentId::new(1)));
     let mut base = fixture.runtime(scenario(|state| {
-        for (id, slot, actor) in [
-            ("observer.controlled", 1, DEPUTY),
-            ("observer.other", 3, AUDITOR),
-            ("observer.removed", 4, GRANARY_PRINCIPAL),
+        for (id, actor) in [
+            ("observer.controlled", DEPUTY),
+            ("observer.other", AUDITOR),
+            ("observer.removed", GRANARY_PRINCIPAL),
         ] {
-            let binding = FiscalObserverBinding {
+            state.add_observer(FiscalObserverBinding {
                 controlled_by: Some(treasury()),
-                ..observer_binding(id, slot, actor, BTreeSet::from([treasury()]))
-            };
-            state.observer_bindings.insert(binding.id.clone(), binding);
+                ..observer_binding(id, actor, BTreeSet::from([treasury()]))
+            });
         }
     }));
     let scope = treasury_scope(0);
@@ -852,10 +868,10 @@ fn a_sealed_run_archives_as_its_fork_restore_and_replay_do() {
         &[(false, execution_claim("result.a", &scope, "request.a", 60))],
     );
     let now = base.time();
-    enqueue_execution_receipt(
+    enqueue_execution_receipts(
         &mut base,
         now,
-        &receipt_packet("receipt.a", &scope, "request.a", evidence),
+        &[receipt_packet("receipt.a", &scope, "request.a", evidence)],
     )
     .expect("receipt");
     settle(&mut base);

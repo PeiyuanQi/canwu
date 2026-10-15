@@ -1,20 +1,21 @@
 //! An observer's fiscal report is a summary and parts, each its own line of
-//! knowledge records, so its size is not bounded by one record.
+//! knowledge records on the observer's own record, so its size is not
+//! bounded by one record.
 //!
-//! The first run reports several hundred aggregates to one observer, well
-//! past what one 65,536-byte record held. Every boundary commits, the report
-//! the observer assembles equals what the fiscal state derives, a boundary
-//! republishes only the parts whose facts changed, each superseding exactly
-//! the record before it on its line, and restore and exact replay agree. The
-//! second run changes more parts in one boundary than a boundary publishes:
-//! the rest are owed, and the next boundary, which the settling boundary
-//! schedules at once, publishes them without any change of the fiscal state;
-//! until then the summary names the parts that are pending. The last runs
-//! cover what cannot be published at once or at all: a report for an
-//! observer who has died, completed by the boundary that revives him, in a
-//! run that sealed its evidence as in one that did not; an observer who does
-//! not exist; a report plan that came with a scenario; and a run with direct
-//! command history, which cannot schedule a drain.
+//! A part is sixteen scope rows of one accounting cycle. The first run
+//! reports several hundred facts to one observer, well past what one
+//! 65,536-byte record held. Every boundary commits, the report the observer
+//! assembles equals what the fiscal records derive, a boundary republishes
+//! only the parts whose digest changed, each superseding exactly the record
+//! before it on its line, and restore and exact replay agree. The second run
+//! owes more than a boundary publishes: the rest stays queued, and the next
+//! boundary, which the publishing boundary schedules at once, publishes it
+//! without any change of the fiscal records; until then the summary names
+//! the parts that are pending. The last runs cover what cannot be published
+//! at once or at all: a report for an observer who has died, completed by
+//! the boundary that revives him, in a run that sealed its evidence as in
+//! one that did not; an observer who does not exist; a queue that names one;
+//! and a run with direct command history, which cannot schedule a drain.
 
 mod support;
 
@@ -22,21 +23,22 @@ use canwu_api::{
     BoundaryReceipt, BoundaryRequest, Canwu, Command, CommandEnvelope, CompactedCanwu, ErrorCode,
     IngressPayload, Issuer, KnowledgeHolderRef, KnowledgeOrigin, KnowledgeRecord,
     KnowledgeRecordId, KnowledgeSubject, KnowledgeSubjectTarget, PersonId, SimDuration, SimTime,
-    TerritoryId,
+    SimulationGranularity, TerritoryId,
 };
 use canwu_fiscal::{
-    FISCAL_REPORT_DRAIN_INGRESS, FISCAL_REPORT_FACTS_PER_PART, FiscalAction,
-    FiscalActionDisposition, FiscalAssessment, FiscalAuditSeverity, FiscalObserverBinding,
-    FiscalPaymentForm, FiscalReport, FiscalReportPlan, FiscalReportRecord, FiscalSettledAction,
-    FiscalState, MAX_FISCAL_OBSERVERS, MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY, compute_projections,
-    fiscal_report_knowledge_schema_id, fiscal_reports, fiscal_state_reference,
+    FISCAL_REPORT_DRAIN_INGRESS, FISCAL_REPORT_ROWS_PER_PART, FiscalAction, FiscalActionBatch,
+    FiscalActionDisposition, FiscalAdoptionStage, FiscalAdoptionState, FiscalAssessment,
+    FiscalAuditSeverity, FiscalMechanism, FiscalObserverBinding, FiscalPaymentForm, FiscalReport,
+    FiscalReportQueueEntry, FiscalReportRecord, FiscalScopeBinding, FiscalSettledAction,
+    FiscalState, MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY, compute_projection,
+    fiscal_observer_reference, fiscal_report_knowledge_schema_id, fiscal_reports,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use support::{
     AUDITOR, DEPUTY, Draft, Fixture, GRANARY_AUTHORITY, GRANARY_PRINCIPAL, GRANARY_SCOPE, OBSERVER,
-    PRINCIPAL, RULE, TREASURY_AUTHORITY, TREASURY_SCOPES, assessment, base_state, draft, enqueue,
-    enqueue_life, enqueue_requests, enqueue_tick, fiscal_record_version, fiscal_state, granary,
-    life_at, observer_binding, outcome, procedure_revision, published_report_records, scenario,
+    PRINCIPAL, RULE, TREASURY_AUTHORITY, TREASURY_SCOPES, assessment, base_state, draft,
+    enqueue_life, enqueue_requests, enqueue_tick, fiscal_record_versions, fiscal_state, granary,
+    ledger_revision, life_at, observer_binding, outcome, published_report_records, scenario,
     scenario_from_state, settle, submit, submit_sealed, treasury, treasury_scope,
 };
 
@@ -46,48 +48,89 @@ const SECOND_BINDING: &str = "observer.principal.granary";
 const AUDITOR_BINDING: &str = "observer.auditor";
 /// One 65,536-byte report record held about 196 facts.
 const FACTS_IN_ONE_OLD_RECORD: usize = 196;
+/// Units of the authored assessments: one book holds one of each.
+const UNITS: usize = 4;
 
 fn observer(
     id: &str,
-    slot: u16,
     actor: PersonId,
     institution: canwu_api::EntityRef,
     confidence: u16,
 ) -> FiscalObserverBinding {
     FiscalObserverBinding {
         confidence_per_mille: confidence,
-        ..observer_binding(id, slot, actor, BTreeSet::from([institution]))
+        ..observer_binding(id, actor, BTreeSet::from([institution]))
     }
 }
 
-/// Installs `assessments` assessments of every treasury scope, all created
-/// when the run starts: sixteen to a book, each of its own unit, so that the
-/// facts follow the order they are numbered in.
-fn author_treasury_assessments(state: &mut FiscalState, assessments: usize) {
-    for scope in 0..TREASURY_SCOPES {
-        for index in 0..assessments {
-            state
-                .add_assessment(FiscalAssessment {
-                    id: format!("authored.{scope}.{index:03}"),
-                    rule_id: RULE.to_owned(),
-                    scope_binding_id: treasury_scope(scope),
-                    accounting_cycle_id: format!("authored.{:03}", index / 16),
-                    quantity: 500,
-                    unit: format!("grain.{index:03}"),
-                    payment_form: FiscalPaymentForm::Grain,
-                    commutation_quote: None,
-                    created_at: SimTime::EPOCH,
-                    source_action_id: None,
-                })
-                .expect("an authored assessment");
+fn extra_scope(index: usize) -> String {
+    format!("scope.treasury.x.{index:02}")
+}
+
+/// Adds `count` operational land scopes to the treasury. Its scopes are
+/// ranked by ID: its four base scopes, its pending scope, then these.
+fn add_treasury_scopes(state: &mut FiscalState, count: usize) {
+    for index in 0..count {
+        let id = extra_scope(index);
+        state.add_scope(FiscalScopeBinding {
+            id: id.clone(),
+            institution: treasury(),
+            jurisdiction_id: "region.a".to_owned(),
+            subject_scope: "registered_land".to_owned(),
+            mechanism: FiscalMechanism::LandTax,
+            authoritative_granularity: SimulationGranularity::Aggregate,
+        });
+        state
+            .add_adoption(FiscalAdoptionState {
+                id: format!("adopt.x.{index:02}"),
+                rule_id: RULE.to_owned(),
+                scope_binding_id: id,
+                stage: FiscalAdoptionStage::Implemented,
+                generation: 1,
+                changed_at: SimTime::EPOCH,
+                source_action_id: None,
+            })
+            .expect("an adoption of a new scope");
+    }
+}
+
+/// Every operational treasury scope of a state with `extra` added scopes.
+fn assessed_scopes(extra: usize) -> Vec<String> {
+    (0..TREASURY_SCOPES)
+        .map(treasury_scope)
+        .chain((0..extra).map(extra_scope))
+        .collect()
+}
+
+/// Installs, for each scope and each of `cycles` cycles, a book of one
+/// assessment of each of `units` units, all created when the run starts.
+fn author_assessments(state: &mut FiscalState, scopes: &[String], cycles: usize, units: usize) {
+    for scope in scopes {
+        for cycle in 0..cycles {
+            for unit in 0..units {
+                state
+                    .add_assessment(FiscalAssessment {
+                        id: format!("authored.{cycle:03}.{unit}"),
+                        rule_id: RULE.to_owned(),
+                        scope_binding_id: scope.clone(),
+                        accounting_cycle_id: format!("authored.{cycle:03}"),
+                        quantity: 500,
+                        unit: format!("grain.{unit}"),
+                        payment_form: FiscalPaymentForm::Grain,
+                        commutation_quote: None,
+                        created_at: SimTime::EPOCH,
+                        source_action_id: None,
+                    })
+                    .expect("an authored assessment");
+            }
         }
     }
 }
 
-fn treasury_assessment(action_id: &str, scope: usize, cycle: &str) -> (PersonId, Draft) {
+fn treasury_assessment(action_id: &str, scope: &str, cycle: &str) -> (PersonId, Draft) {
     (
         PRINCIPAL,
-        assessment(action_id, TREASURY_AUTHORITY, &treasury_scope(scope), cycle),
+        assessment(action_id, TREASURY_AUTHORITY, scope, cycle),
     )
 }
 
@@ -111,40 +154,39 @@ fn reports_of(canwu: &Canwu, actor: PersonId) -> BTreeMap<String, FiscalReport> 
 }
 
 /// Asserts that every report the run's observers hold is complete and equals
-/// what the fiscal state derives for its binding, and returns the reports by
-/// observer binding ID.
+/// what the fiscal records derive for its binding, and returns the reports
+/// by observer binding ID. An observer told nothing yet holds no report.
 fn assert_reports_match_state(canwu: &Canwu) -> BTreeMap<String, FiscalReport> {
     let state = fiscal_state(canwu);
     let mut reports = BTreeMap::new();
     for actor in state
-        .observer_bindings
-        .values()
+        .observer_bindings()
         .filter_map(|binding| binding.actor)
         .collect::<BTreeSet<_>>()
     {
         reports.extend(reports_of(canwu, actor));
     }
-    assert_eq!(
-        reports.keys().collect::<Vec<_>>(),
-        state.observer_bindings.keys().collect::<Vec<_>>()
-    );
     for (observer_id, report) in &reports {
         assert!(report.is_complete(), "{observer_id} is complete");
         assert_eq!(
-            report.projection,
-            compute_projections(&state, report.projection.as_of)[observer_id],
-            "{observer_id} reports what the state derives"
+            Some(&report.projection),
+            compute_projection(&state, observer_id, report.projection.as_of)
+                .expect("projection")
+                .as_ref(),
+            "{observer_id} reports what the records derive"
         );
     }
     reports
 }
 
-/// The report line a record is on: its observer binding, and its part number
-/// or `None` for the summary.
-fn line(record: &FiscalReportRecord) -> (String, Option<u32>) {
+/// The report line a record is on: its observer binding, and the slot and
+/// number of its part, or `None` for the summary.
+type Line = (String, Option<(u16, u32)>);
+
+fn line(record: &FiscalReportRecord) -> Line {
     match record {
         FiscalReportRecord::Summary(summary) => (summary.observer_id.clone(), None),
-        FiscalReportRecord::Part(part) => (part.observer_id.clone(), Some(part.part)),
+        FiscalReportRecord::Part(part) => (part.observer_id.clone(), Some((part.slot, part.part))),
     }
 }
 
@@ -155,8 +197,8 @@ fn published_lines(
     canwu: &Canwu,
     actor: PersonId,
     seen: &mut usize,
-    heads: &mut BTreeMap<(String, Option<u32>), KnowledgeRecord>,
-) -> Vec<(String, Option<u32>)> {
+    heads: &mut BTreeMap<Line, KnowledgeRecord>,
+) -> Vec<Line> {
     let records = published_report_records(canwu, actor);
     let lines = records[*seen..]
         .iter()
@@ -172,45 +214,51 @@ fn published_lines(
     lines
 }
 
-fn treasury_lines(parts: impl IntoIterator<Item = u32>) -> Vec<(String, Option<u32>)> {
+fn lines_of(observer: &str, parts: impl IntoIterator<Item = (u16, u32)>) -> Vec<Line> {
     std::iter::once(None)
         .chain(parts.into_iter().map(Some))
-        .map(|part| (OBSERVER.to_owned(), part))
+        .map(|part| (observer.to_owned(), part))
         .collect()
 }
 
 #[test]
 #[allow(clippy::too_many_lines)]
 fn a_report_past_one_record_is_published_in_parts() {
-    const AUTHORED_CYCLES: usize = 80;
-    let authored = TREASURY_SCOPES * AUTHORED_CYCLES;
+    // Forty-eight treasury rows, three parts to a cycle.
+    const EXTRA_SCOPES: usize = 43;
+    const AUTHORED_CYCLES: usize = 5;
+    let scopes = assessed_scopes(EXTRA_SCOPES);
+    let authored = scopes.len() * AUTHORED_CYCLES * UNITS;
     let fixture = Fixture::new();
     let mut canwu = fixture.runtime(scenario(|state| {
-        author_treasury_assessments(state, AUTHORED_CYCLES);
-        for binding in [
-            observer(SECOND_BINDING, 1, PRINCIPAL, granary(), 500),
-            observer(AUDITOR_BINDING, 2, AUDITOR, granary(), 900),
-        ] {
-            state.observer_bindings.insert(binding.id.clone(), binding);
-        }
+        add_treasury_scopes(state, EXTRA_SCOPES);
+        author_assessments(state, &scopes, AUTHORED_CYCLES, UNITS);
+        state.add_observer(observer(SECOND_BINDING, PRINCIPAL, granary(), 500));
+        state.add_observer(observer(AUDITOR_BINDING, AUDITOR, granary(), 900));
     }));
     let mut seen = 0;
     let mut heads = BTreeMap::new();
 
-    // The first fiscal change publishes every report whole. The treasury's
-    // observer gets one summary and 21 parts for 321 facts, far more than one
-    // record held; the two granary observers get a summary of nothing.
-    let receipts = submit(&mut canwu, vec![treasury_assessment("first", 0, "new.000")]);
-    let facts = authored + 1;
-    assert!(facts > FACTS_IN_ONE_OLD_RECORD);
-    let parts = facts.div_ceil(FISCAL_REPORT_FACTS_PER_PART);
-    assert_eq!(published(&receipts), 1 + parts + 2);
+    // The first boundary publishes the authored report whole: one summary
+    // and three parts of each of five cycles, far more than one record
+    // held; the granary's observers, whose institution has no book yet, are
+    // told nothing. The boundary that settles the first action publishes
+    // its new cycle's one part with a new summary.
+    let receipts = submit(
+        &mut canwu,
+        vec![treasury_assessment("first", &treasury_scope(0), "new.000")],
+    );
+    assert!(authored > FACTS_IN_ONE_OLD_RECORD);
+    assert_eq!(published(&receipts), 1 + 5 * 3 + 2);
     let reports = assert_reports_match_state(&canwu);
-    assert_eq!(reports[OBSERVER].projection.facts.len(), facts);
-    assert!(reports[SECOND_BINDING].projection.facts.is_empty());
-    assert!(reports[AUDITOR_BINDING].projection.facts.is_empty());
-    let mut lines = treasury_lines((0..parts).map(|part| u32::try_from(part).expect("part")));
-    lines.push((SECOND_BINDING.to_owned(), None));
+    assert_eq!(reports[OBSERVER].projection.facts.len(), authored + 1);
+    assert!(!reports.contains_key(SECOND_BINDING));
+    assert!(!reports.contains_key(AUDITOR_BINDING));
+    let mut lines = lines_of(
+        OBSERVER,
+        (0..5_u16).flat_map(|slot| (0..3).map(move |part| (slot, part))),
+    );
+    lines.extend(lines_of(OBSERVER, [(5, 0)]));
     assert_eq!(
         published_lines(&canwu, PRINCIPAL, &mut seen, &mut heads),
         lines
@@ -225,22 +273,21 @@ fn a_report_past_one_record_is_published_in_parts() {
         })
         .max()
         .expect("published records");
-    assert!(largest < 65_536 / 4, "largest record is {largest} bytes");
+    assert!(largest < 65_536 / 2, "largest record is {largest} bytes");
 
-    // A new aggregate joins the last part. Only that part and the summary
-    // are published again, each superseding the record before it.
+    // A new book joins the part of the first one. Only that part and the
+    // summary are published again, each superseding the record before it.
     let receipts = submit(
         &mut canwu,
-        vec![treasury_assessment("second", 1, "new.000")],
+        vec![treasury_assessment("second", &treasury_scope(1), "new.000")],
     );
     assert_eq!(published(&receipts), 2);
     assert_eq!(
         published_lines(&canwu, PRINCIPAL, &mut seen, &mut heads),
-        treasury_lines([20])
+        lines_of(OBSERVER, [(5, 0)])
     );
 
-    // A remission changes one of the oldest aggregates: only the first part
-    // follows.
+    // A remission changes one of the authored books: only its part follows.
     let receipts = submit(
         &mut canwu,
         vec![(
@@ -251,7 +298,7 @@ fn a_report_past_one_record_is_published_in_parts() {
                 FiscalAction::GrantRemission {
                     remission_id: "remit.remission".to_owned(),
                     scope_binding_id: treasury_scope(0),
-                    assessment_id: "authored.0.000".to_owned(),
+                    assessment_id: "authored.000.0".to_owned(),
                     quantity: 100,
                     reason: "flood".to_owned(),
                 },
@@ -261,7 +308,7 @@ fn a_report_past_one_record_is_published_in_parts() {
     assert_eq!(published(&receipts), 2);
     assert_eq!(
         published_lines(&canwu, PRINCIPAL, &mut seen, &mut heads),
-        treasury_lines([0])
+        lines_of(OBSERVER, [(0, 0)])
     );
 
     // A change of the granary reaches the two observers whose bindings name
@@ -271,10 +318,7 @@ fn a_report_past_one_record_is_published_in_parts() {
     assert_eq!(published(&receipts), 4);
     assert_eq!(
         published_lines(&canwu, PRINCIPAL, &mut seen, &mut heads),
-        [
-            (SECOND_BINDING.to_owned(), None),
-            (SECOND_BINDING.to_owned(), Some(0))
-        ]
+        lines_of(SECOND_BINDING, [(0, 0)])
     );
     let reports = assert_reports_match_state(&canwu);
     for binding in [SECOND_BINDING, AUDITOR_BINDING] {
@@ -296,7 +340,7 @@ fn a_report_past_one_record_is_published_in_parts() {
 
     // A boundary that changes no fact an observer can see publishes nothing:
     // here a rejected action, then an audit finding.
-    let behind = procedure_revision(&canwu) - 1;
+    let behind = ledger_revision(&canwu, &treasury_scope(0)) - 1;
     enqueue_requests(
         &mut canwu,
         &[(
@@ -315,7 +359,7 @@ fn a_report_past_one_record_is_published_in_parts() {
                 FiscalAction::RecordAudit {
                     audit_id: "audit.finding".to_owned(),
                     scope_binding_id: treasury_scope(0),
-                    target_id: "authored.0.000".to_owned(),
+                    target_id: "authored.000.0".to_owned(),
                     severity: FiscalAuditSeverity::Notice,
                     finding: "checked".to_owned(),
                     evidence: BTreeSet::new(),
@@ -333,127 +377,167 @@ fn a_report_past_one_record_is_published_in_parts() {
         FiscalActionDisposition::Applied
     );
 
-    // A full boundary of assessments adds 64 aggregates. They fill the last
-    // part and four new ones, and only those five are published.
-    let batch: Vec<_> = (0..16)
-        .flat_map(|cycle| {
-            (0..TREASURY_SCOPES).map(move |scope| {
-                treasury_assessment(
-                    &format!("batch.{scope}.{cycle:02}"),
-                    scope,
-                    &format!("batch.{cycle:02}"),
-                )
-            })
+    // One batch assesses twenty-one more scopes, rows 5 to 25: they fill
+    // the new cycle's first part and start its second, and only those two
+    // are published.
+    let entries = (0..21)
+        .map(|index| {
+            let scope = extra_scope(index);
+            let revision = ledger_revision(&canwu, &scope);
+            assessment(
+                &format!("batch.{index:02}"),
+                TREASURY_AUTHORITY,
+                &scope,
+                "new.000",
+            )
+            .entry(revision)
         })
         .collect();
-    assert_eq!(batch.len(), 64);
-    let receipts = submit(&mut canwu, batch);
-    assert_eq!(published(&receipts), 6);
+    enqueue_requests(
+        &mut canwu,
+        &[(
+            PRINCIPAL,
+            FiscalActionBatch {
+                authority_binding_id: TREASURY_AUTHORITY.to_owned(),
+                entries,
+            },
+        )],
+    );
+    let receipts = settle(&mut canwu);
+    assert_eq!(published(&receipts), 3);
     assert_eq!(
         published_lines(&canwu, PRINCIPAL, &mut seen, &mut heads),
-        treasury_lines(20..25)
+        lines_of(OBSERVER, [(5, 0), (5, 1)])
     );
     let reports = assert_reports_match_state(&canwu);
-    assert_eq!(reports[OBSERVER].projection.facts.len(), authored + 2 + 64);
+    assert_eq!(reports[OBSERVER].projection.facts.len(), authored + 2 + 21);
 
     fixture.assert_restore_and_replay(&canwu);
 }
 
-/// When more parts change in one boundary than a boundary publishes, the
-/// boundary still commits, and the reports the parts belong to say how many
-/// are pending. The boundary schedules a drain packet due at once, so the
-/// next boundary, at the same instant, publishes the rest. Nothing in the
-/// fiscal state changes for that but the plan: no procedure revision, no
+/// Seventy observers of the treasury, all held by the principal, each with
+/// sixteen cycles of authored books, one part each: seventeen records each,
+/// far more than one boundary publishes.
+fn crowded_state() -> FiscalState {
+    let mut state = base_state();
+    author_assessments(&mut state, &assessed_scopes(0), 16, 1);
+    state.remove_observer(OBSERVER);
+    for index in 0..CROWD {
+        let confidence = if index % 2 == 0 { 1_000 } else { 600 };
+        state.add_observer(observer(&crowd(index), PRINCIPAL, treasury(), confidence));
+    }
+    state
+}
+
+const CROWD: usize = 70;
+const RECORDS_PER_OBSERVER: usize = 1 + 16;
+
+fn crowd(index: usize) -> String {
+    format!("observer.{index:02}")
+}
+
+fn drains(canwu: &Canwu) -> usize {
+    canwu
+        .ingress_log()
+        .iter()
+        .filter(|ingress| {
+            matches!(
+                &ingress.payload,
+                IngressPayload::Plugin { packet_type, .. }
+                    if packet_type == FISCAL_REPORT_DRAIN_INGRESS
+            )
+        })
+        .count()
+}
+
+/// When more is owed than a boundary publishes, the boundary still commits,
+/// and the report it could publish only in part says which parts are
+/// pending. The boundary schedules a drain packet due at once, so the next
+/// boundary, at the same instant, publishes the rest. Nothing in the fiscal
+/// records changes for that but the report bookkeeping: no revision, no
 /// action, no receipt. After it nothing is owed, nothing more is queued, and
 /// a boundary without fiscal ingress writes and publishes nothing.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn parts_past_the_boundary_limit_follow_in_the_next_boundary() {
-    const AUTHORED_CYCLES: usize = 64;
-    let facts = TREASURY_SCOPES * AUTHORED_CYCLES;
-    let parts = facts / FISCAL_REPORT_FACTS_PER_PART;
-    let binding = |index: usize| format!("observer.{index:02}");
     let fixture = Fixture::new();
-    let mut canwu = fixture.runtime(scenario(|state| {
-        author_treasury_assessments(state, AUTHORED_CYCLES);
-        // Every observer binding names the same actor, so one holder holds
-        // every line of every report.
-        state.observer_bindings.clear();
-        for index in 0..MAX_FISCAL_OBSERVERS {
-            let confidence = if index % 2 == 0 { 1_000 } else { 600 };
-            let slot = u16::try_from(index).expect("slot");
-            let observer = observer(&binding(index), slot, PRINCIPAL, treasury(), confidence);
-            state
-                .observer_bindings
-                .insert(observer.id.clone(), observer);
-        }
-    }));
-    let wanted = MAX_FISCAL_OBSERVERS * (1 + parts);
+    let mut canwu = fixture.runtime(scenario_from_state(crowded_state()));
+    let wanted = CROWD * RECORDS_PER_OBSERVER;
     assert!(wanted > MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY);
-    let deferred = wanted - MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY;
-    let drains = |canwu: &Canwu| {
+    let full = MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY / RECORDS_PER_OBSERVER;
+    let split_published = MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY - full * RECORDS_PER_OBSERVER - 1;
+    let split_pending = RECORDS_PER_OBSERVER - 1 - split_published;
+
+    // The first event-bearing boundary owes every report whole. It publishes
+    // as many records as it may and commits: `full` reports whole, and the
+    // next one in part. The observers after them keep their queued work, and
+    // a queue page whose work did not change is not written again.
+    let queue_pages = |canwu: &Canwu| -> BTreeMap<String, (u64, serde_json::Value)> {
         canwu
-            .ingress_log()
-            .iter()
-            .filter(|ingress| {
-                matches!(
-                    &ingress.payload,
-                    IngressPayload::Plugin { packet_type, .. }
-                        if packet_type == FISCAL_REPORT_DRAIN_INGRESS
+            .domain_records()
+            .filter(|record| record.reference.kind.name == "report-queue")
+            .map(|record| {
+                (
+                    record.reference.to_string(),
+                    (record.version, record.payload.clone()),
                 )
             })
-            .count()
+            .collect()
     };
-
-    // The first fiscal change plans every part of every report. The boundary
-    // that settles it publishes as many records as it may and commits.
-    enqueue(&mut canwu, vec![granary_assessment("first", "new.000")]);
-    canwu.step_canonical().expect("the admitting boundary");
-    let settling = canwu
+    let pages_before = queue_pages(&canwu);
+    enqueue_tick(&mut canwu);
+    let first = canwu
         .step_canonical()
-        .expect("the settling boundary")
-        .expect("a boundary settles the action");
+        .expect("the first boundary")
+        .expect("the tick opens a boundary");
     assert_eq!(
-        settling.knowledge_record_count,
+        first.knowledge_record_count,
         MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY
     );
-    assert_eq!(drains(&canwu), 1, "the settling boundary schedules a drain");
+    assert_eq!(drains(&canwu), 1, "the boundary schedules a drain");
+    let unchanged: Vec<_> = queue_pages(&canwu)
+        .into_iter()
+        .filter(|(page, (_, payload))| {
+            pages_before
+                .get(page)
+                .is_some_and(|(_, before)| before == payload)
+        })
+        .collect();
+    assert!(!unchanged.is_empty());
+    for (page, (version, _)) in &unchanged {
+        assert_eq!(
+            *version, pages_before[page].0,
+            "{page} is not written again"
+        );
+    }
     let reports = reports_of(&canwu, PRINCIPAL);
-    assert_eq!(reports.len(), MAX_FISCAL_OBSERVERS);
-    let pending: usize = reports
-        .values()
-        .map(|report| report.pending_parts.len())
-        .sum();
-    assert_eq!(pending, deferred);
-    // The reports that are complete are right; the others hold fewer facts
-    // than their summary counts and say so.
+    assert_eq!(reports.len(), full + 1);
     let state = fiscal_state(&canwu);
     for (observer_id, report) in &reports {
-        let derived = &compute_projections(&state, report.projection.as_of)[observer_id];
+        let derived = compute_projection(&state, observer_id, report.projection.as_of)
+            .expect("projection")
+            .expect("an observer's projection");
         if report.is_complete() {
-            assert_eq!(&report.projection, derived);
+            assert_eq!(report.projection, derived);
         } else {
             assert!(report.projection.facts.len() < derived.facts.len());
         }
     }
-    assert!(reports[&binding(0)].is_complete());
-    let last = &reports[&binding(MAX_FISCAL_OBSERVERS - 1)];
-    assert_eq!(
-        last.pending_parts,
-        (0..parts)
-            .map(|part| u32::try_from(part).expect("part"))
-            .collect()
+    let split = &reports[&crowd(full)];
+    let pending: usize = split.pending.values().map(BTreeSet::len).sum();
+    assert_eq!(pending, split_pending);
+    assert!(
+        split
+            .projection
+            .facts
+            .keys()
+            .all(|fact| !split.is_stale(fact))
     );
+    assert_eq!(state.report_queue.len(), CROWD - full);
 
     // The next boundary comes at once, at the same instant, and publishes
-    // what was left with a new summary for each report it completes, and
-    // nothing else. The fiscal state changes only in its plan.
-    let incomplete = reports
-        .values()
-        .filter(|report| !report.is_complete())
-        .count();
-    // A run restored while the drain is queued, and the run's exact replay,
-    // carry it out alike.
+    // what was left, and nothing else. A run restored while the drain is
+    // queued, and the run's exact replay, carry it out alike.
     fixture.assert_restore_and_replay(&canwu);
     let mut restored = Canwu::from_snapshot_json_with_plugins(
         &canwu.snapshot_json().expect("snapshot with a queued drain"),
@@ -461,34 +545,36 @@ fn parts_past_the_boundary_limit_follow_in_the_next_boundary() {
     )
     .expect("restored with a queued drain");
     restored.step_canonical().expect("the restored drain");
-    let revision = procedure_revision(&canwu);
     let outcomes = FiscalSettledAction::from_events(canwu.events()).len();
+    let revision = ledger_revision(&canwu, &treasury_scope(0));
     let at = canwu.time();
     let drain = canwu
         .step_canonical()
         .expect("the drain boundary")
         .expect("the drain packet opens a boundary");
-    assert_eq!(drain.knowledge_record_count, incomplete + deferred);
+    assert_eq!(
+        drain.knowledge_record_count,
+        wanted - MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY + 1
+    );
     assert_eq!(canwu.time(), at);
     assert_eq!(
         restored.snapshot_json().expect("restored snapshot"),
         canwu.snapshot_json().expect("snapshot")
     );
-    assert_reports_match_state(&canwu);
+    let reports = assert_reports_match_state(&canwu);
+    assert_eq!(reports.len(), CROWD);
+    // Every report, whole in the first boundary or finished by the drain,
+    // stands as of the one instant both boundaries share.
+    assert!(reports.values().all(|report| report.projection.as_of == at));
     let drained = fiscal_state(&canwu);
-    assert!(drained.report_plan.deferred.is_empty());
-    assert_eq!(drained.procedure_revision, revision);
+    assert!(drained.report_queue.is_empty());
+    assert!(drained.root.queue_pages.is_empty());
+    assert_eq!(ledger_revision(&canwu, &treasury_scope(0)), revision);
     assert_eq!(
         FiscalSettledAction::from_events(canwu.events()).len(),
         outcomes
     );
-    assert_eq!(
-        FiscalState {
-            report_plan: state.report_plan.clone(),
-            ..drained.clone()
-        },
-        state
-    );
+    assert_eq!(drained.ledgers, state.ledgers);
 
     // Nothing is owed and nothing more is queued. A boundary without fiscal
     // ingress then writes and publishes nothing.
@@ -499,12 +585,125 @@ fn parts_past_the_boundary_limit_follow_in_the_next_boundary() {
             .expect("an empty canonical queue")
             .is_none()
     );
-    let version = fiscal_record_version(&canwu);
+    let versions = fiscal_record_versions(&canwu);
     enqueue_tick(&mut canwu);
     assert_eq!(published(&settle(&mut canwu)), 0);
-    assert_eq!(fiscal_record_version(&canwu), version);
+    assert_eq!(fiscal_record_versions(&canwu), versions);
 
     fixture.assert_restore_and_replay(&canwu);
+}
+
+/// Work queued to repeat a cut publication is kept part by part, within the
+/// report's 64 cycle slots. While its holder is dead, work for further
+/// cycles merges into it; past the slots, the whole report is owed instead,
+/// the boundary commits, and the holder gets the whole report once he is
+/// alive again.
+#[test]
+fn a_held_republication_past_the_slots_is_owed_whole() {
+    const HELD: &str = "observer.held";
+    let fixture = Fixture::new();
+    let mut canwu = fixture.runtime(scenario(|state| {
+        state.add_observer(observer(HELD, AUDITOR, treasury(), 1_000));
+        state.report_queue.insert(
+            HELD.to_owned(),
+            FiscalReportQueueEntry {
+                due_at: SimTime::EPOCH,
+                cycles: (0..64)
+                    .map(|cycle| (format!("c{cycle:02}"), BTreeSet::from([0_u32])))
+                    .collect(),
+                whole: false,
+                republish: true,
+                parked: false,
+            },
+        );
+    }));
+    enqueue_life(&mut canwu, AUDITOR, false);
+    settle(&mut canwu);
+    assert!(queued(&canwu, HELD).is_some_and(|entry| entry.parked && entry.republish));
+
+    // A book of a 65th cycle in a scope the observer sees.
+    submit(
+        &mut canwu,
+        vec![treasury_assessment("c64", &treasury_scope(0), "c64")],
+    );
+    let held = queued(&canwu, HELD).expect("the held work");
+    assert!(held.whole && held.cycles.is_empty() && held.parked);
+
+    enqueue_life(&mut canwu, AUDITOR, true);
+    settle(&mut canwu);
+    assert!(queued(&canwu, HELD).is_none());
+    let reports = assert_reports_match_state(&canwu);
+    assert_eq!(reports[HELD].projection.facts.len(), 1);
+    fixture.assert_restore_and_replay(&canwu);
+}
+
+/// A report cut by the boundary's publication limit can leave more parts of
+/// one cycle than queued work names. They are owed as the whole cycle
+/// instead, which the drain publishes the same way: the parts the boundary
+/// published match their digests and are skipped. Eleven observers of a
+/// treasury of 1,601 scopes owe 101 parts and a summary each when every
+/// scope is assessed in one boundary: ten reports fit, and the eleventh is
+/// cut after three parts, leaving 98.
+#[test]
+fn a_cycle_cut_past_the_queued_parts_is_owed_whole() {
+    const EXTRA: usize = 1_596;
+    const OBSERVERS: usize = 11;
+    let fixture = Fixture::new();
+    let mut canwu = fixture.runtime(scenario(|state| {
+        state.remove_observer(OBSERVER);
+        add_treasury_scopes(state, EXTRA);
+        for index in 0..OBSERVERS {
+            state.add_observer(observer(&crowd(index), PRINCIPAL, treasury(), 1_000));
+        }
+    }));
+    // The first boundary has nothing to report.
+    enqueue_tick(&mut canwu);
+    settle(&mut canwu);
+    assert!(published_report_records(&canwu, PRINCIPAL).is_empty());
+
+    let scopes = assessed_scopes(EXTRA);
+    let batch = FiscalActionBatch {
+        authority_binding_id: TREASURY_AUTHORITY.to_owned(),
+        entries: scopes
+            .iter()
+            .map(|scope| {
+                assessment(&format!("burst.{scope}"), TREASURY_AUTHORITY, scope, "2026")
+                    .entry(ledger_revision(&canwu, scope))
+            })
+            .collect(),
+    };
+    enqueue_requests(&mut canwu, &[(PRINCIPAL, batch)]);
+    canwu.step_canonical().expect("the admitting boundary");
+    let settling = canwu
+        .step_canonical()
+        .expect("the settling boundary")
+        .expect("a boundary settles the batch");
+    assert_eq!(
+        settling.knowledge_record_count,
+        MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY
+    );
+    let state = fiscal_state(&canwu);
+    let (cut, owed) = state
+        .report_queue
+        .iter()
+        .next()
+        .expect("one report is owed the rest");
+    assert_eq!(state.report_queue.len(), 1);
+    assert!(!owed.republish && !owed.whole);
+    assert_eq!(owed.cycles.get("2026"), Some(&BTreeSet::new()));
+    let pending = &reports_of(&canwu, PRINCIPAL)[cut].pending["2026"];
+    assert_eq!(pending.len(), 98);
+
+    // The drain publishes the 98 parts the cut report still owes, and no
+    // part it already published.
+    let drain = canwu
+        .step_canonical()
+        .expect("the drain boundary")
+        .expect("the drain packet opens a boundary");
+    assert_eq!(drain.knowledge_record_count, 98 + 1);
+    let reports = assert_reports_match_state(&canwu);
+    assert_eq!(reports.len(), OBSERVERS);
+    assert!(fiscal_state(&canwu).report_queue.is_empty());
 }
 
 const DEPUTY_BINDING: &str = "observer.deputy";
@@ -513,32 +712,45 @@ const DEPUTY_BINDING: &str = "observer.deputy";
 /// the granary.
 fn deputy_and_auditor() -> canwu_api::Scenario {
     scenario(|state| {
-        for binding in [
-            observer(DEPUTY_BINDING, 1, DEPUTY, treasury(), 1_000),
-            observer(AUDITOR_BINDING, 2, AUDITOR, granary(), 900),
-        ] {
-            state.observer_bindings.insert(binding.id.clone(), binding);
-        }
+        state.add_observer(observer(DEPUTY_BINDING, DEPUTY, treasury(), 1_000));
+        state.add_observer(observer(AUDITOR_BINDING, AUDITOR, granary(), 900));
     })
+}
+
+/// What the queue holds for an observer.
+fn queued(canwu: &Canwu, observer: &str) -> Option<FiscalReportQueueEntry> {
+    fiscal_state(canwu).report_queue.get(observer).cloned()
 }
 
 /// The engine publishes no knowledge to a dead person. When an observer's
 /// actor has died, a change that his report would show still commits, the
 /// other observers get their parts, and his report stays as he last had it.
-/// What he missed is kept, by part and so without growing, and the boundary
-/// that revives him publishes it, without waiting for a change of the fiscal
-/// state.
+/// What he missed is kept queued, by part and so without growing, and the
+/// boundary that revives him publishes it, without waiting for a change of
+/// the fiscal records.
 #[test]
 fn a_dead_observer_is_skipped_until_he_is_alive_again() {
     let fixture = Fixture::new();
     let mut canwu = fixture.runtime(deputy_and_auditor());
-    let deferred = |canwu: &Canwu| fiscal_state(canwu).report_plan.deferred;
-    let held_for_deputy = BTreeMap::from([(DEPUTY_BINDING.to_owned(), BTreeSet::from([0_u32]))]);
+    let held_for_deputy = FiscalReportQueueEntry {
+        cycles: BTreeMap::from([("c1".to_owned(), BTreeSet::from([0_u32]))]),
+        parked: true,
+        ..FiscalReportQueueEntry::default()
+    };
+    let owed = |canwu: &Canwu| {
+        queued(canwu, DEPUTY_BINDING).map(|entry| FiscalReportQueueEntry {
+            due_at: SimTime::EPOCH,
+            ..entry
+        })
+    };
 
-    // Everyone gets a first report: two observers of the treasury a summary
-    // and a part each, the auditor of the granary a summary of nothing.
-    let receipts = submit(&mut canwu, vec![treasury_assessment("first", 0, "c1")]);
-    assert_eq!(published(&receipts), 5);
+    // The two observers of the treasury get a first report, a summary and a
+    // part each; the auditor of the granary is told nothing yet.
+    let receipts = submit(
+        &mut canwu,
+        vec![treasury_assessment("first", &treasury_scope(0), "c1")],
+    );
+    assert_eq!(published(&receipts), 4);
     assert_reports_match_state(&canwu);
 
     enqueue_life(&mut canwu, DEPUTY, false);
@@ -548,7 +760,10 @@ fn a_dead_observer_is_skipped_until_he_is_alive_again() {
 
     // A change his report would show. The boundary commits and the other
     // observer of the treasury gets his part.
-    let receipts = submit(&mut canwu, vec![treasury_assessment("second", 1, "c1")]);
+    let receipts = submit(
+        &mut canwu,
+        vec![treasury_assessment("second", &treasury_scope(1), "c1")],
+    );
     assert_eq!(published(&receipts), 2);
     assert_eq!(
         outcome(&canwu, "second")
@@ -559,33 +774,36 @@ fn a_dead_observer_is_skipped_until_he_is_alive_again() {
     let principal = &reports_of(&canwu, PRINCIPAL)[OBSERVER];
     assert!(principal.is_complete());
     assert_eq!(principal.projection.facts.len(), 2);
-    assert_eq!(deferred(&canwu), held_for_deputy);
+    assert_eq!(owed(&canwu), Some(held_for_deputy.clone()));
     assert_eq!(reports_of(&canwu, DEPUTY), at_death);
 
     // Later changes add nothing for him but the parts they touch, and take
     // nothing from the others, whose changes still go out in full.
-    let receipts = submit(&mut canwu, vec![treasury_assessment("third", 2, "c1")]);
+    let receipts = submit(
+        &mut canwu,
+        vec![treasury_assessment("third", &treasury_scope(2), "c1")],
+    );
     assert_eq!(published(&receipts), 2);
     let receipts = submit(&mut canwu, vec![granary_assessment("granary", "c1")]);
     assert_eq!(published(&receipts), 2);
-    assert_eq!(deferred(&canwu), held_for_deputy);
+    assert_eq!(owed(&canwu), Some(held_for_deputy));
     assert_eq!(reports_of(&canwu, DEPUTY), at_death);
 
     // While he is dead, a boundary without fiscal ingress writes and
     // publishes nothing, although parts are owed to him.
-    let version = fiscal_record_version(&canwu);
+    let versions = fiscal_record_versions(&canwu);
     enqueue_tick(&mut canwu);
     assert_eq!(published(&settle(&mut canwu)), 0);
-    assert_eq!(fiscal_record_version(&canwu), version);
+    assert_eq!(fiscal_record_versions(&canwu), versions);
 
     // Alive again. The boundary that revives him publishes what he missed,
-    // with a new summary, and nothing else: the fiscal state changes only in
-    // its plan, and no action becomes stale.
-    let revision = procedure_revision(&canwu);
+    // with a new summary, and nothing else: no revision advances, and no
+    // action becomes stale.
+    let revision = ledger_revision(&canwu, &treasury_scope(0));
     enqueue_life(&mut canwu, DEPUTY, true);
     assert_eq!(published(&settle(&mut canwu)), 2);
-    assert!(deferred(&canwu).is_empty());
-    assert_eq!(procedure_revision(&canwu), revision);
+    assert!(queued(&canwu, DEPUTY_BINDING).is_none());
+    assert_eq!(ledger_revision(&canwu, &treasury_scope(0)), revision);
     let reports = assert_reports_match_state(&canwu);
     assert_eq!(reports[DEPUTY_BINDING].projection.facts.len(), 3);
 
@@ -597,9 +815,9 @@ fn a_dead_observer_is_skipped_until_he_is_alive_again() {
     fixture.assert_restore_and_replay(&canwu);
 }
 
-/// Whether report parts are owed, and to whom, is read from the committed
-/// fiscal state and person availability, never from retained evidence. A run
-/// that sealed its evidence while parts were owed to a dead observer
+/// Whether report work is owed, and to whom, is read from the committed
+/// fiscal records and person availability, never from retained evidence. A
+/// run that sealed its evidence while parts were owed to a dead observer
 /// publishes them when he is revived exactly as an unsealed fork, a restore
 /// from the sealed segments, and its own exact replay do.
 #[test]
@@ -607,16 +825,17 @@ fn a_sealed_run_publishes_what_a_revived_observer_is_owed_as_its_replay_does() {
     let fixture = Fixture::new();
     let plugins = fixture.plugins();
     let mut base = fixture.runtime(deputy_and_auditor());
-    submit(&mut base, vec![treasury_assessment("first", 0, "c1")]);
+    submit(
+        &mut base,
+        vec![treasury_assessment("first", &treasury_scope(0), "c1")],
+    );
     enqueue_life(&mut base, DEPUTY, false);
     settle(&mut base);
-    submit(&mut base, vec![treasury_assessment("second", 1, "c1")]);
-    assert!(
-        fiscal_state(&base)
-            .report_plan
-            .deferred
-            .contains_key(DEPUTY_BINDING)
+    submit(
+        &mut base,
+        vec![treasury_assessment("second", &treasury_scope(1), "c1")],
     );
+    assert!(queued(&base, DEPUTY_BINDING).is_some_and(|entry| entry.parked));
 
     // A quiet boundary admits what the last boundary emitted, and then the
     // whole history seals.
@@ -666,7 +885,7 @@ fn a_sealed_run_publishes_what_a_revived_observer_is_owed_as_its_replay_does() {
     assert_eq!(from_sealed.checkpoint_hash(), unsealed.checkpoint_hash());
 
     // A later change in the sealed run settles as in the unsealed one.
-    let later = vec![treasury_assessment("third", 2, "c1")];
+    let later = vec![treasury_assessment("third", &treasury_scope(2), "c1")];
     submit(&mut unsealed, later.clone());
     submit_sealed(&mut sealed, later);
     assert_eq!(sealed.checkpoint_hash(), unsealed.checkpoint_hash());
@@ -679,18 +898,16 @@ fn a_sealed_run_publishes_what_a_revived_observer_is_owed_as_its_replay_does() {
     assert_eq!(replayed.snapshot(), unsealed.snapshot());
 }
 
-/// A state whose observer binding names a person who does not exist is
-/// refused when the run is created: the state record references every
-/// observer's person, and the engine checks references against its entity
-/// registry.
+/// An observer binding that names a person who does not exist is refused
+/// when the run is created: the observer record references its holder, and
+/// the engine checks references against its entity registry.
 #[test]
 fn an_observer_who_does_not_exist_is_refused_when_the_run_is_created() {
     let fixture = Fixture::new();
     let nobody = PersonId::new(777);
     let error = fixture
         .try_runtime(scenario(|state| {
-            let binding = observer("observer.nobody", 1, nobody, treasury(), 1_000);
-            state.observer_bindings.insert(binding.id.clone(), binding);
+            state.add_observer(observer("observer.nobody", nobody, treasury(), 1_000));
         }))
         .err()
         .expect("an observer without a person must be refused");
@@ -700,74 +917,35 @@ fn an_observer_who_does_not_exist_is_refused_when_the_run_is_created() {
     );
 }
 
-/// A report plan means something only in a state a boundary has written. A
-/// scenario that brings one, as a state exported from another run does, has
-/// it ignored: the first derivation publishes every report whole, whichever
-/// system writes the state first.
+/// The report queue is part of the fiscal records, and a run is refused
+/// when it is created with a queue page that owes work to an observer
+/// binding that does not exist.
 #[test]
-fn a_report_plan_that_came_with_a_scenario_is_ignored() {
-    const AUTHORED_CYCLES: usize = 10;
-    let facts = TREASURY_SCOPES * AUTHORED_CYCLES;
-    let parts = facts.div_ceil(FISCAL_REPORT_FACTS_PER_PART);
-    let used_plan = || FiscalReportPlan {
-        revision: 1,
-        publish: BTreeMap::from([(OBSERVER.to_owned(), BTreeSet::from([0]))]),
-        deferred: BTreeMap::from([(OBSERVER.to_owned(), BTreeSet::from([1]))]),
-        withdraw: BTreeMap::new(),
-    };
+fn a_queue_naming_an_unknown_observer_is_refused_when_the_run_is_created() {
     let fixture = Fixture::new();
-
-    // The state's derived fields are right, so its first writer is the
-    // settlement of the first action.
-    let mut canwu = fixture.runtime(scenario(|state| {
-        author_treasury_assessments(state, AUTHORED_CYCLES);
-        state.report_plan = used_plan();
-    }));
-    let receipts = submit(&mut canwu, vec![granary_assessment("first", "c1")]);
-    assert_eq!(published(&receipts), 1 + parts);
-    let reports = assert_reports_match_state(&canwu);
-    assert_eq!(reports[OBSERVER].projection.facts.len(), facts);
-    fixture.assert_restore_and_replay(&canwu);
-
-    // The state's aggregates are missing, so its first writer is the
-    // aggregate system, in a boundary without fiscal ingress.
-    let mut state = base_state();
-    author_treasury_assessments(&mut state, AUTHORED_CYCLES);
-    state.report_plan = used_plan();
-    let mut canwu = fixture.runtime(scenario_from_state(state));
-    enqueue_tick(&mut canwu);
-    assert_eq!(published(&settle(&mut canwu)), 1 + parts);
-    let reports = assert_reports_match_state(&canwu);
-    assert_eq!(reports[OBSERVER].projection.facts.len(), facts);
+    let mut scenario = scenario(|_| {});
+    let page = scenario
+        .domain_records
+        .iter_mut()
+        .find(|record| record.reference.kind.name == "report-queue")
+        .expect("the authored observer's queue page");
+    page.payload["entries"]["observer.nobody"] =
+        serde_json::to_value(FiscalReportQueueEntry::default()).expect("entry");
+    let error = fixture
+        .try_runtime(scenario)
+        .err()
+        .expect("a queue naming an unknown observer must be refused");
+    assert!(error.message.contains("unknown observer"), "{error}");
 }
 
 /// A run that holds direct command history cannot add canonical ingress, so
-/// a boundary of it cannot schedule a drain. The first boundary that runs the
-/// fiscal systems on an authored state, planning more report records than it
-/// may publish, then commits with the rest owed instead of failing, and the
-/// next boundary that runs the fiscal systems publishes more of them.
+/// a boundary of it cannot schedule a drain. A boundary that owes more than
+/// it may publish then commits with the rest queued instead of failing, and
+/// the next boundary that runs the fiscal systems publishes more of it.
 #[test]
-fn owed_parts_wait_in_a_run_with_direct_command_history() {
-    const AUTHORED_CYCLES: usize = 64;
+fn owed_reports_wait_in_a_run_with_direct_command_history() {
     let fixture = Fixture::new();
-    // The derived fields are not computed, so the first boundary that runs
-    // the fiscal systems writes them and plans every report whole.
-    let mut state = base_state();
-    author_treasury_assessments(&mut state, AUTHORED_CYCLES);
-    state.observer_bindings.clear();
-    for index in 0..MAX_FISCAL_OBSERVERS {
-        let observer = observer(
-            &format!("observer.{index:02}"),
-            u16::try_from(index).expect("slot"),
-            PRINCIPAL,
-            treasury(),
-            1_000,
-        );
-        state
-            .observer_bindings
-            .insert(observer.id.clone(), observer);
-    }
-    let mut canwu = fixture.runtime(scenario_from_state(state));
+    let mut canwu = fixture.runtime(scenario_from_state(crowded_state()));
     let direct_command_boundary = |canwu: &mut Canwu| {
         canwu
             .submit(CommandEnvelope::new(
@@ -791,10 +969,7 @@ fn owed_parts_wait_in_a_run_with_direct_command_history() {
         MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY
     );
     assert!(first.generated_ingress.is_empty(), "no drain is scheduled");
-    let owed = |canwu: &Canwu| -> usize {
-        let plan = fiscal_state(canwu).report_plan;
-        plan.deferred.len() + plan.deferred.values().map(BTreeSet::len).sum::<usize>()
-    };
+    let owed = |canwu: &Canwu| fiscal_state(canwu).report_queue.len();
     let owed_after_first = owed(&canwu);
     assert!(owed_after_first > 0);
 
@@ -807,14 +982,14 @@ fn owed_parts_wait_in_a_run_with_direct_command_history() {
 
 /// A scenario whose knowledge carries a report record of schema version 1,
 /// the one-record report of 0.14.0, is refused when the run is created: only
-/// version 3 is registered, and the engine accepts no record of a schema it
+/// version 4 is registered, and the engine accepts no record of a schema it
 /// does not know.
 #[test]
 fn a_scenario_with_a_version_one_report_record_is_refused() {
     let fixture = Fixture::new();
     let holder = KnowledgeHolderRef::Person(PRINCIPAL);
     let mut version_one = fiscal_report_knowledge_schema_id();
-    assert_eq!(version_one.version, 3);
+    assert_eq!(version_one.version, 4);
     version_one.version = 1;
     let mut scenario = scenario(|_| {});
     let id = KnowledgeRecordId::new(1);
@@ -823,8 +998,10 @@ fn a_scenario_with_a_version_one_report_record_is_refused() {
         holder,
         schema: version_one,
         subjects: vec![KnowledgeSubject {
-            role: "fiscal_state".to_owned(),
-            target: KnowledgeSubjectTarget::DomainRecord(fiscal_state_reference().into_untyped()),
+            role: "fiscal_observer".to_owned(),
+            target: KnowledgeSubjectTarget::DomainRecord(
+                fiscal_observer_reference(OBSERVER).into_untyped(),
+            ),
         }],
         payload: serde_json::json!({
             "actor": PRINCIPAL,
@@ -847,4 +1024,54 @@ fn a_scenario_with_a_version_one_report_record_is_refused() {
         .err()
         .expect("a version-1 report record must be refused");
     assert_eq!(error.code, ErrorCode::InvalidKnowledgeRecord, "{error}");
+}
+
+/// A full part of the longest texts a row may carry, at the most facts a row
+/// may hold, fits one knowledge record with room to spare.
+#[test]
+fn a_full_part_of_the_longest_rows_fits_one_knowledge_record() {
+    let long = |prefix: &str| {
+        let mut text = prefix.to_owned();
+        text.push_str(&"x".repeat(canwu_fiscal::MAX_FISCAL_IDENTIFIER_BYTES - prefix.len()));
+        text
+    };
+    let fact = canwu_fiscal::FiscalReportRowFact {
+        unit: long("unit."),
+        payment_form: FiscalPaymentForm::Grain,
+        assessed: canwu_fiscal::FiscalAmountEstimate {
+            minimum: u64::MAX - 1,
+            maximum: u64::MAX,
+        },
+        collected: canwu_fiscal::FiscalAmountEstimate {
+            minimum: u64::MAX - 1,
+            maximum: u64::MAX,
+        },
+        outstanding: canwu_fiscal::FiscalAmountEstimate {
+            minimum: u64::MAX - 1,
+            maximum: u64::MAX,
+        },
+    };
+    let rows = (0..u32::try_from(FISCAL_REPORT_ROWS_PER_PART).expect("rows"))
+        .map(|row| canwu_fiscal::FiscalReportRow {
+            row: u32::MAX - row,
+            institution: canwu_api::EntityRef::Domain(canwu_api::DomainRecordRef::new(
+                "n".repeat(50),
+                "k".repeat(50),
+                "i".repeat(canwu_fiscal::MAX_FISCAL_IDENTIFIER_BYTES - 100),
+            )),
+            mechanism: FiscalMechanism::LandTax,
+            scope_binding_id: long("scope."),
+            facts: vec![fact.clone(); canwu_fiscal::MAX_FISCAL_PARTITION_KEYS],
+        })
+        .collect();
+    let part = FiscalReportRecord::Part(canwu_fiscal::FiscalReportPart {
+        observer_id: long("observer."),
+        accounting_cycle_id: long("cycle."),
+        slot: u16::MAX,
+        part: u32::MAX,
+        rows,
+    });
+    let bytes = serde_json::to_vec(&part).expect("part bytes").len();
+    assert!(bytes < 65_536, "a full part takes {bytes} bytes");
+    let _ = Draft::against;
 }

@@ -6,7 +6,7 @@ use canwu_api::{
     PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar, SimTime, SimulationPlugin,
     SimulationView, StateKey, StateVisibility, SystemCadence, TypedDomainRecordRef,
 };
-use canwu_fiscal::{FiscalExecutionEvidence, FiscalStateRecord, fiscal_state_reference};
+use canwu_fiscal::{FiscalExecutionEvidence, FiscalLedgerRecord, fiscal_ledger_reference};
 
 const PLUGIN_NAME: &str = "canwu.ming-fiscal-reference";
 const EXECUTION_RESULT_INGRESS: &str = "reference_fiscal_execution_result_v1";
@@ -61,7 +61,7 @@ impl SimulationPlugin for MingFiscalExecutionAdapterPlugin {
         );
         system.reads = vec![
             StateKey::core_ingress(),
-            StateKey::new(FiscalStateRecord::NAMESPACE, FiscalStateRecord::NAME),
+            StateKey::new(FiscalLedgerRecord::NAMESPACE, FiscalLedgerRecord::NAME),
         ];
         system.writes = vec![evidence_key];
         system.visibility = StateVisibility::SameBoundary;
@@ -73,10 +73,6 @@ fn record_execution_results(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
-    let fiscal = view
-        .typed_domain_record(&fiscal_state_reference())?
-        .ok_or_else(|| invalid("fiscal state is unavailable to the execution adapter"))?
-        .decode_payload::<FiscalStateRecord>()?;
     let mut directives = Vec::new();
     for ingress_id in &context.admitted_ingress {
         let Some(ingress) = view.ingress(*ingress_id)? else {
@@ -100,7 +96,11 @@ fn record_execution_results(
                     "reference fiscal execution evidence could not be decoded: {error}"
                 ))
             })?;
-        validate_execution_result(&fiscal, &evidence)?;
+        let ledger = view
+            .typed_domain_record(&fiscal_ledger_reference(&evidence.scope_binding_id))?
+            .map(canwu_api::DomainRecord::decode_payload::<FiscalLedgerRecord>)
+            .transpose()?;
+        validate_execution_result(ledger.as_ref(), &evidence)?;
         directives.push(BoundaryDirective::MutateRecord {
             mutation: DomainRecordMutation::Create {
                 record: DomainRecordDraft::from_typed(
@@ -118,7 +118,7 @@ fn record_execution_results(
 }
 
 fn validate_execution_result(
-    fiscal: &canwu_fiscal::FiscalState,
+    ledger: Option<&canwu_fiscal::FiscalScopeLedger>,
     evidence: &ReferenceFiscalExecutionEvidence,
 ) -> Result<(), CanwuError> {
     if evidence.id.trim().is_empty()
@@ -129,8 +129,7 @@ fn validate_execution_result(
             "reference fiscal execution evidence requires non-empty identities and unit",
         ));
     }
-    let request = fiscal
-        .ledger(&evidence.scope_binding_id)
+    let request = ledger
         .and_then(|ledger| ledger.book_of_request(&evidence.request_id))
         .and_then(|book| book.execution_requests.get(&evidence.request_id))
         .ok_or_else(|| {

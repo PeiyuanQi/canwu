@@ -12,12 +12,14 @@
 use canwu_api::{
     ArchiveProvider, ArchiveStore, ArchiveStoreOutcome, BoundaryReceipt, BoundaryRequest, Canwu,
     CanwuError, CanwuRun, CommandEnvelope, CommandRequest, CommandRequestId, CompactedCanwu,
-    EntityRef, EvidenceJournalSegment, Issuer, PersonId, ResourceId, SimDuration,
+    EntityRef, EvidenceJournalSegment, Issuer, KnowledgeHolderRef, PersonId, ResourceId,
+    SimDuration,
 };
 use canwu_fiscal::{
-    FiscalAction, FiscalActionRequest, FiscalExecutionKind, FiscalExecutionReceiptPacket,
-    FiscalPaymentForm, FiscalReceiptDisposition, FiscalState, FiscalStateRecord,
-    enqueue_execution_receipt, fiscal_action_command, fiscal_state_reference,
+    FiscalAction, FiscalActionBatch, FiscalActionEntry, FiscalExecutionKind,
+    FiscalExecutionReceiptPacket, FiscalPaymentForm, FiscalReceiptDisposition, FiscalState,
+    audit_fiscal_records, enqueue_execution_receipts, fiscal_action_command, fiscal_action_target,
+    fiscal_reports_of_holder, fiscal_target_revision, load_fiscal_state,
 };
 use canwu_ming_fiscal_reference::{
     DEFAULT_SEED, MingFiscalExecutionAdapterPlugin, ReferenceFiscalExecutionEvidence,
@@ -123,10 +125,9 @@ impl ArchiveStore for SegmentStore {
 }
 
 fn fiscal_state(run: &impl CanwuRun) -> FiscalState {
-    run.domain_record(&fiscal_state_reference().into_untyped())
-        .expect("fiscal state")
-        .decode_payload::<FiscalStateRecord>()
-        .expect("fiscal state payload")
+    load_fiscal_state(run)
+        .expect("fiscal records")
+        .expect("a fiscal state")
 }
 
 /// One settled step: settle what is due, admit its emissions, and seal.
@@ -138,13 +139,20 @@ fn step(run: &mut impl Host) -> Vec<BoundaryReceipt> {
 }
 
 fn action(run: &mut impl Host, actor: PersonId, request_id: u64, action: FiscalAction) {
-    let request = FiscalActionRequest {
-        action_id: format!("compact.action.{request_id}"),
-        authority_binding_id: "authority.revenue-minister".to_owned(),
-        expected_procedure_revision: fiscal_state(run).procedure_revision,
-        action,
-    };
-    let command = fiscal_action_command(&request).expect("fiscal command");
+    let binding = "authority.revenue-minister";
+    let target = fiscal_action_target(&*run, binding, &action).expect("the action's target");
+    let expected_revision = fiscal_target_revision(&*run, &target)
+        .expect("the target's revision")
+        .expect("an existing target");
+    let batch = FiscalActionBatch::single(
+        binding,
+        FiscalActionEntry {
+            action_id: format!("compact.action.{request_id}"),
+            expected_revision,
+            action,
+        },
+    );
+    let command = fiscal_action_command(&batch).expect("fiscal command");
     let at = run.time();
     run.enqueue_tracked(CommandRequest::new(
         CommandRequestId::new(request_id),
@@ -236,15 +244,15 @@ fn settle_receipt(run: &mut impl Host) -> Vec<BoundaryReceipt> {
     let version =
         reference_execution_evidence_version(run, &evidence.id).expect("exact evidence version");
     let at = run.time();
-    enqueue_execution_receipt(
+    enqueue_execution_receipts(
         run,
         at,
-        &FiscalExecutionReceiptPacket {
+        &[FiscalExecutionReceiptPacket {
             receipt_id: "receipt.compact".to_owned(),
             scope_binding_id: "scope.lower-yangzi.land".to_owned(),
             request_id: "compact.execution".to_owned(),
             external_evidence: [version].into_iter().collect(),
-        },
+        }],
     )
     .expect("receipt enqueues");
     receipts.extend(step(run));
@@ -274,6 +282,22 @@ fn fiscal_and_adapter_helpers_drive_a_sealed_compact_run_as_a_full_one() {
             .find(|receipt| receipt.id == "receipt.compact")
             .map(|receipt| receipt.quantity),
         Some(70)
+    );
+    // The host's audit and its report read work on the sealed handle too.
+    assert_eq!(
+        audit_fiscal_records(&compact).expect("the sealed run's records audit"),
+        state
+    );
+    let observer = ming_fiscal_reference_scenario("hongwu-1391")
+        .expect("fixture")
+        .world_ids
+        .observer;
+    let holder = KnowledgeHolderRef::Person(observer);
+    let reports = fiscal_reports_of_holder(&compact, &holder).expect("sealed reports");
+    assert!(!reports.is_empty(), "the observer holds a report");
+    assert_eq!(
+        reports,
+        fiscal_reports_of_holder(&full, &holder).expect("full reports")
     );
     assert!(
         compact.boundaries().len() < full.boundaries().len(),

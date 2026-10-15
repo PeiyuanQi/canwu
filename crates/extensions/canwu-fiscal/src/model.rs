@@ -2,90 +2,134 @@ use crate::PLUGIN_NAME;
 use canwu_api::{
     CanwuError, DomainRecord, DomainRecordClass, DomainRecordDraft, DomainRecordKind,
     DomainRecordLifecycle, DomainRecordType, DomainRecordVersionRef, DomainRecordVersionSource,
-    DomainReference, DomainReferenceTarget, DomainValueKindClass, EntityRef, ErrorCode,
-    EvidenceRef, IngressId, KnowledgeHolderRef, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
-    PayloadRequiredEvidenceContinuationV1, PersonId, ResourceId, SimTime, SimulationGranularity,
-    TypedDomainRecordRef,
+    DomainValueKindClass, EntityRef, ErrorCode, EvidenceRef, IngressId, KnowledgeHolderRef,
+    PersonId, ResourceId, SimTime, SimulationGranularity, TypedDomainRecordRef,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const FISCAL_CONTENT_SCHEMA_VERSION: u32 = 1;
-/// Version of the serialized [`FiscalState`]. Version 4 keeps each scope's
-/// adoptions and accounting cycle books in its [`FiscalScopeLedger`], the
-/// cycle bookkeeping of each institution in its [`FiscalOffice`], the recent
-/// outcomes of each action target in its [`FiscalOutcomeRing`], and the
-/// fiscal archive head; observers may hold their reports without a person.
-pub const FISCAL_RUNTIME_SCHEMA_VERSION: u32 = 4;
-/// Authority bindings, audit bindings, and scope bindings, each counted on
-/// its own. Audit binding IDs are one namespace across all institutions and
-/// share this one cap.
-pub const MAX_FISCAL_RUNTIME_BINDINGS: usize = 4_096;
-pub const MAX_FISCAL_OBSERVERS: usize = 64;
-/// Hot assessments: those of the books the state holds. Remissions, audits,
-/// and aggregates share the number. An archive commit takes closed books out
-/// of the state, so this bounds what a run holds at once, not what it makes:
-/// past it a further assessment is rejected as its own outcome until books
-/// are archived.
-pub const MAX_FISCAL_ASSESSMENTS: usize = 4_096;
-/// Hot execution requests, bounded like [`MAX_FISCAL_ASSESSMENTS`].
-pub const MAX_FISCAL_EXECUTION_REQUESTS: usize = 8_192;
-/// Hot execution receipts, bounded like [`MAX_FISCAL_ASSESSMENTS`].
-pub const MAX_FISCAL_EXECUTION_RECEIPTS: usize = 8_192;
+/// Version of the fiscal records. Version 5 partitions the state into
+/// records: one root, one office per institution, one ledger per scope
+/// binding, one jurisdiction per catalog region in use, one observer per
+/// observer binding, binding-directory buckets, static index pages, and
+/// report-queue pages (see [`crate::FiscalRecordKind`]). Each ledger, office,
+/// jurisdiction, and observer has a revision of its own.
+pub const FISCAL_RUNTIME_SCHEMA_VERSION: u32 = 5;
+/// Scope bindings a run may have, one ledger each.
+pub const MAX_FISCAL_SCOPE_BINDINGS: usize = 1_048_576;
+/// Authority bindings one institution's office holds.
+pub const MAX_FISCAL_AUTHORITY_BINDINGS_PER_OFFICE: usize = 256;
+/// Audit bindings on one institution, held in its office. Audit binding IDs
+/// are one namespace across all institutions, with authority binding and
+/// appointment policy IDs (see [`crate::FiscalDirectoryBucket`]).
+pub const MAX_FISCAL_AUDIT_BINDINGS_PER_OFFICE: usize = 256;
+/// Observer bindings a run may have, one record each.
+pub const MAX_FISCAL_OBSERVERS: usize = 65_536;
+/// Institutions one observer binding may see.
+pub const MAX_FISCAL_VISIBLE_INSTITUTIONS: usize = 4_096;
+/// Observer bindings that may see one institution: its office lists them.
+pub const MAX_FISCAL_OBSERVERS_PER_INSTITUTION: usize = 4_096;
+/// Report rows one observer binding has: one per scope of the institutions
+/// it sees. A part is [`FISCAL_REPORT_ROWS_PER_PART`] rows, so a cycle of a
+/// report has at most [`MAX_FISCAL_REPORT_PARTS_PER_CYCLE`] parts.
+pub const MAX_FISCAL_OBSERVER_ROWS: usize = 16_384;
+/// Partition keys (unit, payment form) one (institution, mechanism, cycle)
+/// may use, and so assessments one book may hold: an assessment that would
+/// add another is rejected with [`FISCAL_PARTITION_KEYS_EXHAUSTED`]. A row of
+/// a report holds a book's facts, one per partition.
+pub const MAX_FISCAL_PARTITION_KEYS: usize = 4;
+/// Remissions one book holds.
+pub const MAX_FISCAL_REMISSIONS_PER_BOOK: usize = 256;
+/// Execution requests one book holds.
+pub const MAX_FISCAL_EXECUTION_REQUESTS_PER_BOOK: usize = 256;
+/// Execution receipts one book holds.
+pub const MAX_FISCAL_EXECUTION_RECEIPTS_PER_BOOK: usize = 1_024;
+/// Audit findings one book holds.
+pub const MAX_FISCAL_AUDITS_PER_BOOK: usize = 256;
+/// Adoptions one scope ledger holds.
+pub const MAX_FISCAL_ADOPTIONS_PER_LEDGER: usize = 64;
 /// Accounting cycle books, open or closed, one scope ledger holds at once. A
 /// further book is refused with [`FISCAL_HOT_BOOKS_EXHAUSTED`] until a closed
 /// one is archived.
 pub const MAX_FISCAL_HOT_BOOKS_PER_LEDGER: usize = 64;
+/// Accounting cycles of which one institution's scopes may hold hot books at
+/// once; a book of a further cycle is refused with
+/// [`FISCAL_HOT_BOOKS_EXHAUSTED`].
+pub const MAX_FISCAL_HOT_CYCLES_PER_OFFICE: usize = 64;
 /// Recent outcomes one action target keeps in its [`FiscalOutcomeRing`].
 /// Every outcome, applied or rejected, is also recorded for good in its
 /// `canwu.fiscal.action_settled.v1` event.
 pub const FISCAL_RECENT_OUTCOMES: usize = 8;
 /// Fiscal actions one boundary applies. Only an action that is current and
-/// authorized, and so reaches the copy and validation of the whole state,
-/// counts; a stale or unauthorized action is rejected without using the
-/// limit. A further such action in the same boundary is recorded as a
-/// `Rejected` outcome whose reason ends with [`FISCAL_BOUNDARY_ACTION_LIMIT`],
-/// so one boundary's fiscal work stays bounded however many commands were
-/// admitted for it.
-pub const MAX_FISCAL_ACTIONS_PER_BOUNDARY: usize = 64;
+/// authorized counts; a stale or unauthorized action is rejected without
+/// using the limit. A further such action in the same boundary is recorded
+/// as a `Rejected` outcome whose reason ends with
+/// [`FISCAL_BOUNDARY_ACTION_LIMIT`].
+pub const MAX_FISCAL_ACTIONS_PER_BOUNDARY: usize = 65_536;
+/// Fiscal actions one boundary applies to one target record, which bounds
+/// the repeated validation of a record. A further one is rejected with
+/// [`FISCAL_RECORD_ACTION_LIMIT`].
+pub const MAX_FISCAL_ACTIONS_PER_RECORD_PER_BOUNDARY: usize = 64;
+/// Scope ledgers one boundary writes, each counted once however many actions
+/// and receipts touch it. An action past it is rejected with
+/// [`FISCAL_BOUNDARY_ACTION_LIMIT`], and a receipt refused with
+/// [`FISCAL_RECEIPT_BOUNDARY_LIMIT`].
+pub const MAX_FISCAL_LEDGER_WRITES_PER_BOUNDARY: usize = 65_536;
+/// Entries one fiscal action batch may carry.
+pub const MAX_FISCAL_BATCH_ENTRIES: usize = 4_096;
+/// Execution receipts one receipt packet may carry.
+pub const MAX_FISCAL_RECEIPTS_PER_PACKET: usize = 4_096;
 /// Longest identifier, in bytes, that a fiscal record or action may carry.
-/// The same length bounds every text of a report fact: an assessment's unit
-/// and accounting cycle, and the namespace, name, and ID of a scope's
+/// The same length bounds every text of a report row: a scope, a unit, an
+/// accounting cycle, and the namespace, name, and ID of a scope's
 /// domain-record institution together.
 pub const MAX_FISCAL_IDENTIFIER_BYTES: usize = 160;
 /// Longest free text, in bytes, that a fiscal action may carry: an audit
 /// `finding`, a remission `reason`, or an execution `purpose`. Admission
-/// rejects a longer one as `InvalidPayload`.
+/// refuses a longer one as `InvalidPayload`.
 pub const MAX_FISCAL_ACTION_TEXT_BYTES: usize = 2_048;
-/// Largest serialized fiscal action request, in bytes, that admission
+/// Largest serialized fiscal action entry, in bytes, that admission
 /// accepts. It bounds every field no narrower limit names, such as entity
 /// references and evidence references.
 pub const MAX_FISCAL_ACTION_JSON_BYTES: usize = 32 * 1_024;
-/// Facts one part of a fiscal report holds. An observer's report is published
-/// as one summary record and parts of this many facts each, so a boundary
-/// republishes only the parts whose facts changed. A full part of ordinary
-/// identifiers is about 6 KiB. It still fits the engine's 65,536-byte
-/// knowledge payload limit, at 55,916 bytes, when every text of every fact is
-/// at its longest and made only of characters JSON has to escape.
-pub const FISCAL_REPORT_FACTS_PER_PART: usize = 16;
-/// Parts one observer's report can have. Every fact reports one aggregate and
-/// every aggregate has one assessment, so [`MAX_FISCAL_ASSESSMENTS`] bounds
-/// the facts and a report of any size the state allows fits its parts.
-pub const MAX_FISCAL_REPORT_PARTS: usize = MAX_FISCAL_ASSESSMENTS / FISCAL_REPORT_FACTS_PER_PART;
+/// Largest serialized fiscal action batch, in bytes.
+pub const MAX_FISCAL_BATCH_JSON_BYTES: usize = 4 * 1_024 * 1_024;
+/// Rows one part of a fiscal report holds: one cycle of 16 consecutive rows.
+pub const FISCAL_REPORT_ROWS_PER_PART: usize = 16;
+/// Parts one cycle of an observer's report can have.
+pub const MAX_FISCAL_REPORT_PARTS_PER_CYCLE: usize =
+    MAX_FISCAL_OBSERVER_ROWS / FISCAL_REPORT_ROWS_PER_PART;
+/// Hot accounting cycles one observer's report shows at once, each in a slot
+/// of its own. A cycle past them is left out of the report until a slot is
+/// free, and the summary counts it in
+/// [`FiscalReportSummary::omitted_cycles`]. It also bounds the summary, which
+/// names every cycle the report shows, within one knowledge record.
+pub const MAX_FISCAL_REPORT_CYCLE_SLOTS: usize = 64;
 /// Fiscal report records one boundary publishes, over all observers: about a
 /// tenth of the engine's per-boundary knowledge record limit, which every
-/// plugin shares. Parts that changed but do not fit are owed: the boundary
-/// schedules an internal `fiscal_report_drain_v1` packet, due at once, so the
-/// next boundary publishes them without waiting for a change of the fiscal
-/// state, up to this many records again. Until then the observer's summary
-/// names them in [`FiscalReportSummary::pending_parts`].
-///
-/// The limit is reached only when one boundary has more records than this to
-/// publish, and then an observer can infer a little that its binding does not
-/// show it: the records are shared in the order of the observer bindings, so
-/// which parts of a report are pending depends on the reports of the
-/// observers before it.
+/// plugin shares. What does not fit stays queued, and the boundary schedules
+/// an internal `fiscal_report_drain_v1` packet, due at once, so the next
+/// boundary at the same instant publishes it.
 pub const MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY: usize = 1_024;
+/// Report-queue pages: the report work owed to an observer is kept on the
+/// page its binding ID's digest names, so a boundary writes only the pages
+/// of the observers it queues or publishes.
+pub const FISCAL_REPORT_QUEUE_PAGES: usize = 4_096;
+/// Cycles one observer's queued report work names part by part; past them
+/// the whole report is owed.
+pub const FISCAL_REPORT_QUEUE_CYCLES: usize = 16;
+/// Parts of one cycle one observer's queued report work names; past them
+/// every part of the cycle is owed.
+pub const FISCAL_REPORT_QUEUE_PARTS: usize = 64;
+/// Binding-directory buckets: the office of a binding, appointment policy,
+/// or auditor proposal ID is kept in the bucket its digest names, so a
+/// request that names only an ID finds its office with one read.
+pub const FISCAL_DIRECTORY_BUCKETS: usize = 4_096;
+/// Scope IDs one index page lists: an office's scopes in rank order, or a
+/// region's scopes in ID order. Index pages are written with the scenario
+/// and never change.
+pub const FISCAL_INDEX_PAGE_SCOPES: usize = 1_024;
 pub const MAX_FISCAL_EVIDENCE_KINDS: usize = 32;
 pub const MAX_FISCAL_EVIDENCE_PER_RECORD: usize = 32;
 /// Parties one [`FiscalAppointmentPolicy`] lists as nominators, and as
@@ -95,81 +139,38 @@ pub const MAX_FISCAL_APPOINTMENT_PARTIES: usize = 32;
 /// [`FiscalAppointmentPolicy`] may have pending at once, over all the
 /// policy's bindings. Admission refuses a further one as `ValueOutOfRange`,
 /// unless it replaces the party's pending proposal of the same kind on the
-/// same binding. A policy lists at most [`MAX_FISCAL_APPOINTMENT_PARTIES`]
-/// nominators and as many petitioners, so it has at most
-/// `2 * MAX_FISCAL_APPOINTMENT_PARTIES * MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY`
-/// proposals pending, and no party fills another's room.
+/// same binding.
 pub const MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY: usize = 4;
 /// Resolved nominations and petitions kept for one policy, as the record of
 /// who proposed, on what, and who decided. A resolution past it drops the
 /// policy's oldest resolved proposals (by the time they were resolved, then
-/// by ID), so a run never runs out of room for proposals; a binding and a
-/// finding keep their nominator in [`FiscalProposalRef`] either way.
+/// by ID); a binding and a finding keep their nominator in
+/// [`FiscalProposalRef`] either way.
 pub const MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY: usize = 64;
-/// Serialized byte budget of the fiscal state record.
-///
-/// Settlement holds every record its boundary writes, leaving out the report
-/// plan, to this budget less [`MAX_FISCAL_REPORT_PLAN_BYTES`] and
-/// [`FISCAL_ARCHIVE_HEAD_RESERVE_BYTES`]: the state as settlement writes it,
-/// and as the candidate and aggregate systems of the same boundary rewrite it
-/// with their derived fields. Any report plan fits in what is left, and so
-/// does any growth of the archive head that an archive commit or
-/// acknowledgement makes, so neither a derived write nor archive maintenance
-/// can pass the budget, however much a change grows the derived fields.
-///
-/// An action whose result does not fit is rejected as its own outcome with
-/// [`FISCAL_STATE_BUDGET_EXHAUSTED`]. An execution receipt or a
-/// historical-context change that does not fit changes nothing, and one
-/// `canwu.fiscal.ingress_rejected.v1` event whose summary ends with
-/// [`FISCAL_INGRESS_BUDGET_REJECTION`] is its only record. The packets around
-/// it and the boundary are unaffected. Admission does not look at the
-/// budget: near it, commands are still accepted, and each is rejected at
-/// settlement while a rejection fits and dropped after that.
-pub const MAX_FISCAL_STATE_JSON_BYTES: usize = 32 * 1_024 * 1_024;
-/// The most bytes a report plan can add to the serialized fiscal state: its
-/// key, its revision, and both of its maps listing every part of every
-/// observer binding under the longest binding ID. A valid plan never takes
-/// more, so settlement leaves this much of [`MAX_FISCAL_STATE_JSON_BYTES`]
-/// free for whatever plan the aggregate system, or a later boundary that
-/// publishes owed parts, writes.
-pub const MAX_FISCAL_REPORT_PLAN_BYTES: usize = {
-    // `,"report_plan":{"revision":` and its closing brace around a revision
-    // of at most 20 digits, and the keys `,"publish":` and `,"deferred":`.
-    let frame = 96;
-    // One observer's entry in one map: the quoted binding ID, a colon,
-    // brackets, a separating comma, and its part numbers, each below
-    // `MAX_FISCAL_REPORT_PARTS` and so at most three digits and a comma.
-    let entry = MAX_FISCAL_IDENTIFIER_BYTES + 6 + MAX_FISCAL_REPORT_PARTS * 4;
-    // The withdrawals: the key `,"withdraw":`, one entry per observer, and
-    // at most one holder per action the boundary applied, each at most
-    // `{"type":"entity","value":{"type":"government","id":` and 20 digits,
-    // two braces, and a comma.
-    let withdrawals = 16
-        + MAX_FISCAL_OBSERVERS * (MAX_FISCAL_IDENTIFIER_BYTES + 6)
-        + MAX_FISCAL_ACTIONS_PER_BOUNDARY * 96;
-    frame + 2 * MAX_FISCAL_OBSERVERS * entry + withdrawals
-};
-const _: () = assert!(MAX_FISCAL_REPORT_PARTS <= 1_000);
-const _: () = assert!(MAX_FISCAL_REPORT_PLAN_BYTES < MAX_FISCAL_STATE_JSON_BYTES / 64);
-/// Room settlement leaves in [`MAX_FISCAL_STATE_JSON_BYTES`] for the growth of
-/// the fiscal archive head: the retention handles of every pending archive
-/// commit (each lists up to 193 object IDs of 64 hexadecimal digits) and the
-/// maintenance receipts recorded with them. Archive maintenance is never
-/// refused for the budget; this reserve is why it never has to be.
-pub const FISCAL_ARCHIVE_HEAD_RESERVE_BYTES: usize = 2 * 1_024 * 1_024;
-const _: () = assert!(FISCAL_ARCHIVE_HEAD_RESERVE_BYTES < MAX_FISCAL_STATE_JSON_BYTES / 8);
+/// Serialized byte budget of a scope ledger record. An action whose result
+/// would not fit, less [`FISCAL_RECORD_RING_RESERVE_BYTES`], is rejected as
+/// its own outcome with [`FISCAL_RECORD_BUDGET_EXHAUSTED`]; a receipt that
+/// would not fit is refused with [`FISCAL_INGRESS_BUDGET_REJECTION`]. A
+/// ledger with one hot annual book takes about 2.5 KiB, so the budget is
+/// reached only by years of books left unarchived, and
+/// [`MAX_FISCAL_HOT_BOOKS_PER_LEDGER`] refuses a new book before that.
+pub const MAX_FISCAL_LEDGER_RECORD_BYTES: usize = 256 * 1_024;
+/// Serialized byte budget of an office or jurisdiction record, held as for a
+/// ledger. The caps on what an office holds (bindings, proposals, observers,
+/// hot cycles) keep it under about half of this; a jurisdiction grows with
+/// the transitions its catalog makes eligible in its region.
+pub const MAX_FISCAL_RECORD_BYTES: usize = 1_024 * 1_024;
+/// Room every record keeps for its outcome ring and the digits of its
+/// revision: an action is applied only while its record fits its budget
+/// with this much to spare, so recording any outcome always fits.
+pub const FISCAL_RECORD_RING_RESERVE_BYTES: usize = 4 * 1_024;
 pub const MAX_FISCAL_CATALOG_PERIODS: usize = 512;
-pub const MAX_FISCAL_CATALOG_REGIONS: usize = 1_024;
+pub const MAX_FISCAL_CATALOG_REGIONS: usize = 65_536;
 pub const MAX_FISCAL_CATALOG_DEFINITIONS: usize = 16_384;
-pub const MAX_FISCAL_CATALOG_COVERAGE_CELLS: usize = 65_536;
+pub const MAX_FISCAL_CATALOG_COVERAGE_CELLS: usize = 1_048_576;
 pub const MAX_FISCAL_REFERENCES_PER_DEFINITION: usize = 1_024;
 pub const MAX_FISCAL_CATALOG_JSON_BYTES: usize = 64 * 1_024 * 1_024;
-const ROOT_ID: &str = "primary";
-/// The reference role under which the state record names its catalog.
-pub(crate) const FISCAL_STATE_CATALOG_ROLE: &str = "catalog";
-/// The reference role under which the state record names the person of each
-/// observer binding.
-pub(crate) const FISCAL_STATE_OBSERVER_ROLE: &str = "observer";
+pub(crate) const ROOT_ID: &str = "primary";
 
 pub struct FiscalCatalogRecord;
 
@@ -181,23 +182,8 @@ impl DomainRecordType for FiscalCatalogRecord {
     const NAME: &'static str = "catalog";
 }
 
-pub struct FiscalStateRecord;
-
-impl DomainRecordType for FiscalStateRecord {
-    type Payload = FiscalState;
-    type Class = DomainValueKindClass;
-
-    const NAMESPACE: &'static str = "canwu.fiscal";
-    const NAME: &'static str = "state";
-}
-
 #[must_use]
 pub fn fiscal_catalog_reference() -> TypedDomainRecordRef<FiscalCatalogRecord> {
-    TypedDomainRecordRef::new(ROOT_ID)
-}
-
-#[must_use]
-pub fn fiscal_state_reference() -> TypedDomainRecordRef<FiscalStateRecord> {
     TypedDomainRecordRef::new(ROOT_ID)
 }
 
@@ -243,7 +229,7 @@ pub enum HistoricalConfidence {
     High,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FiscalPaymentForm {
     Grain,
@@ -389,51 +375,105 @@ pub struct FiscalActionIssuer {
     pub authority_basis: Option<DomainRecordVersionRef>,
 }
 
-/// One fiscal procedure action and the binding its issuer acts under.
+/// A batch of fiscal actions issued under one binding: the payload of one
+/// `apply_fiscal_action_v1` command.
+///
+/// The issuer and its role are resolved once, at admission, for the binding.
+/// Each entry is an ordinary action: its own target record, staleness check,
+/// validation, outcome, and event. Entries settle in order; an entry settled
+/// after a rebind that took the issuer's role away is rejected with
+/// [`FISCAL_ISSUER_NOT_BOUND`]. A batch may mix entries on different scopes
+/// of one institution and any action kinds the role admits.
+///
+/// Admission refuses the whole command for what concerns the whole (its
+/// size, the binding, the issuer) and for an entry it can already refuse (an
+/// unknown target, a target of another institution, an expired or unknown
+/// revision, a known action ID, an ID named twice, or bounds): the refusal's
+/// message begins with `entry N:` and the entry's reason, so a host can fix
+/// or drop that entry and send the batch again.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct FiscalActionRequest {
-    pub action_id: String,
+#[serde(deny_unknown_fields)]
+pub struct FiscalActionBatch {
     /// The binding the issuer acts under: an authority binding of the
-    /// institution the action concerns, or, for [`FiscalAction::RecordAudit`]
+    /// institution the actions concern, or, for [`FiscalAction::RecordAudit`]
     /// only, an audit binding on that institution. For the appointment actions
     /// it is an authority binding of a party the governing
     /// [`FiscalAppointmentPolicy`] lists, or, for a person the policy lists by
     /// name, the policy's own ID.
     pub authority_binding_id: String,
-    /// The procedure revision the issuer decided against. The action is stale,
-    /// and settles as a `Rejected` outcome, unless this equals the procedure
-    /// revision at the start of the boundary that settles it. Every action a
-    /// boundary settles is compared with that one revision, so actions
-    /// admitted against the same revision settle together, in admission order,
-    /// each validated against the state the previous one left. A later action
-    /// is also stale when it would overwrite an adoption, authority binding,
-    /// or audit binding that an earlier action of the same boundary already
-    /// changed.
+    /// From 1 to [`MAX_FISCAL_BATCH_ENTRIES`] entries.
+    pub entries: Vec<FiscalActionEntry>,
+}
+
+impl FiscalActionBatch {
+    /// A batch of one entry: the 0.15.0 single action.
+    #[must_use]
+    pub fn single(authority_binding_id: impl Into<String>, entry: FiscalActionEntry) -> Self {
+        Self {
+            authority_binding_id: authority_binding_id.into(),
+            entries: vec![entry],
+        }
+    }
+}
+
+/// One action of a [`FiscalActionBatch`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FiscalActionEntry {
+    /// The action's ID, unique among the recent outcomes of its target (see
+    /// [`FiscalActionTarget`]).
+    pub action_id: String,
+    /// The revision of the action's target record the issuer decided against
+    /// (see [`crate::fiscal_target_revision`]). The action is stale, and
+    /// settles as a `Rejected` outcome, unless this equals the target's
+    /// revision at the start of the boundary that settles it. Entries admitted
+    /// against the same revision of one target settle together, in admission
+    /// order, each validated against the record the previous one left. A
+    /// later entry is also stale when it would overwrite an adoption, an
+    /// authority or audit binding, or an observer binding that an earlier
+    /// action of the same boundary already changed.
     ///
-    /// An action settles in the boundary after the one that admits its
-    /// command. A receipt, a historical-context change, or another action
-    /// that settles in the admitting boundary therefore advances the revision
-    /// first and makes the action stale. Within the settling boundary neither
-    /// a receipt nor a historical-context change makes an action stale,
-    /// wherever the canonical ingress order puts it; the action is validated
-    /// against the state they left. Archive maintenance never advances the
-    /// revision.
+    /// Only an outcome or a receipt on the target advances its revision, so
+    /// an action is stale only when its own target changed since its issuer
+    /// looked; activity on other scopes, offices, jurisdictions, observers,
+    /// archive maintenance, and historical-context changes leave it current.
     ///
     /// Admission refuses, without consuming anything, a revision above the
-    /// current one ([`FISCAL_REVISION_UNKNOWN`]) and one at or below the
-    /// outcome floor of the action's target ([`FISCAL_REVISION_EXPIRED`]):
-    /// such a request can only be a re-send of an action whose outcome has
-    /// left the target's [`FiscalOutcomeRing`].
-    pub expected_procedure_revision: u64,
+    /// target's current one ([`FISCAL_REVISION_UNKNOWN`]) and one at or below
+    /// the target's outcome floor ([`FISCAL_REVISION_EXPIRED`]): such a
+    /// request can only be a re-send of an action whose outcome has left the
+    /// target's [`FiscalOutcomeRing`].
+    pub expected_revision: u64,
     pub action: FiscalAction,
 }
 
-/// The state an action decides on and keeps its outcome in: its target.
+/// One entry of a batch together with the binding it was issued under: what
+/// the settlement and appointment rules read.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct FiscalActionRequest {
+    pub(crate) action_id: String,
+    pub(crate) authority_binding_id: String,
+    pub(crate) expected_revision: u64,
+    pub(crate) action: FiscalAction,
+}
+
+impl FiscalActionRequest {
+    pub(crate) fn new(authority_binding_id: &str, entry: &FiscalActionEntry) -> Self {
+        Self {
+            action_id: entry.action_id.clone(),
+            authority_binding_id: authority_binding_id.to_owned(),
+            expected_revision: entry.expected_revision,
+            action: entry.action.clone(),
+        }
+    }
+}
+
+/// The record an action decides on and keeps its outcome in: its target.
 ///
-/// Every action has one target, and the target's [`FiscalOutcomeRing`] keeps
-/// the action's recent outcome. Action IDs are per target: two targets may
-/// use one action ID, and a host that wants its IDs unique across targets
-/// provides that itself.
+/// Every action has one target record, whose revision it names and whose
+/// [`FiscalOutcomeRing`] keeps its recent outcome. Action IDs are per
+/// target: two targets may use one action ID, and a host that wants its IDs
+/// unique across targets provides that itself.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "type", content = "id", rename_all = "snake_case")]
 pub enum FiscalActionTarget {
@@ -441,9 +481,11 @@ pub enum FiscalActionTarget {
     /// scope's adoptions and books.
     Ledger(String),
     /// The office of one institution: the target of the actions on its
-    /// authority and audit bindings, its auditor proposals, and its
-    /// transitions.
+    /// authority and audit bindings and its auditor proposals.
     Office(EntityRef),
+    /// The jurisdiction of one catalog region: the target of the transitions
+    /// applied in it.
+    Jurisdiction(String),
     /// One observer binding: the target of re-pointing and removing it.
     Observer(String),
 }
@@ -455,16 +497,18 @@ impl std::fmt::Display for FiscalActionTarget {
             Self::Office(institution) => {
                 write!(formatter, "office:{}", fiscal_office_key(institution))
             }
+            Self::Jurisdiction(region) => write!(formatter, "jurisdiction:{region}"),
             Self::Observer(observer) => write!(formatter, "observer:{observer}"),
         }
     }
 }
 
-/// The key of an institution's [`FiscalOffice`] in [`FiscalState::offices`]:
-/// `office.` and the first 32 hexadecimal digits of a domain-separated BLAKE3
-/// digest of the institution's reference. The office holds its institution,
-/// and validation requires the key to match it, so two institutions whose
-/// digests agree in those digits are an invalid state, never a merged office.
+/// The key of an institution's [`FiscalOffice`] in [`FiscalState::offices`]
+/// and the identity of its office record: `office.` and the first 32
+/// hexadecimal digits of a domain-separated BLAKE3 digest of the
+/// institution's reference. The office holds its institution, and validation
+/// requires the key to match it, so two institutions whose digests agree in
+/// those digits are an invalid state, never a merged office.
 #[must_use]
 pub fn fiscal_office_key(institution: &EntityRef) -> String {
     let digest = canwu_api::canonical_hash("canwu.fiscal.office-key.v1", institution)
@@ -1217,21 +1261,42 @@ pub const FISCAL_PROPOSAL_NOT_PENDING: &str =
 
 /// Stable rejection message used for an action that is current and
 /// authorized in a boundary that already applied
-/// [`MAX_FISCAL_ACTIONS_PER_BOUNDARY`] actions.
+/// [`MAX_FISCAL_ACTIONS_PER_BOUNDARY`] actions, or already wrote
+/// [`MAX_FISCAL_LEDGER_WRITES_PER_BOUNDARY`] ledgers and would write another.
 pub const FISCAL_BOUNDARY_ACTION_LIMIT: &str =
     "fiscal action exceeds the per-boundary action limit";
 
+/// Stable rejection message used for an action that is current and
+/// authorized in a boundary that already applied
+/// [`MAX_FISCAL_ACTIONS_PER_RECORD_PER_BOUNDARY`] actions to its target.
+pub const FISCAL_RECORD_ACTION_LIMIT: &str =
+    "fiscal action exceeds the per-record action limit of its boundary";
+
 /// Stable rejection message used for an action whose result would not fit
-/// [`MAX_FISCAL_STATE_JSON_BYTES`].
-pub const FISCAL_STATE_BUDGET_EXHAUSTED: &str =
-    "fiscal action would exceed the fiscal state byte budget";
+/// the byte budget of a record it writes (see
+/// [`MAX_FISCAL_LEDGER_RECORD_BYTES`] and [`MAX_FISCAL_RECORD_BYTES`]), less
+/// [`FISCAL_RECORD_RING_RESERVE_BYTES`].
+pub const FISCAL_RECORD_BUDGET_EXHAUSTED: &str =
+    "fiscal action would exceed the byte budget of a fiscal record";
+
+/// Stable rejection message used for an assessment that would give one
+/// institution's books of one cycle and mechanism a partition key (unit and
+/// payment form) past [`MAX_FISCAL_PARTITION_KEYS`].
+pub const FISCAL_PARTITION_KEYS_EXHAUSTED: &str =
+    "fiscal assessment would use more partition keys than an institution's cycle may";
 
 /// Reason that ends the summary of a `canwu.fiscal.ingress_rejected.v1`
 /// event for an execution receipt or a historical-context change whose
-/// result would not fit [`MAX_FISCAL_STATE_JSON_BYTES`]. The packet changes
-/// nothing: a receipt consumes neither its evidence versions nor its external
-/// operations, and the procedure revision does not advance.
+/// result would not fit the byte budget of a record it writes. The packet
+/// changes nothing: a receipt consumes neither its evidence versions nor its
+/// external operations, and no revision advances.
 pub const FISCAL_INGRESS_BUDGET_REJECTION: &str = "state_budget_exhausted";
+
+/// Reason that ends the summary of a `canwu.fiscal.ingress_rejected.v1`
+/// event for an execution receipt that would write a ledger past
+/// [`MAX_FISCAL_LEDGER_WRITES_PER_BOUNDARY`]. It changes nothing; a host sends
+/// it again.
+pub const FISCAL_RECEIPT_BOUNDARY_LIMIT: &str = "boundary_limit";
 
 /// Reason that ends the summary of a `canwu.fiscal.ingress_rejected.v1`
 /// event for a fiscal packet whose payload does not decode: an execution
@@ -1247,7 +1312,7 @@ pub const FISCAL_INGRESS_MALFORMED_REJECTION: &str = "malformed_payload";
 /// [`FISCAL_CONTEXT_OUTSIDE_PACK`]) but whose result still does not validate,
 /// after the message that says why. The packet changes nothing: a receipt
 /// consumes neither its evidence versions nor its external operations, and
-/// the procedure revision does not advance.
+/// no revision advances.
 pub const FISCAL_INGRESS_INVALID_REJECTION: &str = "invalid_packet";
 
 /// Reason that ends the summary of a `canwu.fiscal.ingress_rejected.v1`
@@ -1293,16 +1358,15 @@ pub const FISCAL_RECEIPT_ID_CONFLICT: &str = "receipt_id_conflict";
 /// the catalog's historical scope.
 pub const FISCAL_CONTEXT_OUTSIDE_PACK: &str = "context_outside_pack";
 
-/// Stable rejection message used at admission for a request whose
-/// `expected_procedure_revision` is above the current procedure revision: it
-/// was never a revision of the state.
-pub const FISCAL_REVISION_UNKNOWN: &str =
-    "fiscal action names a procedure revision the state never had";
-/// Stable rejection message used at admission for a request whose
-/// `expected_procedure_revision` is at or below its target's outcome floor:
-/// a re-send of an action whose outcome left the target's ring.
+/// Stable rejection message used at admission for an entry whose
+/// `expected_revision` is above its target record's current revision: it
+/// was never a revision of the target.
+pub const FISCAL_REVISION_UNKNOWN: &str = "fiscal action names a revision its target never had";
+/// Stable rejection message used at admission for an entry whose
+/// `expected_revision` is at or below its target's outcome floor: a re-send
+/// of an action whose outcome left the target's ring.
 pub const FISCAL_REVISION_EXPIRED: &str =
-    "fiscal action names a procedure revision at or below its target's outcome floor";
+    "fiscal action names a revision at or below its target's outcome floor";
 /// Stable rejection message used for an assessment, remission, or execution
 /// authorization on a closed book.
 pub const FISCAL_CYCLE_CLOSED: &str = "fiscal accounting cycle book is closed";
@@ -1552,28 +1616,26 @@ pub struct FiscalScopeBinding {
 ///
 /// Observer bindings come with the state. With an `actor` the holder is that
 /// person; without one it is a government, which holds the report as an
-/// institution. The holder must exist: the state record references the
-/// person or government, and the engine refuses a state that references an
+/// institution. The holder must exist: the observer record references the
+/// person or government, and the engine refuses a record that references an
 /// entity its registry does not hold. While a person holder is dead, nothing
-/// is published to the binding and what changes in its report is kept in
-/// [`FiscalReportPlan::deferred`].
+/// is published to the binding and what changes in its report waits in the
+/// report queue.
 ///
-/// The binding's report lines are numbered from its `line_slot`, which the
-/// scenario allocates once per binding: two bindings never share a slot, and
-/// a removed binding keeps its own, so re-pointing or removing one binding
-/// never moves another's lines. A binding with `controlled_by` can be
-/// re-pointed ([`FiscalAction::RebindObserver`]) and removed
-/// ([`FiscalAction::RemoveObserver`]) by that institution; what it may see is
-/// the scenario's and does not change.
+/// The binding's report lines are named on its own observer record, so
+/// re-pointing or removing one binding never moves another's lines. A binding
+/// with `controlled_by` can be re-pointed ([`FiscalAction::RebindObserver`])
+/// and removed ([`FiscalAction::RemoveObserver`]) by that institution; what it
+/// may see is the scenario's and does not change.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalObserverBinding {
     pub id: String,
     pub actor: Option<PersonId>,
     pub knowledge_holder: KnowledgeHolderRef,
+    /// At most [`MAX_FISCAL_VISIBLE_INSTITUTIONS`], each with an office, and
+    /// at most [`MAX_FISCAL_OBSERVER_ROWS`] scopes among them.
     pub visible_institutions: BTreeSet<EntityRef>,
     pub confidence_per_mille: u16,
-    /// Below [`MAX_FISCAL_OBSERVERS`], and unique among the state's bindings.
-    pub line_slot: u16,
     /// The institution whose authority bindings may re-point or remove this
     /// binding; `None` when only the scenario changes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1585,9 +1647,6 @@ pub struct FiscalObserverBinding {
     /// binding is never published to again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed: Option<FiscalRebinding>,
-    /// The recent outcomes of the actions on this binding.
-    #[serde(default, skip_serializing_if = "FiscalOutcomeRing::is_empty")]
-    pub outcomes: FiscalOutcomeRing,
 }
 
 impl FiscalObserverBinding {
@@ -1712,26 +1771,26 @@ pub struct FiscalAuditFinding {
 pub struct FiscalRecentOutcome {
     pub action_id: String,
     pub disposition: FiscalActionDisposition,
-    /// The procedure revision when the outcome was recorded, before the
+    /// The target's revision when the outcome was recorded, before the
     /// outcome advanced it.
     pub settled_revision: u64,
 }
 
 /// The newest outcomes of one action target, and its outcome floor.
 ///
-/// Every outcome, applied or rejected, is recorded here and advances the
-/// procedure revision. The ring keeps the newest
-/// [`FISCAL_RECENT_OUTCOMES`]; an outcome it evicts raises `floor` to that
-/// outcome's settled revision. Admission refuses a request whose action ID
-/// is in the ring (`IdempotencyConflict`), and one whose expected revision
-/// is at or below the floor ([`FISCAL_REVISION_EXPIRED`]): every outcome was
-/// admitted with an expected revision no greater than its settled revision,
-/// so a re-send of an evicted outcome's request is refused, while a fresh
-/// request names the current revision, which is above every recorded
-/// outcome's. Settlement skips a copy of an action whose ID has an outcome
-/// in the ring or among the outcomes the boundary has settled for the same
-/// target. Together they apply an action at most once, without keeping
-/// every outcome for the life of the state.
+/// Every outcome, applied or rejected, is recorded here and advances its
+/// target's revision. The ring keeps the newest [`FISCAL_RECENT_OUTCOMES`];
+/// an outcome it evicts raises `floor` to that outcome's settled revision.
+/// Admission refuses a request whose action ID is in the ring
+/// (`IdempotencyConflict`), and one whose expected revision is at or below
+/// the floor ([`FISCAL_REVISION_EXPIRED`]): every outcome was admitted with
+/// an expected revision no greater than its settled revision, so a re-send
+/// of an evicted outcome's request is refused, while a fresh request names
+/// the current revision, which is above every recorded outcome's.
+/// Settlement skips a copy of an action whose ID has an outcome in the ring
+/// or among the outcomes the boundary has settled for the same target.
+/// Together they apply an action at most once, without keeping every
+/// outcome for the life of the run.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalOutcomeRing {
     /// Oldest first.
@@ -1768,14 +1827,15 @@ impl FiscalOutcomeRing {
         }
     }
 
-    fn validate(&self, procedure_revision: u64) -> Result<(), CanwuError> {
+    /// Checks the ring of a target at `revision`, which is at least 1.
+    pub(crate) fn validate(&self, revision: u64) -> Result<(), CanwuError> {
         let mut ids = BTreeSet::new();
         if self.recent.len() > FISCAL_RECENT_OUTCOMES
-            || self.floor >= procedure_revision
+            || self.floor >= revision
             || self.recent.iter().any(|outcome| {
                 validate_identifier(&outcome.action_id, "fiscal action").is_err()
                     || !ids.insert(&outcome.action_id)
-                    || outcome.settled_revision >= procedure_revision
+                    || outcome.settled_revision >= revision
             })
             || self
                 .recent
@@ -1787,7 +1847,7 @@ impl FiscalOutcomeRing {
                 .is_some_and(|oldest| oldest.settled_revision <= self.floor)
         {
             return Err(invalid(
-                "a fiscal outcome ring is unbounded, unordered, repeats an action, or lies past the procedure revision",
+                "a fiscal outcome ring is unbounded, unordered, repeats an action, or lies past its record's revision",
             ));
         }
         Ok(())
@@ -1817,13 +1877,19 @@ pub enum FiscalBookStatus {
 /// Object IDs are unique among the hot objects of their kind in one scope,
 /// so a reference to one names its scope; an ID may be used again in a later
 /// book once the earlier one is archived. The assessments of a book are of
-/// distinct (unit, payment form) partitions. The book's totals per partition
-/// are the state's aggregates of its scope and cycle (see
-/// [`FiscalState::aggregates`]), and are archived with it.
+/// distinct (unit, payment form) partitions, at most
+/// [`MAX_FISCAL_PARTITION_KEYS`]. The book's totals per partition
+/// ([`Self::totals`]) are what a report row shows of it, and are archived
+/// with it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalCycleBook {
     pub accounting_cycle_id: String,
     pub status: FiscalBookStatus,
+    /// Advances on every change of the book. An archive commit binds the
+    /// revision of each book it takes, so one prepared before a change of a
+    /// selected book settles stale.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub revision: u64,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub assessments: BTreeMap<String, FiscalAssessment>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1843,6 +1909,7 @@ impl FiscalCycleBook {
         Self {
             accounting_cycle_id: accounting_cycle_id.into(),
             status: FiscalBookStatus::Open,
+            revision: 0,
             assessments: BTreeMap::new(),
             remissions: BTreeMap::new(),
             execution_requests: BTreeMap::new(),
@@ -1854,6 +1921,27 @@ impl FiscalCycleBook {
     #[must_use]
     pub fn is_open(&self) -> bool {
         self.status == FiscalBookStatus::Open
+    }
+
+    /// Advances the book's revision after a change.
+    pub(crate) fn touch(&mut self) -> Result<(), CanwuError> {
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| invalid("fiscal book revision overflowed"))?;
+        Ok(())
+    }
+
+    /// The partition keys of the book's assessments, in partition order.
+    #[must_use]
+    pub fn partition_keys(&self) -> BTreeSet<FiscalPartitionKey> {
+        self.assessments
+            .values()
+            .map(|assessment| FiscalPartitionKey {
+                unit: assessment.unit.clone(),
+                payment_form: assessment.payment_form,
+            })
+            .collect()
     }
 
     /// The scope-level totals of the book, one per (unit, payment form)
@@ -1932,6 +2020,14 @@ impl FiscalCycleBook {
     }
 }
 
+/// One accounting partition of a scope and cycle: what one assessment
+/// assesses, and one fact of a report row.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct FiscalPartitionKey {
+    pub unit: String,
+    pub payment_form: FiscalPaymentForm,
+}
+
 /// One cycle's totals of one partition: of one scope's book, or summed over
 /// an institution's books of the cycle per (mechanism, unit, payment form).
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2005,12 +2101,24 @@ fn sum(left: u64, right: u64) -> Result<u64, CanwuError> {
 }
 
 /// One scope binding with everything the state holds for it: its adoptions,
-/// the books of its hot accounting cycles, its watermark, and the recent
-/// outcomes of the actions on it.
+/// the books of its hot accounting cycles, its watermark, its revision, and
+/// the recent outcomes of the actions on it. The payload of its
+/// `canwu.fiscal:ledger` record.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalScopeLedger {
     pub scope: FiscalScopeBinding,
-    /// Adoptions of rules in this scope, keyed by adoption ID.
+    /// The key of the office of the scope's institution; derived.
+    #[serde(default)]
+    pub office: String,
+    /// The scope's place among its office's scopes, in scope ID order, which
+    /// is its row among an observer's rows of that office; derived.
+    #[serde(default)]
+    pub rank: u32,
+    /// Advances by one with every outcome and every receipt on the scope.
+    /// An action names the revision it decided against.
+    pub revision: u64,
+    /// Adoptions of rules in this scope, keyed by adoption ID; at most
+    /// [`MAX_FISCAL_ADOPTIONS_PER_LEDGER`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub adoptions: BTreeMap<String, FiscalAdoptionState>,
     /// Hot books, open or closed, keyed by accounting cycle; at most
@@ -2030,11 +2138,21 @@ pub struct FiscalScopeLedger {
 }
 
 impl FiscalScopeLedger {
+    /// Checks the ledger on its own: its scope, revision, ring, adoptions,
+    /// books, and every per-assessment invariant of its books. This is what
+    /// every write of its record checks.
+    pub fn validate(&self, catalog: &CompiledFiscalCatalog) -> Result<(), CanwuError> {
+        validate_ledger(self, catalog)
+    }
+
     /// A ledger with nothing but its scope binding.
     #[must_use]
     pub fn new(scope: FiscalScopeBinding) -> Self {
         Self {
+            office: fiscal_office_key(&scope.institution),
             scope,
+            rank: 0,
+            revision: 1,
             adoptions: BTreeMap::new(),
             books: BTreeMap::new(),
             watermark: None,
@@ -2072,15 +2190,40 @@ impl FiscalScopeLedger {
     }
 }
 
-/// The cycle bookkeeping of one institution, and the recent outcomes of the
-/// actions on its bindings, proposals, and transitions.
+/// One institution: its authority bindings, the audit bindings on it, the
+/// policy that governs its auditors and their proposals, the cycle
+/// bookkeeping of its scopes' books, its revision, and the recent outcomes
+/// of the actions on it. The payload of its `canwu.fiscal:office` record,
+/// keyed by [`fiscal_office_key`].
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalOffice {
     pub institution: EntityRef,
+    /// Advances by one with every outcome on the office.
+    pub revision: u64,
+    /// The recent outcomes of the actions targeting the office.
+    #[serde(default, skip_serializing_if = "FiscalOutcomeRing::is_empty")]
+    pub outcomes: FiscalOutcomeRing,
+    /// The institution's authority bindings, keyed by binding ID; at most
+    /// [`MAX_FISCAL_AUTHORITY_BINDINGS_PER_OFFICE`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub authority_bindings: BTreeMap<String, FiscalAuthorityBinding>,
+    /// Auditors from outside the institution, keyed by audit binding ID; at
+    /// most [`MAX_FISCAL_AUDIT_BINDINGS_PER_OFFICE`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub audit_bindings: BTreeMap<String, FiscalAuditBinding>,
+    /// Who appoints and removes the institution's auditors; declared with
+    /// the state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appointment_policy: Option<FiscalAppointmentPolicy>,
+    /// The nominations and petitions concerning the institution's auditors,
+    /// pending and the latest resolved, keyed by proposal ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub audit_proposals: BTreeMap<String, FiscalAuditProposal>,
     /// Each accounting cycle of which some scope of the institution holds a
-    /// hot book: how many do, how many were archived, and the totals of those
-    /// archived. A cycle leaves when its last hot book is archived, by the
-    /// archive commit that also archives the institution's totals of it.
+    /// hot book: how many do, the partition keys their books use, how many
+    /// were archived, and the totals of those archived. A cycle leaves when
+    /// its last hot book is archived, by the archive commit that also
+    /// archives the institution's totals of it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub cycles: BTreeMap<String, FiscalOfficeCycle>,
     /// The greatest accounting cycle, in byte order, whose institution totals
@@ -2088,9 +2231,15 @@ pub struct FiscalOffice {
     /// below it, so those totals are archived once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watermark: Option<String>,
-    /// The recent outcomes of the actions targeting the office.
-    #[serde(default, skip_serializing_if = "FiscalOutcomeRing::is_empty")]
-    pub outcomes: FiscalOutcomeRing,
+    /// How many scope bindings the institution has; derived.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub scope_count: u32,
+    /// The observer bindings that see the institution, each with the row of
+    /// the institution's first scope in its report; derived. Settlement finds
+    /// the report parts a change of a scope's book touches from this alone:
+    /// the scope's row is that first row plus the scope's rank.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub observers: BTreeMap<String, u32>,
 }
 
 impl FiscalOffice {
@@ -2098,14 +2247,17 @@ impl FiscalOffice {
     pub fn new(institution: EntityRef) -> Self {
         Self {
             institution,
+            revision: 1,
+            outcomes: FiscalOutcomeRing::default(),
+            authority_bindings: BTreeMap::new(),
+            audit_bindings: BTreeMap::new(),
+            appointment_policy: None,
+            audit_proposals: BTreeMap::new(),
             cycles: BTreeMap::new(),
             watermark: None,
-            outcomes: FiscalOutcomeRing::default(),
+            scope_count: 0,
+            observers: BTreeMap::new(),
         }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.cycles.is_empty() && self.watermark.is_none() && self.outcomes.is_empty()
     }
 }
 
@@ -2115,6 +2267,10 @@ pub struct FiscalOfficeCycle {
     /// Scopes of the institution that hold a hot book of the cycle; above
     /// zero.
     pub hot_books: u32,
+    /// The partition keys the cycle's books use, per mechanism, at most
+    /// [`MAX_FISCAL_PARTITION_KEYS`] each. Keys stay until the cycle leaves.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub partition_keys: BTreeMap<FiscalMechanism, BTreeSet<FiscalPartitionKey>>,
     /// Books of the cycle already archived.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub archived_books: u32,
@@ -2129,6 +2285,312 @@ fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
+/// One catalog region in use: its scopes' mechanisms, its adoption counts,
+/// and the transition candidates they derive, its revision, and the recent
+/// outcomes of the transitions applied in it. The payload of its
+/// `canwu.fiscal:jurisdiction` record.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalJurisdiction {
+    pub region_id: String,
+    /// Advances by one with every outcome on the jurisdiction.
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "FiscalOutcomeRing::is_empty")]
+    pub outcomes: FiscalOutcomeRing,
+    /// How many scope bindings name the region; derived.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub scope_count: u32,
+    /// The mechanisms of those scopes, and how many scopes have each;
+    /// derived.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mechanisms: BTreeMap<FiscalMechanism, u32>,
+    /// For each rule adopted in the region, how many of its adoptions are not
+    /// repealed and how many are operational; derived.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub adoption_counts: BTreeMap<String, FiscalAdoptionCount>,
+    /// The transitions the catalog, the historical context, and the adoption
+    /// counts make eligible in the region; derived.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub transition_candidates: BTreeMap<String, FiscalTransitionCandidate>,
+}
+
+impl FiscalJurisdiction {
+    #[must_use]
+    pub fn new(region_id: impl Into<String>) -> Self {
+        Self {
+            region_id: region_id.into(),
+            revision: 1,
+            outcomes: FiscalOutcomeRing::default(),
+            scope_count: 0,
+            mechanisms: BTreeMap::new(),
+            adoption_counts: BTreeMap::new(),
+            transition_candidates: BTreeMap::new(),
+        }
+    }
+}
+
+/// How many adoptions of one rule a region has that are not repealed, and
+/// how many are operational.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalAdoptionCount {
+    pub live: u32,
+    pub operational: u32,
+}
+
+/// One observer binding with its revision, the recent outcomes of the
+/// actions on it, the layout of its report, and what its report has
+/// published. The payload of its `canwu.fiscal:observer` record, whose
+/// identity is the binding ID; the binding's report lines are named on that
+/// record.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalObserver {
+    pub binding: FiscalObserverBinding,
+    /// Advances by one with every outcome on the binding.
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "FiscalOutcomeRing::is_empty")]
+    pub outcomes: FiscalOutcomeRing,
+    /// The report's rows: for each visible institution, in canonical order,
+    /// its office and the row of its first scope; derived.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<FiscalObserverRows>,
+    /// What the report has published.
+    #[serde(default, skip_serializing_if = "FiscalObserverReport::is_unused")]
+    pub report: FiscalObserverReport,
+}
+
+impl FiscalObserver {
+    /// An observer with nothing published yet.
+    #[must_use]
+    pub fn new(binding: FiscalObserverBinding) -> Self {
+        Self {
+            binding,
+            revision: 1,
+            outcomes: FiscalOutcomeRing::default(),
+            rows: Vec::new(),
+            report: FiscalObserverReport::default(),
+        }
+    }
+
+    /// The row of `rank`-th scope of the office `office`, when the observer
+    /// sees that office.
+    #[must_use]
+    pub fn row_of(&self, office: &str, rank: u32) -> Option<u32> {
+        self.rows
+            .iter()
+            .find(|rows| rows.office == office && rank < rows.scopes)
+            .and_then(|rows| rows.first_row.checked_add(rank))
+    }
+
+    /// How many rows the report has.
+    #[must_use]
+    pub fn row_count(&self) -> u32 {
+        self.rows
+            .last()
+            .map_or(0, |rows| rows.first_row.saturating_add(rows.scopes))
+    }
+}
+
+/// The rows of one visible institution in an observer's report.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalObserverRows {
+    pub institution: EntityRef,
+    /// The institution's office key.
+    pub office: String,
+    /// The row of the institution's first scope.
+    pub first_row: u32,
+    /// How many scopes, and so rows, the institution has.
+    pub scopes: u32,
+}
+
+/// What one observer's report has published: the time it last changed, the
+/// slot of each hot cycle it shows with the digest and fact count of each of
+/// the cycle's parts, the cycles it had no slot for, and the holders owed a
+/// withdrawn summary.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalObserverReport {
+    /// When the report last changed; `None` while nothing was published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<SimTime>,
+    /// Each cycle the report shows, by accounting cycle.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cycles: BTreeMap<String, FiscalReportCycleSlot>,
+    /// Hot cycles the report has no slot for (see
+    /// [`MAX_FISCAL_REPORT_CYCLE_SLOTS`]).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub omitted_cycles: BTreeSet<String>,
+    /// Holders the binding was re-pointed away from, or removed from, still
+    /// owed a withdrawn summary.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub withdraw: BTreeSet<KnowledgeHolderRef>,
+}
+
+impl FiscalObserverReport {
+    /// Whether nothing was published yet and nothing is owed.
+    #[must_use]
+    pub fn is_unused(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The facts the report holds once every part is current.
+    #[must_use]
+    pub fn fact_count(&self) -> u32 {
+        self.cycles
+            .values()
+            .map(FiscalReportCycleSlot::fact_count)
+            .fold(0, u32::saturating_add)
+    }
+}
+
+/// Hexadecimal digits one part takes in [`FiscalReportCycleSlot::parts`]:
+/// sixteen of digest and two of fact count.
+pub(crate) const PART_ENTRY_DIGITS: usize = 18;
+
+/// The entry of a part with no facts.
+pub(crate) const EMPTY_PART_ENTRY: &str = "000000000000000000";
+
+/// The slot one cycle of a report takes, and what was published of each of
+/// its parts: for each part in order, sixteen hexadecimal digits of the
+/// digest of its rows and two of its fact count, all zeros for a part with
+/// no facts, with the empty parts at the end left out. The digest is the
+/// first 64 bits of a BLAKE3 digest; a change of a part is missed only when
+/// the digests of its old and new rows agree.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalReportCycleSlot {
+    pub slot: u16,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub parts: String,
+}
+
+impl FiscalReportCycleSlot {
+    /// An empty slot.
+    #[must_use]
+    pub fn new(slot: u16) -> Self {
+        Self {
+            slot,
+            parts: String::new(),
+        }
+    }
+
+    /// The published entry of part `part`: its digest and fact count.
+    #[must_use]
+    pub fn entry(&self, part: u32) -> &str {
+        usize::try_from(part)
+            .ok()
+            .and_then(|part| part.checked_mul(PART_ENTRY_DIGITS))
+            .and_then(|start| self.parts.get(start..start + PART_ENTRY_DIGITS))
+            .unwrap_or(EMPTY_PART_ENTRY)
+    }
+
+    /// How many parts the stored entries span, the empty ones between them
+    /// included.
+    #[must_use]
+    pub fn part_count(&self) -> u32 {
+        u32::try_from(self.parts.len() / PART_ENTRY_DIGITS).unwrap_or(u32::MAX)
+    }
+
+    /// The parts that have facts.
+    pub fn parts_with_facts(&self) -> impl Iterator<Item = u32> + '_ {
+        self.parts
+            .as_bytes()
+            .chunks(PART_ENTRY_DIGITS)
+            .enumerate()
+            .filter(|(_, entry)| *entry != EMPTY_PART_ENTRY.as_bytes())
+            .filter_map(|(part, _)| u32::try_from(part).ok())
+    }
+
+    /// The facts the cycle's parts hold.
+    #[must_use]
+    pub fn fact_count(&self) -> u32 {
+        self.parts
+            .as_bytes()
+            .chunks(PART_ENTRY_DIGITS)
+            .filter_map(|entry| {
+                entry
+                    .get(16..)
+                    .and_then(|count| std::str::from_utf8(count).ok())
+            })
+            .filter_map(|count| u32::from_str_radix(count, 16).ok())
+            .fold(0, u32::saturating_add)
+    }
+
+    /// Stores the entry of part `part`.
+    pub(crate) fn set_entry(&mut self, part: u32, entry: &str) {
+        let start = usize::try_from(part)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(PART_ENTRY_DIGITS);
+        if start >= self.parts.len() {
+            if entry == EMPTY_PART_ENTRY {
+                return;
+            }
+            while self.parts.len() < start {
+                self.parts.push_str(EMPTY_PART_ENTRY);
+            }
+            self.parts.push_str(entry);
+        } else {
+            self.parts
+                .replace_range(start..start + PART_ENTRY_DIGITS, entry);
+        }
+        while self.parts.ends_with(EMPTY_PART_ENTRY) {
+            self.parts.truncate(self.parts.len() - PART_ENTRY_DIGITS);
+        }
+    }
+
+    /// Whether the cycle has no part with facts.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.parts.is_empty()
+    }
+}
+
+/// The report work one observer is owed: which parts of which cycles
+/// changed, whether its whole report or its summary is owed, and since when.
+/// A boundary that changes what an observer sees queues it; the report
+/// system publishes it in the first boundary at or after `due_at` that runs
+/// the fiscal systems, within the boundary's publication limits.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalReportQueueEntry {
+    pub due_at: SimTime,
+    /// The parts whose rows changed, by accounting cycle; an empty set
+    /// stands for every part of the cycle. At most
+    /// [`FISCAL_REPORT_QUEUE_CYCLES`] cycles of at most
+    /// [`FISCAL_REPORT_QUEUE_PARTS`] parts each: past them a cycle is owed
+    /// whole, and past the cycles the report is.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cycles: BTreeMap<String, BTreeSet<u32>>,
+    /// Whether every part of every cycle the report shows is owed, and
+    /// published whether it changed or not: the holder may hold none of
+    /// them, because the report was never published to it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub whole: bool,
+    /// Whether the parts `cycles` names are published whether they changed
+    /// or not: they are what is left of a whole report that did not fit one
+    /// boundary.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub republish: bool,
+    /// Whether the holder could not receive knowledge when the entry was
+    /// last due: the observer is parked, and the report system checks its
+    /// holder again in every boundary that runs it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parked: bool,
+}
+
+/// The state-wide part of the fiscal state: the historical context, the
+/// approved execution-evidence kinds, and the index of the report queue. The
+/// payload of the `canwu.fiscal:root` record. The archive head is a record
+/// of its own (`canwu.fiscal:archive`), so that the root stays small.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalRoot {
+    pub schema_version: u32,
+    pub catalog_version: DomainRecordVersionRef,
+    pub historical_context: FiscalHistoricalContext,
+    /// Advances with every historical-context change.
+    pub context_revision: u64,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub execution_evidence_kinds: BTreeSet<DomainRecordKind>,
+    /// The report-queue pages that hold an entry; derived.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub queue_pages: BTreeSet<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalTransitionCandidate {
     pub id: String,
@@ -2139,37 +2601,18 @@ pub struct FiscalTransitionCandidate {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct FiscalStrategicAggregate {
-    pub institution: EntityRef,
-    pub mechanism: FiscalMechanism,
-    pub scope_binding_id: String,
-    pub accounting_cycle_id: String,
-    pub unit: String,
-    pub payment_form: FiscalPaymentForm,
-    pub assessed: u64,
-    pub remission_granted: u64,
-    pub collected: u64,
-    pub remitted: u64,
-    pub disbursed: u64,
-    pub reserved: u64,
-    pub returned: u64,
-    pub outstanding: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalAmountEstimate {
     pub minimum: u64,
     pub maximum: u64,
 }
 
+/// One fact of a report: one accounting partition of one scope's book, as an
+/// observer is told it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalReportFact {
-    /// The fact's label in a [`FiscalProjection`]: `fact.NNNN`, by its place
-    /// among the observer's facts in aggregate-ID order. Aggregates keep their
-    /// IDs, so a fact keeps its label while later aggregates are added. A
-    /// fact inside a published [`FiscalReportPart`] has no label yet; the
-    /// field is empty there and omitted from the record.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    /// The fact's label in a [`FiscalProjection`]: the accounting cycle, the
+    /// row of the scope among the observer's rows, and the fact's place in
+    /// the row, joined by `:`. A fact keeps its label while its book is hot.
     pub id: String,
     pub institution: EntityRef,
     pub mechanism: FiscalMechanism,
@@ -2182,10 +2625,31 @@ pub struct FiscalReportFact {
     pub outstanding: FiscalAmountEstimate,
 }
 
-/// Everything one observer is told: what [`crate::compute_projections`]
-/// derives from a fiscal state, and what
+impl FiscalReportFact {
+    /// The label of the `index`-th fact of row `row` in `cycle`.
+    #[must_use]
+    pub fn label(cycle: &str, row: u32, index: usize) -> String {
+        format!("{cycle}:{row}:{index}")
+    }
+
+    /// The cycle and part of a fact's label.
+    #[must_use]
+    pub fn part_of(label: &str) -> Option<(&str, u32)> {
+        let mut pieces = label.rsplitn(3, ':');
+        let _index = pieces.next()?;
+        let row: u32 = pieces.next()?.parse().ok()?;
+        let cycle = pieces.next()?;
+        Some((
+            cycle,
+            row / u32::try_from(FISCAL_REPORT_ROWS_PER_PART).unwrap_or(u32::MAX),
+        ))
+    }
+}
+
+/// Everything one observer is told: what [`crate::compute_projection`]
+/// derives from the fiscal state, and what
 /// [`crate::assemble_fiscal_reports`] puts back together from the report
-/// records the observer holds.
+/// records the observer's holder holds.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalProjection {
     /// The observer binding's actor; `None` for a report an institution
@@ -2196,12 +2660,12 @@ pub struct FiscalProjection {
     pub facts: BTreeMap<String, FiscalReportFact>,
 }
 
-/// The payload of one fiscal report knowledge record (schema version 3).
+/// The payload of one fiscal report knowledge record (schema version 4).
 ///
-/// An observer's report is one summary and up to [`MAX_FISCAL_REPORT_PARTS`]
-/// parts, each its own line of records: a record supersedes the previous
-/// record of the same line and no other. A binding's lines are numbered from
-/// its [`FiscalObserverBinding::line_slot`], so no two bindings share one. Read a report with
+/// An observer's report is one summary and, for each hot cycle it shows,
+/// parts of [`FISCAL_REPORT_ROWS_PER_PART`] rows each, every one its own line
+/// of records on the observer's record: a record supersedes the previous
+/// record of the same line and no other. Read a report with
 /// [`crate::fiscal_reports`] or [`crate::assemble_fiscal_reports`] rather
 /// than from single records.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2221,17 +2685,27 @@ pub struct FiscalReportSummary {
     pub actor: Option<PersonId>,
     pub as_of: SimTime,
     pub confidence_per_mille: u16,
+    /// Each hot cycle the report shows, and the slot its parts are in. A part
+    /// of another slot, or of a cycle not listed, is not part of the report.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cycles: BTreeMap<String, u16>,
     /// Facts the report holds once every part is current.
     pub fact_count: u32,
-    /// Parts the report holds once every part is current.
-    pub part_count: u32,
-    /// The numbers of the parts whose facts changed but which no boundary has
-    /// published yet, because a boundary publishes at most
-    /// [`MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY`] report records. The records
-    /// the observer holds for them are older, or missing. Empty for a
-    /// complete report.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub pending_parts: BTreeSet<u32>,
+    /// The parts, by cycle, whose rows changed but which no boundary has
+    /// published yet. The records the holder holds for them are older, or
+    /// missing. Empty for a complete report. Each cycle's parts are written
+    /// as a bitmap in hexadecimal, bit `p % 8` of byte `p / 8` for part `p`,
+    /// so a summary stays within one knowledge record.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        with = "part_bitmaps"
+    )]
+    pub pending: BTreeMap<String, BTreeSet<u32>>,
+    /// Hot cycles the report has no slot for and does not show (see
+    /// [`MAX_FISCAL_REPORT_CYCLE_SLOTS`]).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub omitted_cycles: u32,
     /// Whether the binding was re-pointed away from this holder, or removed:
     /// the holder keeps what it was told, and [`crate::fiscal_reports`] and
     /// [`crate::assemble_fiscal_reports`] omit the report.
@@ -2239,226 +2713,228 @@ pub struct FiscalReportSummary {
     pub withdrawn: bool,
 }
 
-/// Up to [`FISCAL_REPORT_FACTS_PER_PART`] facts of one observer's report.
-///
-/// An observer's facts are divided in aggregate-ID order. An aggregate keeps
-/// the ID it was first given and a new one takes the next, so new aggregates
-/// fill the last part and the parts before it keep their members; an
-/// archive commit that takes books out renumbers them. A part with no facts
-/// withdraws a part the report no longer has, and a part at or past the
-/// summary's `part_count` is not part of the report.
+/// The parts of each cycle as a hexadecimal bitmap.
+mod part_bitmaps {
+    use super::MAX_FISCAL_REPORT_PARTS_PER_CYCLE;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub(super) fn serialize<S: Serializer>(
+        parts: &BTreeMap<String, BTreeSet<u32>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        parts
+            .iter()
+            .map(|(cycle, parts)| {
+                let mut bytes = Vec::new();
+                for part in parts {
+                    let index = usize::try_from(*part / 8).unwrap_or(usize::MAX);
+                    if bytes.len() <= index {
+                        bytes.resize(index + 1, 0_u8);
+                    }
+                    bytes[index] |= 1 << (part % 8);
+                }
+                let hex = bytes.iter().fold(String::new(), |mut hex, byte| {
+                    use std::fmt::Write;
+                    let _ = write!(hex, "{byte:02x}");
+                    hex
+                });
+                (cycle, hex)
+            })
+            .collect::<BTreeMap<_, _>>()
+            .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<String, BTreeSet<u32>>, D::Error> {
+        let encoded = BTreeMap::<String, String>::deserialize(deserializer)?;
+        let mut parts = BTreeMap::new();
+        for (cycle, hex) in encoded {
+            if hex.len() % 2 != 0 || hex.len() > MAX_FISCAL_REPORT_PARTS_PER_CYCLE / 4 {
+                return Err(serde::de::Error::custom(
+                    "a fiscal part bitmap is malformed",
+                ));
+            }
+            let mut set = BTreeSet::new();
+            for (index, pair) in hex.as_bytes().chunks(2).enumerate() {
+                let byte = std::str::from_utf8(pair)
+                    .ok()
+                    .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                    .ok_or_else(|| serde::de::Error::custom("a fiscal part bitmap is malformed"))?;
+                for bit in 0..8_u32 {
+                    if byte & (1 << bit) != 0 {
+                        set.insert(u32::try_from(index).unwrap_or(u32::MAX) * 8 + bit);
+                    }
+                }
+            }
+            parts.insert(cycle, set);
+        }
+        Ok(parts)
+    }
+}
+
+/// [`FISCAL_REPORT_ROWS_PER_PART`] consecutive rows of one cycle of one
+/// observer's report. A row lists the facts of one scope's book of the
+/// cycle; a row whose scope has no book of the cycle is left out, and a part
+/// with no row withdraws what its line held.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalReportPart {
     pub observer_id: String,
-    /// The part's number, counted from zero.
+    pub accounting_cycle_id: String,
+    pub slot: u16,
+    /// The part's number within its cycle, counted from zero: it holds rows
+    /// `part * 16` to `part * 16 + 15`.
     pub part: u32,
-    pub facts: Vec<FiscalReportFact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<FiscalReportRow>,
+}
+
+/// One scope's facts of one cycle.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalReportRow {
+    /// The scope's row among the observer's rows.
+    pub row: u32,
+    pub institution: EntityRef,
+    pub mechanism: FiscalMechanism,
+    pub scope_binding_id: String,
+    /// One per partition of the scope's book, in partition order; at most
+    /// [`MAX_FISCAL_PARTITION_KEYS`].
+    pub facts: Vec<FiscalReportRowFact>,
+}
+
+/// One partition's estimates in a [`FiscalReportRow`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalReportRowFact {
+    pub unit: String,
+    pub payment_form: FiscalPaymentForm,
+    pub assessed: FiscalAmountEstimate,
+    pub collected: FiscalAmountEstimate,
+    pub outstanding: FiscalAmountEstimate,
 }
 
 /// One observer's report, assembled from the records its holder currently
 /// holds.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalReport {
-    /// The report's facts in aggregate-ID order. For a complete report this
-    /// equals what [`crate::compute_projections`] derives, at `as_of`, from
-    /// the fiscal state the report was published from.
+    /// The report's facts. For a complete report this equals what
+    /// [`crate::compute_projection`] derives, at `as_of`, from the fiscal
+    /// records the report was published from.
     pub projection: FiscalProjection,
-    /// The numbers of the parts that are not current; see
-    /// [`FiscalReportSummary::pending_parts`]. The facts of part `n` are
-    /// those labelled `fact.NNNN` from `n` times
-    /// [`FISCAL_REPORT_FACTS_PER_PART`] on, so a reader can tell which facts
-    /// of an incomplete report are older than its `as_of`, and that facts of
-    /// a pending part may be missing.
-    pub pending_parts: BTreeSet<u32>,
+    /// The parts, by cycle, that are not current; see
+    /// [`FiscalReportSummary::pending`].
+    pub pending: BTreeMap<String, BTreeSet<u32>>,
+    /// Hot cycles the report does not show.
+    pub omitted_cycles: u32,
 }
 
 impl FiscalReport {
     /// Whether every part of the report is current.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.pending_parts.is_empty()
+        self.pending.is_empty()
     }
 
     /// Whether the fact with this label belongs to a part that is not
     /// current, so that it may be older than the report's `as_of`.
     #[must_use]
     pub fn is_stale(&self, fact_id: &str) -> bool {
-        fact_id
-            .strip_prefix("fact.")
-            .and_then(|index| index.parse::<usize>().ok())
-            .and_then(|index| u32::try_from(index / FISCAL_REPORT_FACTS_PER_PART).ok())
-            .is_some_and(|part| self.pending_parts.contains(&part))
+        FiscalReportFact::part_of(fact_id).is_some_and(|(cycle, part)| {
+            self.pending
+                .get(cycle)
+                .is_some_and(|parts| parts.contains(&part))
+        })
     }
 }
 
-/// Which report parts the report system publishes, kept with the derived
-/// fields of the fiscal state.
+/// The fiscal state of a run: the union of its fiscal records, as one value
+/// to author, assemble, and audit.
 ///
-/// The aggregate system writes the plan whenever it finds that a part of an
-/// observer's report changed, and the report system publishes exactly what
-/// the plan lists. Nothing reads published reports back, so the plan is what
-/// makes a boundary republish only what changed.
-///
-/// A plan means something only in a state a boundary has written. In a state
-/// at its scenario version it is ignored, and the first system that writes
-/// the state clears it, so the first derivation of an authored state always
-/// plans every report whole.
-///
-/// Parts the plan defers for an observer who can receive knowledge do not
-/// wait for a change of the fiscal state. The aggregate system of any later
-/// boundary that runs the fiscal systems finds them by reading this field
-/// from the committed record, without decoding the state, and publishes them
-/// in a plan of their own; a boundary that leaves such parts owed schedules
-/// an internal `fiscal_report_drain_v1` packet so that the next boundary
-/// comes at once. A boundary in which no observer is owed anything it can
-/// receive does not decode the state.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct FiscalReportPlan {
-    /// The procedure revision the plan was computed at; zero while no report
-    /// has been planned. `publish` is published by the boundary that computed
-    /// the plan, and a plan of an earlier revision has been carried out. A
-    /// plan that publishes owed parts is computed by a boundary that does not
-    /// advance the procedure revision, and every other write of the state
-    /// either advances it or writes a new plan, so a plan is never carried
-    /// out twice.
-    pub revision: u64,
-    /// Observer binding ID to the part numbers to publish. An observer listed
-    /// here also gets its summary.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub publish: BTreeMap<String, BTreeSet<u32>>,
-    /// Observer binding ID to the part numbers that changed but were not
-    /// planned: they did not fit
-    /// [`MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY`], or the observer's actor is
-    /// dead, and the engine publishes no knowledge to a dead person. The next
-    /// plan takes them first. A dead observer's stay here, outside every
-    /// plan's limit, for as long as the actor is dead, and are published by
-    /// the first boundary after the actor is alive again that runs the fiscal
-    /// systems: the boundary that revives the actor, when it admits any
-    /// ingress or event. An observer listed with no part is owed its summary
-    /// only.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub deferred: BTreeMap<String, BTreeSet<u32>>,
-    /// Observer binding ID to the holders the boundary that computed the plan
-    /// re-pointed the binding away from, or removed it from. Each that can
-    /// still receive knowledge gets one summary marked withdrawn.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub withdraw: BTreeMap<String, BTreeSet<KnowledgeHolderRef>>,
-}
-
-impl FiscalReportPlan {
-    /// Whether no report has been planned yet.
-    #[must_use]
-    pub fn is_unused(&self) -> bool {
-        *self == Self::default()
-    }
-
-    /// Marks the plan carried out, in a boundary whose only change of the
-    /// state is archive maintenance. Maintenance does not advance the
-    /// procedure revision, so the plan of an earlier boundary would otherwise
-    /// still look current and the report system would publish it again.
-    /// What the plan owes (`deferred`) stays owed.
-    pub(crate) fn settle_maintenance(&mut self) {
-        self.publish.clear();
-        self.withdraw.clear();
-    }
-}
-
-/// The fiscal state of a run: one record, `canwu.fiscal:state`.
+/// A run keeps it as records (see [`crate::FiscalRecordKind`]):
+/// [`FiscalState::into_records`] partitions an authored state, and
+/// [`FiscalState::from_records`] assembles one, which costs a pass over every
+/// fiscal record and is for hosts, tools, and tests. A boundary decodes and
+/// writes only the records its packets touch.
 ///
 /// Each scope's adoptions and the books of its hot accounting cycles are in
-/// its [`FiscalScopeLedger`]; each institution's cycle bookkeeping is in its
-/// [`FiscalOffice`]; closed books leave the state through the fiscal archive
-/// (see [`FiscalState::prepare_fiscal_archive`]). Nothing in the state grows
-/// for the life of a run: every action target keeps its recent outcomes in a
+/// its [`FiscalScopeLedger`]; each institution's bindings, auditor policy and
+/// proposals, and cycle bookkeeping in its [`FiscalOffice`]; each region's
+/// adoption counts and transition candidates in its [`FiscalJurisdiction`];
+/// each observer binding with its report bookkeeping in its
+/// [`FiscalObserver`]. Closed books leave through the fiscal archive (see
+/// [`FiscalState::prepare_fiscal_archive`]). Nothing grows for the life of a
+/// run: every action target keeps its recent outcomes in a
 /// [`FiscalOutcomeRing`], and the archive keeps every archived book and
 /// institution total for good.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalState {
-    pub schema_version: u32,
-    pub procedure_revision: u64,
-    pub catalog_version: DomainRecordVersionRef,
-    pub historical_context: FiscalHistoricalContext,
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub execution_evidence_kinds: BTreeSet<DomainRecordKind>,
-    pub authority_bindings: BTreeMap<String, FiscalAuthorityBinding>,
-    /// Auditors from outside an institution, keyed by audit binding ID. The
-    /// field is omitted from the serialized state while it is empty.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub audit_bindings: BTreeMap<String, FiscalAuditBinding>,
-    /// Who appoints and removes each institution's auditors, keyed by policy
-    /// ID; declared with the state. Omitted from the serialized state while
-    /// it is empty.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub audit_appointment_policies: BTreeMap<String, FiscalAppointmentPolicy>,
-    /// Every pending nomination and removal petition, and the latest resolved
-    /// ones of each policy, keyed by proposal ID. Omitted from the serialized
-    /// state while it is empty.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub audit_proposals: BTreeMap<String, FiscalAuditProposal>,
-    /// One ledger per scope binding, keyed by scope binding ID.
-    pub ledgers: BTreeMap<String, FiscalScopeLedger>,
-    /// Institutions with hot cycles, an archived cycle, or a recent outcome,
-    /// keyed by [`fiscal_office_key`]. An office is made when it first holds
-    /// something and never holds nothing again.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub offices: BTreeMap<String, FiscalOffice>,
-    pub observer_bindings: BTreeMap<String, FiscalObserverBinding>,
-    pub transition_candidates: BTreeMap<String, FiscalTransitionCandidate>,
-    /// The per-cycle totals of the hot books, one per accounting partition
-    /// (institution, mechanism, scope, cycle, unit, payment form), by stable
-    /// ID; see [`crate::compute_aggregates`]. They are what reports tell, and
-    /// a book's totals are archived with it.
-    pub aggregates: BTreeMap<String, FiscalStrategicAggregate>,
-    /// The fiscal archive head: the directory of the newest applied commit,
-    /// the maintenance receipts, and the retention handles not yet
-    /// acknowledged. Omitted while no archive commit has settled.
+    pub root: FiscalRoot,
+    /// The fiscal archive head: what every applied commit has archived, the
+    /// maintenance receipts, and the retention handles not yet acknowledged.
+    /// The payload of the `canwu.fiscal:archive` record.
     #[serde(default, skip_serializing_if = "crate::FiscalArchiveHeadV1::is_unused")]
     pub archive: crate::FiscalArchiveHeadV1,
-    /// Observer binding ID to the holders that settlement re-pointed the
-    /// binding away from, or removed it from, in the current boundary; the
-    /// same boundary's aggregate system moves them into the report plan, so
-    /// a state a boundary has finished holds none.
+    /// Keyed by [`fiscal_office_key`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub pending_withdrawals: BTreeMap<String, BTreeSet<KnowledgeHolderRef>>,
-    /// Which report parts the report system publishes. The field is omitted
-    /// from the serialized state until a report has been planned.
-    #[serde(default, skip_serializing_if = "FiscalReportPlan::is_unused")]
-    pub report_plan: FiscalReportPlan,
+    pub offices: BTreeMap<String, FiscalOffice>,
+    /// Keyed by scope binding ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ledgers: BTreeMap<String, FiscalScopeLedger>,
+    /// Keyed by catalog region ID; one for each region a scope names.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub jurisdictions: BTreeMap<String, FiscalJurisdiction>,
+    /// Keyed by observer binding ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub observers: BTreeMap<String, FiscalObserver>,
+    /// The report work each observer is owed, keyed by observer binding ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub report_queue: BTreeMap<String, FiscalReportQueueEntry>,
 }
 
 impl FiscalState {
     #[must_use]
     pub fn new(year: i32, mode: FiscalHistoricalMode, at: SimTime) -> Self {
         Self {
-            schema_version: FISCAL_RUNTIME_SCHEMA_VERSION,
-            procedure_revision: 1,
-            catalog_version: initial_catalog_version(),
-            historical_context: FiscalHistoricalContext {
-                year,
-                mode,
-                updated_at: at,
+            root: FiscalRoot {
+                schema_version: FISCAL_RUNTIME_SCHEMA_VERSION,
+                catalog_version: initial_catalog_version(),
+                historical_context: FiscalHistoricalContext {
+                    year,
+                    mode,
+                    updated_at: at,
+                },
+                context_revision: 1,
+                execution_evidence_kinds: BTreeSet::new(),
+                queue_pages: BTreeSet::new(),
             },
-            execution_evidence_kinds: BTreeSet::new(),
-            authority_bindings: BTreeMap::new(),
-            audit_bindings: BTreeMap::new(),
-            audit_appointment_policies: BTreeMap::new(),
-            audit_proposals: BTreeMap::new(),
-            ledgers: BTreeMap::new(),
-            offices: BTreeMap::new(),
-            observer_bindings: BTreeMap::new(),
-            transition_candidates: BTreeMap::new(),
-            aggregates: BTreeMap::new(),
             archive: crate::FiscalArchiveHeadV1::default(),
-            pending_withdrawals: BTreeMap::new(),
-            report_plan: FiscalReportPlan::default(),
+            offices: BTreeMap::new(),
+            ledgers: BTreeMap::new(),
+            jurisdictions: BTreeMap::new(),
+            observers: BTreeMap::new(),
+            report_queue: BTreeMap::new(),
         }
     }
 
+    /// The historical context of the run.
+    #[must_use]
+    pub fn historical_context(&self) -> &FiscalHistoricalContext {
+        &self.root.historical_context
+    }
+
     /// Adds a scope binding with an empty ledger, or replaces the binding of
-    /// an existing one.
+    /// an existing one, making its office and jurisdiction when it has none.
     pub fn add_scope(&mut self, binding: FiscalScopeBinding) {
+        self.office_mut(&binding.institution);
+        self.jurisdictions
+            .entry(binding.jurisdiction_id.clone())
+            .or_insert_with(|| FiscalJurisdiction::new(binding.jurisdiction_id.clone()));
         match self.ledgers.get_mut(&binding.id) {
-            Some(ledger) => ledger.scope = binding,
+            Some(ledger) => {
+                ledger.office = fiscal_office_key(&binding.institution);
+                ledger.scope = binding;
+            }
             None => {
                 self.ledgers
                     .insert(binding.id.clone(), FiscalScopeLedger::new(binding));
@@ -2479,14 +2955,16 @@ impl FiscalState {
     pub fn add_assessment(&mut self, assessment: FiscalAssessment) -> Result<(), CanwuError> {
         let ledger = self.ledger_mut(&assessment.scope_binding_id)?;
         let opened = !ledger.books.contains_key(&assessment.accounting_cycle_id);
-        ledger
+        let book = ledger
             .books
             .entry(assessment.accounting_cycle_id.clone())
-            .or_insert_with(|| FiscalCycleBook::open(assessment.accounting_cycle_id.clone()))
-            .assessments
-            .insert(assessment.id.clone(), assessment);
+            .or_insert_with(|| FiscalCycleBook::open(assessment.accounting_cycle_id.clone()));
+        book.assessments.insert(assessment.id.clone(), assessment);
+        book.touch()?;
         if opened {
             self.recompute_offices();
+        } else {
+            self.recompute_partition_keys();
         }
         Ok(())
     }
@@ -2497,12 +2975,11 @@ impl FiscalState {
         scope_binding_id: &str,
         remission: FiscalRemission,
     ) -> Result<(), CanwuError> {
-        self.book_with_mut(scope_binding_id, |book| {
+        let book = self.book_with_mut(scope_binding_id, |book| {
             book.assessments.contains_key(&remission.assessment_id)
-        })?
-        .remissions
-        .insert(remission.id.clone(), remission);
-        Ok(())
+        })?;
+        book.remissions.insert(remission.id.clone(), remission);
+        book.touch()
     }
 
     /// Adds an execution request to the book of its assessment in
@@ -2512,12 +2989,11 @@ impl FiscalState {
         scope_binding_id: &str,
         request: FiscalExecutionRequest,
     ) -> Result<(), CanwuError> {
-        self.book_with_mut(scope_binding_id, |book| {
+        let book = self.book_with_mut(scope_binding_id, |book| {
             book.assessments.contains_key(&request.assessment_id)
-        })?
-        .execution_requests
-        .insert(request.id.clone(), request);
-        Ok(())
+        })?;
+        book.execution_requests.insert(request.id.clone(), request);
+        book.touch()
     }
 
     /// Adds an execution receipt to the book of its request in
@@ -2527,12 +3003,11 @@ impl FiscalState {
         scope_binding_id: &str,
         receipt: FiscalExecutionReceipt,
     ) -> Result<(), CanwuError> {
-        self.book_with_mut(scope_binding_id, |book| {
+        let book = self.book_with_mut(scope_binding_id, |book| {
             book.execution_requests.contains_key(&receipt.request_id)
-        })?
-        .execution_receipts
-        .insert(receipt.id.clone(), receipt);
-        Ok(())
+        })?;
+        book.execution_receipts.insert(receipt.id.clone(), receipt);
+        book.touch()
     }
 
     /// Adds an audit finding to the book of its target in
@@ -2547,13 +3022,72 @@ impl FiscalState {
             .and_then(|ledger| ledger.book_of_audit_target(&audit.target_id))
             .map(|book| book.accounting_cycle_id.clone())
             .ok_or_else(|| invalid("fiscal audit target is not in its scope's books"))?;
-        self.ledger_mut(scope_binding_id)?
+        let book = self
+            .ledger_mut(scope_binding_id)?
             .books
             .get_mut(&cycle)
-            .ok_or_else(|| invalid("fiscal audit book is unavailable"))?
-            .audits
-            .insert(audit.id.clone(), audit);
-        Ok(())
+            .ok_or_else(|| invalid("fiscal audit book is unavailable"))?;
+        book.audits.insert(audit.id.clone(), audit);
+        book.touch()
+    }
+
+    /// Adds an authority binding to the office of its institution.
+    pub fn add_authority_binding(&mut self, binding: FiscalAuthorityBinding) {
+        self.office_mut(&binding.institution)
+            .authority_bindings
+            .insert(binding.id.clone(), binding);
+    }
+
+    /// Adds an audit binding to the office of its audited institution.
+    pub fn add_audit_binding(&mut self, binding: FiscalAuditBinding) {
+        self.office_mut(&binding.institution)
+            .audit_bindings
+            .insert(binding.id.clone(), binding);
+    }
+
+    /// Sets the appointment policy of its institution's office.
+    pub fn add_appointment_policy(&mut self, policy: FiscalAppointmentPolicy) {
+        self.office_mut(&policy.appointer);
+        let institution = policy.institution.clone();
+        self.office_mut(&institution).appointment_policy = Some(policy);
+    }
+
+    /// Adds an auditor proposal to the office of its audited institution.
+    pub fn add_audit_proposal(&mut self, proposal: FiscalAuditProposal) {
+        self.office_mut(&proposal.institution)
+            .audit_proposals
+            .insert(proposal.id.clone(), proposal);
+    }
+
+    /// Adds an observer binding, or replaces one, with nothing published yet:
+    /// its whole report is owed from the start of the run.
+    pub fn add_observer(&mut self, binding: FiscalObserverBinding) {
+        for institution in binding
+            .visible_institutions
+            .iter()
+            .chain(binding.controlled_by.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.office_mut(&institution);
+        }
+        self.report_queue.insert(
+            binding.id.clone(),
+            FiscalReportQueueEntry {
+                due_at: SimTime::EPOCH,
+                whole: true,
+                ..FiscalReportQueueEntry::default()
+            },
+        );
+        self.observers
+            .insert(binding.id.clone(), FiscalObserver::new(binding));
+    }
+
+    /// Removes an observer binding from an authored state, with its queued
+    /// report work.
+    pub fn remove_observer(&mut self, observer_binding_id: &str) {
+        self.observers.remove(observer_binding_id);
+        self.report_queue.remove(observer_binding_id);
     }
 
     fn book_with_mut(
@@ -2641,30 +3175,146 @@ impl FiscalState {
         self.offices.get(&fiscal_office_key(institution))
     }
 
-    pub(crate) fn office_mut(&mut self, institution: &EntityRef) -> &mut FiscalOffice {
+    /// The office of one institution, made when it has none.
+    pub fn office_mut(&mut self, institution: &EntityRef) -> &mut FiscalOffice {
         self.offices
             .entry(fiscal_office_key(institution))
             .or_insert_with(|| FiscalOffice::new(institution.clone()))
     }
 
-    /// The outcome ring of one action target. An office or observer that has
-    /// no ring yet has an empty one.
+    /// The jurisdiction of one region.
+    #[must_use]
+    pub fn jurisdiction(&self, region_id: &str) -> Option<&FiscalJurisdiction> {
+        self.jurisdictions.get(region_id)
+    }
+
+    /// One observer binding.
+    #[must_use]
+    pub fn observer_binding(&self, observer_binding_id: &str) -> Option<&FiscalObserverBinding> {
+        self.observers
+            .get(observer_binding_id)
+            .map(|observer| &observer.binding)
+    }
+
+    /// Every observer binding, in ID order.
+    pub fn observer_bindings(&self) -> impl Iterator<Item = &FiscalObserverBinding> {
+        self.observers.values().map(|observer| &observer.binding)
+    }
+
+    /// The authority binding `binding_id`, to change it.
+    pub fn authority_binding_mut(
+        &mut self,
+        binding_id: &str,
+    ) -> Option<&mut FiscalAuthorityBinding> {
+        self.offices
+            .values_mut()
+            .find_map(|office| office.authority_bindings.get_mut(binding_id))
+    }
+
+    /// The authority binding `binding_id`, in whichever office holds it.
+    #[must_use]
+    pub fn authority_binding(&self, binding_id: &str) -> Option<&FiscalAuthorityBinding> {
+        self.offices
+            .values()
+            .find_map(|office| office.authority_bindings.get(binding_id))
+    }
+
+    /// Every authority binding, by office and then ID.
+    pub fn authority_bindings(&self) -> impl Iterator<Item = &FiscalAuthorityBinding> {
+        self.offices
+            .values()
+            .flat_map(|office| office.authority_bindings.values())
+    }
+
+    /// The audit binding `binding_id`, in the office of its audited
+    /// institution.
+    #[must_use]
+    pub fn audit_binding(&self, binding_id: &str) -> Option<&FiscalAuditBinding> {
+        self.offices
+            .values()
+            .find_map(|office| office.audit_bindings.get(binding_id))
+    }
+
+    /// Every audit binding, by office and then ID.
+    pub fn audit_bindings(&self) -> impl Iterator<Item = &FiscalAuditBinding> {
+        self.offices
+            .values()
+            .flat_map(|office| office.audit_bindings.values())
+    }
+
+    /// The appointment policy `policy_id`.
+    #[must_use]
+    pub fn appointment_policy(&self, policy_id: &str) -> Option<&FiscalAppointmentPolicy> {
+        self.appointment_policies()
+            .find(|policy| policy.id == policy_id)
+    }
+
+    /// The appointment policy that governs the auditors of `institution`.
+    #[must_use]
+    pub fn appointment_policy_of(
+        &self,
+        institution: &EntityRef,
+    ) -> Option<&FiscalAppointmentPolicy> {
+        self.office(institution)
+            .and_then(|office| office.appointment_policy.as_ref())
+    }
+
+    /// Every appointment policy, by office.
+    pub fn appointment_policies(&self) -> impl Iterator<Item = &FiscalAppointmentPolicy> {
+        self.offices
+            .values()
+            .filter_map(|office| office.appointment_policy.as_ref())
+    }
+
+    /// The auditor proposal `proposal_id`, in the office of its audited
+    /// institution.
+    #[must_use]
+    pub fn audit_proposal(&self, proposal_id: &str) -> Option<&FiscalAuditProposal> {
+        self.offices
+            .values()
+            .find_map(|office| office.audit_proposals.get(proposal_id))
+    }
+
+    /// Every auditor proposal, by office and then ID.
+    pub fn audit_proposals(&self) -> impl Iterator<Item = &FiscalAuditProposal> {
+        self.offices
+            .values()
+            .flat_map(|office| office.audit_proposals.values())
+    }
+
+    /// The revision of one action target, when it exists.
+    #[must_use]
+    pub fn target_revision(&self, target: &FiscalActionTarget) -> Option<u64> {
+        match target {
+            FiscalActionTarget::Ledger(scope) => self.ledger(scope).map(|ledger| ledger.revision),
+            FiscalActionTarget::Office(institution) => {
+                self.office(institution).map(|office| office.revision)
+            }
+            FiscalActionTarget::Jurisdiction(region) => self
+                .jurisdiction(region)
+                .map(|jurisdiction| jurisdiction.revision),
+            FiscalActionTarget::Observer(observer) => self
+                .observers
+                .get(observer)
+                .map(|observer| observer.revision),
+        }
+    }
+
+    /// The outcome ring of one action target.
     #[must_use]
     pub fn outcome_ring(&self, target: &FiscalActionTarget) -> Option<&FiscalOutcomeRing> {
-        static EMPTY: FiscalOutcomeRing = FiscalOutcomeRing {
-            recent: Vec::new(),
-            floor: 0,
-        };
         match target {
             FiscalActionTarget::Ledger(scope) => self.ledger(scope).map(|ledger| &ledger.outcomes),
-            FiscalActionTarget::Office(institution) => Some(
-                self.office(institution)
-                    .map_or(&EMPTY, |office| &office.outcomes),
-            ),
+            FiscalActionTarget::Office(institution) => {
+                self.office(institution).map(|office| &office.outcomes)
+            }
+            FiscalActionTarget::Jurisdiction(region) => self
+                .jurisdiction(region)
+                .map(|jurisdiction| &jurisdiction.outcomes),
             FiscalActionTarget::Observer(observer) => self
-                .observer_bindings
+                .observers
                 .get(observer)
-                .map(|binding| &binding.outcomes),
+                .map(|observer| &observer.outcomes),
         }
     }
 
@@ -2679,26 +3329,65 @@ impl FiscalState {
         self.outcome_ring(target)?.get(action_id)
     }
 
-    pub(crate) fn outcome_ring_mut(
+    /// The ring and the revision of one action target, to record an outcome
+    /// in.
+    pub(crate) fn target_mut(
         &mut self,
         target: &FiscalActionTarget,
-    ) -> Result<&mut FiscalOutcomeRing, CanwuError> {
+    ) -> Result<(&mut FiscalOutcomeRing, &mut u64), CanwuError> {
         match target {
-            FiscalActionTarget::Ledger(scope) => Ok(&mut self.ledger_mut(scope)?.outcomes),
-            FiscalActionTarget::Office(institution) => {
-                Ok(&mut self.office_mut(institution).outcomes)
+            FiscalActionTarget::Ledger(scope) => {
+                let ledger = self.ledger_mut(scope)?;
+                Ok((&mut ledger.outcomes, &mut ledger.revision))
             }
-            FiscalActionTarget::Observer(observer) => self
-                .observer_bindings
-                .get_mut(observer)
-                .map(|binding| &mut binding.outcomes)
-                .ok_or_else(|| invalid("fiscal observer binding is unavailable")),
+            FiscalActionTarget::Office(institution) => {
+                let office = self
+                    .offices
+                    .get_mut(&fiscal_office_key(institution))
+                    .ok_or_else(|| invalid("fiscal office is unavailable"))?;
+                Ok((&mut office.outcomes, &mut office.revision))
+            }
+            FiscalActionTarget::Jurisdiction(region) => {
+                let jurisdiction = self
+                    .jurisdictions
+                    .get_mut(region)
+                    .ok_or_else(|| invalid("fiscal jurisdiction is unavailable"))?;
+                Ok((&mut jurisdiction.outcomes, &mut jurisdiction.revision))
+            }
+            FiscalActionTarget::Observer(observer) => {
+                let observer = self
+                    .observers
+                    .get_mut(observer)
+                    .ok_or_else(|| invalid("fiscal observer binding is unavailable"))?;
+                Ok((&mut observer.outcomes, &mut observer.revision))
+            }
         }
     }
 
-    /// Sets each office's count of hot books per cycle from the ledgers,
-    /// making the offices that need one. What an office keeps of archived
-    /// books (their totals and its watermark) is left as it is.
+    /// Records one outcome on its target at the target's revision, and
+    /// advances the revision.
+    pub(crate) fn record_outcome(
+        &mut self,
+        target: &FiscalActionTarget,
+        action_id: &str,
+        disposition: FiscalActionDisposition,
+    ) -> Result<(), CanwuError> {
+        let (ring, revision) = self.target_mut(target)?;
+        ring.push(FiscalRecentOutcome {
+            action_id: action_id.to_owned(),
+            disposition,
+            settled_revision: *revision,
+        });
+        *revision = revision
+            .checked_add(1)
+            .ok_or_else(|| invalid("fiscal record revision overflowed"))?;
+        Ok(())
+    }
+
+    /// Sets each office's count of hot books per cycle, and the partition
+    /// keys of its cycles, from the ledgers, making the offices that need
+    /// one. What an office keeps of archived books (their totals and its
+    /// watermark) is left as it is.
     pub fn recompute_offices(&mut self) {
         let mut counts = BTreeMap::<String, (EntityRef, BTreeMap<String, u32>)>::new();
         for ledger in self
@@ -2733,114 +3422,168 @@ impl FiscalState {
         for office in self.offices.values_mut() {
             office.cycles.retain(|_, entry| entry.hot_books > 0);
         }
-        self.offices.retain(|_, office| !office.is_empty());
+        self.recompute_partition_keys();
     }
 
+    /// Adds to each office cycle the partition keys its hot books use.
+    fn recompute_partition_keys(&mut self) {
+        let mut keys =
+            BTreeMap::<(String, String), Vec<(FiscalMechanism, FiscalPartitionKey)>>::new();
+        for ledger in self.ledgers.values() {
+            for (cycle, book) in &ledger.books {
+                keys.entry((ledger.office.clone(), cycle.clone()))
+                    .or_default()
+                    .extend(
+                        book.partition_keys()
+                            .into_iter()
+                            .map(|key| (ledger.scope.mechanism, key)),
+                    );
+            }
+        }
+        for ((office, cycle), used) in keys {
+            if let Some(entry) = self
+                .offices
+                .get_mut(&office)
+                .and_then(|office| office.cycles.get_mut(&cycle))
+            {
+                for (mechanism, key) in used {
+                    entry
+                        .partition_keys
+                        .entry(mechanism)
+                        .or_default()
+                        .insert(key);
+                }
+            }
+        }
+    }
+
+    /// Checks the whole state: every record on its own (the root, each
+    /// office, ledger, jurisdiction, and observer, as settlement checks every
+    /// record it writes), and every invariant across records, derived fields
+    /// included.
     #[allow(clippy::too_many_lines)]
     pub fn validate(&self, catalog: &CompiledFiscalCatalog) -> Result<(), CanwuError> {
-        if self.schema_version != FISCAL_RUNTIME_SCHEMA_VERSION {
-            return Err(invalid("unsupported fiscal runtime schema"));
-        }
-        if self.procedure_revision == 0 {
-            return Err(invalid("fiscal procedure revision must be nonzero"));
-        }
-        let hot = |count: usize, cap: usize| count <= cap;
-        if self.execution_evidence_kinds.len() > MAX_FISCAL_EVIDENCE_KINDS
-            || self.authority_bindings.len() > MAX_FISCAL_RUNTIME_BINDINGS
-            || self.audit_bindings.len() > MAX_FISCAL_RUNTIME_BINDINGS
-            || self.audit_appointment_policies.len() > MAX_FISCAL_RUNTIME_BINDINGS
-            || self.ledgers.len() > MAX_FISCAL_RUNTIME_BINDINGS
-            || self.observer_bindings.len() > MAX_FISCAL_OBSERVERS
-            || !hot(self.adoptions().count(), MAX_FISCAL_EXECUTION_REQUESTS)
-            || !hot(self.assessments().count(), MAX_FISCAL_ASSESSMENTS)
-            || !hot(self.remissions().count(), MAX_FISCAL_ASSESSMENTS)
-            || !hot(
-                self.execution_requests().count(),
-                MAX_FISCAL_EXECUTION_REQUESTS,
-            )
-            || !hot(
-                self.execution_receipts().count(),
-                MAX_FISCAL_EXECUTION_RECEIPTS,
-            )
-            || !hot(self.audits().count(), MAX_FISCAL_ASSESSMENTS)
-            || self
-                .ledgers
-                .values()
-                .any(|ledger| ledger.books.len() > MAX_FISCAL_HOT_BOOKS_PER_LEDGER)
-            || self.transition_candidates.len() > MAX_FISCAL_CATALOG_COVERAGE_CELLS
-            || self.aggregates.len() > MAX_FISCAL_ASSESSMENTS
+        validate_root(&self.root, catalog)?;
+        self.archive.validate()?;
+        if self.ledgers.len() > MAX_FISCAL_SCOPE_BINDINGS
+            || self.observers.len() > MAX_FISCAL_OBSERVERS
         {
-            return Err(invalid(
-                "fiscal runtime record exceeds its bounded capacity",
-            ));
+            return Err(invalid("fiscal runtime state exceeds its bounded capacity"));
         }
-        if self.catalog_version != initial_catalog_version()
-            || self.historical_context.year != catalog.historical_year
-                && self.historical_context.updated_at == SimTime::EPOCH
-        {
-            return Err(invalid(
-                "fiscal state is not bound to the selected initial catalog",
-            ));
+        // Binding and policy IDs are one namespace across offices, and
+        // proposal IDs another: the binding directory resolves each to one
+        // office.
+        let mut bindings = BTreeSet::new();
+        let mut proposals = BTreeSet::new();
+        for (key, office) in &self.offices {
+            if *key != fiscal_office_key(&office.institution) {
+                return Err(invalid("a fiscal office is not keyed by its institution"));
+            }
+            validate_office(office)?;
+            for id in office_binding_ids(office) {
+                if !bindings.insert(id) {
+                    return Err(invalid(format!(
+                        "fiscal binding or policy ID {id} is used twice"
+                    )));
+                }
+            }
+            for id in office.audit_proposals.keys() {
+                if !proposals.insert(id) {
+                    return Err(invalid(format!("fiscal proposal ID {id} is used twice")));
+                }
+            }
         }
-        if !catalog
-            .historical_scope
-            .contains(self.historical_context.year)
-        {
-            return Err(invalid(
-                "fiscal historical context lies outside the catalog scope",
-            ));
+        for binding in self.audit_bindings() {
+            if self.authority_binding(&binding.id).is_some() {
+                return Err(invalid(
+                    "fiscal audit bindings require an ID no authority binding or appointment policy uses",
+                ));
+            }
         }
-        validate_map(
-            &self.authority_bindings,
-            |value| &value.id,
-            "authority binding",
-        )?;
-        validate_map(
-            &self.observer_bindings,
-            |value| &value.id,
-            "observer binding",
-        )?;
-        validate_map(
-            &self.transition_candidates,
-            |value| &value.id,
-            "transition candidate",
-        )?;
-        if self.authority_bindings.values().any(|binding| {
-            binding.acting_actor.is_some() != binding.authority_basis.is_some()
-                || binding.acting_actor.is_some()
-                    && binding.acting_actor == binding.authorized_actor
-                || binding
-                    .authority_basis
-                    .as_ref()
-                    .is_some_and(|basis| basis.version == 0)
-        }) {
-            return Err(invalid(
-                "fiscal acting actors require one exact authority basis and differ from the authorized actor",
-            ));
+        for proposal in self.audit_proposals() {
+            if self.authority_binding(&proposal.audit_binding_id).is_some()
+                || self
+                    .appointment_policy(&proposal.audit_binding_id)
+                    .is_some()
+            {
+                return Err(invalid(format!(
+                    "audit proposal {} names an authority binding or policy ID",
+                    proposal.id
+                )));
+            }
+            if let FiscalAuditProposalKind::RemovalPetition { auditor, .. } = &proposal.kind
+                && proposal.is_pending()
+                && self
+                    .audit_binding(&proposal.audit_binding_id)
+                    .is_none_or(|binding| {
+                        binding.institution != proposal.institution || binding.auditor != *auditor
+                    })
+            {
+                return Err(invalid(format!(
+                    "audit proposal {} is no longer apt while pending",
+                    proposal.id
+                )));
+            }
         }
-        validate_map(&self.audit_bindings, |value| &value.id, "audit binding")?;
-        if self.audit_bindings.values().any(|binding| {
-            binding.authority_basis.version == 0
-                || self.authority_bindings.contains_key(&binding.id)
-                || self.audit_appointment_policies.contains_key(&binding.id)
-        }) {
-            return Err(invalid(
-                "fiscal audit bindings require one exact authority basis and an ID no authority binding or appointment policy uses",
-            ));
+        for (key, ledger) in &self.ledgers {
+            validate_identifier(key, "scope binding")?;
+            if *key != ledger.scope.id {
+                return Err(invalid("scope binding map key does not match its value"));
+            }
+            validate_ledger(ledger, catalog)?;
+            if !self.offices.contains_key(&ledger.office)
+                || !self
+                    .jurisdictions
+                    .contains_key(&ledger.scope.jurisdiction_id)
+            {
+                return Err(invalid(format!(
+                    "fiscal scope {key} has no office or jurisdiction"
+                )));
+            }
         }
-        self.validate_appointments()?;
+        for (key, jurisdiction) in &self.jurisdictions {
+            if *key != jurisdiction.region_id {
+                return Err(invalid(
+                    "fiscal jurisdiction map key does not match its value",
+                ));
+            }
+            validate_jurisdiction(jurisdiction, catalog)?;
+        }
+        for (key, observer) in &self.observers {
+            if *key != observer.binding.id {
+                return Err(invalid("observer binding map key does not match its value"));
+            }
+            validate_observer(observer)?;
+            if observer
+                .binding
+                .visible_institutions
+                .iter()
+                .chain(observer.binding.controlled_by.iter())
+                .any(|institution| self.office(institution).is_none())
+            {
+                return Err(invalid(format!(
+                    "observer binding {key} names an institution without an office"
+                )));
+            }
+        }
+        for (observer_id, entry) in &self.report_queue {
+            if !self.observers.contains_key(observer_id) {
+                return Err(invalid(format!(
+                    "the fiscal report queue names an unknown observer binding: {observer_id}"
+                )));
+            }
+            validate_queue_entry(entry)?;
+        }
+        self.validate_derived(catalog)?;
         if self
-            .authority_bindings
-            .values()
+            .authority_bindings()
             .filter_map(|binding| binding.authority_basis.as_ref())
             .chain(
-                self.audit_bindings
-                    .values()
+                self.audit_bindings()
                     .map(|binding| &binding.authority_basis),
             )
             .chain(
-                self.audit_proposals
-                    .values()
+                self.audit_proposals()
                     .filter_map(|proposal| match &proposal.kind {
                         FiscalAuditProposalKind::Nomination {
                             authority_basis, ..
@@ -2848,634 +3591,828 @@ impl FiscalState {
                         FiscalAuditProposalKind::RemovalPetition { .. } => None,
                     }),
             )
-            .any(|basis| basis.record.kind.namespace == FiscalStateRecord::NAMESPACE)
+            .any(|basis| basis.record.kind.namespace == FiscalCatalogRecord::NAMESPACE)
         {
             return Err(invalid(
                 "a fiscal authority basis must be an application record, not a fiscal record",
             ));
         }
-        self.validate_observers()?;
-        self.validate_report_plan()?;
-        for (key, ledger) in &self.ledgers {
-            validate_identifier(key, "scope binding")?;
-            if *key != ledger.scope.id {
-                return Err(invalid("scope binding map key does not match its value"));
-            }
-            self.validate_ledger(ledger, catalog)?;
-        }
-        self.validate_offices()?;
-        self.archive.validate()?;
         Ok(())
     }
 
-    /// Checks the observer bindings: bounded confidence and visibility, a
-    /// holder that is the actor's person or, without an actor, a government;
-    /// one line slot each, below [`MAX_FISCAL_OBSERVERS`]; and their rings.
-    fn validate_observers(&self) -> Result<(), CanwuError> {
-        let mut slots = BTreeSet::new();
-        for observer in self.observer_bindings.values() {
-            let holder_matches = match (observer.actor, &observer.knowledge_holder) {
-                (Some(actor), KnowledgeHolderRef::Person(person)) => actor == *person,
-                (None, KnowledgeHolderRef::Entity(EntityRef::Government(_))) => true,
-                _ => false,
-            };
-            if observer.confidence_per_mille > 1_000
-                || !holder_matches
-                || observer.visible_institutions.len() > MAX_FISCAL_RUNTIME_BINDINGS
-                || usize::from(observer.line_slot) >= MAX_FISCAL_OBSERVERS
-                || !slots.insert(observer.line_slot)
-            {
-                return Err(invalid(
-                    "fiscal observers require bounded confidence, their actor's person or a government as holder, and a line slot of their own",
-                ));
-            }
-            observer.outcomes.validate(self.procedure_revision)?;
-        }
-        if self
-            .pending_withdrawals
-            .keys()
-            .any(|id| !self.observer_bindings.contains_key(id))
-        {
-            return Err(invalid(
-                "a fiscal report withdrawal names an unknown observer binding",
-            ));
-        }
-        Ok(())
-    }
-
-    fn validate_report_plan(&self) -> Result<(), CanwuError> {
-        let plan = &self.report_plan;
-        let active = |id: &String| {
-            self.observer_bindings
-                .get(id)
-                .is_some_and(FiscalObserverBinding::is_active)
-        };
-        if plan.revision > self.procedure_revision
-            || !plan.publish.keys().chain(plan.deferred.keys()).all(active)
-            || plan
-                .withdraw
-                .keys()
-                .any(|id| !self.observer_bindings.contains_key(id))
-            || plan
-                .publish
-                .values()
-                .chain(plan.deferred.values())
-                .flatten()
-                .any(|part| {
-                    usize::try_from(*part).map_or(true, |part| part >= MAX_FISCAL_REPORT_PARTS)
+    /// Checks that every derived field is what the rest of the state derives:
+    /// the offices' scope counts, observer lists, and cycle bookkeeping, the
+    /// ledgers' offices and ranks, the jurisdictions' counts and candidates
+    /// (their evaluation times aside), the observers' rows, and the root's
+    /// queue pages.
+    fn validate_derived(&self, catalog: &CompiledFiscalCatalog) -> Result<(), CanwuError> {
+        let mut derived = self.clone();
+        derived.recompute_derived_fields(catalog, None);
+        let unequal =
+            |what: &str| invalid(format!("fiscal {what} differ from what the state derives"));
+        for (key, office) in &self.offices {
+            let expected = derived.offices.get(key).ok_or_else(|| unequal("offices"))?;
+            if office.scope_count != expected.scope_count
+                || office.observers != expected.observers
+                || office.cycles.keys().collect::<Vec<_>>()
+                    != expected.cycles.keys().collect::<Vec<_>>()
+                || office.cycles.iter().any(|(cycle, entry)| {
+                    let expected = &expected.cycles[cycle];
+                    entry.hot_books != expected.hot_books
+                        || expected.partition_keys.iter().any(|(mechanism, keys)| {
+                            entry
+                                .partition_keys
+                                .get(mechanism)
+                                .is_none_or(|held| !held.is_superset(keys))
+                        })
                 })
-            || plan.publish.len()
-                + plan.publish.values().map(BTreeSet::len).sum::<usize>()
-                + plan.withdraw.values().map(BTreeSet::len).sum::<usize>()
-                > MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY
-        {
-            return Err(invalid(
-                "the fiscal report plan names an unknown observer or part, a later revision, or more records than one boundary publishes",
-            ));
+            {
+                return Err(unequal("office cycle bookkeeping or observer lists"));
+            }
+        }
+        if derived.offices.len() != self.offices.len() {
+            return Err(unequal("offices"));
+        }
+        for (key, ledger) in &self.ledgers {
+            let expected = &derived.ledgers[key];
+            if ledger.office != expected.office || ledger.rank != expected.rank {
+                return Err(unequal("ledger offices or ranks"));
+            }
+        }
+        if derived.jurisdictions.len() != self.jurisdictions.len() {
+            return Err(unequal("jurisdictions"));
+        }
+        for (key, jurisdiction) in &self.jurisdictions {
+            let expected = &derived.jurisdictions[key];
+            let candidates = |jurisdiction: &FiscalJurisdiction| {
+                jurisdiction
+                    .transition_candidates
+                    .values()
+                    .map(|candidate| {
+                        (
+                            candidate.id.clone(),
+                            candidate.transition_id.clone(),
+                            candidate.historically_observed,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            if jurisdiction.scope_count != expected.scope_count
+                || jurisdiction.mechanisms != expected.mechanisms
+                || jurisdiction.adoption_counts != expected.adoption_counts
+                || candidates(jurisdiction) != candidates(expected)
+            {
+                return Err(unequal("jurisdiction counts or candidates"));
+            }
+        }
+        for (key, observer) in &self.observers {
+            if observer.rows != derived.observers[key].rows {
+                return Err(unequal("observer rows"));
+            }
+        }
+        if self.root.queue_pages != derived.root.queue_pages {
+            return Err(unequal("report queue pages"));
         }
         Ok(())
     }
 
-    /// Checks one scope ledger the way [`Self::validate`] does: what a
-    /// change confined to that ledger's books can break.
-    pub(crate) fn validate_scope(
-        &self,
-        scope_binding_id: &str,
-        catalog: &CompiledFiscalCatalog,
-    ) -> Result<(), CanwuError> {
-        let ledger = self
-            .ledger(scope_binding_id)
-            .ok_or_else(|| invalid(format!("fiscal scope {scope_binding_id} is unavailable")))?;
-        self.validate_ledger(ledger, catalog)
+    /// Brings every derived field up to date: offices for every institution
+    /// a scope or observer binding names, their scope counts, observer
+    /// lists, and cycle bookkeeping; the ledgers' offices and ranks; a
+    /// jurisdiction for every region a scope names, with its counts and its
+    /// transition candidates as of `at`; the observers' rows; and the root's
+    /// queue pages. [`Self::into_records`] runs it. The first report of each
+    /// observer is queued by [`Self::add_observer`].
+    pub fn recompute_derived(&mut self, catalog: &CompiledFiscalCatalog, at: SimTime) {
+        self.recompute_derived_fields(catalog, Some(at));
     }
 
-    /// Checks one scope ledger: its scope, adoptions, books, and ring, and
-    /// every per-assessment invariant of its books.
     #[allow(clippy::too_many_lines)]
-    fn validate_ledger(
-        &self,
-        ledger: &FiscalScopeLedger,
-        catalog: &CompiledFiscalCatalog,
-    ) -> Result<(), CanwuError> {
-        let scope = &ledger.scope;
-        if !catalog.regions.contains_key(&scope.jurisdiction_id) {
+    fn recompute_derived_fields(&mut self, catalog: &CompiledFiscalCatalog, at: Option<SimTime>) {
+        let institutions: Vec<EntityRef> = self
+            .ledgers
+            .values()
+            .map(|ledger| ledger.scope.institution.clone())
+            .chain(self.observers.values().flat_map(|observer| {
+                observer
+                    .binding
+                    .visible_institutions
+                    .iter()
+                    .chain(observer.binding.controlled_by.iter())
+                    .cloned()
+            }))
+            .collect();
+        for institution in institutions {
+            self.office_mut(&institution);
+        }
+        // Ranks: each office's scopes in ID order.
+        let mut ranks = BTreeMap::<String, u32>::new();
+        for ledger in self.ledgers.values_mut() {
+            ledger.office = fiscal_office_key(&ledger.scope.institution);
+            let rank = ranks.entry(ledger.office.clone()).or_default();
+            ledger.rank = *rank;
+            *rank += 1;
+        }
+        for (key, office) in &mut self.offices {
+            office.scope_count = ranks.get(key).copied().unwrap_or_default();
+            office.observers.clear();
+        }
+        self.recompute_offices();
+        // Jurisdictions.
+        for ledger in self.ledgers.values() {
+            self.jurisdictions
+                .entry(ledger.scope.jurisdiction_id.clone())
+                .or_insert_with(|| FiscalJurisdiction::new(ledger.scope.jurisdiction_id.clone()));
+        }
+        for jurisdiction in self.jurisdictions.values_mut() {
+            jurisdiction.scope_count = 0;
+            jurisdiction.mechanisms.clear();
+            jurisdiction.adoption_counts.clear();
+        }
+        for ledger in self.ledgers.values() {
+            let Some(jurisdiction) = self.jurisdictions.get_mut(&ledger.scope.jurisdiction_id)
+            else {
+                continue;
+            };
+            jurisdiction.scope_count += 1;
+            *jurisdiction
+                .mechanisms
+                .entry(ledger.scope.mechanism)
+                .or_default() += 1;
+            add_adoption_counts(
+                &mut jurisdiction.adoption_counts,
+                ledger.adoptions.values(),
+                1,
+            );
+        }
+        let context = self.root.historical_context.clone();
+        for jurisdiction in self.jurisdictions.values_mut() {
+            let candidates = crate::derive::jurisdiction_candidates(
+                jurisdiction,
+                catalog,
+                &context,
+                at.unwrap_or(context.updated_at),
+            );
+            jurisdiction.transition_candidates = candidates;
+        }
+        // Observer rows.
+        for observer in self.observers.values_mut() {
+            let mut first_row = 0_u32;
+            observer.rows = observer
+                .binding
+                .visible_institutions
+                .iter()
+                .map(|institution| {
+                    let office = fiscal_office_key(institution);
+                    let scopes = self
+                        .offices
+                        .get(&office)
+                        .map_or(0, |office| office.scope_count);
+                    let rows = FiscalObserverRows {
+                        institution: institution.clone(),
+                        office,
+                        first_row,
+                        scopes,
+                    };
+                    first_row = first_row.saturating_add(scopes);
+                    rows
+                })
+                .collect();
+            for rows in &observer.rows {
+                if let Some(office) = self.offices.get_mut(&rows.office) {
+                    office
+                        .observers
+                        .insert(observer.binding.id.clone(), rows.first_row);
+                }
+            }
+        }
+        self.root.queue_pages = self
+            .report_queue
+            .keys()
+            .map(|observer| crate::records::report_queue_page(observer))
+            .collect();
+    }
+}
+
+/// Adds `sign` times the adoptions to per-rule counts, dropping a rule whose
+/// counts reach zero.
+pub(crate) fn add_adoption_counts<'a>(
+    counts: &mut BTreeMap<String, FiscalAdoptionCount>,
+    adoptions: impl IntoIterator<Item = &'a FiscalAdoptionState>,
+    sign: i8,
+) {
+    for adoption in adoptions {
+        let count = counts.entry(adoption.rule_id.clone()).or_default();
+        let step = |value: &mut u32| {
+            *value = if sign > 0 {
+                value.saturating_add(1)
+            } else {
+                value.saturating_sub(1)
+            };
+        };
+        if adoption.stage != FiscalAdoptionStage::Repealed {
+            step(&mut count.live);
+        }
+        if adoption.stage.is_operational() {
+            step(&mut count.operational);
+        }
+    }
+    counts.retain(|_, count| count.live > 0 || count.operational > 0);
+}
+
+/// The binding and policy IDs one office holds, which the binding directory
+/// resolves to it: its authority and audit bindings and its policy. Its
+/// proposal IDs are resolved too, in a namespace of their own.
+pub(crate) fn office_binding_ids(office: &FiscalOffice) -> impl Iterator<Item = &String> {
+    office
+        .authority_bindings
+        .keys()
+        .chain(office.audit_bindings.keys())
+        .chain(office.appointment_policy.iter().map(|policy| &policy.id))
+}
+
+/// Checks one observer's queued report work: within
+/// [`FISCAL_REPORT_QUEUE_CYCLES`] cycles of [`FISCAL_REPORT_QUEUE_PARTS`]
+/// parts, or, for what is left of a split publication, within the report's
+/// cycle slots and parts; every part in range, and no cycle named beside a
+/// whole report.
+pub(crate) fn validate_queue_entry(entry: &FiscalReportQueueEntry) -> Result<(), CanwuError> {
+    let (cycles, parts) = if entry.republish {
+        (
+            MAX_FISCAL_REPORT_CYCLE_SLOTS,
+            MAX_FISCAL_REPORT_PARTS_PER_CYCLE,
+        )
+    } else {
+        (FISCAL_REPORT_QUEUE_CYCLES, FISCAL_REPORT_QUEUE_PARTS)
+    };
+    if entry.cycles.len() > cycles
+        || entry.whole && !entry.cycles.is_empty()
+        || entry.cycles.values().any(|owed| {
+            owed.len() > parts
+                || owed.iter().any(|part| {
+                    usize::try_from(*part)
+                        .map_or(true, |part| part >= MAX_FISCAL_REPORT_PARTS_PER_CYCLE)
+                })
+        })
+    {
+        return Err(invalid(
+            "a fiscal report-queue entry names more cycles or parts than it may",
+        ));
+    }
+    entry
+        .cycles
+        .keys()
+        .try_for_each(|cycle| validate_identifier(cycle, "fiscal accounting cycle"))
+}
+
+/// Checks the root record.
+pub(crate) fn validate_root(
+    root: &FiscalRoot,
+    catalog: &CompiledFiscalCatalog,
+) -> Result<(), CanwuError> {
+    if root.schema_version != FISCAL_RUNTIME_SCHEMA_VERSION {
+        return Err(invalid("unsupported fiscal runtime schema"));
+    }
+    if root.context_revision == 0 {
+        return Err(invalid("fiscal context revision must be nonzero"));
+    }
+    if root.execution_evidence_kinds.len() > MAX_FISCAL_EVIDENCE_KINDS {
+        return Err(invalid("fiscal root approves too many evidence kinds"));
+    }
+    if root.catalog_version != initial_catalog_version()
+        || root.historical_context.year != catalog.historical_year
+            && root.historical_context.updated_at == SimTime::EPOCH
+    {
+        return Err(invalid(
+            "fiscal state is not bound to the selected initial catalog",
+        ));
+    }
+    if !catalog
+        .historical_scope
+        .contains(root.historical_context.year)
+    {
+        return Err(invalid(
+            "fiscal historical context lies outside the catalog scope",
+        ));
+    }
+    for page in &root.queue_pages {
+        validate_identifier(page, "fiscal report queue page")?;
+    }
+    Ok(())
+}
+
+/// Checks one office record on its own: its key fields, ring, bindings,
+/// policy, proposals, and cycle bookkeeping.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn validate_office(office: &FiscalOffice) -> Result<(), CanwuError> {
+    if office.revision == 0 {
+        return Err(invalid("fiscal office revision must be nonzero"));
+    }
+    office.outcomes.validate(office.revision)?;
+    if let Some(watermark) = &office.watermark {
+        validate_identifier(watermark, "fiscal accounting cycle")?;
+    }
+    if office.authority_bindings.len() > MAX_FISCAL_AUTHORITY_BINDINGS_PER_OFFICE
+        || office.audit_bindings.len() > MAX_FISCAL_AUDIT_BINDINGS_PER_OFFICE
+        || office.observers.len() > MAX_FISCAL_OBSERVERS_PER_INSTITUTION
+        || office.cycles.len() > MAX_FISCAL_HOT_CYCLES_PER_OFFICE
+    {
+        return Err(invalid("fiscal office exceeds its bounded capacity"));
+    }
+    validate_map(
+        &office.authority_bindings,
+        |value| &value.id,
+        "authority binding",
+    )?;
+    validate_map(&office.audit_bindings, |value| &value.id, "audit binding")?;
+    if office.authority_bindings.values().any(|binding| {
+        binding.institution != office.institution
+            || binding.acting_actor.is_some() != binding.authority_basis.is_some()
+            || binding.acting_actor.is_some() && binding.acting_actor == binding.authorized_actor
+            || binding
+                .authority_basis
+                .as_ref()
+                .is_some_and(|basis| basis.version == 0)
+    }) {
+        return Err(invalid(
+            "fiscal authority bindings belong to their office, and acting actors require one exact authority basis and differ from the authorized actor",
+        ));
+    }
+    if office.audit_bindings.values().any(|binding| {
+        binding.institution != office.institution || binding.authority_basis.version == 0
+    }) {
+        return Err(invalid(
+            "fiscal audit bindings belong to the office of their audited institution and require one exact authority basis",
+        ));
+    }
+    for observer in office.observers.keys() {
+        validate_identifier(observer, "observer binding")?;
+    }
+    for (cycle, entry) in &office.cycles {
+        validate_identifier(cycle, "fiscal accounting cycle")?;
+        if entry.hot_books == 0
+            || entry
+                .partition_keys
+                .values()
+                .any(|keys| keys.len() > MAX_FISCAL_PARTITION_KEYS)
+            || !entry
+                .archived_totals
+                .windows(2)
+                .all(|pair| pair[0].key() < pair[1].key())
+        {
+            return Err(invalid(
+                "a fiscal office cycle has no hot book, too many partition keys, or unordered archived totals",
+            ));
+        }
+    }
+    validate_office_appointments(office)
+}
+
+/// Checks the policy and proposals of one office: a policy of the office's
+/// institution with bounded party lists; proposals on that institution, by
+/// a listed party, with bounded grounds; at most
+/// [`MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY`] pending for one party, each of
+/// a different kind or binding, and at most
+/// [`MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY`] resolved; and every pending
+/// petition still apt: its binding still has the auditor it names, since
+/// any change of that auditor supersedes the petition.
+fn validate_office_appointments(office: &FiscalOffice) -> Result<(), CanwuError> {
+    if let Some(policy) = &office.appointment_policy {
+        validate_identifier(&policy.id, "appointment policy")?;
+        if policy.institution != office.institution
+            || policy.nominators.len() > MAX_FISCAL_APPOINTMENT_PARTIES
+            || policy.petitioners.len() > MAX_FISCAL_APPOINTMENT_PARTIES
+        {
+            return Err(invalid(
+                "a fiscal appointment policy governs its office's institution and lists a bounded number of parties",
+            ));
+        }
+    }
+    validate_map(&office.audit_proposals, |value| &value.id, "audit proposal")?;
+    if office.audit_proposals.is_empty() {
+        return Ok(());
+    }
+    let Some(policy) = &office.appointment_policy else {
+        return Err(invalid(
+            "audit proposals concern an institution no appointment policy governs",
+        ));
+    };
+    let mut pending = BTreeMap::<_, BTreeSet<_>>::new();
+    let mut resolved = 0_usize;
+    for proposal in office.audit_proposals.values() {
+        let binding = office.audit_bindings.get(&proposal.audit_binding_id);
+        let (listed, bounded, apt) = match &proposal.kind {
+            FiscalAuditProposalKind::Nomination {
+                authority_basis, ..
+            } => (
+                policy.nominators.contains(&proposal.party),
+                authority_basis.version != 0,
+                true,
+            ),
+            FiscalAuditProposalKind::RemovalPetition { auditor, grounds } => (
+                policy.petitioners.contains(&proposal.party),
+                !grounds.is_empty() && grounds.len() <= MAX_FISCAL_EVIDENCE_PER_RECORD,
+                binding.is_some_and(|binding| binding.auditor == *auditor),
+            ),
+        };
+        if proposal.institution != office.institution
+            || !listed
+            || !bounded
+            || validate_identifier(&proposal.audit_binding_id, "audit binding").is_err()
+            || proposal.is_pending() && !apt
+        {
             return Err(invalid(format!(
-                "scope {} references unavailable jurisdiction {}",
-                scope.id, scope.jurisdiction_id
+                "audit proposal {} is invalid or no longer apt while pending",
+                proposal.id
             )));
         }
-        // A report fact carries the scope's institution, so its domain
-        // reference is bounded like the other texts of a fact.
-        if matches!(
-            &scope.institution,
-            EntityRef::Domain(reference)
-                if reference.kind.namespace.len()
-                    + reference.kind.name.len()
-                    + reference.id.len()
-                    > MAX_FISCAL_IDENTIFIER_BYTES
-        ) {
-            return Err(invalid(
-                "a fiscal institution reference is longer than a report fact may carry",
-            ));
-        }
-        if let Some(watermark) = &ledger.watermark {
-            validate_identifier(watermark, "fiscal accounting cycle")?;
-        }
-        ledger.outcomes.validate(self.procedure_revision)?;
-        validate_map(&ledger.adoptions, |value| &value.id, "adoption")?;
-        for adoption in ledger.adoptions.values() {
-            let rule = catalog.rules.get(&adoption.rule_id).ok_or_else(|| {
-                invalid(format!("adoption {} references unknown rule", adoption.id))
-            })?;
-            if adoption.scope_binding_id != scope.id
-                || rule.mechanism != scope.mechanism
-                || adoption.generation == 0
+        if proposal.is_pending() {
+            let nominates = matches!(proposal.kind, FiscalAuditProposalKind::Nomination { .. });
+            if !pending
+                .entry(&proposal.party)
+                .or_default()
+                .insert((nominates, &proposal.audit_binding_id))
             {
                 return Err(invalid(format!(
-                    "adoption {} is inconsistent with its scope or generation",
-                    adoption.id
-                )));
-            }
-        }
-        let operational_rules: BTreeSet<_> = ledger
-            .adoptions
-            .values()
-            .filter(|adoption| adoption.stage.is_operational())
-            .map(|adoption| adoption.rule_id.as_str())
-            .collect();
-        // Object IDs are unique among the scope's hot objects of their kind,
-        // and evidence and external operations settle at most one receipt of
-        // the scope's hot books.
-        let mut ids: [BTreeSet<&str>; 5] = Default::default();
-        let mut consumed_evidence = BTreeSet::new();
-        let mut consumed_operations = BTreeSet::new();
-        for (cycle, book) in &ledger.books {
-            validate_identifier(cycle, "fiscal accounting cycle")?;
-            if *cycle != book.accounting_cycle_id {
-                return Err(invalid("fiscal book map key does not match its cycle"));
-            }
-            validate_map(&book.assessments, |value| &value.id, "assessment")?;
-            validate_map(&book.remissions, |value| &value.id, "remission")?;
-            validate_map(
-                &book.execution_requests,
-                |value| &value.id,
-                "execution request",
-            )?;
-            validate_map(
-                &book.execution_receipts,
-                |value| &value.id,
-                "execution receipt",
-            )?;
-            validate_map(&book.audits, |value| &value.id, "audit")?;
-            for (set, keys) in ids.iter_mut().zip([
-                book.assessments.keys().collect::<Vec<_>>(),
-                book.remissions.keys().collect(),
-                book.execution_requests.keys().collect(),
-                book.execution_receipts.keys().collect(),
-                book.audits.keys().collect(),
-            ]) {
-                if keys.into_iter().any(|key| !set.insert(key.as_str())) {
-                    return Err(invalid(format!(
-                        "a fiscal object ID of scope {} is used by two of its hot books",
-                        scope.id
-                    )));
-                }
-            }
-            if let FiscalBookStatus::Closed { closed_by } = &book.status {
-                validate_identifier(&closed_by.action_id, "fiscal action")?;
-            }
-            let mut partitions = BTreeSet::new();
-            for assessment in book.assessments.values() {
-                let rule = catalog.rules.get(&assessment.rule_id).ok_or_else(|| {
-                    invalid(format!(
-                        "assessment {} references unknown rule",
-                        assessment.id
-                    ))
-                })?;
-                if assessment.quantity == 0
-                    || assessment.unit.is_empty()
-                    || assessment.unit.len() > MAX_FISCAL_IDENTIFIER_BYTES
-                    || assessment.scope_binding_id != scope.id
-                    || assessment.accounting_cycle_id != book.accounting_cycle_id
-                    || rule.mechanism != scope.mechanism
-                    || !rule.payment_forms.contains(&assessment.payment_form)
-                {
-                    return Err(invalid(format!("assessment {} is invalid", assessment.id)));
-                }
-                if !operational_rules.contains(assessment.rule_id.as_str()) {
-                    return Err(invalid(format!(
-                        "assessment {} uses a rule that is not operational in its scope",
-                        assessment.id
-                    )));
-                }
-                if !partitions.insert((assessment.unit.as_str(), assessment.payment_form)) {
-                    return Err(invalid(
-                        "the same fiscal accounting partition was assessed more than once",
-                    ));
-                }
-            }
-            let mut remitted_by_assessment = BTreeMap::<&str, u64>::new();
-            for remission in book.remissions.values() {
-                if remission.quantity == 0
-                    || !book.assessments.contains_key(&remission.assessment_id)
-                {
-                    return Err(invalid(format!("remission {} is invalid", remission.id)));
-                }
-                checked_add(
-                    remitted_by_assessment
-                        .entry(&remission.assessment_id)
-                        .or_default(),
-                    remission.quantity,
-                    "remission total",
-                )?;
-            }
-            let mut collection_requested_by_assessment = BTreeMap::<&str, u64>::new();
-            for request in book.execution_requests.values() {
-                let assessment = book
-                    .assessments
-                    .get(&request.assessment_id)
-                    .ok_or_else(|| {
-                        invalid(format!(
-                            "execution request {} has no assessment",
-                            request.id
-                        ))
-                    })?;
-                if request.quantity == 0
-                    || request.unit != assessment.unit
-                    || request.payment_form != assessment.payment_form
-                    || request.resource.get() == 0
-                    || request.source == request.target
-                    || request.institution != scope.institution
-                    || request.source != request.institution
-                        && request.target != request.institution
-                {
-                    return Err(invalid(format!(
-                        "execution request {} is invalid",
-                        request.id
-                    )));
-                }
-                if request.kind == FiscalExecutionKind::Collect {
-                    checked_add(
-                        collection_requested_by_assessment
-                            .entry(&request.assessment_id)
-                            .or_default(),
-                        request.quantity,
-                        "collection request total",
-                    )?;
-                }
-            }
-            for assessment in book.assessments.values() {
-                let remitted = remitted_by_assessment
-                    .get(assessment.id.as_str())
-                    .copied()
-                    .unwrap_or_default();
-                let requested = collection_requested_by_assessment
-                    .get(assessment.id.as_str())
-                    .copied()
-                    .unwrap_or_default();
-                if remitted > assessment.quantity || requested > assessment.quantity - remitted {
-                    return Err(invalid(format!(
-                        "assessment {} is over-remitted or double-claimed",
-                        assessment.id
-                    )));
-                }
-            }
-            let mut fulfilled_by_request = BTreeMap::<&str, u64>::new();
-            for receipt in book.execution_receipts.values() {
-                let counts_as_fulfillment = receipt.disposition.counts_as_fulfillment();
-                if receipt.external_evidence.is_empty()
-                    || receipt.external_evidence.len() > MAX_FISCAL_EVIDENCE_PER_RECORD
-                    || receipt.external_operations.len() != receipt.external_evidence.len()
-                    || !book.execution_requests.contains_key(&receipt.request_id)
-                    || counts_as_fulfillment == (receipt.quantity == 0)
-                {
-                    return Err(invalid(format!(
-                        "execution receipt {} is invalid",
-                        receipt.id
-                    )));
-                }
-                if receipt
-                    .external_evidence
-                    .iter()
-                    .any(|evidence| !consumed_evidence.insert(evidence.clone()))
-                {
-                    return Err(invalid(
-                        "one external execution result cannot settle multiple fiscal receipts",
-                    ));
-                }
-                if receipt.external_operations.iter().any(|operation| {
-                    operation.external_operation_id.trim().is_empty()
-                        || !consumed_operations.insert(operation.clone())
-                }) {
-                    return Err(invalid(
-                        "one external fiscal operation cannot settle multiple receipts",
-                    ));
-                }
-                if counts_as_fulfillment {
-                    checked_add(
-                        fulfilled_by_request.entry(&receipt.request_id).or_default(),
-                        receipt.quantity,
-                        "execution receipt total",
-                    )?;
-                }
-            }
-            for request in book.execution_requests.values() {
-                if fulfilled_by_request
-                    .get(request.id.as_str())
-                    .copied()
-                    .unwrap_or_default()
-                    > request.quantity
-                {
-                    return Err(invalid(format!(
-                        "execution request {} was fulfilled more than once",
-                        request.id
-                    )));
-                }
-            }
-            for audit in book.audits.values() {
-                if audit.evidence.len() > MAX_FISCAL_EVIDENCE_PER_RECORD
-                    || !book.assessments.contains_key(&audit.target_id)
-                        && !book.execution_requests.contains_key(&audit.target_id)
-                        && !book.execution_receipts.contains_key(&audit.target_id)
-                {
-                    return Err(invalid(format!("audit {} has an unknown target", audit.id)));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Checks the offices against the ledgers: each keyed by its
-    /// institution, holding something, and counting for each cycle exactly
-    /// the scopes of its institution that hold a hot book of it.
-    fn validate_offices(&self) -> Result<(), CanwuError> {
-        let mut hot = BTreeMap::<String, BTreeMap<&str, u32>>::new();
-        for ledger in self.ledgers.values() {
-            let cycles = hot
-                .entry(fiscal_office_key(&ledger.scope.institution))
-                .or_default();
-            for cycle in ledger.books.keys() {
-                *cycles.entry(cycle.as_str()).or_default() += 1;
-            }
-        }
-        for (key, office) in &self.offices {
-            if *key != fiscal_office_key(&office.institution) || office.is_empty() {
-                return Err(invalid(
-                    "a fiscal office is empty or not keyed by its institution",
-                ));
-            }
-            if let Some(watermark) = &office.watermark {
-                validate_identifier(watermark, "fiscal accounting cycle")?;
-            }
-            office.outcomes.validate(self.procedure_revision)?;
-            for entry in office.cycles.values() {
-                if entry.hot_books == 0
-                    || !entry
-                        .archived_totals
-                        .windows(2)
-                        .all(|pair| pair[0].key() < pair[1].key())
-                {
-                    return Err(invalid(
-                        "a fiscal office cycle has no hot book or unordered archived totals",
-                    ));
-                }
-            }
-            let counted: BTreeMap<&str, u32> = office
-                .cycles
-                .iter()
-                .map(|(cycle, entry)| (cycle.as_str(), entry.hot_books))
-                .collect();
-            if hot.remove(key).unwrap_or_default() != counted {
-                return Err(invalid(
-                    "a fiscal office does not count the hot books of its scopes",
-                ));
-            }
-        }
-        if hot.values().any(|cycles| !cycles.is_empty()) {
-            return Err(invalid(
-                "an institution holds hot books but no fiscal office counts them",
-            ));
-        }
-        Ok(())
-    }
-
-    /// Checks the appointment policies and proposals: one policy per audited
-    /// institution, bounded party lists, and IDs apart from every authority
-    /// binding; proposals on governed institutions, by a listed party, with
-    /// bounded grounds; at most [`MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY`]
-    /// pending for one party of one policy, each of a different kind or
-    /// binding, and at most [`MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY`]
-    /// resolved for one policy; and every pending petition still apt: its
-    /// binding still has the auditor it names, since any change of that
-    /// auditor supersedes the petition.
-    fn validate_appointments(&self) -> Result<(), CanwuError> {
-        validate_map(
-            &self.audit_appointment_policies,
-            |value| &value.id,
-            "appointment policy",
-        )?;
-        let mut governed = BTreeSet::new();
-        for policy in self.audit_appointment_policies.values() {
-            if !governed.insert(&policy.institution)
-                || policy.nominators.len() > MAX_FISCAL_APPOINTMENT_PARTIES
-                || policy.petitioners.len() > MAX_FISCAL_APPOINTMENT_PARTIES
-                || self.authority_bindings.contains_key(&policy.id)
-            {
-                return Err(invalid(
-                    "fiscal appointment policies govern one institution each, list a bounded number of parties, and take an ID no authority binding uses",
-                ));
-            }
-        }
-        validate_map(&self.audit_proposals, |value| &value.id, "audit proposal")?;
-        let policies: BTreeMap<&EntityRef, &FiscalAppointmentPolicy> = self
-            .audit_appointment_policies
-            .values()
-            .map(|policy| (&policy.institution, policy))
-            .collect();
-        // Pending proposals by policy, party, kind, and binding, and resolved
-        // proposals by policy.
-        let mut pending = BTreeMap::<_, BTreeSet<_>>::new();
-        let mut resolved = BTreeMap::<&EntityRef, usize>::new();
-        for proposal in self.audit_proposals.values() {
-            let Some(policy) = policies.get(&proposal.institution) else {
-                return Err(invalid(format!(
-                    "audit proposal {} concerns an institution no appointment policy governs",
-                    proposal.id
-                )));
-            };
-            let binding = self.audit_bindings.get(&proposal.audit_binding_id);
-            let (listed, bounded, apt) = match &proposal.kind {
-                FiscalAuditProposalKind::Nomination {
-                    authority_basis, ..
-                } => (
-                    policy.nominators.contains(&proposal.party),
-                    authority_basis.version != 0,
-                    true,
-                ),
-                FiscalAuditProposalKind::RemovalPetition { auditor, grounds } => (
-                    policy.petitioners.contains(&proposal.party),
-                    !grounds.is_empty() && grounds.len() <= MAX_FISCAL_EVIDENCE_PER_RECORD,
-                    binding.is_some_and(|binding| {
-                        binding.institution == proposal.institution && binding.auditor == *auditor
-                    }),
-                ),
-            };
-            if !listed
-                || !bounded
-                || validate_identifier(&proposal.audit_binding_id, "audit binding").is_err()
-                || self
-                    .authority_bindings
-                    .contains_key(&proposal.audit_binding_id)
-                || self
-                    .audit_appointment_policies
-                    .contains_key(&proposal.audit_binding_id)
-                || proposal.is_pending() && !apt
-            {
-                return Err(invalid(format!(
-                    "audit proposal {} is invalid or no longer apt while pending",
+                    "audit proposal {} duplicates a pending proposal of its party",
                     proposal.id
                 )));
             }
-            if proposal.is_pending() {
-                let nominates = matches!(proposal.kind, FiscalAuditProposalKind::Nomination { .. });
-                if !pending
-                    .entry((&proposal.institution, &proposal.party))
-                    .or_default()
-                    .insert((nominates, &proposal.audit_binding_id))
-                {
-                    return Err(invalid(format!(
-                        "audit proposal {} duplicates a pending proposal of its party",
-                        proposal.id
-                    )));
-                }
-            } else {
-                *resolved.entry(&proposal.institution).or_default() += 1;
-            }
+        } else {
+            resolved += 1;
         }
-        if pending
+    }
+    if pending
+        .values()
+        .any(|proposals| proposals.len() > MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY)
+        || resolved > MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY
+    {
+        return Err(invalid(
+            "fiscal audit proposals exceed the pending room of a party or the resolved room of a policy",
+        ));
+    }
+    Ok(())
+}
+
+/// Checks one jurisdiction record on its own.
+pub(crate) fn validate_jurisdiction(
+    jurisdiction: &FiscalJurisdiction,
+    catalog: &CompiledFiscalCatalog,
+) -> Result<(), CanwuError> {
+    if jurisdiction.revision == 0 || !catalog.regions.contains_key(&jurisdiction.region_id) {
+        return Err(invalid(format!(
+            "fiscal jurisdiction {} has no revision or no catalog region",
+            jurisdiction.region_id
+        )));
+    }
+    jurisdiction.outcomes.validate(jurisdiction.revision)?;
+    validate_map(
+        &jurisdiction.transition_candidates,
+        |value| &value.id,
+        "transition candidate",
+    )?;
+    if jurisdiction
+        .adoption_counts
+        .keys()
+        .any(|rule| !catalog.rules.contains_key(rule))
+        || jurisdiction
+            .transition_candidates
             .values()
-            .any(|proposals| proposals.len() > MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY)
-            || resolved
-                .values()
-                .any(|count| *count > MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY)
+            .any(|candidate| candidate.jurisdiction_id != jurisdiction.region_id)
+    {
+        return Err(invalid(
+            "a fiscal jurisdiction counts an unknown rule or holds another region's candidate",
+        ));
+    }
+    Ok(())
+}
+
+/// Checks one observer record on its own: bounded confidence and
+/// visibility, a holder that is the actor's person or, without an actor, a
+/// government, its ring, its rows, and its report bookkeeping.
+pub(crate) fn validate_observer(observer: &FiscalObserver) -> Result<(), CanwuError> {
+    let binding = &observer.binding;
+    validate_identifier(&binding.id, "observer binding")?;
+    let holder_matches = match (binding.actor, &binding.knowledge_holder) {
+        (Some(actor), KnowledgeHolderRef::Person(person)) => actor == *person,
+        (None, KnowledgeHolderRef::Entity(EntityRef::Government(_))) => true,
+        _ => false,
+    };
+    if observer.revision == 0
+        || binding.confidence_per_mille > 1_000
+        || !holder_matches
+        || binding.visible_institutions.len() > MAX_FISCAL_VISIBLE_INSTITUTIONS
+        || usize::try_from(observer.row_count())
+            .map_or(true, |rows| rows > MAX_FISCAL_OBSERVER_ROWS)
+    {
+        return Err(invalid(
+            "fiscal observers require a revision, bounded confidence, rows, and visibility, and their actor's person or a government as holder",
+        ));
+    }
+    observer.outcomes.validate(observer.revision)?;
+    let report = &observer.report;
+    let mut slots = BTreeSet::new();
+    for (cycle, slot) in &report.cycles {
+        validate_identifier(cycle, "fiscal accounting cycle")?;
+        if usize::from(slot.slot) >= MAX_FISCAL_REPORT_CYCLE_SLOTS
+            || !slots.insert(slot.slot)
+            || slot.parts.len() % PART_ENTRY_DIGITS != 0
+            || slot.parts.len() / PART_ENTRY_DIGITS > MAX_FISCAL_REPORT_PARTS_PER_CYCLE
+            || !slot
+                .parts
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || slot.parts.ends_with(EMPTY_PART_ENTRY)
         {
             return Err(invalid(
-                "fiscal audit proposals exceed the pending room of a party or the resolved room of a policy",
+                "a fiscal observer's cycle slots are out of range, shared, or malformed",
             ));
         }
-        Ok(())
     }
+    report
+        .omitted_cycles
+        .iter()
+        .try_for_each(|cycle| validate_identifier(cycle, "fiscal accounting cycle"))
+}
 
-    pub fn into_record(self, catalog: &CompiledFiscalCatalog) -> Result<DomainRecord, CanwuError> {
-        self.validate(catalog)?;
-        let draft = self.record_draft()?;
-        Ok(DomainRecord {
-            reference: draft.reference,
-            owner: PLUGIN_NAME.to_owned(),
-            class: DomainRecordClass::Record,
-            version: 1,
-            lifecycle: DomainRecordLifecycle::Active,
-            payload: draft.payload,
-            references: draft.references,
-        })
+/// Checks one scope ledger on its own: its scope, revision, ring, adoptions,
+/// books, and every per-assessment invariant of its books.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn validate_ledger(
+    ledger: &FiscalScopeLedger,
+    catalog: &CompiledFiscalCatalog,
+) -> Result<(), CanwuError> {
+    let scope = &ledger.scope;
+    validate_identifier(&scope.id, "scope binding")?;
+    if !catalog.regions.contains_key(&scope.jurisdiction_id) {
+        return Err(invalid(format!(
+            "scope {} references unavailable jurisdiction {}",
+            scope.id, scope.jurisdiction_id
+        )));
     }
-
-    pub(crate) fn record_draft(&self) -> Result<DomainRecordDraft, CanwuError> {
-        let (draft, encoded_len) = self.encode_record()?;
-        if encoded_len > MAX_FISCAL_STATE_JSON_BYTES {
-            return Err(invalid("fiscal state exceeds its serialized byte budget"));
-        }
-        Ok(draft)
-    }
-
-    /// Encodes the state as its record draft and returns the serialized size
-    /// of the payload, without holding it to the byte budget.
-    ///
-    /// The payload declares, as required evidence, the versions the hot books
-    /// cite that a boundary established: their commutation quotes and their
-    /// receipts' evidence. An archived book's citations stop being declared;
-    /// [`FiscalState::prepare_fiscal_archive`] refuses a book whose citations
-    /// a seal has not covered yet.
-    pub(crate) fn encode_record(&self) -> Result<(DomainRecordDraft, usize), CanwuError> {
-        let mut draft = DomainRecordDraft::from_typed(fiscal_state_reference(), self)?;
-        let dependencies = self
-            .books()
-            .flat_map(|(_, book)| book.citations())
-            .filter(|reference| {
-                matches!(
-                    reference.established_by,
-                    DomainRecordVersionSource::BoundaryChange { .. }
-                )
-            })
-            .cloned()
-            .map(EvidenceRef::DomainRecordVersion)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let continuation = if dependencies.is_empty() {
-            PayloadRequiredEvidenceContinuationV1::completed()
-        } else {
-            PayloadRequiredEvidenceContinuationV1::active(dependencies)
-        };
-        draft
-            .payload
-            .as_object_mut()
-            .ok_or_else(|| invalid("fiscal state payload is not an object"))?
-            .insert(
-                PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD.to_owned(),
-                serde_json::to_value(continuation).map_err(|error| {
-                    invalid(format!(
-                        "fiscal evidence continuation could not be encoded: {error}"
-                    ))
-                })?,
-            );
-        let encoded_len = serde_json::to_vec(&draft.payload)
-            .map_err(|error| invalid(format!("fiscal state could not be sized: {error}")))?
-            .len();
-        draft.references = self.record_references();
-        Ok((draft, encoded_len))
-    }
-
-    /// What the state record references: its catalog, and the person or
-    /// government that holds each observer binding's report. The engine
-    /// checks a record's references against its entity registry when a run is
-    /// created or restored and at every write, so a state that names a holder
-    /// who does not exist is refused where it enters a run, instead of
-    /// failing the first boundary that publishes to it.
-    fn record_references(&self) -> Vec<DomainReference> {
-        let mut references: Vec<_> = self
-            .observer_bindings
-            .values()
-            .filter_map(|observer| match &observer.knowledge_holder {
-                KnowledgeHolderRef::Person(person) => Some(EntityRef::Person(*person)),
-                KnowledgeHolderRef::Entity(entity @ EntityRef::Government(_)) => {
-                    Some(entity.clone())
-                }
-                KnowledgeHolderRef::Entity(_) => None,
-            })
-            .map(|holder| DomainReference {
-                role: FISCAL_STATE_OBSERVER_ROLE.to_owned(),
-                target: DomainReferenceTarget::Core(holder),
-            })
-            .collect();
-        references.push(DomainReference::from_typed(
-            FISCAL_STATE_CATALOG_ROLE,
-            fiscal_catalog_reference(),
+    // A report row carries the scope's institution, so its domain reference
+    // is bounded like the other texts of a row.
+    if matches!(
+        &scope.institution,
+        EntityRef::Domain(reference)
+            if reference.kind.namespace.len()
+                + reference.kind.name.len()
+                + reference.id.len()
+                > MAX_FISCAL_IDENTIFIER_BYTES
+    ) {
+        return Err(invalid(
+            "a fiscal institution reference is longer than a report row may carry",
         ));
-        references.sort();
-        references.dedup();
-        references
     }
-
-    pub fn validate_record_binding(&self, record: &DomainRecord) -> Result<(), CanwuError> {
-        let expected_payload = self.record_draft()?.payload;
-        if record.references != self.record_references() || record.payload != expected_payload {
-            return Err(invalid(
-                "fiscal state record does not match its decoded payload, its catalog root, and its observers",
-            ));
+    if ledger.revision == 0 || ledger.office != fiscal_office_key(&scope.institution) {
+        return Err(invalid(format!(
+            "fiscal ledger {} has no revision or names another office",
+            scope.id
+        )));
+    }
+    if let Some(watermark) = &ledger.watermark {
+        validate_identifier(watermark, "fiscal accounting cycle")?;
+    }
+    if ledger.books.len() > MAX_FISCAL_HOT_BOOKS_PER_LEDGER
+        || ledger.adoptions.len() > MAX_FISCAL_ADOPTIONS_PER_LEDGER
+    {
+        return Err(invalid(format!(
+            "fiscal ledger {} exceeds its bounded capacity",
+            scope.id
+        )));
+    }
+    ledger.outcomes.validate(ledger.revision)?;
+    validate_map(&ledger.adoptions, |value| &value.id, "adoption")?;
+    for adoption in ledger.adoptions.values() {
+        let rule = catalog
+            .rules
+            .get(&adoption.rule_id)
+            .ok_or_else(|| invalid(format!("adoption {} references unknown rule", adoption.id)))?;
+        if adoption.scope_binding_id != scope.id
+            || rule.mechanism != scope.mechanism
+            || adoption.generation == 0
+        {
+            return Err(invalid(format!(
+                "adoption {} is inconsistent with its scope or generation",
+                adoption.id
+            )));
         }
-        Ok(())
     }
+    let operational_rules: BTreeSet<_> = ledger
+        .adoptions
+        .values()
+        .filter(|adoption| adoption.stage.is_operational())
+        .map(|adoption| adoption.rule_id.as_str())
+        .collect();
+    // Object IDs are unique among the scope's hot objects of their kind,
+    // and evidence and external operations settle at most one receipt of
+    // the scope's hot books.
+    let mut ids: [BTreeSet<&str>; 5] = Default::default();
+    let mut consumed_evidence = BTreeSet::new();
+    let mut consumed_operations = BTreeSet::new();
+    for (cycle, book) in &ledger.books {
+        validate_identifier(cycle, "fiscal accounting cycle")?;
+        if *cycle != book.accounting_cycle_id {
+            return Err(invalid("fiscal book map key does not match its cycle"));
+        }
+        if book.assessments.is_empty()
+            || book.assessments.len() > MAX_FISCAL_PARTITION_KEYS
+            || book.remissions.len() > MAX_FISCAL_REMISSIONS_PER_BOOK
+            || book.execution_requests.len() > MAX_FISCAL_EXECUTION_REQUESTS_PER_BOOK
+            || book.execution_receipts.len() > MAX_FISCAL_EXECUTION_RECEIPTS_PER_BOOK
+            || book.audits.len() > MAX_FISCAL_AUDITS_PER_BOOK
+            || book.revision == 0
+        {
+            return Err(invalid(format!(
+                "fiscal book {cycle} of scope {} is empty, unrevised, or exceeds its bounded capacity",
+                scope.id
+            )));
+        }
+        validate_map(&book.assessments, |value| &value.id, "assessment")?;
+        validate_map(&book.remissions, |value| &value.id, "remission")?;
+        validate_map(
+            &book.execution_requests,
+            |value| &value.id,
+            "execution request",
+        )?;
+        validate_map(
+            &book.execution_receipts,
+            |value| &value.id,
+            "execution receipt",
+        )?;
+        validate_map(&book.audits, |value| &value.id, "audit")?;
+        for (set, keys) in ids.iter_mut().zip([
+            book.assessments.keys().collect::<Vec<_>>(),
+            book.remissions.keys().collect(),
+            book.execution_requests.keys().collect(),
+            book.execution_receipts.keys().collect(),
+            book.audits.keys().collect(),
+        ]) {
+            if keys.into_iter().any(|key| !set.insert(key.as_str())) {
+                return Err(invalid(format!(
+                    "a fiscal object ID of scope {} is used by two of its hot books",
+                    scope.id
+                )));
+            }
+        }
+        if let FiscalBookStatus::Closed { closed_by } = &book.status {
+            validate_identifier(&closed_by.action_id, "fiscal action")?;
+        }
+        let mut partitions = BTreeSet::new();
+        for assessment in book.assessments.values() {
+            let rule = catalog.rules.get(&assessment.rule_id).ok_or_else(|| {
+                invalid(format!(
+                    "assessment {} references unknown rule",
+                    assessment.id
+                ))
+            })?;
+            if assessment.quantity == 0
+                || validate_identifier(&assessment.unit, "fiscal unit").is_err()
+                || assessment.scope_binding_id != scope.id
+                || assessment.accounting_cycle_id != book.accounting_cycle_id
+                || rule.mechanism != scope.mechanism
+                || !rule.payment_forms.contains(&assessment.payment_form)
+            {
+                return Err(invalid(format!("assessment {} is invalid", assessment.id)));
+            }
+            if !operational_rules.contains(assessment.rule_id.as_str()) {
+                return Err(invalid(format!(
+                    "assessment {} uses a rule that is not operational in its scope",
+                    assessment.id
+                )));
+            }
+            if !partitions.insert((assessment.unit.as_str(), assessment.payment_form)) {
+                return Err(invalid(
+                    "the same fiscal accounting partition was assessed more than once",
+                ));
+            }
+        }
+        let mut remitted_by_assessment = BTreeMap::<&str, u64>::new();
+        for remission in book.remissions.values() {
+            if remission.quantity == 0 || !book.assessments.contains_key(&remission.assessment_id) {
+                return Err(invalid(format!("remission {} is invalid", remission.id)));
+            }
+            checked_add(
+                remitted_by_assessment
+                    .entry(&remission.assessment_id)
+                    .or_default(),
+                remission.quantity,
+                "remission total",
+            )?;
+        }
+        let mut collection_requested_by_assessment = BTreeMap::<&str, u64>::new();
+        for request in book.execution_requests.values() {
+            let assessment = book
+                .assessments
+                .get(&request.assessment_id)
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "execution request {} has no assessment",
+                        request.id
+                    ))
+                })?;
+            if request.quantity == 0
+                || request.unit != assessment.unit
+                || request.payment_form != assessment.payment_form
+                || request.resource.get() == 0
+                || request.source == request.target
+                || request.institution != scope.institution
+                || request.source != request.institution && request.target != request.institution
+            {
+                return Err(invalid(format!(
+                    "execution request {} is invalid",
+                    request.id
+                )));
+            }
+            if request.kind == FiscalExecutionKind::Collect {
+                checked_add(
+                    collection_requested_by_assessment
+                        .entry(&request.assessment_id)
+                        .or_default(),
+                    request.quantity,
+                    "collection request total",
+                )?;
+            }
+        }
+        for assessment in book.assessments.values() {
+            let remitted = remitted_by_assessment
+                .get(assessment.id.as_str())
+                .copied()
+                .unwrap_or_default();
+            let requested = collection_requested_by_assessment
+                .get(assessment.id.as_str())
+                .copied()
+                .unwrap_or_default();
+            if remitted > assessment.quantity || requested > assessment.quantity - remitted {
+                return Err(invalid(format!(
+                    "assessment {} is over-remitted or double-claimed",
+                    assessment.id
+                )));
+            }
+        }
+        let mut fulfilled_by_request = BTreeMap::<&str, u64>::new();
+        for receipt in book.execution_receipts.values() {
+            let counts_as_fulfillment = receipt.disposition.counts_as_fulfillment();
+            if receipt.external_evidence.is_empty()
+                || receipt.external_evidence.len() > MAX_FISCAL_EVIDENCE_PER_RECORD
+                || receipt.external_operations.len() != receipt.external_evidence.len()
+                || !book.execution_requests.contains_key(&receipt.request_id)
+                || counts_as_fulfillment == (receipt.quantity == 0)
+            {
+                return Err(invalid(format!(
+                    "execution receipt {} is invalid",
+                    receipt.id
+                )));
+            }
+            if receipt
+                .external_evidence
+                .iter()
+                .any(|evidence| !consumed_evidence.insert(evidence.clone()))
+            {
+                return Err(invalid(
+                    "one external execution result cannot settle multiple fiscal receipts",
+                ));
+            }
+            if receipt.external_operations.iter().any(|operation| {
+                operation.external_operation_id.trim().is_empty()
+                    || !consumed_operations.insert(operation.clone())
+            }) {
+                return Err(invalid(
+                    "one external fiscal operation cannot settle multiple receipts",
+                ));
+            }
+            if counts_as_fulfillment {
+                checked_add(
+                    fulfilled_by_request.entry(&receipt.request_id).or_default(),
+                    receipt.quantity,
+                    "execution receipt total",
+                )?;
+            }
+        }
+        for request in book.execution_requests.values() {
+            if fulfilled_by_request
+                .get(request.id.as_str())
+                .copied()
+                .unwrap_or_default()
+                > request.quantity
+            {
+                return Err(invalid(format!(
+                    "execution request {} was fulfilled more than once",
+                    request.id
+                )));
+            }
+        }
+        for audit in book.audits.values() {
+            if audit.evidence.len() > MAX_FISCAL_EVIDENCE_PER_RECORD
+                || !book.assessments.contains_key(&audit.target_id)
+                    && !book.execution_requests.contains_key(&audit.target_id)
+                    && !book.execution_receipts.contains_key(&audit.target_id)
+            {
+                return Err(invalid(format!("audit {} has an unknown target", audit.id)));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn checked_add(target: &mut u64, value: u64, label: &str) -> Result<(), CanwuError> {
@@ -3529,4 +4466,70 @@ fn validate_refs<T>(
 
 pub(crate) fn invalid(message: impl Into<String>) -> CanwuError {
     CanwuError::new(ErrorCode::InvalidDomainRecord, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary(pending: BTreeMap<String, BTreeSet<u32>>) -> FiscalReportSummary {
+        FiscalReportSummary {
+            observer_id: "observer".to_owned(),
+            actor: None,
+            as_of: SimTime::EPOCH,
+            confidence_per_mille: 1_000,
+            cycles: BTreeMap::new(),
+            fact_count: 0,
+            pending,
+            omitted_cycles: 0,
+            withdrawn: false,
+        }
+    }
+
+    #[test]
+    fn pending_parts_round_trip_as_a_bitmap_per_cycle() {
+        let last = u32::try_from(MAX_FISCAL_REPORT_PARTS_PER_CYCLE).expect("parts") - 1;
+        let pending = BTreeMap::from([
+            ("a".to_owned(), BTreeSet::from([0, 7, 8, 9, last])),
+            ("b".to_owned(), BTreeSet::from([3])),
+            ("c".to_owned(), (0..=last).collect()),
+        ]);
+        let value = serde_json::to_value(summary(pending.clone())).expect("summary");
+        assert_eq!(value["pending"]["b"], "08");
+        assert_eq!(
+            value["pending"]["c"].as_str().expect("bitmap").len(),
+            MAX_FISCAL_REPORT_PARTS_PER_CYCLE / 4
+        );
+        let back: FiscalReportSummary = serde_json::from_value(value).expect("decoded");
+        assert_eq!(back.pending, pending);
+    }
+
+    #[test]
+    fn a_malformed_bitmap_is_refused() {
+        let mut value = serde_json::to_value(summary(BTreeMap::new())).expect("summary");
+        for bitmap in [
+            "0".to_owned(),
+            "zz".to_owned(),
+            "00".repeat(MAX_FISCAL_REPORT_PARTS_PER_CYCLE / 8 + 1),
+        ] {
+            value["pending"] = serde_json::json!({ "a": bitmap });
+            assert!(serde_json::from_value::<FiscalReportSummary>(value.clone()).is_err());
+        }
+    }
+
+    #[test]
+    fn an_office_key_names_its_institution_alone() {
+        let first = fiscal_office_key(&EntityRef::Government(canwu_api::GovernmentId::new(1)));
+        let second = fiscal_office_key(&EntityRef::Government(canwu_api::GovernmentId::new(2)));
+        assert_ne!(first, second);
+        for key in [&first, &second] {
+            let digits = key.strip_prefix("office.").expect("prefix");
+            assert_eq!(digits.len(), 32);
+            assert!(digits.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        }
+        assert_eq!(
+            first,
+            fiscal_office_key(&EntityRef::Government(canwu_api::GovernmentId::new(1)))
+        );
+    }
 }

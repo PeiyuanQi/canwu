@@ -712,20 +712,47 @@ fn completed_totals(
 
 impl FiscalState {
     /// The digest an archive batch is prepared from and applies against: the
-    /// procedure revision, which every action, receipt, and context change
-    /// advances, and the archive head. A commit whose source root is not the
-    /// state's current one settles as stale.
-    pub fn archive_source_root(&self) -> Result<String, CanwuError> {
+    /// archive head it extends, the revision of every book it selects, and
+    /// the cycle bookkeeping of every office cycle those books belong to. A
+    /// commit whose source root is not the one the state has now settles as
+    /// stale: another commit moved the head or took a book of one of its
+    /// cycles, or an audit finding changed a book it selects. Nothing else
+    /// makes it stale, so actions, receipts, and context changes on other
+    /// books do not.
+    pub fn archive_source_root(
+        &self,
+        books: &[FiscalArchiveBookRefV1],
+    ) -> Result<String, CanwuError> {
+        let mut selected = Vec::with_capacity(books.len());
+        let mut cycles = BTreeMap::<(String, &str), Option<(u32, u32)>>::new();
+        for book in books {
+            let ledger = self.ledger(&book.scope_binding_id);
+            let revision = ledger
+                .and_then(|ledger| ledger.books.get(&book.accounting_cycle_id))
+                .filter(|hot| !hot.is_open())
+                .map(|hot| hot.revision);
+            selected.push((&book.scope_binding_id, &book.accounting_cycle_id, revision));
+            if let Some(ledger) = ledger {
+                let key = (ledger.office.clone(), book.accounting_cycle_id.as_str());
+                let entry = self
+                    .offices
+                    .get(&key.0)
+                    .and_then(|office| office.cycles.get(key.1))
+                    .map(|entry| (entry.hot_books, entry.archived_books));
+                cycles.insert(key, entry);
+            }
+        }
         canonical_hash(
             SOURCE_ROOT_DOMAIN,
             &(
-                self.procedure_revision,
                 &self.archive.directory_root,
                 self.archive.archived_book_count,
                 self.archive.archived_totals_count,
                 self.archive.archived_receipt_count,
                 self.archive.committed_batch_count,
                 self.archive.receipt_sequence,
+                selected,
+                cycles.into_iter().collect::<Vec<_>>(),
             ),
         )
     }
@@ -832,7 +859,14 @@ impl FiscalState {
                 }
             }
         }
-        let expected_source_root = self.archive_source_root()?;
+        let selected_books: Vec<FiscalArchiveBookRefV1> = books
+            .iter()
+            .map(|(scope, book)| FiscalArchiveBookRefV1 {
+                scope_binding_id: scope.id.clone(),
+                accounting_cycle_id: book.accounting_cycle_id.clone(),
+            })
+            .collect();
+        let expected_source_root = self.archive_source_root(&selected_books)?;
         let pages = self.archive_pages(&expected_source_root, &receipts, &books)?;
         let previous_lookup_root = match &self.archive.directory_root {
             Some(root) => {
@@ -887,13 +921,7 @@ impl FiscalState {
         Ok(PreparedFiscalArchiveBatchV1 {
             expected_source_root,
             selected_receipts: receipts.iter().map(|receipt| receipt.id.clone()).collect(),
-            selected_books: books
-                .iter()
-                .map(|(scope, book)| FiscalArchiveBookRefV1 {
-                    scope_binding_id: scope.id.clone(),
-                    accounting_cycle_id: book.accounting_cycle_id.clone(),
-                })
-                .collect(),
+            selected_books,
             pages,
             lookup_pages: lookup
                 .pages
@@ -1020,7 +1048,7 @@ impl FiscalState {
     /// commit the head has no room for, because it already holds
     /// [`MAX_FISCAL_ARCHIVE_PENDING_HANDLES`] unacknowledged stale handles, is
     /// refused and changes nothing. Neither reads the archive store, and
-    /// neither advances the procedure revision, so archive maintenance never
+    /// neither advances any record's revision, so archive maintenance never
     /// makes an action stale.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn apply_fiscal_archive_commit(
@@ -1029,7 +1057,8 @@ impl FiscalState {
         at: SimTime,
     ) -> Result<FiscalArchiveSettlement, CanwuError> {
         commit.validate()?;
-        let applied = self.archive_source_root()? == commit.expected_source_root;
+        let applied =
+            self.archive_source_root(&commit.selected_books)? == commit.expected_source_root;
         if !applied {
             if self
                 .archive

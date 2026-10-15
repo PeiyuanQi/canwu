@@ -19,11 +19,11 @@ use canwu_fiscal::{
 };
 use support::{
     Draft, Fixture, PRINCIPAL, RULE, TREASURY_AUTHORITY, admission_rejection, assessment, draft,
-    enqueue_requests, fiscal_state, procedure_revision, scenario, settle, submit, treasury_scope,
+    enqueue_requests, fiscal_state, ledger_revision, scenario, settle, submit, treasury_scope,
 };
 
-/// An assessment of the treasury's first scope in a unit of its own, so that
-/// many share one book.
+/// An assessment of the treasury's first scope in a cycle of its own, so that
+/// many fit the scope's ledger.
 fn assess(action_id: &str) -> Draft {
     draft(
         action_id,
@@ -32,9 +32,9 @@ fn assess(action_id: &str) -> Draft {
             assessment_id: format!("{action_id}.assessment"),
             rule_id: RULE.to_owned(),
             scope_binding_id: treasury_scope(0),
-            accounting_cycle_id: "cycle.1".to_owned(),
+            accounting_cycle_id: format!("cycle.{action_id}"),
             quantity: 100,
-            unit: format!("unit.{action_id}"),
+            unit: "grain".to_owned(),
             payment_form: FiscalPaymentForm::Grain,
             commutation_quote: None,
         },
@@ -70,7 +70,7 @@ fn a_resent_action_is_refused_while_its_outcome_is_hot_and_after_it_is_evicted()
     let mut canwu = fixture.runtime(scenario(|_| {}));
 
     // The first action applies; its outcome is in its scope's ring.
-    let first_revision = procedure_revision(&canwu);
+    let first_revision = ledger_revision(&canwu, &treasury_scope(0));
     let first = assess("first").against(first_revision);
     enqueue_requests(&mut canwu, &[(PRINCIPAL, first.clone())]);
     settle(&mut canwu);
@@ -92,13 +92,13 @@ fn a_resent_action_is_refused_while_its_outcome_is_hot_and_after_it_is_evicted()
     );
     assert_eq!(settled(&canwu, "first").len(), 1);
 
-    // A revision the state never had is refused too.
-    let ahead = assess("ahead").against(procedure_revision(&canwu) + 1);
+    // A revision the scope's ledger never had is refused too.
+    let ahead = assess("ahead").against(ledger_revision(&canwu, &treasury_scope(0)) + 1);
     enqueue_requests(&mut canwu, &[(PRINCIPAL, ahead)]);
     settle(&mut canwu);
     let error = refused(&canwu, "ahead");
     assert_eq!(error.code, ErrorCode::ValueOutOfRange);
-    assert_eq!(error.message, FISCAL_REVISION_UNKNOWN);
+    assert_eq!(error.message, format!("entry 0: {FISCAL_REVISION_UNKNOWN}"));
     assert!(settled(&canwu, "ahead").is_empty());
 
     // As many later outcomes as the ring holds evict the first one. The
@@ -117,7 +117,7 @@ fn a_resent_action_is_refused_while_its_outcome_is_hot_and_after_it_is_evicted()
     settle(&mut canwu);
     let error = refused(&canwu, "first");
     assert_eq!(error.code, ErrorCode::ValueOutOfRange);
-    assert_eq!(error.message, FISCAL_REVISION_EXPIRED);
+    assert_eq!(error.message, format!("entry 0: {FISCAL_REVISION_EXPIRED}"));
     assert_eq!(settled(&canwu, "first").len(), 1);
 
     // Every outcome is still recorded for good in its settled event.
@@ -148,7 +148,7 @@ fn copies_settled_in_one_boundary_apply_once() {
     let fixture = Fixture::new();
     let mut canwu = fixture.runtime(scenario(|_| {}));
 
-    let revision = procedure_revision(&canwu);
+    let revision = ledger_revision(&canwu, &treasury_scope(0));
     let copy = assess("copied").against(revision);
     enqueue_requests(&mut canwu, &[(PRINCIPAL, copy.clone()), (PRINCIPAL, copy)]);
     settle(&mut canwu);
@@ -164,7 +164,7 @@ fn copies_settled_in_one_boundary_apply_once() {
     // The first copy settles, then as many outcomes as the ring holds evict
     // it, then the second copy reaches settlement in the same boundary. The
     // boundary remembers what it settled, so nothing applies twice.
-    let revision = procedure_revision(&canwu);
+    let revision = ledger_revision(&canwu, &treasury_scope(0));
     let mut commands = vec![(PRINCIPAL, assess("evicted").against(revision))];
     commands.extend((0..FISCAL_RECENT_OUTCOMES).map(|index| {
         (

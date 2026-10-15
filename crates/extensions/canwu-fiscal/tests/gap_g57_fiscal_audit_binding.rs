@@ -39,18 +39,15 @@ fn self_appointment(state: &mut FiscalState) {
         ("appointment.treasury", treasury()),
         ("appointment.granary", granary()),
     ] {
-        state.audit_appointment_policies.insert(
-            id.to_owned(),
-            FiscalAppointmentPolicy {
-                id: id.to_owned(),
-                institution: institution.clone(),
-                appointer: institution,
-                nominators: BTreeSet::new(),
-                petitioners: BTreeSet::new(),
-                appoints_without_nomination: true,
-                removes_without_petition: true,
-            },
-        );
+        state.add_appointment_policy(FiscalAppointmentPolicy {
+            id: id.to_owned(),
+            institution: institution.clone(),
+            appointer: institution,
+            nominators: BTreeSet::new(),
+            petitioners: BTreeSet::new(),
+            appoints_without_nomination: true,
+            removes_without_petition: true,
+        });
     }
 }
 
@@ -160,17 +157,14 @@ fn gap_g57_fiscal_audit_binding() {
         self_appointment(state);
         authored_assessment(state, TREASURY_ASSESSMENT, &treasury_scope(0));
         authored_assessment(state, GRANARY_ASSESSMENT, GRANARY_SCOPE);
-        state.audit_bindings.insert(
-            TREASURY_AUDIT.to_owned(),
-            FiscalAuditBinding {
-                id: TREASURY_AUDIT.to_owned(),
-                institution: treasury(),
-                auditor: AUDITOR,
-                authority_basis: initial_commission(AUDITOR_COMMISSION),
-                rebound_by: None,
-                nomination: None,
-            },
-        );
+        state.add_audit_binding(FiscalAuditBinding {
+            id: TREASURY_AUDIT.to_owned(),
+            institution: treasury(),
+            auditor: AUDITOR,
+            authority_basis: initial_commission(AUDITOR_COMMISSION),
+            rebound_by: None,
+            nomination: None,
+        });
     }));
 
     // The auditor, who holds no role in the treasury, records a finding on it,
@@ -395,7 +389,7 @@ fn gap_g57_fiscal_audit_binding() {
     assert!(applied(&canwu, "rebind.second-auditor"));
     assert!(rejection_reason(&canwu, "audit.after-rebind").ends_with(FISCAL_ISSUER_NOT_BOUND));
     let state = fiscal_state(&canwu);
-    let binding = &state.audit_bindings[TREASURY_AUDIT];
+    let binding = &state.audit_binding(TREASURY_AUDIT).expect("audit binding");
     assert_eq!(binding.auditor, SECOND_AUDITOR);
     let rebound_by = binding.rebound_by.as_ref().expect("rebinding provenance");
     assert_eq!(rebound_by.action_id, "rebind.second-auditor");
@@ -476,11 +470,7 @@ fn gap_g57_fiscal_audit_binding() {
         )],
     );
     assert!(applied(&canwu, "rebind.removed"));
-    assert!(
-        !fiscal_state(&canwu)
-            .audit_bindings
-            .contains_key(TREASURY_AUDIT)
-    );
+    assert!(fiscal_state(&canwu).audit_binding(TREASURY_AUDIT).is_none());
     submit(
         &mut canwu,
         vec![(

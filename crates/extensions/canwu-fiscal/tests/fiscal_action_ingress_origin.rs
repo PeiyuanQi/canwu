@@ -25,8 +25,7 @@ use canwu_fiscal::{
 };
 use support::{
     Fixture, GRANARY_AUTHORITY, GRANARY_PRINCIPAL, GRANARY_SCOPE, PRINCIPAL, TREASURY_AUTHORITY,
-    assessment, enqueue_requests, fiscal_state, outcome, procedure_revision, scenario,
-    treasury_scope,
+    assessment, enqueue_requests, fiscal_state, ledger_revision, outcome, scenario, treasury_scope,
 };
 
 const FORGER: &str = "fixture-forger";
@@ -132,17 +131,23 @@ fn only_the_command_that_produced_an_action_packet_can_settle_it() {
         actor: Some(PRINCIPAL),
         authority_basis: None,
     };
-    // A forged request is decided against the revision its settling boundary
-    // begins with, by the binding's principal, so it would apply if it were
-    // settled.
-    let revision = procedure_revision(&canwu);
+    // A forged batch is decided against the revision its scope's ledger has,
+    // by the binding's principal, so it would apply if it were settled.
+    let revision = ledger_revision(&canwu, &treasury_scope(0));
+    let forged_revision = ledger_revision(&canwu, &treasury_scope(1));
     let forged = |action_id: &str, command: u64| {
+        let entry = assessment(action_id, TREASURY_AUTHORITY, &treasury_scope(1), "c1")
+            .entry(forged_revision);
         serde_json::json!({
-            "request": assessment(action_id, TREASURY_AUTHORITY, &treasury_scope(1), "c1")
-                .against(revision + 1),
+            "authority_binding_id": TREASURY_AUTHORITY,
             "command": command,
-            "issuer": issuer,
-            "target": {"type": "ledger", "id": treasury_scope(1)},
+            "entries": [{
+                "action_id": entry.action_id,
+                "expected_revision": entry.expected_revision,
+                "action": entry.action,
+                "issuer": issuer,
+                "target": {"type": "ledger", "id": treasury_scope(1)},
+            }],
         })
     };
     let error = canwu
@@ -176,19 +181,20 @@ fn only_the_command_that_produced_an_action_packet_can_settle_it() {
     };
 
     // After it settles, another command is admitted, decided against the
-    // revision that settlement left, and another plugin's boundary system
+    // revision its own ledger has, and another plugin's boundary system
     // schedules two packets into the action ingress: one that names the
     // first command with an action and an issuer of its own, and one that is
     // not an action packet at all. All three settle together in the next
     // boundary.
     canwu.step_canonical().expect("the settling boundary");
-    assert_eq!(procedure_revision(&canwu), revision + 1);
+    assert_eq!(ledger_revision(&canwu, &treasury_scope(0)), revision + 1);
+    let granary_revision = ledger_revision(&canwu, GRANARY_SCOPE);
     enqueue_requests(
         &mut canwu,
         &[(
             GRANARY_PRINCIPAL,
             assessment("issued.granary", GRANARY_AUTHORITY, GRANARY_SCOPE, "c1")
-                .against(revision + 1),
+                .against(granary_revision),
         )],
     );
     canwu
@@ -196,7 +202,7 @@ fn only_the_command_that_produced_an_action_packet_can_settle_it() {
             FORGER,
             FORGE_INGRESS,
             canwu.time(),
-            serde_json::json!([forged("forged.boundary", command.get()), {"request": 7}]),
+            serde_json::json!([forged("forged.boundary", command.get()), {"entries": 7}]),
         ))
         .expect("forge trigger");
     canwu

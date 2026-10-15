@@ -2,9 +2,10 @@
 
 Status: design for 0.16.0, reviewed ("implement with changes, with phasing")
 and amended. Phase 0, the engine probe, is measured
-([Phase 0 results](#phase-0-results)), and Phase 1 is implemented on the single
-state record ([Phase 1 as implemented](#phase-1-as-implemented)); Phase 2 is
-not. The owner
+([Phase 0 results](#phase-0-results)), Phase 1 is implemented on the single
+state record ([Phase 1 as implemented](#phase-1-as-implemented)), and Phase 2
+is implemented on the partitioned records
+([Phase 2 as implemented](#phase-2-as-implemented)). The owner
 decided on 2026-10-15 that Phases 0, 1, and 2 ship in 0.16.0 and that the
 release waits for them, so that 0.16.0 can run the county-level world; Phase 3
 stays later ([Phases](#phases)). It answers downstream gaps G-15
@@ -43,6 +44,7 @@ and the lookup-index functions that the 0.16.0 production archive package
 3. [The design on one page](#the-design-on-one-page)
 4. [Phases](#phases)
    - [Phase 1 as implemented](#phase-1-as-implemented)
+   - [Phase 2 as implemented](#phase-2-as-implemented)
 5. [State layout](#state-layout)
 6. [Revisions, staleness, and idempotency](#revisions-staleness-and-idempotency)
 7. [Throughput](#throughput)
@@ -127,9 +129,11 @@ The world target cannot be reached by raising the caps:
     page whose canonical bytes carry the record as `value_bytes: Vec<u8>`,
     which `serde_json` writes as an array of decimal numbers, about 4 bytes
     per byte. Phase 0 confirmed it: a record whose payload is larger than
-    1,151,023 bytes cannot be written into a paged checkpoint
-    ([Phase 0 results](#phase-0-results)). The 0.15.0 fiscal profile state
-    (2.15 MB) is already past it.
+    1,151,023 bytes could not be written into a paged checkpoint
+    ([Phase 0 results](#phase-0-results)), and the 0.15.0 fiscal profile
+    state (2.15 MB) was already past it. The 0.16.0 record-store package has
+    since lifted the ceiling to 512 MiB per record, paged in 1 MiB chunks, so
+    it no longer bounds a fiscal record.
   - **Reverse-reference closure.** A record mutation re-validates every record
     that references it, transitively, up to 16,384
     (`MAX_AFFECTED_RECORD_VALIDATION_CLOSURE`). A shard design in which many
@@ -222,7 +226,8 @@ integrated into it.
 **Phase 0: engine probes (no fiscal code; done).** What a record write costs
 the engine, as a function of the record's size and shape, in a store of
 65,536 records; what an idle boundary costs with that store; and whether a
-record of 1.2 MB fits a paged checkpoint (it does not). The binary is
+record of 1.2 MB fits a paged checkpoint (it did not, before the record-store
+package lifted the ceiling to 512 MiB). The binary is
 `record-write-profile` in `benchmarks/performance-harness`; the results are
 in [Phase 0 results](#phase-0-results).
 
@@ -264,9 +269,10 @@ and removing other bindings.
 
 Phase 1 alone does not reach the world target: the state is still decoded,
 copied, and journaled whole by every boundary that changes it, the global
-revision still makes concurrent actions stale, and a state above the
-paged-checkpoint ceiling ([Phase 0 results](#phase-0-results)) cannot be
-written into a paged checkpoint. It is a milestone of its own because it is
+revision still makes concurrent actions stale, and, before the record-store
+package lifted the paged-checkpoint ceiling, a state above 1.15 MB
+([Phase 0 results](#phase-0-results)) could not be written into a paged
+checkpoint. It is a milestone of its own because it is
 complete, tested, and reviewable before the storage changes under it; whether
 it lands as its own commit is the orchestrator's choice.
 
@@ -332,7 +338,9 @@ to pull forward if a 0.16.0 world needs court-level reports.
 Phase 1 is implemented on the 0.16.0 integration branch (the fiscal and society
 package and the knowledge package included), with the semantics above on the
 one state record `canwu.fiscal:state`. What it holds and how it differs from
-the design follows; the rest of this proposal still describes Phase 2.
+the design follows; the design sections after it describe Phase 2 as
+designed, and [Phase 2 as implemented](#phase-2-as-implemented) records where
+the implementation differs.
 
 **State.** `FiscalState` keeps one `FiscalScopeLedger` per scope binding
 (`ledgers`, keyed by scope ID: the binding, its adoptions, its hot
@@ -471,8 +479,8 @@ before Phase 1 (three samples each, all equal):
 | Measure | Before | Phase 1 |
 | --- | ---: | ---: |
 | Fiscal state (bytes) | 2,155,406 | 1,947,029 |
-| Admitting boundary of 48 actions (allocations) | 1,714,681 | 1,635,402 |
-| Settling boundary of 48 actions | 6,476,053 | 6,282,337 |
+| Admitting boundary of 40 actions (allocations) | 1,714,681 | 1,635,402 |
+| Settling boundary of 40 actions | 6,476,053 | 6,282,337 |
 | Decode / clone / encode the state | 42,436 / 42,435 / 191,824 | 40,440 / 40,439 / 180,896 |
 | Validate the state | 6,412 | 9,418 |
 | Settlement's measure | 34,124 | 29,646 |
@@ -481,6 +489,278 @@ before Phase 1 (three samples each, all equal):
 The state is smaller (rings instead of 3,840 kept outcomes) and every
 operation on it a little cheaper, except validation, which now also checks
 the ledgers, offices, rings, and observer slots.
+
+### Phase 2 as implemented
+
+Phase 2 is implemented on the 0.16.0 integration branch after the record-store
+package, so it is sized against that package's engine numbers (an idle
+boundary of 0.08 to 0.10 ms at 65,536 records, one 2.45 KiB write 24.3 µs, 48
+to 66 µs a write at 50,000 writes in one boundary, a paged-record ceiling of
+512 MiB in 1 MiB chunks), not Phase 0's. The state is partitioned into the
+records of [State layout](#state-layout); what differs from the design
+follows.
+
+**Records.** The kinds of the design, with these changes:
+
+- The archive head is a record of its own, `canwu.fiscal:archive` (identity
+  `primary`), not part of the root, so archive maintenance and report
+  bookkeeping never write the same record, and the root stays a few hundred
+  bytes. The root (`FiscalRoot`) holds the schema version
+  (`FISCAL_RUNTIME_SCHEMA_VERSION` 5), the catalog version, the historical
+  context and its `context_revision`, the approved evidence kinds, the
+  report-queue pages in use, and the parked observers. It keeps no earliest
+  due time: every observer is `OnChange` until Phase 3.
+- The report queue is 4,096 pages (`canwu.fiscal:report-queue`, identity
+  `queue.` and three hexadecimal digits of a digest of the observer binding
+  ID), not slots keyed by due time: an observer's queued work is one
+  `FiscalReportQueueEntry` (due time, cycles to parts, whether the whole
+  report is owed, whether a split publication must be repeated, whether its
+  holder is parked) that merges with what is already owed. An entry names at
+  most 16 cycles of 64 parts each; past them the cycle, or the whole report,
+  is owed, which publishes the same parts since unchanged parts are skipped.
+  The root lists the non-empty pages, so a boundary that owes no report reads
+  the root alone.
+- The directory is as designed (4,096 buckets, `dir.` and three hexadecimal
+  digits), with two maps: binding and policy IDs (one namespace), and auditor
+  proposal IDs, each to the office key.
+- Index pages hold 1,024 scope IDs (the design said 4,096), so a by-rank read
+  decodes at most about 25 KiB; the identity is `index.`, 32 hexadecimal
+  digits of a digest of the owner (office or region), and the page number.
+- Budgets: a ledger 256 KiB (its record's payload, the evidence continuation
+  that names its citations included, measured exactly), an office or a
+  jurisdiction 1 MiB, each held at settlement less a 4 KiB reserve for its
+  outcome ring (`FISCAL_RECORD_RING_RESERVE_BYTES`), so a rejection always
+  fits; the design's 64 KiB root and 256 KiB for every record became these,
+  because an office of 256 authority and 256 audit bindings with its
+  proposals and 64 hot cycles can pass 256 KiB. An office is held to its
+  bytes plus the room its hot cycles keep for archive commits: for each
+  cycle, its bookkeeping at the largest it can grow to while the cycle is
+  hot (the counts at their largest and a total of the largest amounts for
+  every partition key) less what it takes now. Every action that changes an
+  office, its cycle bookkeeping alone included, is checked that way;
+  archive commits, which settle without a check, only move bytes from that
+  room into the record. **Guarantee:** every ledger, office, and
+  jurisdiction a settled run writes stays within its budget, so a settled
+  run always restores. Settlement holds a record (an office with its room)
+  to its budget less 4 KiB; what it writes without a check afterwards, a
+  full outcome ring of eight 160-byte IDs (about 2 KiB), the digits of the
+  revision, and an archive commit's totals into the room kept for them,
+  stays inside that. Activation refuses a record whose bytes besides its
+  ring, with an office's room and 2 KiB, pass its budget, which every
+  settled record meets; a unit test pins that a full ring and the largest
+  revision fit in 2 KiB, and another that archive merges never grow an
+  office's budgeted bytes.
+- `FiscalState` holds `root`, `archive`, and `offices` (by office key),
+  `ledgers`, `jurisdictions`, `observers`, and `report_queue`; the authoring
+  helpers (`add_scope`, `add_adoption`, `add_assessment`,
+  `add_authority_binding`, `add_audit_binding`, `add_appointment_policy`,
+  `add_audit_proposal`, `add_observer`, `remove_observer`) put each object in
+  its record, and `into_records` derives every derived field.
+- Activation runs `audit_fiscal_record_set` on every scenario and restored
+  snapshot: a record set that is not exactly the partition of a valid state
+  is refused. A directory bucket or queue page left empty by an earlier
+  partition is accepted, since records cannot be deleted without leaving a
+  tombstone and a later re-creation is impossible; empty pages are updated,
+  never deleted.
+
+**Revisions and batches.** As designed: a revision per ledger, office,
+jurisdiction, and observer; an entry is current when its expected revision is
+its target's at the start of the settling boundary; a transition advances
+every ledger whose adoptions it changes; a historical-context change advances
+`context_revision` and no action target (the deliberate narrowing). Each
+entry is settled on a copy of the records it touches (offices copied with
+only their cycle bookkeeping when the action changes no binding), so an
+entry that is rejected changes nothing but its target's ring. The batch
+carries up to 4,096 entries (4 MiB); admission refuses the whole command for
+an inadmissible entry, prefixing the reason with the entry's index, and for a
+duplicate (target, action ID). Limits: 65,536 applied actions and 65,536
+ledger writes per boundary, 64 applied actions per target record per
+boundary, 4 partition keys per (institution, mechanism, cycle), 64 hot cycles
+per office, each a recorded rejection.
+
+**Reports.** `fiscal_report` schema version 4. Lines are named on each
+binding's own observer record: the role `fiscal_observer` and one role per
+hexadecimal digit of the line number (`report_line_<place>_<digit>`, five
+places). Line 0 is the summary and part `p` of slot `s` is line
+`1 + s * 1,024 + p`. Deviations:
+
+- 64 cycle slots per observer, not 255 (`MAX_FISCAL_REPORT_CYCLE_SLOTS`), so
+  the summary, which lists every shown cycle, and the observer record stay
+  small; a cycle past them is counted in the summary's `omitted_cycles` and
+  takes the first slot that frees, in the drain boundary at the same instant.
+- 1,024 parts per slot (16,384 rows per observer), not 4,096.
+- The digest per part is the first 64 bits of a BLAKE3 digest of the part's
+  rows, kept with its fact count in 18 hexadecimal digits per part, not
+  32 bytes: the digest only decides whether to republish, a collision costs
+  one missed republication of one part, and 64 slots of up to 1,024 parts
+  must fit one observer record.
+- The summary's pending parts are a hexadecimal bitmap per cycle.
+- A report with no hot cycle is not published, so an observer whose
+  institutions hold no book yet is told nothing.
+- A leaving cycle (its last visible book archived) publishes its parts empty,
+  and then its slot is free.
+- A part cites, as evidence, the ledger versions its rows were read from,
+  sorted (a part over two offices reads them out of ID order).
+- Parked holders are checked again in every boundary that runs the report
+  system, not rotated (rotation is Phase 3).
+- Observers are scope-granularity and `OnChange` only; institution
+  granularity, `Interval` cadence, and domain-entity holders stay in Phase 3.
+  The strategic aggregates and the transition-candidate and aggregate systems
+  are removed: a report row is read from its scope's book, and settlement
+  writes a jurisdiction's candidates with its counts.
+
+**Archive.** A commit's source root binds the archive head, the revision of
+each book it selects (`FiscalCycleBook::revision`, advanced by every change of
+the book), and the affected cycle entries of their offices (hot books and
+archived books), so a commit prepared in one gap stays current while actions,
+receipts, and other commits change other books; Phase 1 bound the global
+revision, so any settled action made it stale. A stale commit past the head's
+room for unacknowledged stale handles has no retention handle in the state:
+`finalize_fiscal_archive_retention` returns an error for it, and the host
+abandons that store copy itself (its handle stays `DurableIngress` in the
+host's store).
+
+**Host helpers.** Every fiscal host helper takes either run handle through
+the engine's `CanwuRun` trait (from the 0.16.0 continuation package):
+`fiscal_action_target`, `fiscal_target_revision`, `fiscal_recent_outcome`,
+`enqueue_execution_receipts`, `load_fiscal_state`, `audit_fiscal_records`,
+`fiscal_reports_of_holder`, `enqueue_fiscal_archive`, and
+`finalize_fiscal_archive_retention`. Phase 1's `FiscalArchiveRuntime` is
+folded into it and removed, and `CanwuRun` gains `admin_query_knowledge`,
+which both handles already had, for the report read. A fiscal run seals
+before its first boundary (there is nothing to seal yet) and after every
+boundary, and settles as its unsealed fork does
+(`a_fiscal_run_seals_before_its_first_boundary`); the reference
+integration's compact-host test drives the action, receipt, audit, and
+report helpers on a run sealed after every step.
+
+**Fixed on the way, found by the world profile.** Two boundary failures that
+no test of the fixture's size reached, each with a regression test that
+fails without its fix: a part whose rows came from two offices cited its
+ledgers out of ID order, which the engine refuses
+(`a_part_over_the_scopes_of_two_offices_is_published`); and a report cut by
+the per-boundary publication limit left a queue entry naming more parts of a
+cycle than queued work may (`a_cycle_cut_past_the_queued_parts_is_owed_whole`,
+1,601 scopes and 11 observers). The Phase 2 reviews found four more, each
+fixed and, where a test reaches it, with a regression test that fails
+without the fix:
+
+- A proposal ID that one office gives up (a pending nomination replaced, or
+  a resolved proposal trimmed) and another takes in the same boundary
+  failed every boundary when the taking office's key sorted first: the
+  directory applied each office's changes in key order and found the ID
+  still held. The directory now applies every removal before any insertion
+  (`fiscal_proposal_id_moves.rs`, both key orders).
+- Work queued to repeat a cut publication (`republish`) kept growing while
+  its holder was dead, past the 64 cycles a queue entry may name, and then
+  failed every boundary. Past the report's slots the whole report is owed
+  instead (`a_held_republication_past_the_slots_is_owed_whole`).
+- An office could pass its 1 MiB budget through actions that change only
+  its cycle bookkeeping, which were not measured, and through archive
+  commits, and a snapshot of it would then be refused at restore. See the
+  budget guarantee above. Reaching the budget takes an office near every
+  cap at once (4,096 observers, 512 bindings, 64 cycles of long partition
+  keys), too slow for the test suite, so unit tests hold the accounting.
+- A ledger's evidence continuation was estimated at 600 bytes a citation,
+  while activation measures the stored payload. A cited evidence record's
+  ID has no length limit, so a receipt citing one with a 4 KB ID near the
+  budget settled into a ledger that a restore then refused. Settlement now
+  measures the payload exactly, as activation does
+  (`a_citation_with_a_long_id_is_measured_and_the_run_restores`, and a unit
+  test that the measure equals the stored payload's length); the office
+  and jurisdiction budgets already measured their payloads.
+
+And three costs that grew with the world:
+
+- A cycle new to a report computed every part of it, every row of the
+  observer, though only the parts its new books queued can hold rows; only a
+  cycle that was omitted for want of a slot does that now. A boundary of 64
+  actions in the `world` preset went from about 244 ms to about 75 ms.
+- The report system went on reading the rows of every queued observer after
+  the boundary could publish nothing more; it now leaves their queued work
+  untouched for the drain.
+- The engine's lookup of a record version proposed earlier in the same
+  boundary (`SimulationView::current_domain_record_version` and
+  `proposed_domain_record_version`) scanned the boundary's whole evidence,
+  so a report system that cites ledger versions after a settlement of 50,000
+  writes spent about 40 s on a close of every book. The lookup is now a
+  range query on the evidence set (`canwu-sim`, `runtime/view.rs`), with the
+  same answer.
+
+**Proofs.** The tests of [Acceptance tests](#acceptance-tests), Phase 2,
+plus `fiscal_record_partition.rs` (record shapes, identities, the partition
+as a fixed point, and every activation refusal of a record under another
+owner, a derived field out of step, a directory or index that does not
+match), `fiscal_record_budgets.rs` (a ledger at its budget rejects an action
+with `FISCAL_RECORD_BUDGET_EXHAUSTED` and refuses a receipt with
+`state_budget_exhausted`, and the boundary commits), and unit tests of the
+part bitmap, the office key, and the bucket and page names. With the
+record-store package's engine and the partitioned records, the full lifetime
+test (`fiscal_archive_lifetime.rs`) runs in the debug suite again, in about
+105 s (Phase 1: about six minutes, so it was release-only). The test of the
+action past the per-boundary limit writes 65,537 ledgers in one boundary and
+stays release-only (`-- --ignored`, 18.8 s in a release build). There is no
+differential test against the Phase 1 single-record model: the randomized
+partition test checks, after every boundary, that the records are exactly
+the partition of a valid state and that every report the observers hold is
+what the records derive, not that a run settles as it did on one record.
+
+**Measurements.** `fiscal-world-profile` (see `benchmarks/README.md`, "World-scale
+fiscal profile") on the `world` preset: 200 partitions, 50,000 scopes (the
+largest partition 6,000), 4,200 institutions, 4,000 observers, one annual
+cycle, release build, medians of three samples on one machine:
+
+| Boundary | Admission (ms) | Settlement (ms) | Fiscal / engine (ms) | Drains at the instant |
+| --- | ---: | ---: | ---: | ---: |
+| Idle (nothing fiscal due) | | 1.06 | 0.00 / 1.06 | |
+| A spread day: 137 assessments | 56 | 82 | 21 / 60 | 3 boundaries, 119 ms |
+| Burst: 50,000 assessments | 2,139 | 4,790 | 3,134 / 1,644 | 62 boundaries, 4,562 ms |
+| 16,384 receipts | | 1,872 | 1,113 / 681 | 54 boundaries, 5,573 ms |
+| Close of 50,000 books | 9,606 | 7,026 | 5,571 / 1,556 | none |
+| Archive commit of 4,096 books | | 286 | 160 / 128 | 7 boundaries, 112 ms |
+
+The fiscal records are 67,990 records, 33.8 MB of JSON as authored and
+57.7 MB with a book in every scope (ledgers about 1 KiB; the largest record
+besides the 68 KB catalog is an observer record of 10.4 KiB). Activating a
+new run takes 8.7 s, of which the audit of every fiscal record is 1.2 s. A
+fiscal action costs settlement 60 to 100 µs (copying, applying, validating,
+and measuring its records) and the engine about 30 µs a written record.
+Against Phase 0's estimate for the engine alone (a burst about 25 s, a
+monthly day seconds), the burst of every scope now takes about 11.5 s of
+boundaries at its instant and a spread day about a quarter of a second.
+
+`fiscal-profile` in allocation mode, in the shape Phase 1 was measured in
+(48 institutions with 40 settled cycles each, four observers; three samples,
+all equal):
+
+| Measure | Phase 1 | Phase 2 |
+| --- | ---: | ---: |
+| Fiscal record bytes | 1,947,029 (one record) | 1,527,010 (all records) |
+| Admitting boundary of 40 actions (allocations) | 1,635,402 | 25,502 |
+| Settling boundary of 40 actions | 6,282,337 | 231,492 |
+| Decode / clone / encode what an action writes | 40,440 / 40,439 / 180,896 (the state) | 625 / 625 / 2,577 (one 27 KB ledger) |
+| Validate it | 9,418 | 178 |
+| Idle boundary, settled state / no fiscal records | 489 / 481 | 500 / 499 |
+| Audit of every fiscal record | | 256,670 |
+
+What remains is mostly not fiscal, and is listed for the owner:
+
+- **Report drains.** 4,000 observers whose institutions all change need 63
+  boundaries at one instant, because the engine publishes to at most 64
+  holders per system and boundary. That is the Phase 3 gate.
+- **Engine command admission.** The engine's share of admitting a command
+  grows with the run: about 0.4 ms a command in the fresh world, and about
+  2.2 ms after the burst and its drains (the close of every book, 4,200
+  commands, takes 9.6 s to admit, 0.4 s of it fiscal). Not located.
+- **Restore of an unsealed run.** After the burst, the snapshot is 1.09 GB
+  of JSON, almost all of it retained boundary evidence and published
+  knowledge, and restoring it takes 231 s. Sealing, and the continuation
+  snapshot of the 0.16.0 continuation package, are the answer, not the
+  fiscal records.
+- **Host archive operations** assemble the whole committed state (about
+  1 s) each time: preparing, verifying and queueing, and finalizing. A
+  host that archives often would want them to read only the records they
+  need.
 
 ## State layout
 
@@ -1412,7 +1692,7 @@ remains.
 | --- | ---: | ---: | --- |
 | `MAX_FISCAL_STATE_JSON_BYTES` | 32 MiB, one record | removed | replaced by per-record budgets |
 | Root record bytes | — | 64 KiB | global, small, written often |
-| Office, ledger, jurisdiction, observer, directory, index, queue record bytes | — | 256 KiB each | well under the inferred ~1.1 MB paged-checkpoint ceiling; a ledger reaches it only with years of unarchived books, and then refuses (recorded), never fails |
+| Office, ledger, jurisdiction, observer, directory, index, queue record bytes | — | as implemented: ledger 256 KiB, office and jurisdiction 1 MiB, each keeping 4 KiB for its outcome ring; the others bounded by their caps | far under the 512 MiB paged-record ceiling the record-store package set; a ledger reaches its budget only with years of unarchived books, and then refuses (recorded), never fails |
 | `MAX_FISCAL_REPORT_PLAN_BYTES` | 152,416 (package) | removed | no plan in a shared record |
 | `MAX_FISCAL_RUNTIME_BINDINGS` | 4,096 (authority, audit, scope each) | scope bindings 1,048,576; per office 256 authority and 256 audit bindings | one ledger per scope; bindings live in their office |
 | `MAX_FISCAL_OBSERVERS` | 64 | 65,536 | one record each; nothing shared grows with observers. The G-16 filed fix asked for a configurable value "under the size guard"; with no shared record there is no size guard to stay under, so a fixed generous cap replaces the configuration |
@@ -1448,7 +1728,7 @@ remains.
 | `MAX_FISCAL_CATALOG_REGIONS` | 1,024 | 65,536 | a world catalog's regions may be first-level divisions (a few thousand) |
 | `MAX_FISCAL_CATALOG_COVERAGE_CELLS` | 65,536 | 1,048,576 | periods × regions × mechanisms |
 | Catalog definitions, periods, references per definition | 16,384, 512, 1,024 | unchanged | |
-| `MAX_FISCAL_CATALOG_JSON_BYTES` | 64 MiB | unchanged, see risk | boundaries read entries by key; the catalog's size costs activation, snapshots, and, if the inferred page ceiling holds, paged checkpoints above about 1.1 MB |
+| `MAX_FISCAL_CATALOG_JSON_BYTES` | 64 MiB | unchanged, see risk | boundaries read entries by key; the catalog's size costs activation and snapshots; the record-store package's 512 MiB paged-record ceiling is far above it |
 | Archive: records per blob, blobs per commit | — | 64, 64 (4,096 per commit) | a hit reads one blob of about 150 KB |
 | Archive: pending applied handles | — | 64 | backpressure at preparation |
 | Counters (revisions, archive counts, receipt sequence) | u64 | u64 | |
@@ -1561,6 +1841,8 @@ floor is per-record work the engine repeats in every boundary.
 1,247,847-byte payload fails `prepare_paged_checkpoint` with "state page bytes
 exceed the bounded page limit". Bisection puts the largest payload that fits
 at 1,151,023 bytes (one byte of record takes 3.7 to 4.3 bytes of leaf page).
+The record-store package (0.16.0) lifted this ceiling to 512 MiB per record,
+paged in 1 MiB chunks; the statement stands as the Phase 0 measurement only.
 
 ### What this means for the county-level world
 
@@ -1599,8 +1881,9 @@ journals about 2 × 50,000 × 2.5 KiB = 250 MB of record changes in one
 boundary, which a host seals regularly. Hot fiscal state in the save: about
 125 to 175 MB for the annual world (ledgers about 125 MB, offices, observers,
 directory, and index pages the rest), within the 1 GB save size the owner
-allows. No fiscal record approaches the paged-checkpoint ceiling (256 KiB
-budget); a world catalog can, and must then be split.
+allows. No fiscal record approaches the paged-record ceiling (512 MiB since
+the record-store package; the largest fiscal budget is 1 MiB), and neither
+does a world catalog (64 MiB at most).
 
 ## Authority
 
@@ -1779,7 +2062,7 @@ p95 over samples, per boundary kind:
 - the engine's cost of a ledger write, as Phase 0 measured a generic record's,
   for the ledgers Phase 2 actually writes;
 - fiscal record bytes (total and largest per kind), snapshot bytes, the largest
-  record against the paged-checkpoint page, restore time (activation), and
+  record against the paged-record ceiling, restore time (activation), and
   exact replay of a 30-day window;
 - archive growth at 10, 25, 50, and 100 years: objects and bytes written,
   lookup pages reachable and superseded, miss and hit lookup time, and
@@ -1824,8 +2107,8 @@ reverting its fix in the working tree.
 | `fiscal_partitioned_state.rs` | Random sequences of batches, receipts, closes, archive commits, transitions, and context changes: after every boundary `audit_fiscal_records` passes and the records equal what `into_records` derives from the assembled state; restore and exact replay agree. |
 | `fiscal_record_revisions.rs` | An action on one scope is not stale for activity on another; it is stale for its own scope; the overwrite rule within a boundary, including ledgers a transition changed; per-target action IDs. |
 | `fiscal_action_batches.rs` | A batch of 4,096 entries over many scopes settles in one boundary with one outcome and one event each; per-record and per-boundary limits reject as outcomes; the role is re-checked after a rebind entry; an inadmissible entry refuses the command with its index and reason. |
-| `fiscal_report_lines.rs` | Lines on observer records; publication of changed parts only (digests); more than the engine's per-boundary publications drain at the same instant with identical `as_of`; withdrawn parts when a cycle is archived. |
-| Format and tamper (unit) | Record shapes, report schema hash, office key, and every activation refusal of the cross-record invariants. |
+| `fiscal_report_lines.rs` | Lines on observer records; publication of changed parts only (digests); more than the engine's per-boundary publications drain at the same instant with identical `as_of`; withdrawn parts when a cycle is archived. As implemented: the archived cycle's parts published empty and its slot reused; a cycle past the 64 slots omitted until one frees; a part over two offices. The drain with identical `as_of` is held by `fiscal_report_parts.rs`, with a cut cycle owed whole. |
+| `fiscal_record_partition.rs`, `fiscal_record_budgets.rs`, unit tests | Record shapes and identities, the partition as a fixed point, the office key, the bucket and page names, the part bitmap, and the activation refusals of a record under another owner, a derived field out of step, and a directory or index that does not match; a ledger at its byte budget rejects an action and refuses a receipt. (The report schema hash is a constant, changed with the schema version; no test pins it.) |
 
 **Phase 3** (later): `fiscal_report_cadence.rs` (interval observers publish only
 at their due times and only changed parts, queue pages, parked rotation) and
@@ -1852,7 +2135,7 @@ tests), M (one crate, days), L (a crate's storage or settlement redesign), XL
 | Engine knowledge | superseded records stay in every holder's ledger for good (the 0.16.0 knowledge package removes their per-boundary cost, not their memory and save size) | 4,000 observers × monthly reports × 100 years is gigabytes held in memory and in saves | knowledge retention and archive: L |
 | Engine record writes | measured in Phase 0: about 200 µs per written record plus 134 to 153 µs per KiB of structured JSON (34 µs per KiB for flat text), rising at 50,000 writes in one boundary; the encodings and hashes of the write account for a sixth to a quarter | a monthly day of the county-level world costs 3.5 to 4.5 s and a burst 25 s in the engine alone | a cheaper write path; where the time goes is not yet located, and the handling of the payload tree is the first suspect: L |
 | Engine idle floor | measured in Phase 0: every boundary costs about 0.5 to 1.7 µs per stored domain record (35 to 113 ms at 65,536 records, 5 to 6 ms at 16,384), whichever kinds its systems declare | every boundary of a world with tens of thousands of records, of any plugin, pays tens of milliseconds before any work | per-boundary work proportional to what changed, not to the store: M to L (cause not yet located) |
-| Engine persistence | confirmed in Phase 0: a record whose payload is larger than 1,151,023 bytes does not fit a 4 MiB paged-checkpoint page (`value_bytes` written as a JSON number array) | every extension whose single root record grows past it (resource, production, society, culture, law plan and directory, the fiscal catalog) cannot take a paged checkpoint | a compact byte encoding or chunked leaves: S to M |
+| Engine persistence | resolved in 0.16.0: Phase 0 confirmed that a record whose payload was larger than 1,151,023 bytes did not fit a 4 MiB paged-checkpoint page; the record-store package pages a record of up to 512 MiB in 1 MiB chunks | none at the target: a single root record of an extension can grow to 512 MiB before a paged checkpoint refuses it | done (record-store package) |
 | Engine sealing | `seal_evidence` requires an empty ingress queue, future-dated packets included | no plugin can keep a timer as a future packet | allow future-dated plugin ingress across seals: M |
 | Resource (`ResourceLimitsV1`) | accounts 8,192 canonical, 262,144 hard; definitions and unit revisions 1,024; access grants 4,096 never archived; allocation candidates 2,048; reports 256 and grants 1,024; one root record decoded, validated, and journaled by every changing boundary (about 50 µs per hot record) | 50,000 scopes × several resources is about 250,000 accounts in one record rewritten every day | shard the root by account holder: XL |
 | Production (G-18) | sites 2,048; facilities, work orders, executions, projects 4,096; outcomes 8,192; incident receipts 8,192 for life; 64 reports and 512 incidents a boundary; limits fixed in code; one root record | county-level production is tens of thousands of sites | the filed fix (at least 16,384, or shard by site, plus a batching contract): L |
@@ -1878,9 +2161,10 @@ In the fiscal extension, after this design:
   of another plugin that both writes in phase 13 and retires knowledge holders.
   Phases 1 and 2 have no domain-entity holders, so no such case.
 
-An action never fails a boundary: it is applied, rejected as its own outcome,
-or dropped with `canwu.fiscal.action_dropped.v1` when even its rejection cannot
-be recorded (its record at its byte budget). A receipt or historical-context
+An action never fails a boundary: it is applied or rejected as its own
+outcome. As implemented, every record keeps a 4 KiB reserve of its byte
+budget for its outcome ring, so a rejection always fits and no action is
+dropped. A receipt or historical-context
 packet never fails one either: it settles or is refused with
 `canwu.fiscal.ingress_rejected.v1`. Neither does an archive packet: a commit
 or acknowledgement that is malformed or forged, a commit that does not bind
@@ -1911,12 +2195,12 @@ stays pending.
    construction with cheap local checks. A bug there corrupts silently until the
    next audit or restore, which is why every test and profile audits after every
    boundary.
-4. **The paged-checkpoint ceiling.** Confirmed: a record whose payload is
-   larger than 1,151,023 bytes cannot be written into a paged checkpoint. Phase
-   1 keeps the state in one record, so a Phase 1 run whose state passes that
-   size cannot take a paged checkpoint until Phase 2 partitions it. It affects
-   every extension that keeps its state in one record, and a world catalog
-   larger than the ceiling needs splitting.
+4. **The paged-checkpoint ceiling.** Resolved. Phase 0 confirmed that a
+   record whose payload was larger than 1,151,023 bytes could not be written
+   into a paged checkpoint; the record-store package lifted the ceiling to
+   512 MiB per record in 1 MiB chunks, so neither a Phase 1 state record nor
+   a world catalog is bounded by it, and Phase 2's records are kept small for
+   write cost, not for the ceiling.
 5. **Engine knowledge limits.** Thousands of observers lean on same-instant drain
    boundaries until the engine's per-system publication limit changes; Phase 3
    waits for that.

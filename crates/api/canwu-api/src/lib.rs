@@ -253,6 +253,14 @@ pub trait CanwuRun {
         request: PluginIngressRequest,
         permit: &PluginIngressPermit,
     ) -> Result<IngressReceipt, CanwuError>;
+    /// Trusted host/admin query of one holder's knowledge, as
+    /// [`Canwu::admin_query_knowledge`] does. Player-facing callers must use a
+    /// restricted [`CanwuViewer`].
+    fn admin_query_knowledge(
+        &self,
+        holder: KnowledgeHolderRef,
+        query: &KnowledgeQuery,
+    ) -> Result<KnowledgeQueryResult, CanwuError>;
 }
 
 macro_rules! impl_canwu_run {
@@ -319,6 +327,13 @@ macro_rules! impl_canwu_run {
                 permit: &PluginIngressPermit,
             ) -> Result<IngressReceipt, CanwuError> {
                 Self::enqueue_permitted_plugin_ingress(self, request, permit)
+            }
+            fn admin_query_knowledge(
+                &self,
+                holder: KnowledgeHolderRef,
+                query: &KnowledgeQuery,
+            ) -> Result<KnowledgeQueryResult, CanwuError> {
+                Self::admin_query_knowledge(self, holder, query)
             }
         }
     };

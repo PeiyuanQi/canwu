@@ -2,20 +2,20 @@
 //!
 //! Every simulated year runs one sample cycle (assessment, authorization,
 //! execution evidence, receipt) in a cycle of its own and closes it; every
-//! ten years the closed books are archived. The fiscal state stays inside its
-//! 32 MiB budget and bounded by one decade of books, and its size over the
-//! run is printed (`--nocapture`) and recorded in the world-scale fiscal
-//! proposal, with the snapshot's, which grows with the run's retained history
-//! (sealing bounds that, and is not this test's subject), and the archive's.
+//! ten years the closed books are archived. The fiscal records stay bounded
+//! by one decade of books, and their size over the run is printed
+//! (`--nocapture`) and recorded in the world-scale fiscal proposal, with the
+//! snapshot's, which grows with the run's retained history (sealing bounds
+//! that, and is not this test's subject), and the archive's.
 //! Restore and exact replay of runs that archive are held by the fiscal
 //! crate's own tests.
 
 use canwu_api::{Canwu, SimDuration, SimTime};
 use canwu_fiscal::{
     FiscalArchiveError, FiscalArchiveKeyV1, FiscalArchiveRetentionHandleV1,
-    FiscalArchiveRetentionPhaseV1, FiscalArchiveStore, FiscalArchivedRecordV1, FiscalStateRecord,
-    MAX_FISCAL_STATE_JSON_BYTES, archived_fiscal_record, audit_fiscal_archive,
-    fiscal_state_reference,
+    FiscalArchiveRetentionPhaseV1, FiscalArchiveStore, FiscalArchivedRecordV1,
+    MAX_FISCAL_LEDGER_RECORD_BYTES, archived_fiscal_record, audit_fiscal_archive,
+    audit_fiscal_records,
 };
 use canwu_ming_fiscal_reference::{
     DEFAULT_SEED, archive_ming_fiscal_books, close_ming_fiscal_sample_cycle,
@@ -88,26 +88,26 @@ impl FiscalArchiveStore for MemoryStore {
 }
 
 fn fiscal_state(canwu: &Canwu) -> canwu_fiscal::FiscalState {
-    canwu
-        .typed_domain_record(&fiscal_state_reference())
-        .expect("fiscal state")
-        .decode_payload::<FiscalStateRecord>()
-        .expect("fiscal state payload")
+    audit_fiscal_records(canwu).expect("fiscal records audit")
 }
 
-fn state_bytes(canwu: &Canwu) -> usize {
-    serde_json::to_vec(
-        &canwu
-            .typed_domain_record(&fiscal_state_reference())
-            .expect("fiscal state")
-            .payload,
-    )
-    .expect("fiscal state bytes")
-    .len()
+/// The bytes of every fiscal record a run writes, and of the largest; the
+/// create-only catalog and index pages aside.
+fn state_bytes(canwu: &Canwu) -> (usize, usize) {
+    canwu
+        .domain_records()
+        .filter(|record| {
+            record.reference.kind.namespace == "canwu.fiscal"
+                && !matches!(record.reference.kind.name.as_str(), "catalog" | "index")
+        })
+        .map(|record| serde_json::to_vec(&record.payload).expect("bytes").len())
+        .fold((0, 0), |(total, largest), bytes| {
+            (total + bytes, largest.max(bytes))
+        })
 }
 
 #[test]
-fn a_century_with_an_archive_cadence_stays_inside_the_state_budget() {
+fn a_century_with_an_archive_cadence_keeps_the_fiscal_records_bounded() {
     let mut canwu = new_ming_fiscal_reference(DEFAULT_SEED, "hongwu-1391").expect("runtime");
     let store = MemoryStore::default();
     let mut largest = 0;
@@ -116,7 +116,7 @@ fn a_century_with_an_archive_cadence_stays_inside_the_state_budget() {
         let prefix = format!("year.{year:03}");
         run_ming_fiscal_sample_cycle(&mut canwu, &prefix).expect("the year's cycle");
         close_ming_fiscal_sample_cycle(&mut canwu, &prefix).expect("the year's close");
-        largest = largest.max(state_bytes(&canwu));
+        largest = largest.max(state_bytes(&canwu).1);
         if year % ARCHIVE_EVERY_YEARS == 0 {
             let archived = archive_ming_fiscal_books(&mut canwu, &store).expect("the decade");
             assert_eq!(archived, u64::try_from(ARCHIVE_EVERY_YEARS).expect("years"));
@@ -133,7 +133,7 @@ fn a_century_with_an_archive_cadence_stays_inside_the_state_budget() {
         if matches!(year, 10 | 25 | 50 | 100) {
             sizes.push((
                 year,
-                state_bytes(&canwu),
+                state_bytes(&canwu).0,
                 canwu.snapshot_json().expect("snapshot").len(),
                 store.bytes(),
             ));
@@ -141,15 +141,15 @@ fn a_century_with_an_archive_cadence_stays_inside_the_state_budget() {
     }
     for (year, state, snapshot, archive) in &sizes {
         eprintln!(
-            "year {year}: fiscal state {state} bytes, snapshot {snapshot} bytes, archive {archive} bytes"
+            "year {year}: fiscal records {state} bytes, snapshot {snapshot} bytes, archive {archive} bytes"
         );
     }
-    eprintln!("largest fiscal state {largest} bytes");
+    eprintln!("largest fiscal record {largest} bytes");
 
-    assert!(largest < MAX_FISCAL_STATE_JSON_BYTES);
-    // The state holds at most one decade of books, so it does not grow with
-    // the run: after a century it is no larger than after its first decade,
-    // give or take the digits of its counters.
+    assert!(largest < MAX_FISCAL_LEDGER_RECORD_BYTES);
+    // The records hold at most one decade of books, so they do not grow with
+    // the run: after a century they are no larger than after its first
+    // decade, give or take the digits of their counters.
     let state_after = |year: i64| {
         sizes
             .iter()

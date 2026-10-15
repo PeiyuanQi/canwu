@@ -15,8 +15,9 @@ use canwu_api::{
     SimDuration, SimulationPlugin,
 };
 use canwu_fiscal::{
-    FiscalAction, FiscalActionRequest, FiscalAuditSeverity, FiscalState, FiscalStateRecord,
-    fiscal_action_command, fiscal_state_reference,
+    FiscalAction, FiscalActionBatch, FiscalActionEntry, FiscalAuditSeverity, FiscalState,
+    fiscal_action_command, fiscal_action_target, fiscal_office_reference, fiscal_target_revision,
+    load_fiscal_state,
 };
 use canwu_ming_fiscal_reference::{
     DEFAULT_SEED, MingFiscalExecutionAdapterPlugin, ming_fiscal_plugin,
@@ -55,11 +56,9 @@ impl_host!(Canwu);
 impl_host!(CompactedCanwu);
 
 fn fiscal_state<H: Host>(canwu: &H) -> canwu_fiscal::FiscalState {
-    canwu
-        .domain_record(fiscal_state_reference().as_untyped())
-        .expect("fiscal state")
-        .decode_payload::<FiscalStateRecord>()
-        .expect("fiscal state payload")
+    load_fiscal_state(canwu)
+        .expect("fiscal records")
+        .expect("a fiscal state")
 }
 
 /// Settles one fiscal action and requires it to have applied: `applied`
@@ -71,13 +70,19 @@ fn act<H: Host>(
     action: FiscalAction,
     applied: impl Fn(&FiscalState) -> bool,
 ) {
-    let request = FiscalActionRequest {
-        action_id: format!("action.{request_id}"),
-        authority_binding_id: AUTHORITY.to_owned(),
-        expected_procedure_revision: fiscal_state(canwu).procedure_revision,
-        action,
-    };
-    let command = fiscal_action_command(&request).expect("fiscal command");
+    let target = fiscal_action_target(&*canwu, AUTHORITY, &action).expect("the action's target");
+    let expected_revision = fiscal_target_revision(&*canwu, &target)
+        .expect("the target's revision")
+        .expect("an existing target");
+    let batch = FiscalActionBatch::single(
+        AUTHORITY,
+        FiscalActionEntry {
+            action_id: format!("action.{request_id}"),
+            expected_revision,
+            action,
+        },
+    );
+    let command = fiscal_action_command(&batch).expect("fiscal command");
     let at = canwu.time();
     let revision = canwu.revision();
     canwu.enqueue(CommandRequest::new(
@@ -154,22 +159,32 @@ fn the_validator_answers_alike_sealed_unsealed_restored_and_replayed() {
     // that cites that evidence.
     run_ming_fiscal_sample_cycle(&mut base, "sealed").expect("sample cycle");
 
-    // An assessment quoting the fiscal state's version of this moment; the
-    // action that applies it supersedes that version.
-    let quoted = base
-        .current_domain_record_version(fiscal_state_reference().as_untyped())
-        .expect("provenance")
-        .expect("the fiscal state has a current version");
-    assert!(matches!(
-        quoted.established_by,
-        DomainRecordVersionSource::BoundaryChange { .. }
-    ));
-    let sample = fiscal_state(&base)
+    // An assessment quoting the version its institution's office record has
+    // at this moment; the action that applies it opens a cycle the office
+    // records, which supersedes that version.
+    let state = fiscal_state(&base);
+    let sample = state
         .assessments()
         .find(|assessment| assessment.id == "sealed.assessment")
         .cloned()
         .expect("the sample assessment is hot");
     let scope = sample.scope_binding_id.clone();
+    let office = fiscal_office_reference(
+        &state
+            .ledger(&scope)
+            .expect("the sample scope's ledger")
+            .scope
+            .institution,
+    )
+    .into_untyped();
+    let quoted = base
+        .current_domain_record_version(&office)
+        .expect("provenance")
+        .expect("the office has a current version");
+    assert!(matches!(
+        quoted.established_by,
+        DomainRecordVersionSource::BoundaryChange { .. }
+    ));
     act(
         &mut base,
         actor,
@@ -278,18 +293,14 @@ fn the_validator_answers_alike_sealed_unsealed_restored_and_replayed() {
     );
     assert!(validate_ming_fiscal_reference(&probe).is_err());
 
-    // An audit citing a version of the fiscal state the run never reached,
+    // An audit citing a version of the office record the run never reached,
     // by a boundary the run settled, is refused alike by the unsealed fork,
     // the sealed run, the restore, and the exact replay.
     let mut future = quoted.clone();
     future.version = 999;
     assert!(
-        unsealed
-            .domain_record(fiscal_state_reference().as_untyped())
-            .expect("fiscal state")
-            .version
-            < 999,
-        "the state never reached the cited version"
+        unsealed.domain_record(&office).expect("the office").version < 999,
+        "the office never reached the cited version"
     );
     let late = || {
         audit(

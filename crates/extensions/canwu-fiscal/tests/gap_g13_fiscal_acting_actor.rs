@@ -15,14 +15,15 @@ use canwu_api::{
     StateVisibility, SystemCadence, Territory, TerritoryId, TypedDomainRecordRef, WorldSnapshot,
 };
 use canwu_fiscal::{
-    FISCAL_ACTING_BASIS_NOT_CURRENT, FiscalAction, FiscalActionDisposition, FiscalActionRequest,
-    FiscalActionTarget, FiscalAdoptionStage, FiscalAdoptionState, FiscalAssessmentBasis,
-    FiscalAuthorityBinding, FiscalCommutationPolicy, FiscalContentPack, FiscalContentSelection,
-    FiscalCoverageDeclaration, FiscalCoverageSelector, FiscalCoverageStatus, FiscalHistoricalMode,
-    FiscalMechanism, FiscalPackManifest, FiscalPaymentForm, FiscalPeriodDefinition, FiscalPlugin,
-    FiscalProvenance, FiscalRegionDefinition, FiscalRuleDefinition, FiscalScopeBinding,
-    FiscalSettledAction, FiscalState, FiscalStateRecord, HistoricalConfidence,
-    HistoricalYearWindow, compile_fiscal_content, fiscal_action_command, fiscal_state_reference,
+    FISCAL_ACTING_BASIS_NOT_CURRENT, FiscalAction, FiscalActionBatch, FiscalActionDisposition,
+    FiscalActionEntry, FiscalActionTarget, FiscalAdoptionStage, FiscalAdoptionState,
+    FiscalAssessmentBasis, FiscalAuthorityBinding, FiscalCommutationPolicy, FiscalContentPack,
+    FiscalContentSelection, FiscalCoverageDeclaration, FiscalCoverageSelector,
+    FiscalCoverageStatus, FiscalHistoricalMode, FiscalMechanism, FiscalPackManifest,
+    FiscalPaymentForm, FiscalPeriodDefinition, FiscalPlugin, FiscalProvenance,
+    FiscalRegionDefinition, FiscalRuleDefinition, FiscalScopeBinding, FiscalSettledAction,
+    FiscalState, HistoricalConfidence, HistoricalYearWindow, audit_fiscal_records,
+    compile_fiscal_content, fiscal_action_command, fiscal_target_revision,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -246,17 +247,14 @@ fn scenario() -> Scenario {
     )
     .expect("fixture fiscal catalog");
     let mut state = FiscalState::new(150, FiscalHistoricalMode::Counterfactual, SimTime::EPOCH);
-    state.authority_bindings.insert(
-        AUTHORITY_ID.to_owned(),
-        FiscalAuthorityBinding {
-            id: AUTHORITY_ID.to_owned(),
-            institution: institution.clone(),
-            authorized_actor: Some(PRINCIPAL),
-            acting_actor: Some(ACTING),
-            authority_basis: Some(initial_basis()),
-            rebound_by: None,
-        },
-    );
+    state.add_authority_binding(FiscalAuthorityBinding {
+        id: AUTHORITY_ID.to_owned(),
+        institution: institution.clone(),
+        authorized_actor: Some(PRINCIPAL),
+        acting_actor: Some(ACTING),
+        authority_basis: Some(initial_basis()),
+        rebound_by: None,
+    });
     state.add_scope(FiscalScopeBinding {
         id: "scope.a".to_owned(),
         institution,
@@ -284,41 +282,44 @@ fn scenario() -> Scenario {
         },
     )
     .expect("grant draft");
+    let mut domain_records = vec![
+        DomainRecord {
+            reference: grant.reference,
+            owner: GRANT_PLUGIN.to_owned(),
+            class: DomainRecordClass::Record,
+            version: 1,
+            lifecycle: DomainRecordLifecycle::Active,
+            payload: grant.payload,
+            references: grant.references,
+        },
+        catalog.clone().into_record().expect("catalog record"),
+    ];
+    domain_records.extend(state.into_records(&catalog).expect("fiscal records"));
     Scenario {
         start_time: SimTime::EPOCH,
         entities: world.entities(),
         world,
         knowledge: KnowledgeSnapshot::default(),
-        domain_records: vec![
-            DomainRecord {
-                reference: grant.reference,
-                owner: GRANT_PLUGIN.to_owned(),
-                class: DomainRecordClass::Record,
-                version: 1,
-                lifecycle: DomainRecordLifecycle::Active,
-                payload: grant.payload,
-                references: grant.references,
-            },
-            catalog.clone().into_record().expect("catalog record"),
-            state.into_record(&catalog).expect("fiscal state record"),
-        ],
+        domain_records,
     }
 }
 
 fn fiscal_state(canwu: &Canwu) -> FiscalState {
-    canwu
-        .typed_domain_record(&fiscal_state_reference())
-        .expect("fiscal state record")
-        .decode_payload::<FiscalStateRecord>()
-        .expect("fiscal state payload")
+    audit_fiscal_records(canwu).expect("fiscal records audit")
+}
+
+/// The revision of the one scope's ledger on `runtime`.
+fn scope_revision<R: canwu_api::CanwuRun>(runtime: &R) -> u64 {
+    fiscal_target_revision(runtime, &FiscalActionTarget::Ledger("scope.a".to_owned()))
+        .expect("ledger revision read")
+        .expect("the scope's ledger")
 }
 
 /// Submits one tracked assessment action as `issuer` and settles it.
 fn submit_assessment(canwu: &mut Canwu, issuer: PersonId, action_id: &str, cycle: &str) {
-    let request = FiscalActionRequest {
+    let request = FiscalActionEntry {
         action_id: action_id.to_owned(),
-        authority_binding_id: AUTHORITY_ID.to_owned(),
-        expected_procedure_revision: fiscal_state(canwu).procedure_revision,
+        expected_revision: scope_revision(canwu),
         action: FiscalAction::OpenAssessment {
             assessment_id: format!("{action_id}.assessment"),
             rule_id: "rule.land".to_owned(),
@@ -339,7 +340,8 @@ fn submit_assessment(canwu: &mut Canwu, issuer: PersonId, action_id: &str, cycle
                 canwu.revision(),
                 CommandEnvelope::new(
                     Issuer::Actor(issuer),
-                    fiscal_action_command(&request).expect("fiscal command"),
+                    fiscal_action_command(&FiscalActionBatch::single(AUTHORITY_ID, request))
+                        .expect("fiscal command"),
                 )
                 .at_time(canwu.time()),
             ),
@@ -423,7 +425,11 @@ fn gap_g13_fiscal_acting_actor() {
     assert_eq!(current.version, 2);
     assert_ne!(
         Some(current),
-        fiscal_state(&canwu).authority_bindings[AUTHORITY_ID].authority_basis
+        fiscal_state(&canwu)
+            .authority_binding(AUTHORITY_ID)
+            .expect("the binding")
+            .authority_basis
+            .clone()
     );
 
     // With the basis stale, command admission itself rejects the acting holder.
@@ -437,7 +443,10 @@ fn gap_g13_fiscal_acting_actor() {
         panic!("a stale authority basis must reject the acting actor");
     };
     assert_eq!(error.code, ErrorCode::InvalidAuthority);
-    assert_eq!(error.message, FISCAL_ACTING_BASIS_NOT_CURRENT);
+    assert_eq!(
+        error.message,
+        format!("entry 0: {FISCAL_ACTING_BASIS_NOT_CURRENT}")
+    );
     assert!(
         fiscal_state(&canwu)
             .recent_outcome(&scope_target(), "action.acting.stale")
@@ -489,14 +498,6 @@ fn current_grant(canwu: &Canwu) -> DomainRecordVersionRef {
         .expect("current grant version")
 }
 
-fn sealed_fiscal_state(sealed: &CompactedCanwu) -> FiscalState {
-    sealed
-        .typed_domain_record(&fiscal_state_reference())
-        .expect("fiscal state record")
-        .decode_payload::<FiscalStateRecord>()
-        .expect("fiscal state payload")
-}
-
 /// Submits one tracked assessment action that cites `quote` as its
 /// commutation quote, as the principal, and runs the boundary that admits it.
 fn submit_quoted_assessment(
@@ -504,10 +505,9 @@ fn submit_quoted_assessment(
     action_id: &str,
     quote: DomainRecordVersionRef,
 ) {
-    let request = FiscalActionRequest {
+    let request = FiscalActionEntry {
         action_id: action_id.to_owned(),
-        authority_binding_id: AUTHORITY_ID.to_owned(),
-        expected_procedure_revision: sealed_fiscal_state(sealed).procedure_revision,
+        expected_revision: scope_revision(&*sealed),
         action: FiscalAction::OpenAssessment {
             assessment_id: format!("{action_id}.assessment"),
             rule_id: "rule.land".to_owned(),
@@ -528,7 +528,8 @@ fn submit_quoted_assessment(
                 sealed.revision(),
                 CommandEnvelope::new(
                     Issuer::Actor(PRINCIPAL),
-                    fiscal_action_command(&request).expect("fiscal command"),
+                    fiscal_action_command(&FiscalActionBatch::single(AUTHORITY_ID, request))
+                        .expect("fiscal command"),
                 )
                 .at_time(sealed.time()),
             ),
@@ -584,7 +585,9 @@ fn sealed_run_rejects_a_superseded_commutation_quote_like_its_replay() {
     sealed
         .advance_canonical(SimDuration::minutes(1))
         .expect("the admitted quote action settles");
-    let state = sealed_fiscal_state(&sealed);
+    let state = canwu_fiscal::load_fiscal_state(&sealed)
+        .expect("fiscal state")
+        .expect("a fiscal state");
     assert!(
         state
             .recent_outcome(&scope_target(), "action.quote.superseded")

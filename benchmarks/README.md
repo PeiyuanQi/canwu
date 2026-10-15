@@ -409,12 +409,13 @@ execution requests (48 institutions and 40 settled cycles by default, about
   written yet, and with one a boundary has written;
 - the boundary that admits a batch of fiscal action commands, one per
   institution, and the boundary that settles them; and
-- decoding, copying, validating, and encoding the state itself, so a boundary
-  time can be read as a count of those operations; and
-- `settlement_measure`: what settlement adds, from 0.16.0, to its one
-  encoding of the state to measure every record its boundary writes, namely
-  deriving the transition candidates and aggregates and encoding those fields
-  before and after.
+- `fiscal_ledger_component_ms`: decoding, copying, validating, and encoding
+  one scope ledger record, which is what an action writes since the state was
+  partitioned into records, so a boundary time can be read as a count of
+  those operations, and `audit_every_record`, the host's audit of every
+  fiscal record (`audit_fiscal_records`). Up to Phase 1 of the world-scale
+  change these figures were of the whole state record, with
+  `settlement_measure` beside them.
 
 ```console
 cargo run --release \
@@ -490,6 +491,13 @@ order of its current-record sets and in load validation; its allocation runs
 were recorded again on 2026-10-15 from the final state and give the same
 counts.
 
+Phase 2 of the world-scale change partitions the state into records:
+[`allocations`](baselines/2026-10-15-fiscal-boundary-0.16.0-partitioned-allocations.json)
+in the default shape (three samples after one warm-up, all equal) count
+25,502 allocations for the boundary that admits the 40 actions and 231,492
+for the one that settles them, where Phase 1's single record took 1,635,402
+and 6,282,337; an idle boundary is unchanged (500 against 489).
+
 The fiscal-limits change of 0.16.0 (see
 [`docs/proposals/fiscal-and-society-limits.md`](../docs/proposals/fiscal-and-society-limits.md))
 was recorded separately on 2026-10-14, alternating a 0.15.0 build of the
@@ -506,6 +514,96 @@ timed inside one process, are the figures to read.
 | Round 2 | [`elapsed`](baselines/2026-10-14-fiscal-boundary-0.15.0-fiscal-limits-round2-elapsed.json) | [`elapsed`](baselines/2026-10-14-fiscal-boundary-0.16.0-fiscal-limits-round2-elapsed.json) |
 | Round 3 | [`elapsed`](baselines/2026-10-14-fiscal-boundary-0.15.0-fiscal-limits-round3-elapsed.json) | [`elapsed`](baselines/2026-10-14-fiscal-boundary-0.16.0-fiscal-limits-round3-elapsed.json) |
 
+## World-scale fiscal profile
+
+The standalone `fiscal-world-profile` binary measures `canwu-fiscal` on its
+partitioned records at the scale of
+[`docs/proposals/world-scale-fiscal.md`](../docs/proposals/world-scale-fiscal.md).
+It generates, deterministically from `--seed`, a world of partitions with
+heavy-tailed sizes, each with one catalog region, three central institutions,
+eighteen regional offices, and twenty observers (one seeing every institution
+of its partition, nineteen seeing one institution each), every scope with one
+land rule implemented and one annual cycle. Identifiers are generated
+(`scope.000017`, `authority.0003`). It measures, through the public API:
+
+- the state: partitioning the authored state (`into_records`), activation of
+  a new run, the host's audit of every fiscal record, fiscal record bytes and
+  counts per kind and the largest record, before and after every scope is
+  assessed, snapshot bytes, and restore time;
+- idle boundaries (one tick of another plugin, nothing fiscal due), on the
+  initial state and once every scope holds a book;
+- assessing bursts of 64, a spread day (the annual world's assessments
+  spread over 365 days), 1,024, 4,096, 16,384, and every scope, each as the
+  boundary that admits the batches (one per institution), the boundary that
+  settles them, and the drain boundaries at the same instant that publish
+  the reports the settling boundary could not;
+- receipt boundaries of 1,024 and 16,384 receipts (packets of 4,096), after
+  their collections are authorized and their evidence recorded;
+- a close of every book; and
+- archive commits of 256 and 4,096 closed books: assembling the state,
+  preparing and storing the batch, verifying and queueing it, the settling
+  boundary, finalizing the retention, and the acknowledging boundary.
+
+Each boundary figure has, in an elapsed build, the share of the fiscal
+handlers (`settlement_fiscal_handlers_ms`, and each handler in
+`settlement_fiscal_handler_ms`) and the engine's own
+(`settlement_engine_ms`), from the engine's boundary profile. Every boundary
+of the last sample of a measurement is followed, outside the timed part, by
+`audit_fiscal_records`, whose time is reported as `audit_after_ms`.
+
+```console
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml \
+  --bin fiscal-world-profile -- \
+  --preset world \
+  --machine YOUR-STABLE-MACHINE-LABEL \
+  --recorded-on YYYY-MM-DD \
+  --output benchmarks/baselines/YYYY-MM-DD-fiscal-world-world-elapsed.json
+```
+
+`--preset smoke` is 20 partitions and 2,000 scopes (five samples after one
+warm-up); `world` is 200 partitions, 50,000 scopes (the largest partition
+about 6,000), 4,200 institutions, and 4,000 observers (three samples after
+one warm-up). `--mode allocations`, in a build with `--features
+allocation-counting`, counts allocator calls as `fiscal-profile` does; the
+two modes are separate builds.
+
+The 2026-10-15 runs were recorded from the world-scale change's Phase 2
+(before the version bump), on one machine, the elapsed runs with nothing else
+running and the allocation runs alongside builds (allocation counts do not
+depend on load): [`smoke` elapsed](baselines/2026-10-15-fiscal-world-smoke-elapsed.json),
+[`smoke` allocations](baselines/2026-10-15-fiscal-world-smoke-allocations.json),
+[`world` elapsed](baselines/2026-10-15-fiscal-world-world-elapsed.json), and
+[`world` allocations](baselines/2026-10-15-fiscal-world-world-allocations.json).
+Medians of the `world` elapsed run, in milliseconds (the settling boundary's
+time split into the fiscal handlers' and the engine's own):
+
+| Boundary | Admission | Settlement | Fiscal handlers | Engine | Drains at the same instant | Report records |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Idle (one tick, nothing fiscal due) | | 1.06 | 0.00 | | | |
+| Assess 64 scopes | 27.5 | 68.3 | 15.6 | 53.5 | 1 boundary, 35.8 | 230 |
+| A spread day (137 scopes) | 56.4 | 81.7 | 21.4 | 60.2 | 3, 119 | 458 |
+| Assess 1,024 | 303 | 212 | 79.5 | 127 | 12, 780 | 2,519 |
+| Assess 4,096 | 862 | 679 | 356 | 322 | 29, 2,071 | 6,642 |
+| Assess 16,384 | 1,363 | 1,613 | 1,001 | 612 | 54, 2,966 | 11,271 |
+| Assess every scope (50,000) | 2,139 | 4,790 | 3,134 | 1,644 | 62, 4,562 | 12,416 |
+| 1,024 receipts | | 165 | 74.2 | 91.2 | 12, 811 | 2,519 |
+| 16,384 receipts | | 1,872 | 1,113 | 681 | 54, 5,573 | 11,271 |
+| Close every book (50,000) | 9,606 | 7,026 | 5,571 | 1,556 | none | 0 |
+| Archive commit of 256 books | | 46.9 | 16.2 | 30.8 | none | 97 |
+| Archive commit of 4,096 books | | 286 | 160 | 128 | 7, 112 | 1,193 |
+
+The world holds 67,990 fiscal records: 33.8 MB of JSON as authored and
+57.7 MB once every scope holds a book (ledgers about 1 KiB each, the
+largest observer record 10.4 KiB, the catalog 68 KB). Partitioning the
+authored state takes 0.7 s, activating a new run 8.7 s, and the host's audit
+of every fiscal record 1.2 s. The host side of an archive commit is
+dominated by assembling the committed state from every fiscal record: about
+0.95 s before preparing (preparing and storing 4,096 books takes 0.11 s), and
+again inside verifying and queueing (0.4 to 0.7 s) and finalizing (0.4 s).
+After the burst of every
+scope the unsealed snapshot is 1.09 GB of JSON, almost all of it retained
+boundary evidence and published knowledge, and restoring it takes 231 s.
 ## Knowledge-ledger profile
 
 The standalone `knowledge-ledger-profile` binary measures what a boundary
