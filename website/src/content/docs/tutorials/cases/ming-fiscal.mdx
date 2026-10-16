@@ -105,7 +105,7 @@ FiscalAuthorityBinding {
 
 `rebound_by` 一直是 `None`，直到运行中有 `RebindAuthority` 行动更换这个绑定的角色；这几个起点都不会这样做。
 
-fixture 中的每条采纳记录变成一个 `FiscalScopeBinding`（把一个辖区和一种机制交给某个机构，粒度为 `SimulationGranularity::Aggregate`）和一条带 fixture 阶段的采纳状态；每个范围各有一条[范围账](/reference/terminology/)记录。观察者绑定 `observer.revenue-minister` 让户部尚书以 `confidence_per_mille: 850` 看到这些机构的总数；它把尚书写在 `actor`、把他本人写在 `knowledge_holder`，`controlled_by: None` 表示没有财政行动能改指它。随后 `FiscalState::into_records` 把状态拆分成场景携带的各条记录。
+fixture 中的每条采纳记录变成一个 `FiscalScopeBinding`（把一个辖区和一种机制交给某个机构，粒度为 `SimulationGranularity::Aggregate`）和一条带 fixture 阶段的采纳状态；每个范围各有一条[范围明细](/reference/terminology/)记录。观察者绑定 `observer.revenue-minister` 让户部尚书以 `confidence_per_mille: 850` 看到这些机构的总数；它把尚书写在 `actor`、把他本人写在 `knowledge_holder`，`controlled_by: None` 表示没有财政行动能改指它。随后 `FiscalState::into_records` 把状态拆分成场景携带的各条记录。
 
 ### 3. 注册插件
 
@@ -133,7 +133,7 @@ action: FiscalAction::OpenAssessment {
 },
 ```
 
-`reference_batch` 用 `fiscal_target_revision` 读出范围账的修订号，并按它把行动放进一个只有一个条目的 `FiscalActionBatch`；`submit_reference_action_with_trace` 用 `fiscal_action_command` 包装这个批次，以绑定中的角色身份提交。第一个边界上，准入过程核对角色与绑定、绑定机构与范围；下一个边界把条目的 `expected_revision` 与这个边界开始时范围账的修订号对照，结算行动，把结果记入范围账的结果环，并发出 `canwu.fiscal.action_settled.v1`，辅助函数用 `FiscalSettledAction::from_events` 读回它。示例每次只提交一个行动；一个包含多个条目的批次，或按同一个修订号构造的多个批次，会在这一个边界里按准入顺序一起结算。核算周期 ID 由上层应用决定，与历史时期相互独立；某周期的第一笔核算为该范围开立这个周期的账册。第二个行动 `AuthorizeExecution` 允许把资源 `ResourceId::new(1)` 中的 70 从该角色征收给机构，资源余额保持不变。
+`reference_batch` 用 `fiscal_target_revision` 读出范围明细的修订号，并按它把行动放进一个只有一个条目的 `FiscalActionBatch`；`submit_reference_action_with_trace` 用 `fiscal_action_command` 包装这个批次，以绑定中的角色身份提交。第一个边界上，准入过程核对角色与绑定、绑定机构与范围；下一个边界把条目的 `expected_revision` 与这个边界开始时范围明细的修订号对照，结算行动，把结果记入范围明细的结果环，并发出 `canwu.fiscal.action_settled.v1`，辅助函数用 `FiscalSettledAction::from_events` 读回它。示例每次只提交一个行动；一个包含多个条目的批次，或按同一个修订号构造的多个批次，会在这一个边界里按准入顺序一起结算。核算周期 ID 由上层应用决定，与历史时期相互独立；某周期的第一笔核算为该范围开立这个周期的账册。第二个行动 `AuthorizeExecution` 允许把资源 `ResourceId::new(1)` 中的 70 从该角色征收给机构，资源余额保持不变。
 
 ### 5. 记录征收并结算凭证
 
@@ -188,7 +188,7 @@ Some((observer_id.clone(), report.projection))
 
 - 已征数量只能经由适配器的证据记录进入财政状态，比授权晚两个边界。
 - 凭证的数量和处置结果来自所引用的证据。一个精确证据版本最多结算一张凭证，一个证据种类与 `external_operation_id` 的组合在该范围的常驻账册内最多结算一张。
-- 每个行动只写明它改动的那条记录（这里是范围账）的修订号，所以其他范围上的行动不会让它过期。
+- 每个行动只写明它改动的那条记录（这里是范围明细）的修订号，所以其他范围上的行动不会让它过期。
 - 三个起点共用一套代码，由 fixture JSON 决定流程使用的法规、范围和机构。
 - 户部尚书看到的是 100-109，权威状态中的值是 100。
 - `wanli-1581` 的 trace 把 `adopt_single_whip_north` 和 `adopt_single_whip_southwest` 列为转型候选；在 `ApplyTransition` 行动结算之前，它们一直只是候选。

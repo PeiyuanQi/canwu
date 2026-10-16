@@ -81,7 +81,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `CompiledFiscalCatalog` | 不可变的运行目录，保存为只可创建的记录 `canwu.fiscal:catalog` |
 | `FiscalRuleDefinition` | 一条法规：机制、法定年份范围、辖区、核算依据、支付形态、折纳政策、出处、置信度 |
 | `FiscalTransitionDefinition` | 一项改革：来源与目标法规、观测与适用年份范围、辖区、取代或停用的法规、前置条件 |
-| `FiscalState` | 整个财政状态的逻辑模型和编写模型：根、归档头，以及按键存放的财政机构记录、[范围账](/reference/terminology/)、辖区记录、观察者记录和报告队列。`into_records` 把它拆分成运行中保存的记录，`from_records` 把记录拼回来 |
+| `FiscalState` | 整个财政状态的逻辑模型和编写模型：根、归档头，以及按键存放的财政机构记录、[范围明细](/reference/terminology/)、辖区记录、观察者记录和报告队列。`into_records` 把它拆分成运行中保存的记录，`from_records` 把记录拼回来 |
 | `FiscalRoot` | `canwu.fiscal:root` 记录：历史语境及其修订号、获准的证据种类、正在使用的报告队列页，以及被搁置的观察者 |
 | `FiscalScopeLedger`、`FiscalCycleBook` | 一个范围绑定的记录：它的采纳、每个常驻周期各一本[核算周期账册](/reference/terminology/)（核算、减免、请求、凭证、审计结论）、修订号、最近结果和周期水位线 |
 | `FiscalOffice` | 一个机构的记录：权限绑定和审计绑定、任命政策和审计人提案、各周期的记账，以及能看到它的观察者 |
@@ -95,7 +95,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `FiscalObserverBinding` | 谁接收报告（一名人物，或没有角色的政府）、看哪些机构、置信度多少，以及哪个机构可以改指或移除它 |
 | `FiscalAdoptionState` | 一条法规在一个范围内的阶段，带一个记录变更次数的代次 |
 | `FiscalActionBatch`、`FiscalActionEntry`、`FiscalAction` | 一条命令中同一绑定下最多 4,096 个程序步骤；带 ID 和预期修订号的一个步骤；步骤本身 |
-| `FiscalActionTarget` | 行动写明修订号的那条记录：范围账、财政机构记录、辖区记录或观察者记录 |
+| `FiscalActionTarget` | 行动写明修订号的那条记录：范围明细、财政机构记录、辖区记录或观察者记录 |
 | `FiscalExecutionRequest` | 征收、汇解、支出、储备或退还某个数量的授权 |
 | `FiscalExecutionEvidence` | 适配器在实际操作之后写入的类型化结果，写明它结算的范围和请求 |
 | `FiscalExecutionReceiptPacket`、`FiscalExecutionReceipt` | 引用精确证据版本的凭证请求，以及结算后的凭证 |
@@ -139,7 +139,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 用 `FiscalState::new` 和各个 `add_*` 辅助函数（`add_scope`、`add_adoption`、`add_assessment`、`add_authority_binding`、`add_audit_binding`、`add_appointment_policy`、`add_audit_proposal`、`add_observer`）构造状态，然后调用 `FiscalState::into_records(&catalog)`：它把所有派生字段算到最新（名次、计数、候选、机构周期记账、观察者布局），校验状态，再拆分成记录，包括目录桶、索引页和队列页。你自己填的派生字段会被重新计算，不会被采信。激活时对每个新场景和恢复的快照运行 `audit_fiscal_records`，所以不是有效状态的精确拆分的记录集合，在创建运行时就会被拒绝。`load_fiscal_state` 为上层应用拼出运行中已提交的状态，开销与财政记录数成正比；`fiscal_root_reference`、`fiscal_office_reference`、`fiscal_ledger_reference`、`fiscal_jurisdiction_reference`、`fiscal_observer_reference` 和 `fiscal_archive_reference` 指向单条记录。
 
-每条记录都有字节预算，结算时按扣除 `FISCAL_RECORD_RING_RESERVE_BYTES`（4 KiB）后的预算检查，这部分预留给记录的结果环：范围账为 `MAX_FISCAL_LEDGER_RECORD_BYTES`（256 KiB，按载荷精确测量），财政机构记录或辖区记录为 `MAX_FISCAL_RECORD_BYTES`（1 MiB）；其余记录由各自的数量上限约束。结果放不下的行动作为它自己的结果被拒绝，原因是 `FISCAL_RECORD_BUDGET_EXHAUSTED`，这条拒绝记录能放进预留空间；放不下的凭证或历史语境变更以 `state_budget_exhausted` 被拒绝。一本常驻年度账册的范围账约 1 到 2.5 KiB，所以只有多年账册不归档，范围账才会触及预算：及时关闭并归档。财政机构记录按它的字节数加上常驻周期为归档提交预留的空间来检查，所以归档提交永远不会让它超出预算，已结算的运行总能恢复。
+每条记录都有字节预算，结算时按扣除 `FISCAL_RECORD_RING_RESERVE_BYTES`（4 KiB）后的预算检查，这部分预留给记录的结果环：范围明细为 `MAX_FISCAL_LEDGER_RECORD_BYTES`（256 KiB，按载荷精确测量），财政机构记录或辖区记录为 `MAX_FISCAL_RECORD_BYTES`（1 MiB）；其余记录由各自的数量上限约束。结果放不下的行动作为它自己的结果被拒绝，原因是 `FISCAL_RECORD_BUDGET_EXHAUSTED`，这条拒绝记录能放进预留空间；放不下的凭证或历史语境变更以 `state_budget_exhausted` 被拒绝。一本常驻年度账册的范围明细约 1 到 2.5 KiB，所以只有多年账册不归档，范围明细才会触及预算：及时关闭并归档。财政机构记录按它的字节数加上常驻周期为归档提交预留的空间来检查，所以归档提交永远不会让它超出预算，已结算的运行总能恢复。
 
 每个上层应用辅助函数都通过 `canwu_api::CanwuRun` 接受任一运行句柄，`Canwu` 或封存过的 `CompactedCanwu`：`fiscal_action_target`、`fiscal_target_revision`、`fiscal_recent_outcome`、`enqueue_execution_receipts`、`load_fiscal_state`、`audit_fiscal_records`、`fiscal_reports_of_holder`、`enqueue_fiscal_archive` 和 `finalize_fiscal_archive_retention`。它们只读当前记录和当前版本索引，所以封存过证据的运行与它未封存的派生分支读取和结算完全一致。
 
@@ -159,7 +159,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
     Adapter --> Evidence["证据记录<br/>FiscalExecutionEvidence 载荷"]
     Evidence --> Packet["FiscalExecutionReceiptPacket<br/>引用精确版本"]
     Packet --> Receipt["FiscalExecutionReceipt<br/>数量与处置取自证据"]
-    Remit --> Book["范围账<br/>FiscalCycleBook 合计"]
+    Remit --> Book["范围明细<br/>FiscalCycleBook 合计"]
     Receipt --> Book
     Book --> Report["第 13 阶段<br/>以知识形式发布的持有人报告"]
     Book --> Close["CloseAccountingCycle"]
@@ -167,7 +167,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 `}
 />
 
-法规在某个范围内被采纳，就形成了应征义务；核算把一个核算周期内应缴多少固定下来，并在范围账里开立该周期的账册。引擎按下面的顺序运行这条流程：
+法规在某个范围内被采纳，就形成了应征义务；核算把一个核算周期内应缴多少固定下来，并在范围明细里开立该周期的账册。引擎按下面的顺序运行这条流程：
 
 1. **安装。** 场景带上编译好的目录（`CompiledFiscalCatalog::into_record`）和初始状态的记录（`FiscalState::into_records`）。注册 `FiscalPlugin::new(evidence_kinds)`；如果绑定用到代理角色或审计人，再加上 `.with_authority_basis_kinds(kinds)`。激活时审计每条财政记录，所以财政记录集合无效或不完整的模拟运行在创建或恢复时就会被拒绝，不会等到某个边界才出错。绑定引用的权限依据如果属于插件不会读取的种类，激活同样会被拒绝；首次报告派生放不下的状态也会被拒绝。
 2. **提交。** 用 `fiscal_target_revision` 读取行动目标的修订号（或先用 `fiscal_action_target` 找到某个绑定和行动的目标），在同一绑定下构造包含一个或多个条目的 `FiscalActionBatch`（单个条目用 `FiscalActionBatch::single`），用 `fiscal_action_command` 包装成 `apply_fiscal_action_v1` 的[领域命令](/tutorials/command-plugin/)，再用 `Canwu::enqueue_command` 排队；旧式的直接命令路径会以 `MixedCommandIngress` 失败。每个条目带有行动 ID、目标的 `expected_revision` 和行动本身。一个机构要在同一个核算步骤里核算许多范围时，把它们放进一个批次。
@@ -180,7 +180,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
    引擎把每次拒绝都记为 `Canwu::command_attempts` 中被拒绝的尝试，边界照常提交，也不占用任何行动 ID。准入不把修订号与条目实际结算时的状态比较，这项检查在结算时进行。随后处理函数安排一条内部的 `fiscal_action_v1` [规范化输入](/reference/terminology/)（类别 `Decision`），其中带着批次和签发者当时所持的身份。上层应用不能自己排入这种数据包：这个类型是内部输入，并且数据包只有在它的输入记录把它所携带的命令记为原因时才会结算。
 4. **结算（第 7 阶段）。** 下一个边界上，`settle-fiscal-ingress-v1` 在 `DomainDeltaProposal` 阶段运行。它先结算归档提交和保留确认，再按准入顺序结算其他已准入的数据包。它把批次条目按目标分组，每个目标只解码一次；对每个条目，判断是否过期（见[行动批次与修订号](#行动批次与修订号)），对照机构记录重新检查签发者的身份和权限依据，在上一个条目留下的记录副本上执行行动，再校验它改动的每条记录。结果以 `Applied` 或 `Rejected` 记入目标的结果环，目标的修订号加一，每个条目发出一个 `canwu.fiscal.action_settled.v1` 事件。下一个条目从最近一组有效记录继续，无论各条目结果如何，边界都照常提交。
 5. **凭证与语境。** 同一个系统还结算 `fiscal_execution_receipts_v1`（用 `enqueue_execution_receipts` 提交、每包最多 4,096 张凭证的数据包，类别 `Acknowledgement`，事件 `canwu.fiscal.execution_receipt_recorded.v1`）和 `fiscal_historical_context_v1`（用 `fiscal_historical_context_ingress` 构造、`enqueue_plugin_ingress` 排队，事件 `canwu.fiscal.historical_context_changed.v1`）。每张凭证各自结算或各自被拒绝，被拒绝的凭证或语境变更什么也不改变：它留下的唯一记录是一个 `canwu.fiscal.ingress_rejected.v1` 事件，事件摘要写明数据包，并以稳定的原因结尾（见[凭证](#凭证)）。上层应用能发送的任何内容都不会让边界失败。
-6. **派生字段。** 结算写入每条涉及的记录时，派生字段都是最新的：范围账的账册带着合计，机构记录带着周期记账，辖区记录带着计数和转型候选。没有单独的派生系统，也没有保存的聚合；报告行直接从范围的账册读出。
+6. **派生字段。** 结算写入每条涉及的记录时，派生字段都是最新的：范围明细的账册带着合计，机构记录带着周期记账，辖区记录带着计数和转型候选。没有单独的派生系统，也没有保存的聚合；报告行直接从范围的账册读出。
 7. **报告（第 13 阶段）。** `materialize-fiscal-reports-v1` 在 `PerspectiveAndReportMaterialization` 阶段运行：对本边界能够发布其排队工作的每个观察者，发布摘要和各行有变化的分段，详见[知识与可见性](#知识与可见性)。
 
 两个系统都是事件驱动的，只要边界准入了事件或任何输入就会运行，并且都先用开销很小的读取判断自己有没有事可做：结算系统在本边界没有准入财政输入时直接返回，报告系统读根记录，没有正在使用的报告队列页就直接返回。因此，与财政程序无关的边界只读根记录，不管这个世界有多大。
@@ -191,13 +191,13 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 | `FiscalAction` | 目标 | 效果 | 主要检查 |
 | --- | --- | --- | --- |
-| `ChangeAdoption` | 范围账 | 新建采纳或改变其阶段；每次变更，代次加一 | 法规的机制与范围一致，且法规覆盖该范围的辖区；新建采纳要求当前年份在法规的法定年份范围内，也不能让转型目标直接以可执行阶段起步；每个范围账最多 64 项采纳 |
-| `ApplyTransition` | 辖区记录 | 在一个辖区内把目标法规设为 `Implemented`，并在同一辖区停用被该转型取代的法规，一次行动完成；采纳发生变化的每个范围账的修订号加一 | 每条目标法规恰好绑定一次；目标范围同属一个辖区；该转型当前是这个辖区的候选；绑定拥有全部目标范围 |
-| `OpenAssessment` | 范围账 | 记录数量、单位、支付形态、核算周期和可选的折纳报价；范围还没有该周期的账册时开立一本 | 年份在法规的法定年份范围内；采纳可执行；法规允许该支付形态；同一范围、核算周期、单位和支付形态只能有一笔核算；周期高于该范围的两条水位线；每个范围账最多 64 本常驻账册，每个机构最多 64 个常驻周期；每个机构、机制和周期最多 4 个分区键 |
-| `GrantRemission` | 范围账 | 在打开的账册中减少应征额 | 减免总额不超过应征数量；每本账册最多 256 笔 |
-| `AuthorizeExecution` | 范围账 | 在打开的账册中创建一条 `FiscalExecutionRequest`，种类为 `Collect`、`Remit`、`Disburse`、`Reserve` 或 `Return` | 单位与核算一致；来源和目标不同；机构是其中一方；`Collect` 请求合计不超过应征减去减免；每本账册最多 256 条 |
-| `RecordAudit` | 范围账 | 在打开或已关闭的账册上记录一条带 `FiscalAuditSeverity` 和证据的审计结论；结论写明由谁在哪个绑定下录入，以及审计人由谁任命和提名 | 目标是该范围的一笔核算、一条请求或一张凭证；在拥有该范围的机构的权限绑定之下发起，或在针对该机构的[审计绑定](#审计绑定)之下发起；每本账册最多 256 条 |
-| `CloseAccountingCycle` | 范围账 | 关闭一个范围的一本账册，此后它只接受审计结论，并可以归档 | 账册存在且处于打开状态；在该范围所属机构的权限绑定之下发起 |
+| `ChangeAdoption` | 范围明细 | 新建采纳或改变其阶段；每次变更，代次加一 | 法规的机制与范围一致，且法规覆盖该范围的辖区；新建采纳要求当前年份在法规的法定年份范围内，也不能让转型目标直接以可执行阶段起步；每个范围明细最多 64 项采纳 |
+| `ApplyTransition` | 辖区记录 | 在一个辖区内把目标法规设为 `Implemented`，并在同一辖区停用被该转型取代的法规，一次行动完成；采纳发生变化的每个范围明细的修订号加一 | 每条目标法规恰好绑定一次；目标范围同属一个辖区；该转型当前是这个辖区的候选；绑定拥有全部目标范围 |
+| `OpenAssessment` | 范围明细 | 记录数量、单位、支付形态、核算周期和可选的折纳报价；范围还没有该周期的账册时开立一本 | 年份在法规的法定年份范围内；采纳可执行；法规允许该支付形态；同一范围、核算周期、单位和支付形态只能有一笔核算；周期高于该范围的两条水位线；每个范围明细最多 64 本常驻账册，每个机构最多 64 个常驻周期；每个机构、机制和周期最多 4 个分区键 |
+| `GrantRemission` | 范围明细 | 在打开的账册中减少应征额 | 减免总额不超过应征数量；每本账册最多 256 笔 |
+| `AuthorizeExecution` | 范围明细 | 在打开的账册中创建一条 `FiscalExecutionRequest`，种类为 `Collect`、`Remit`、`Disburse`、`Reserve` 或 `Return` | 单位与核算一致；来源和目标不同；机构是其中一方；`Collect` 请求合计不超过应征减去减免；每本账册最多 256 条 |
+| `RecordAudit` | 范围明细 | 在打开或已关闭的账册上记录一条带 `FiscalAuditSeverity` 和证据的审计结论；结论写明由谁在哪个绑定下录入，以及审计人由谁任命和提名 | 目标是该范围的一笔核算、一条请求或一张凭证；在拥有该范围的机构的权限绑定之下发起，或在针对该机构的[审计绑定](#审计绑定)之下发起；每本账册最多 256 条 |
+| `CloseAccountingCycle` | 范围明细 | 关闭一个范围的一本账册，此后它只接受审计结论，并可以归档 | 账册存在且处于打开状态；在该范围所属机构的权限绑定之下发起 |
 | `RebindAuthority` | 财政机构记录 | 同时更换一个权限绑定的常设角色、代理角色和权限依据 | 见[权限改绑](#权限改绑) |
 | `RebindAudit` | 财政机构记录 | 作为被审计机构自己的直接决定，安装、更换或移除审计绑定 | 只有该机构的[任命政策](#审计绑定)让它自己担任任命机构时才允许 |
 | `NominateAuditor`、`PetitionAuditorRemoval`、`DecideAuditAppointment` | 财政机构记录 | 提名候选人、请求罢免审计人，以及对提案作出决定或直接决定 | 见[审计绑定](#审计绑定) |
@@ -209,7 +209,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 `FiscalExecutionReceiptPacket` 包含凭证 ID、它结算的范围、请求 ID 和 1 到 32 个精确证据版本。插件逐个检查：版本的种类在根记录获准的证据种类中；这个精确版本是其记录的当前版本，或初始场景中的版本；载荷能解码为 `FiscalExecutionEvidence`，并且其中的范围、请求、单位、支付形态、执行种类、资源、来源和目标都与请求一致。所有被引用记录的处置结果相同，数量合计不超过请求数量，建立时间都不早于请求。凭证的数量和 `FiscalReceiptDisposition` 取自这些证据。`Fulfilled` 和 `Partial` 计入合计，`Rejected` 和 `Excused` 的数量为零。一个精确版本最多结算一张凭证，一个 `(evidence kind, external_operation_id)` 组合在该范围的常驻账册内最多结算一张。以相同内容重复提交同一张凭证，状态保持不变。
 
-凭证通过 `enqueue_execution_receipts` 以每包最多 `MAX_FISCAL_RECEIPTS_PER_PACKET`（4,096）张的数据包提交，按顺序结算，每张对照它所在范围的范围账。结算不能接受的凭证以 `canwu.fiscal.ingress_rejected.v1` 被拒绝，后面的凭证照常结算：
+凭证通过 `enqueue_execution_receipts` 以每包最多 `MAX_FISCAL_RECEIPTS_PER_PACKET`（4,096）张的数据包提交，按顺序结算，每张对照它所在范围的范围明细。结算不能接受的凭证以 `canwu.fiscal.ingress_rejected.v1` 被拒绝，后面的凭证照常结算：
 
 | 原因 | 何时 |
 | --- | --- |
@@ -219,14 +219,14 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `evidence_count_invalid`、`evidence_kind_unapproved`、`evidence_not_current` | 没有证据或超过 32 个版本；根记录未获准的种类；被引用的版本不是其记录的当前版本，例如记录在数据包排队之后发生了变化 |
 | `claim_mismatch`、`quantity_exceeded` | 声明与范围、请求或其他声明不一致，或早于请求；凭证合计会超过请求授权的数量 |
 | `operation_reused`、`evidence_reused`、`receipt_id_conflict` | 已被该范围常驻账册中的凭证结算过；某张常驻凭证已占用这个 ID 且内容不同 |
-| `state_budget_exhausted`、`boundary_limit` | 范围账会超出字节预算；本边界已写了 65,536 个范围账（请重新发送） |
+| `state_budget_exhausted`、`boundary_limit` | 范围明细会超出字节预算；本边界已写了 65,536 个范围明细（请重新发送） |
 | `context_outside_pack`、`invalid_packet` | 语境年份超出内容包范围；其他任何会让状态无效的情况 |
 
 被拒绝的凭证不消耗任何东西，所以改正后的凭证可以稍后结算；被引用的记录变了，就引用它的新版本。引用只可创建的证据种类，待结算的凭证才能保持当前。同一个范围内每个请求 ID 在整个运行期内只用一次：在之后的账册里重复使用某个请求 ID，而证据的模拟时间又与已归档的同 ID 请求的证据相同时，可能再次拿到那份证据。
 
 ### 行动批次与修订号
 
-每条范围账、财政机构记录、辖区记录和观察者记录都有自己的修订号。记录上的每个结果（无论应用还是拒绝）和每张凭证都让该记录的修订号加一；转型让采纳发生变化的每个范围账的修订号加一。归档维护、报告记账和历史语境变更不改变任何行动目标的修订号，所以都不会让待决的决策过期。
+每条范围明细、财政机构记录、辖区记录和观察者记录都有自己的修订号。记录上的每个结果（无论应用还是拒绝）和每张凭证都让该记录的修订号加一；转型让采纳发生变化的每个范围明细的修订号加一。归档维护、报告记账和历史语境变更不改变任何行动目标的修订号，所以都不会让待决的决策过期。
 
 只有当条目的 `expected_revision` 等于结算它的边界开始时目标的修订号，条目才会应用。因此，只有行动自己的目标在签发者查看之后发生了变化，行动才算过期：其他范围或机构上的活动不影响它，一个机构把它各范围的核算放在一个批次里提交时，无论别处发生了什么，所有条目都一起结算。同一个边界内，条目按准入顺序结算，每个条目都在前面的条目留下的记录上校验。后面的条目可以建立在前面条目创建的内容之上（前一个条目刚让某项采纳可执行，后一个条目就可以据此开立核算），但如果它要覆盖本边界更早的行动改动过的采纳、绑定、政策、提案或观察者（包括转型改动的），就会作为过期被拒绝。只新建内容的行动彼此不冲突：同一笔核算上的两项减免，只要合计仍能通过校验，就都会应用。在同一边界结算的凭证也不会让条目过期。
 
@@ -237,22 +237,22 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | 上限 | 值 | 原因 |
 | --- | ---: | --- |
 | `MAX_FISCAL_ACTIONS_PER_BOUNDARY` | 65,536 个已应用的行动 | `FISCAL_BOUNDARY_ACTION_LIMIT` |
-| `MAX_FISCAL_LEDGER_WRITES_PER_BOUNDARY` | 65,536 个范围账，行动和凭证合计 | `FISCAL_BOUNDARY_ACTION_LIMIT`（凭证为 `boundary_limit`） |
+| `MAX_FISCAL_LEDGER_WRITES_PER_BOUNDARY` | 65,536 个范围明细，行动和凭证合计 | `FISCAL_BOUNDARY_ACTION_LIMIT`（凭证为 `boundary_limit`） |
 | `MAX_FISCAL_ACTIONS_PER_RECORD_PER_BOUNDARY` | 同一目标上 64 个已应用的行动 | `FISCAL_RECORD_ACTION_LIMIT` |
 | `MAX_FISCAL_PARTITION_KEYS` | 每个机构、机制和周期 4 个分区键 | `FISCAL_PARTITION_KEYS_EXHAUSTED` |
-| `MAX_FISCAL_HOT_BOOKS_PER_LEDGER`、`MAX_FISCAL_HOT_CYCLES_PER_OFFICE` | 每个范围账 64 本账册，每个机构 64 个周期 | `FISCAL_HOT_BOOKS_EXHAUSTED` |
+| `MAX_FISCAL_HOT_BOOKS_PER_LEDGER`、`MAX_FISCAL_HOT_CYCLES_PER_OFFICE` | 每个范围明细 64 本账册，每个机构 64 个周期 | `FISCAL_HOT_BOOKS_EXHAUSTED` |
 | 记录字节预算 | 见[记录与字节预算](#记录与字节预算) | `FISCAL_RECORD_BUDGET_EXHAUSTED` |
 
 过期或未通过权限检查的行动被拒绝时不占用任何上限。这些都不是整个运行期的总量上限：关闭并归档账册就能释放它们。
 
 ### 核算周期与归档
 
-每个范围的范围账为每个常驻核算周期保存一本 `FiscalCycleBook`，每个机构的财政机构记录按周期统计常驻账册数。核算周期 ID 由上层应用决定，与历史时期相互独立；它们按字节顺序比较，所以请让它们按时间排序（`"1644"`、`"1644-03"`）。
+每个范围的范围明细为每个常驻核算周期保存一本 `FiscalCycleBook`，每个机构的财政机构记录按周期统计常驻账册数。核算周期 ID 由上层应用决定，与历史时期相互独立；它们按字节顺序比较，所以请让它们按时间排序（`"1644"`、`"1644-03"`）。
 
 - `OpenAssessment` 开立某个周期的账册。`CloseAccountingCycle` 关闭一个范围的一本账册；关闭的账册只接受审计结论（核算、减免或授权为 `FISCAL_CYCLE_CLOSED`，凭证为 `cycle_closed`）。账册可以按任意顺序关闭和归档。
-- 归档提交把已关闭的账册从范围账移入财政归档。它把每个范围的水位线提高到它归档的最大周期；在归档某个机构某周期最后一本常驻账册的那次提交中，还把该机构这个周期的合计归档一次，并提高机构水位线。不在任何一条水位线及以下开立新账册（`FISCAL_CYCLE_ARCHIVED`），所以一个核算分区（范围、周期、单位、支付形态）在整个运行期内最多核算一次，而无需读取归档。低于机构水位线的常驻账册不受影响。
+- 归档提交把已关闭的账册从范围明细移入财政归档。它把每个范围的水位线提高到它归档的最大周期；在归档某个机构某周期最后一本常驻账册的那次提交中，还把该机构这个周期的合计归档一次，并提高机构水位线。不在任何一条水位线及以下开立新账册（`FISCAL_CYCLE_ARCHIVED`），所以一个核算分区（范围、周期、单位、支付形态）在整个运行期内最多核算一次，而无需读取归档。低于机构水位线的常驻账册不受影响。
 - 归档由上层应用完成，协议与资源归档和生产归档相同：`FiscalState::prepare_fiscal_archive(book_limit, store, sealed_cut)` 按（范围、周期）顺序选出已关闭的账册，最多 `MAX_FISCAL_ARCHIVE_COMMIT_RECORDS`（4,096）条记录、每个 blob 64 条，构造 `PreparedFiscalArchiveBatchV1` 的 blob、成员页、时间页、查找索引页和目录；`enqueue_fiscal_archive` 把它们写入你的 `FiscalArchiveStore` 并校验，持久化保留句柄，再把提交排入队列（`fiscal_archive_commit_v1`）；提交结算后，`finalize_fiscal_archive_retention` 排入确认。准备和排队要在同一个边界间隙内完成。两者都要拼出已提交的状态，开销与财政记录数成正比。归档头持有 `MAX_FISCAL_ARCHIVE_PENDING_HANDLES`（64）个未确认句柄时，准备会被拒绝（`FiscalArchiveError::Backpressure`）。
-- 在会封存证据的运行上，把最后一个已封存日志段的终点游标作为 `sealed_cut` 传入：引用了在它之后建立的证据版本的账册会在准备时被拒绝（`FiscalArchiveError::UnsealedCitations`），直到某次封存覆盖它为止，因为归档账册会结束范围账对它引用的折纳报价和凭证证据的载荷保留声明。这个切点由上层应用传入；会封存的上层应用传 `None` 就跳过了这项拒绝。
+- 在会封存证据的运行上，把最后一个已封存日志段的终点游标作为 `sealed_cut` 传入：引用了在它之后建立的证据版本的账册会在准备时被拒绝（`FiscalArchiveError::UnsealedCitations`），直到某次封存覆盖它为止，因为归档账册会结束范围明细对它引用的折纳报价和凭证证据的载荷保留声明。这个切点由上层应用传入；会封存的上层应用传 `None` 就跳过了这项拒绝。
 - 提交先于所在边界的其他财政数据包结算，并且只对照它绑定的记录检查：归档头、每本选中账册的修订号，以及它们所属机构受影响的周期条目。其他账册上的行动、凭证或提交不影响它。从旧账册准备的提交结算为失效的空操作，留下凭证和一个由上层应用确认的句柄；归档头已持有其句柄的提交副本什么也不记录；两者都记在各自的 `canwu.fiscal.archive_maintenance.v1` 事件里。确认把它的句柄退掉一次。两者都不改变任何修订号。超过归档头余量（64 个未确认的失效句柄）的失效提交，以及不匹配的提交，以拒绝事件被拒绝，什么也不改变；这样的提交在状态中没有保留句柄，所以 `finalize_fiscal_archive_retention` 对它返回错误，由上层应用自己放弃存储中的那份副本。
 - 没有任何边界读取归档存储。准入、结算、幂等和分区唯一性都只用常驻记录，所以无论存储能否读取，运行的结算完全相同，恢复和精确重放也不需要存储。只有上层应用的归档操作读取存储：`archived_fiscal_record` 通过累积的[归档查找索引](/reference/terminology/)按 `FiscalArchiveKeyV1` 查找已归档的账册、某机构某周期的合计或维护凭证，`audit_fiscal_archive` 对照归档头检查整个归档。`()` 是一个什么都不存的存储。
 
@@ -311,7 +311,7 @@ FiscalAction::RebindAuthority {
 谁任命和罢免一个机构的审计人，由它的[审计任命政策](/reference/terminology/)决定：随状态用 `FiscalState::add_appointment_policy` 声明的 `FiscalAppointmentPolicy`，每个被审计机构最多一份：
 
 - **任命机构**是其决定负责任命和罢免的机构。它在自己的某个权限绑定之下，以该绑定的常设角色或整体名义，用 `FiscalAction::DecideAuditAppointment { audit_binding_id, decision }` 作决定；代理角色永远不能作决定。决定可以是 `AcceptNomination`（按提名时的依据任命某条待决提名的候选人，依据必须仍是当前版本）、`Appoint`（直接任命，需要 `appoints_without_nomination`）、`AcceptPetition`（罢免请求所指的审计人，此人必须仍持有该绑定）、`Remove`（直接罢免，需要 `removes_without_petition`）或 `Dismiss`（驳回一条待决的提名或请求）。
-- **提名方和请求罢免方**是在自己的某个权限绑定之下行动的机构，或政策按姓名列出、在政策自身 ID 之下行动的人物（`FiscalIssuerRole::ListedActor`）。提名方用 `NominateAuditor { nomination_id, audit_binding_id, institution, candidate, authority_basis }` 提出候选人和权限依据，绑定可以尚不存在。请求罢免方用 `PetitionAuditorRemoval { petition_id, audit_binding_id, grounds }` 根据证据请求罢免某个绑定当前的审计人。
+- **提名方和请议方**是在自己的某个权限绑定之下行动的机构，或政策按姓名列出、在政策自身 ID 之下行动的人物（`FiscalIssuerRole::ListedActor`）。提名方用 `NominateAuditor { nomination_id, audit_binding_id, institution, candidate, authority_basis }` 提出候选人和权限依据，绑定可以尚不存在。请议方用 `PetitionAuditorRemoval { petition_id, audit_binding_id, grounds }` 根据证据请求罢免某个绑定当前的审计人。
 - **任期。** 用另一人替换在任的审计人既是罢免也是任命，所以需要 `removes_without_petition`（否则为 `FISCAL_PETITION_REQUIRED`）；政策保护在任审计人时，任命机构先接受针对他的罢免请求，再填补空缺。向空缺任命，或按续期的依据再次任命在任的审计人，不罢免任何人，只需要任命规则（需要提名而没有提名时为 `FISCAL_NOMINATION_REQUIRED`）。
 - **提案。** 每条提名和罢免请求都是被审计机构记录中的一条 `FiscalAuditProposal`，记有提出它的一方和签发者，在结案之前一直待决，并且只结案一次：被任命机构接受或驳回，或者被取代。同一方对同一绑定提出的同类新提案取代它原来的待决提案；一次任命取代该绑定上待决的其他提名，只有在它替换了请求所指的审计人时才取代请求；一次罢免取代其他待决请求，提名则继续等待空缺。每一方在一份政策下最多有 `MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY`（4）条待决提案，所以谁也占不了别人的名额（超过时为 `ValueOutOfRange`）；每份政策保留最近 `MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY`（64）条已结案提案。
 - **拒绝。** 每次拒绝都有记录：准入时记为 `InvalidAuthority`（`FISCAL_ISSUER_NOT_LISTED`、`FISCAL_ISSUER_NOT_APPOINTER`、`FISCAL_NOMINATION_REQUIRED`、`FISCAL_PETITION_REQUIRED`、`FISCAL_APPOINTMENT_POLICY_MISSING`）、`InvalidPayload`（`FISCAL_PROPOSAL_NOT_PENDING`）、`EntityNotFound` 或 `ValueOutOfRange`；结算时，签发者身份已经消失，或所引用的提案已被本边界更早的条目结案的，记为 `Rejected` 结果。
@@ -360,7 +360,7 @@ for (binding_id, report) in fiscal_reports(&viewer)? {
 一份报告保存为若干条知识记录，schema 为 `fiscal_report_knowledge_schema_id()`（种类 `canwu-fiscal` / `fiscal_report`，版本 4）：一条摘要记录，加上报告显示的每个常驻周期的若干分段，每段 `FISCAL_REPORT_ROWS_PER_PART`（16）行（`FiscalReportRecord`）。单独一条记录只是一条摘要或一个分段，所以整份报告请通过 `fiscal_reports` 读取。
 
 - **报告行落在观察者记录上。** 每条报告记录的主体都是该绑定自己的观察者记录，报告行由这条记录上的角色命名：摘要在第 0 行，槽位 `s` 中周期的分段 `p` 在第 `1 + s * 1,024 + p` 行。改指或移除一个绑定，其他绑定的报告行都留在原处。
-- **每条记录取代本条线上前面的那一条。** 报告系统用 [`SimulationView::knowledge_heads`](/architecture/knowledge-information/#取代先前的记录) 在已提交的知识账本里找到那条记录，所以封存过证据的模拟运行与其重放取代的记录完全相同。分段把它各行读自的范围账版本作为证据引用。
+- **每条记录取代本条线上前面的那一条。** 报告系统用 [`SimulationView::knowledge_heads`](/architecture/knowledge-information/#取代先前的记录) 在已提交的知识账本里找到那条记录，所以封存过证据的模拟运行与其重放取代的记录完全相同。分段把它各行读自的范围明细版本作为证据引用。
 - **只发布有变化的部分。** 账册有变化时，看到该机构的每个观察者的报告队列页上都会排入账册所在行的分段。报告系统只发布排队分段中摘要值有变化的那些，连同摘要一起；观察者记录保存每个已发布分段的摘要值。如果边界没有改变某位观察者能看到的任何内容，就不会向他发布任何记录，所以 `as_of` 是报告最后一次变化的时间。没有常驻周期的报告不发布。
 - **周期来去。** 一份报告最多显示 `MAX_FISCAL_REPORT_CYCLE_SLOTS`（64）个周期；超出的周期计入摘要的 `omitted_cycles`，等第一个空出的槽位。观察者看到的某周期最后一本账册归档后，这个周期离开报告：它的各分段在原来的行上发布为空，摘要不再列出它，槽位随之空出。
 - **改指与移除。** 绑定改指之后，新持有人在下一次发布时拿到整份报告，旧持有人的报告被撤回：它的摘要被一条标为 `withdrawn` 的摘要取代，读取函数不再列出它。被移除的绑定的报告以同样方式撤回，记录本身保留，所以它的标识不会被重复使用。被撤回的持有人保留已经拿到的记录，那是历史。
@@ -377,7 +377,7 @@ for (binding_id, report) in fiscal_reports(&viewer)? {
 
 财政扩展不抽取随机数，也不声明随机流。报告区间来自整数分桶，部分征收之类的结果由你的适配器作为证据带进来。
 
-财政状态存放在[记录与字节预算](#记录与字节预算)所列的记录中。目录记录只可创建。每条范围账把它常驻账册中的凭证和折纳报价引用的、运行中产生的精确证据版本标记为需要保留载荷，所以账册常驻期间引擎会让这些载荷始终可以加载；归档账册会结束这项声明，这正是会封存的运行上 `prepare_fiscal_archive` 拒绝未封存引用的原因。观察者记录引用持有人的人物或政府，所以如果状态写到了不存在的持有人，引擎会拒绝它。改绑、审计绑定、提名和结论的 `entered_by` 所写的记录版本则没有这样保留：之后不会再有判断读取它们，`seal_evidence` 之后，其中已被取代的版本可能无法再证明。`load_fiscal_state` 和 `audit_fiscal_records` 校验目录、每条记录和跨记录不变量。
+财政状态存放在[记录与字节预算](#记录与字节预算)所列的记录中。目录记录只可创建。每条范围明细把它常驻账册中的凭证和折纳报价引用的、运行中产生的精确证据版本标记为需要保留载荷，所以账册常驻期间引擎会让这些载荷始终可以加载；归档账册会结束这项声明，这正是会封存的运行上 `prepare_fiscal_archive` 拒绝未封存引用的原因。观察者记录引用持有人的人物或政府，所以如果状态写到了不存在的持有人，引擎会拒绝它。改绑、审计绑定、提名和结论的 `entered_by` 所写的记录版本则没有这样保留：之后不会再有判断读取它们，`seal_evidence` 之后，其中已被取代的版本可能无法再证明。`load_fiscal_state` 和 `audit_fiscal_records` 校验目录、每条记录和跨记录不变量。
 
 每个边界判断都只读常驻财政记录、目录、本边界自己准入的输入、当前版本索引、不受封存影响的记录版本、人物可用性和 `knowledge_heads`，从不读取保留的证据或归档存储，所以封存过的运行、未封存的派生分支、从已封存日志段恢复的运行和精确重放结算完全一致。插件只安排零延迟的数据包（报告排空），规范化步进会在同一次调用中准入它，所以它不会长时间阻止 `seal_evidence`。快照和[精确重放](/developer/persistence/)要求插件身份一致：名称 `canwu-fiscal`、版本 `0.1.0-experimental` 和它的语义哈希。重放消费记录下来的命令和输入，不会重新运行玩家或 AI 的选择。参考整合包的 `restore_ming_fiscal_reference` 和 `replay_ming_fiscal_reference` 注册同样的三个插件，然后运行 `validate_ming_fiscal_reference`：它接受任一运行句柄，只用封存无法改变的状态把每张凭证与其证据重新核对一遍。
 
@@ -396,7 +396,7 @@ for (binding_id, report) in fiscal_reports(&viewer)? {
 
 | 常量 | 值 | 限制对象 |
 | --- | ---: | --- |
-| `MAX_FISCAL_SCOPE_BINDINGS` | 1,048,576 | 范围绑定，每个一条范围账 |
+| `MAX_FISCAL_SCOPE_BINDINGS` | 1,048,576 | 范围绑定，每个一条范围明细 |
 | `MAX_FISCAL_AUTHORITY_BINDINGS_PER_OFFICE`、`MAX_FISCAL_AUDIT_BINDINGS_PER_OFFICE` | 256 | 一个机构的绑定，两类分别计数 |
 | `MAX_FISCAL_OBSERVERS` | 65,536 | 观察者绑定；每个最多看 4,096 个机构、16,384 个范围行，一个机构最多被 4,096 个观察者看到 |
 | 每本账册 | 4 笔核算（每个分区键一笔）、256 笔减免、256 条执行请求、1,024 张凭证、256 条审计结论 | 一个范围在一个周期内的对象 |
@@ -404,14 +404,14 @@ for (binding_id, report) in fiscal_reports(&viewer)? {
 | `MAX_FISCAL_HOT_BOOKS_PER_LEDGER`、`MAX_FISCAL_HOT_CYCLES_PER_OFFICE` | 64 | 一个范围的常驻账册；一个机构的常驻周期 |
 | `MAX_FISCAL_PARTITION_KEYS` | 4 | 每个机构、机制和周期的分区键 |
 | `MAX_FISCAL_BATCH_ENTRIES`、`MAX_FISCAL_BATCH_JSON_BYTES` | 4,096、4 MiB | 一个行动批次的条目数和字节数 |
-| `MAX_FISCAL_ACTIONS_PER_BOUNDARY`、`MAX_FISCAL_LEDGER_WRITES_PER_BOUNDARY` | 65,536 | 一个边界应用的行动数和写入的范围账数 |
+| `MAX_FISCAL_ACTIONS_PER_BOUNDARY`、`MAX_FISCAL_LEDGER_WRITES_PER_BOUNDARY` | 65,536 | 一个边界应用的行动数和写入的范围明细数 |
 | `MAX_FISCAL_ACTIONS_PER_RECORD_PER_BOUNDARY` | 64 | 一个边界内同一目标上应用的行动数 |
 | `FISCAL_RECENT_OUTCOMES` | 8 | 一个目标保留的常驻结果数 |
 | `MAX_FISCAL_RECEIPTS_PER_PACKET` | 4,096 | 一个数据包中的凭证数 |
 | `MAX_FISCAL_EVIDENCE_KINDS`、`MAX_FISCAL_EVIDENCE_PER_RECORD` | 32 | 获准的证据种类；每张凭证或每条审计的证据数 |
 | `MAX_FISCAL_ACTION_JSON_BYTES`、`MAX_FISCAL_ACTION_TEXT_BYTES`、`MAX_FISCAL_IDENTIFIER_BYTES` | 32 KiB、2,048 字节、160 字节 | 一个条目；审计的 `finding`、减免的 `reason` 或执行授权的 `purpose`；单位或被引用的 ID、核算的单位和核算周期，以及领域记录机构的命名空间、名称和 ID 的合计长度 |
-| `MAX_FISCAL_APPOINTMENT_PARTIES`、`MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY`、`MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY` | 32、4、64 | 一份政策的提名方或请求罢免方；一方的待决提案；一份政策保留的已结案提案 |
-| `MAX_FISCAL_LEDGER_RECORD_BYTES`、`MAX_FISCAL_RECORD_BYTES`、`FISCAL_RECORD_RING_RESERVE_BYTES` | 256 KiB、1 MiB、4 KiB | 一条范围账；一条财政机构记录或辖区记录；每条记录为结果环预留的空间 |
+| `MAX_FISCAL_APPOINTMENT_PARTIES`、`MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY`、`MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY` | 32、4、64 | 一份政策的提名方或请议方；一方的待决提案；一份政策保留的已结案提案 |
+| `MAX_FISCAL_LEDGER_RECORD_BYTES`、`MAX_FISCAL_RECORD_BYTES`、`FISCAL_RECORD_RING_RESERVE_BYTES` | 256 KiB、1 MiB、4 KiB | 一条范围明细；一条财政机构记录或辖区记录；每条记录为结果环预留的空间 |
 | `FISCAL_REPORT_ROWS_PER_PART`、`MAX_FISCAL_REPORT_CYCLE_SLOTS`、`MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY` | 16、64、1,024 | 一个分段中的行数；一份报告显示的周期数；一个边界为全体观察者发布的报告记录数 |
 | `MAX_FISCAL_ARCHIVE_COMMIT_RECORDS`、`MAX_FISCAL_ARCHIVE_RECORDS_PER_BLOB`、`MAX_FISCAL_ARCHIVE_PENDING_HANDLES` | 4,096、64、64 | 一次归档提交的记录数和 blob 大小；未确认的保留句柄数 |
 

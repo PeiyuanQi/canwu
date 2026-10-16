@@ -63,7 +63,7 @@ operation IDs are the evidence domain's guarantee.
 （`prepare_fiscal_archive`、`enqueue_fiscal_archive`、
 `finalize_fiscal_archive_retention`）；参考整合用
 `close_ming_fiscal_sample_cycle` 和 `archive_ming_fiscal_books` 完成这两步。
-自 0.16.0 起，财政状态被分区为多条记录：每个范围账最多容纳 64 本常驻账册，
+自 0.16.0 起，财政状态被分区为多条记录：每个范围明细最多容纳 64 本常驻账册，
 记录预算 256 KiB；每本账册最多 256 条减免、执行请求和审计结论、1,024 张凭证；
 每张凭证最多引用 32 个证据版本；机构记录和辖区记录各不超过 1 MiB；一个边界
 最多应用 65,536 个财政行动，每条记录最多 64 个。归档会释放这些容量，因此它们

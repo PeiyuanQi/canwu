@@ -213,7 +213,7 @@ let plugin = SocietyPlugin::with_settlement_cadence(SystemCadence::Monthly);
 - **到期转移默认批量结算。** 同一周期内的每个签发者看到的都是同一个状态，所以 `SocietyPlugin::DAILY`、`default()` 和 `with_settlement_cadence` 默认使用 `TransferSettlement::Batch`：每笔到期转移都按结算开始时的状态检查，仍然成立的按准入顺序逐笔应用，每笔都在前面几笔留下的状态上执行；它准入之后、更早的某次结算改动了它涉及的 cohort 的转移结算为 `stale_source`，数量已经放不进来源 cohort 的转移结算为 `insufficient_source`。`SocietyPlugin::with_transfer_settlement(TransferSettlement::OneByOne)` 恢复 0.15.0 的规则：每笔到期转移按同一次结算中更早的转移留下的状态检查，涉及同一个 cohort 的到期转移只有一笔完成，其余结算为 `stale_source`，需要重新提交。节奏较粗，或者两次结算之间可能有多笔转移把人口移出或移入同一个 cohort 时选 `Batch`；每笔转移都必须看到前一笔的结果时选 `OneByOne`。模式是插件身份的一部分，恢复和重放要用同一模式的插件。
 - **什么都没改变的结算不写入任何内容。** 闲置的 society 不会写出新的记录版本，也不会留下记录变更证据。观察者的投影及其 `observed_at` 时间，只在这位观察者自己的估计发生变化时才会改变。
 - **节奏随模拟运行一起保存。** 它是插件描述的一部分，所以恢复和重放必须使用同一节奏的插件。`from_society_snapshot_json` 按 `Daily` 恢复；其他节奏要调用 `from_society_snapshot_json_with_plugin(&saved, &plugin)`。
-- **节奏越粗，输入队列等得越久。** 队列最多容纳 4,096 条输入（`MAX_SOCIETY_INGRESS_QUEUE`）。队列已满时到达的输入由准入它的边界拒绝：cohort 交换账本中记下终态的 `queue_full` 结果，并发出一个 `society_ingress_rejected_v1` 事件（压力修订则是 `society_pressure_revision_rejected_v1`），需要重新发送；队列已满期间，`revise_society_pressure` 命令在准入时就被拒绝。队列是一条很小的头记录，加上每个准入了输入的边界各一条批次记录（`SocietyIngressBatch`，用 `society_ingress_queue_entries` 读取），所以不管队列等多久，它的证据都只随各边界准入的数量增长。
+- **节奏越粗，社群输入队列等得越久。** 队列最多容纳 4,096 条输入（`MAX_SOCIETY_INGRESS_QUEUE`）。队列已满时到达的输入由准入它的边界拒绝：cohort 交换账本中记下终态的 `queue_full` 结果，并发出一个 `society_ingress_rejected_v1` 事件（压力修订则是 `society_pressure_revision_rejected_v1`），需要重新发送；队列已满期间，`revise_society_pressure` 命令在准入时就被拒绝。队列是一条很小的头记录，加上每个准入了输入的边界各一条批次记录（`SocietyIngressBatch`，用 `society_ingress_queue_entries` 读取），所以不管队列等多久，它的证据都只随各边界准入的数量增长。
 
 ### 运行中修订压力
 
