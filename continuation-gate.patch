@@ -1,0 +1,1069 @@
+From a3bee27318d7788ca9c40b64d405e2b1316cdda8 Mon Sep 17 00:00:00 2001
+From: Peiyuan Qi <qipeiyuan@outlook.com>
+Date: Thu, 15 Oct 2026 13:23:48 -0700
+Subject: [PATCH] test(api): WIP continuation gate (local only, not for merge)
+
+---
+ crates/api/canwu-api/Cargo.toml               |   5 +
+ crates/api/canwu-api/src/continuation_gate.rs | 337 ++++++++++++++++++
+ crates/api/canwu-api/src/lib.rs               | 214 ++++++-----
+ crates/runtime/canwu-sim/Cargo.toml           |   4 +
+ crates/runtime/canwu-sim/src/runtime/gate.rs  |  74 ++++
+ crates/runtime/canwu-sim/src/runtime/mod.rs   |   2 +
+ .../canwu-sim/src/runtime/persistence.rs      |   8 +
+ .../runtime/canwu-sim/src/runtime/replay.rs   |  45 ++-
+ 8 files changed, 603 insertions(+), 86 deletions(-)
+ create mode 100644 crates/api/canwu-api/src/continuation_gate.rs
+ create mode 100644 crates/runtime/canwu-sim/src/runtime/gate.rs
+
+diff --git a/crates/api/canwu-api/Cargo.toml b/crates/api/canwu-api/Cargo.toml
+index 755ff17..c70c9ef 100644
+--- a/crates/api/canwu-api/Cargo.toml
++++ b/crates/api/canwu-api/Cargo.toml
+@@ -24,5 +24,10 @@ canwu-transport.workspace = true
+ serde.workspace = true
+ serde_json.workspace = true
+ 
++[features]
++# Tests only: shadows every Canwu with a sealed run restored from continuation
++# checkpoints and panics on any divergence.
++continuation-gate = ["canwu-sim/continuation-gate"]
++
+ [lints]
+ workspace = true
+diff --git a/crates/api/canwu-api/src/continuation_gate.rs b/crates/api/canwu-api/src/continuation_gate.rs
+new file mode 100644
+index 0000000..fccad54
+--- /dev/null
++++ b/crates/api/canwu-api/src/continuation_gate.rs
+@@ -0,0 +1,337 @@
++//! Continuation gate (feature `continuation-gate`, tests only).
++//!
++//! With the feature on, every [`crate::Canwu`] keeps a shadow run: a compact
++//! fork made before the first mutation, sealed before every later mutation,
++//! and replaced from time to time by a run restored from its own
++//! continuation checkpoint. Every mutation runs on both, and the gate panics
++//! with a `continuation gate:` message when a result, the checkpoint hash,
++//! or the authoritative state hash differs; when the shadow cannot seal or
++//! write a continuation checkpoint; when the unsealed run's continuation
++//! checkpoint differs from the shadow's; or when an exact replay of the
++//! unsealed run reaches a different checkpoint hash.
++//!
++//! The shadow has its own archive provider: it answers from what the run
++//! loaded in the same call, and from the run's provider only for an object
++//! the run did not load, so a test that counts provider loads sees the
++//! shadow only when the two read differently. An exact replay of the run
++//! answers from everything the run has loaded, and from the run's provider
++//! only for an object the run never loaded. A test that deliberately
++//! declares evidence after its seal fails at the shadow's seal.
++
++use canwu_sim::{CanwuError, CompactedSimulation, PluginArchiveObjectProvider, Simulation};
++use std::collections::BTreeMap;
++use std::fmt::Debug;
++use std::sync::{Arc, Mutex};
++
++/// The run's archive provider, recording what each call loads.
++struct RecordingProvider {
++    inner: Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
++    /// What the current call loaded.
++    loads: Mutex<BTreeMap<(String, String), Option<Vec<u8>>>>,
++    /// The latest answer for every object the run has loaded.
++    history: Mutex<BTreeMap<(String, String), Option<Vec<u8>>>>,
++}
++
++impl PluginArchiveObjectProvider for RecordingProvider {
++    fn load_plugin_archive_object(
++        &self,
++        namespace: &str,
++        object_id: &str,
++    ) -> Result<Option<Vec<u8>>, CanwuError> {
++        let loaded = self
++            .inner
++            .load_plugin_archive_object(namespace, object_id)?;
++        let key = (namespace.to_owned(), object_id.to_owned());
++        self.loads
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .insert(key.clone(), loaded.clone());
++        self.history
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .insert(key, loaded.clone());
++        Ok(loaded)
++    }
++}
++
++/// The shadow's archive provider: what the run loaded in this call, then
++/// the run's own provider.
++struct ShadowProvider(Arc<RecordingProvider>);
++
++impl PluginArchiveObjectProvider for ShadowProvider {
++    fn load_plugin_archive_object(
++        &self,
++        namespace: &str,
++        object_id: &str,
++    ) -> Result<Option<Vec<u8>>, CanwuError> {
++        if let Some(loaded) = self
++            .0
++            .loads
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .get(&(namespace.to_owned(), object_id.to_owned()))
++        {
++            return Ok(loaded.clone());
++        }
++        self.0
++            .inner
++            .load_plugin_archive_object(namespace, object_id)
++    }
++}
++
++/// The provider of an exact replay of the run: everything the run has
++/// loaded, then the run's own provider.
++struct ReplayProvider(Arc<RecordingProvider>);
++
++impl PluginArchiveObjectProvider for ReplayProvider {
++    fn load_plugin_archive_object(
++        &self,
++        namespace: &str,
++        object_id: &str,
++    ) -> Result<Option<Vec<u8>>, CanwuError> {
++        if let Some(loaded) = self
++            .0
++            .history
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .get(&(namespace.to_owned(), object_id.to_owned()))
++        {
++            return Ok(loaded.clone());
++        }
++        self.0
++            .inner
++            .load_plugin_archive_object(namespace, object_id)
++    }
++}
++
++/// The shadow run and the schedule of its restores.
++#[derive(Default)]
++pub(crate) struct Gate {
++    shadow: Option<CompactedSimulation>,
++    /// The run's provider, when the host attached one through the gate.
++    provider: Option<Arc<RecordingProvider>>,
++    /// Restore the shadow once it has settled this many boundaries.
++    next_restore: u64,
++    /// Replay the unsealed run once the shadow has settled this many
++    /// boundaries.
++    next_replay: u64,
++}
++
++fn fail(message: String) -> ! {
++    panic!("continuation gate: {message}")
++}
++
++fn first_difference(left: &str, right: &str) -> usize {
++    left.bytes()
++        .zip(right.bytes())
++        .position(|(left, right)| left != right)
++        .unwrap_or_else(|| left.len().min(right.len()))
++}
++
++fn excerpt(text: &str, at: usize) -> &str {
++    let start = text.floor_char_boundary(at.saturating_sub(200));
++    let end = text.ceil_char_boundary((at + 400).min(text.len()));
++    &text[start..end]
++}
++
++impl Gate {
++    /// The shadow, made from `primary` if there is none, and sealed.
++    pub(crate) fn prepare(&mut self, primary: &Simulation) -> Option<&mut CompactedSimulation> {
++        if self.shadow.is_none() {
++            let mut shadow = primary
++                .fork()
++                .into_compacted()
++                .unwrap_or_else(|error| fail(format!("no compact fork: {error:?}")));
++            if let Some(provider) = &self.provider {
++                shadow.set_plugin_archive_object_provider(Arc::new(ShadowProvider(Arc::clone(
++                    provider,
++                ))));
++            }
++            self.shadow = Some(shadow);
++            if self.next_restore == 0 {
++                self.next_restore = 2;
++                self.next_replay = 3;
++            }
++        }
++        if let Some(provider) = &self.provider {
++            provider
++                .loads
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner)
++                .clear();
++        }
++        let shadow = self.shadow.as_mut()?;
++        if let Err(error) = shadow.seal_evidence() {
++            fail(format!(
++                "the sealed run cannot seal at revision {}: {error:?}",
++                shadow.revision()
++            ));
++        }
++        Some(shadow)
++    }
++
++    /// Records what the run loads through `provider`, which the run gets
++    /// back, and gives the shadow its own provider.
++    pub(crate) fn wrap_provider(
++        &mut self,
++        provider: Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
++    ) -> Arc<dyn PluginArchiveObjectProvider + Send + Sync> {
++        let recording = Arc::new(RecordingProvider {
++            inner: provider,
++            loads: Mutex::new(BTreeMap::new()),
++            history: Mutex::new(BTreeMap::new()),
++        });
++        if let Some(shadow) = self.shadow.as_mut() {
++            shadow.set_plugin_archive_object_provider(Arc::new(ShadowProvider(Arc::clone(
++                &recording,
++            ))));
++        }
++        self.provider = Some(Arc::clone(&recording));
++        recording
++    }
++
++    /// Forgets the shadow; the next mutation makes a new one.
++    pub(crate) fn drop_shadow(&mut self) {
++        self.shadow = None;
++    }
++
++    pub(crate) fn shadow(&mut self) -> Option<&mut CompactedSimulation> {
++        self.shadow.as_mut()
++    }
++
++    /// Compares one mutation's results and the runs' hashes, then restores
++    /// or replays when the schedule says so.
++    pub(crate) fn check<T: Debug>(
++        &mut self,
++        method: &str,
++        primary: &Simulation,
++        unsealed: &Result<T, CanwuError>,
++        sealed: Option<Result<T, CanwuError>>,
++    ) {
++        let Some(sealed) = sealed else {
++            return;
++        };
++        let Some(shadow) = self.shadow.as_mut() else {
++            return;
++        };
++        // Host errors are compared by code: a message may say why the
++        // evidence is unavailable in words that depend on the seal.
++        let (unsealed_text, sealed_text) = match (unsealed, &sealed) {
++            (Err(left), Err(right)) => (format!("{:?}", left.code), format!("{:?}", right.code)),
++            _ => (format!("{unsealed:?}"), format!("{sealed:?}")),
++        };
++        if unsealed_text != sealed_text {
++            let at = first_difference(&unsealed_text, &sealed_text);
++            let records = (
++                format!("{:?}", primary.boundaries().last()),
++                format!("{:?}", shadow.boundaries().last()),
++            );
++            let record_at = first_difference(&records.0, &records.1);
++            fail(format!(
++                "{method} diverged at revision {}:\n unsealed …{}…\n sealed   …{}…\n last boundary records:\n unsealed …{}…\n sealed   …{}…",
++                primary.revision(),
++                excerpt(&unsealed_text, at),
++                excerpt(&sealed_text, at),
++                excerpt(&records.0, record_at),
++                excerpt(&records.1, record_at)
++            ));
++        }
++        if primary.checkpoint_hash() != shadow.checkpoint_hash() {
++            fail(format!(
++                "{method} left different checkpoint hashes at revision {}",
++                primary.revision()
++            ));
++        }
++        let hashes = (
++            primary.authoritative_state_hash(),
++            shadow.authoritative_state_hash(),
++        );
++        if format!("{:?}", hashes.0) != format!("{:?}", hashes.1) {
++            fail(format!(
++                "{method} left different state hashes at revision {}: {:?}",
++                primary.revision(),
++                hashes
++            ));
++        }
++        let boundaries = shadow
++            .evidence_cursor()
++            .unwrap_or_else(|error| fail(format!("no evidence cursor: {error:?}")))
++            .boundary_count;
++        if boundaries >= self.next_restore {
++            self.restore(method, primary);
++            self.next_restore = boundaries.saturating_mul(2).max(boundaries + 1);
++        }
++        if boundaries >= self.next_replay {
++            let provider = self.provider.as_ref().map(|provider| {
++                Arc::new(ReplayProvider(Arc::clone(provider)))
++                    as Arc<dyn PluginArchiveObjectProvider + Send + Sync>
++            });
++            let replayed = primary
++                .gate_replay_checkpoint_hash(provider)
++                .unwrap_or_else(|error| {
++                    fail(format!(
++                        "the unsealed run does not replay after {method} at revision {}: {error:?}",
++                        primary.revision()
++                    ))
++                });
++            if replayed != primary.checkpoint_hash() {
++                fail(format!(
++                    "the replay of the unsealed run differs after {method} at revision {}",
++                    primary.revision()
++                ));
++            }
++            self.next_replay = boundaries.saturating_mul(4).max(boundaries + 1);
++        }
++    }
++
++    /// Replaces the shadow by a run restored from its own continuation
++    /// checkpoint, after checking that the unsealed run writes the same one.
++    fn restore(&mut self, method: &str, primary: &Simulation) {
++        let Some(shadow) = self.shadow.as_mut() else {
++            return;
++        };
++        let (checkpoint, hash) = shadow.continuation_checkpoint().unwrap_or_else(|error| {
++            fail(format!(
++                "the sealed run writes no continuation checkpoint after {method} at revision {}: {error:?}",
++                primary.revision()
++            ))
++        });
++        let (unsealed, unsealed_hash) = primary.continuation_checkpoint().unwrap_or_else(|error| {
++            fail(format!(
++                "the unsealed run writes no continuation checkpoint after {method} at revision {}: {error:?}",
++                primary.revision()
++            ))
++        });
++        if unsealed_hash != hash {
++            let unsealed_text = unsealed.to_json().unwrap_or_default();
++            let sealed_text = checkpoint.to_json().unwrap_or_default();
++            let at = unsealed_text
++                .bytes()
++                .zip(sealed_text.bytes())
++                .position(|(left, right)| left != right)
++                .unwrap_or_else(|| unsealed_text.len().min(sealed_text.len()));
++            fail(format!(
++                "continuation checkpoints differ after {method} at revision {}:\n unsealed …{}…\n sealed   …{}…",
++                primary.revision(),
++                excerpt(&unsealed_text, at),
++                excerpt(&sealed_text, at)
++            ));
++        }
++        let restored = shadow
++            .gate_runtime()
++            .gate_restore_continuation(checkpoint, &hash)
++            .unwrap_or_else(|error| {
++                fail(format!(
++                    "the continuation checkpoint does not restore after {method} at revision {}: {error:?}",
++                    primary.revision()
++                ))
++            });
++        if restored.checkpoint_hash() != primary.checkpoint_hash() {
++            fail(format!(
++                "the restored run has a different checkpoint hash after {method} at revision {}",
++                primary.revision()
++            ));
++        }
++        self.shadow = Some(restored);
++    }
++}
+diff --git a/crates/api/canwu-api/src/lib.rs b/crates/api/canwu-api/src/lib.rs
+index c93ec29..b860a65 100644
+--- a/crates/api/canwu-api/src/lib.rs
++++ b/crates/api/canwu-api/src/lib.rs
+@@ -165,6 +165,34 @@ use serde::{Deserialize, Serialize};
+ /// be `Sync`.
+ pub struct Canwu {
+     simulation: Simulation,
++    #[cfg(feature = "continuation-gate")]
++    gate: continuation_gate::Gate,
++}
++
++#[cfg(feature = "continuation-gate")]
++mod continuation_gate;
++
++/// Runs a mutation on the run, and with the continuation gate also on its
++/// sealed shadow, comparing the two.
++macro_rules! gated {
++    ($self:ident, $name:literal, |$sim:ident| $call:expr) => {{
++        #[cfg(feature = "continuation-gate")]
++        {
++            let _ = $self.gate.prepare(&$self.simulation);
++            let result = {
++                let $sim = &mut $self.simulation;
++                $call
++            };
++            let sealed = $self.gate.shadow().map(|$sim| $call);
++            $self.gate.check($name, &$self.simulation, &result, sealed);
++            result
++        }
++        #[cfg(not(feature = "continuation-gate"))]
++        {
++            let $sim = &mut $self.simulation;
++            $call
++        }
++    }};
+ }
+ 
+ /// Public API for a live runtime whose sealed evidence segments are stored by the caller.
+@@ -358,15 +386,21 @@ pub fn typed_domain_record<'a, T: DomainRecordType, R: CanwuRun + ?Sized>(
+ }
+ 
+ impl Canwu {
++    fn wrap(simulation: Simulation) -> Self {
++        Self {
++            simulation,
++            #[cfg(feature = "continuation-gate")]
++            gate: continuation_gate::Gate::default(),
++        }
++    }
++
+     #[must_use]
+     pub const fn version() -> &'static str {
+         ENGINE_VERSION
+     }
+ 
+     pub fn new(seed: u64, scenario: Scenario) -> Result<Self, CanwuError> {
+-        Ok(Self {
+-            simulation: Simulation::new(seed, scenario)?,
+-        })
++        Ok(Self::wrap(Simulation::new(seed, scenario)?))
+     }
+ 
+     /// Enters the explicit compact-journal interface without discarding evidence.
+@@ -381,9 +415,9 @@ impl Canwu {
+         scenario: Scenario,
+         plugins: &[&dyn SimulationPlugin],
+     ) -> Result<Self, CanwuError> {
+-        Ok(Self {
+-            simulation: Simulation::new_with_plugins(seed, scenario, plugins)?,
+-        })
++        Ok(Self::wrap(Simulation::new_with_plugins(
++            seed, scenario, plugins,
++        )?))
+     }
+ 
+     pub fn new_with_manifest(
+@@ -391,9 +425,11 @@ impl Canwu {
+         scenario: Scenario,
+         run_manifest: RunManifest,
+     ) -> Result<Self, CanwuError> {
+-        Ok(Self {
+-            simulation: Simulation::new_with_manifest(seed, scenario, run_manifest)?,
+-        })
++        Ok(Self::wrap(Simulation::new_with_manifest(
++            seed,
++            scenario,
++            run_manifest,
++        )?))
+     }
+ 
+     pub fn new_with_manifest_and_plugins(
+@@ -402,14 +438,12 @@ impl Canwu {
+         run_manifest: RunManifest,
+         plugins: &[&dyn SimulationPlugin],
+     ) -> Result<Self, CanwuError> {
+-        Ok(Self {
+-            simulation: Simulation::new_with_manifest_and_plugins(
+-                seed,
+-                scenario,
+-                run_manifest,
+-                plugins,
+-            )?,
+-        })
++        Ok(Self::wrap(Simulation::new_with_manifest_and_plugins(
++            seed,
++            scenario,
++            run_manifest,
++            plugins,
++        )?))
+     }
+ 
+     pub fn new_with_run_configuration(
+@@ -418,14 +452,12 @@ impl Canwu {
+         run_manifest: RunManifest,
+         run_configuration: RunConfiguration,
+     ) -> Result<Self, CanwuError> {
+-        Ok(Self {
+-            simulation: Simulation::new_with_run_configuration(
+-                seed,
+-                scenario,
+-                run_manifest,
+-                run_configuration,
+-            )?,
+-        })
++        Ok(Self::wrap(Simulation::new_with_run_configuration(
++            seed,
++            scenario,
++            run_manifest,
++            run_configuration,
++        )?))
+     }
+ 
+     pub fn new_with_run_configuration_and_plugins(
+@@ -435,21 +467,21 @@ impl Canwu {
+         run_configuration: RunConfiguration,
+         plugins: &[&dyn SimulationPlugin],
+     ) -> Result<Self, CanwuError> {
+-        Ok(Self {
+-            simulation: Simulation::new_with_run_configuration_and_plugins(
++        Ok(Self::wrap(
++            Simulation::new_with_run_configuration_and_plugins(
+                 seed,
+                 scenario,
+                 run_manifest,
+                 run_configuration,
+                 plugins,
+             )?,
+-        })
++        ))
+     }
+ 
+     /// Deprecated compatibility scenario. New hosts should use an integration-owned scenario.
+     pub fn demo(seed: u64) -> Result<Self, CanwuError> {
+         let (simulation, _) = Simulation::demo(seed)?;
+-        Ok(Self { simulation })
++        Ok(Self::wrap(simulation))
+     }
+ 
+     /// IDs for the deprecated compatibility scenario.
+@@ -837,6 +869,8 @@ impl Canwu {
+         &mut self,
+         plugin: &P,
+     ) -> Result<(), CanwuError> {
++        #[cfg(feature = "continuation-gate")]
++        self.gate.drop_shadow();
+         self.simulation.register_plugin(plugin)
+     }
+ 
+@@ -850,6 +884,8 @@ impl Canwu {
+         &mut self,
+         provider: std::sync::Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
+     ) {
++        #[cfg(feature = "continuation-gate")]
++        let provider = self.gate.wrap_provider(provider);
+         self.simulation.set_plugin_archive_object_provider(provider);
+     }
+ 
+@@ -865,14 +901,15 @@ impl Canwu {
+     }
+ 
+     pub fn submit(&mut self, command: CommandEnvelope) -> Result<CommandReceipt, CanwuError> {
+-        self.simulation.submit(command)
++        gated!(self, "submit", |sim| sim.submit(command.clone()))
+     }
+ 
+     pub fn process_command(
+         &mut self,
+         request: CommandRequest,
+     ) -> Result<CommandOutcome, CanwuError> {
+-        self.simulation.process_command(request)
++        gated!(self, "process_command", |sim| sim
++            .process_command(request.clone()))
+     }
+ 
+     pub fn enqueue_command(
+@@ -881,14 +918,19 @@ impl Canwu {
+         priority: i32,
+         request: CommandRequest,
+     ) -> Result<IngressReceipt, CanwuError> {
+-        self.simulation.enqueue_command(due_at, priority, request)
++        gated!(self, "enqueue_command", |sim| sim.enqueue_command(
++            due_at,
++            priority,
++            request.clone()
++        ))
+     }
+ 
+     pub fn enqueue_plugin_ingress(
+         &mut self,
+         request: PluginIngressRequest,
+     ) -> Result<IngressReceipt, CanwuError> {
+-        self.simulation.enqueue_plugin_ingress(request)
++        gated!(self, "enqueue_plugin_ingress", |sim| sim
++            .enqueue_plugin_ingress(request.clone()))
+     }
+ 
+     pub fn enqueue_permitted_plugin_ingress(
+@@ -896,8 +938,8 @@ impl Canwu {
+         request: PluginIngressRequest,
+         permit: &PluginIngressPermit,
+     ) -> Result<IngressReceipt, CanwuError> {
+-        self.simulation
+-            .enqueue_permitted_plugin_ingress(request, permit)
++        gated!(self, "enqueue_permitted_plugin_ingress", |sim| sim
++            .enqueue_permitted_plugin_ingress(request.clone(), permit))
+     }
+ 
+     /// Withdraws a still-pending plugin ingress item that the host enqueued
+@@ -921,7 +963,9 @@ impl Canwu {
+         ingress_id: IngressId,
+         reason: impl Into<String>,
+     ) -> Result<IngressReceipt, CanwuError> {
+-        self.simulation.cancel_plugin_ingress(ingress_id, reason)
++        let reason: String = reason.into();
++        gated!(self, "cancel_plugin_ingress", |sim| sim
++            .cancel_plugin_ingress(ingress_id, reason.clone()))
+     }
+ 
+     /// Withdraws a still-pending item of an internal packet type through the
+@@ -935,8 +979,13 @@ impl Canwu {
+         permit: &PluginIngressPermit,
+         reason: impl Into<String>,
+     ) -> Result<IngressReceipt, CanwuError> {
+-        self.simulation
+-            .cancel_permitted_plugin_ingress(ingress_id, permit, reason)
++        let reason: String = reason.into();
++        gated!(self, "cancel_permitted_plugin_ingress", |sim| sim
++            .cancel_permitted_plugin_ingress(
++                ingress_id,
++                permit,
++                reason.clone()
++            ))
+     }
+ 
+     pub fn prepare_decision(
+@@ -973,7 +1022,11 @@ impl Canwu {
+         priority: i32,
+         request: DecisionIngressRequest,
+     ) -> Result<IngressReceipt, CanwuError> {
+-        self.simulation.enqueue_decision(due_at, priority, request)
++        gated!(self, "enqueue_decision", |sim| sim.enqueue_decision(
++            due_at,
++            priority,
++            request.clone()
++        ))
+     }
+ 
+     pub fn drive_decision(
+@@ -985,14 +1038,14 @@ impl Canwu {
+         ticket_id: DecisionTicketId,
+         policy: &dyn DecisionPolicy,
+     ) -> Result<DecisionEvaluation, CanwuError> {
+-        self.simulation.drive_decision(
++        gated!(self, "drive_decision", |sim| sim.drive_decision(
+             due_at,
+             priority,
+             decision_request_id,
+             command_request_id,
+             ticket_id,
+             policy,
+-        )
++        ))
+     }
+ 
+     pub fn schedule_calendar_boundary(
+@@ -1000,29 +1053,32 @@ impl Canwu {
+         due_at: SimTime,
+         cadences: Vec<SystemCadence>,
+     ) -> Result<IngressReceipt, CanwuError> {
+-        self.simulation.schedule_calendar_boundary(due_at, cadences)
++        gated!(self, "schedule_calendar_boundary", |sim| sim
++            .schedule_calendar_boundary(due_at, cadences.clone()))
+     }
+ 
+     pub fn advance_canonical(
+         &mut self,
+         duration: SimDuration,
+     ) -> Result<Vec<BoundaryReceipt>, CanwuError> {
+-        self.simulation.advance_canonical(duration)
++        gated!(self, "advance_canonical", |sim| sim
++            .advance_canonical(duration))
+     }
+ 
+     pub fn step_canonical(&mut self) -> Result<Option<BoundaryReceipt>, CanwuError> {
+-        self.simulation.step_canonical()
++        gated!(self, "step_canonical", |sim| sim.step_canonical())
+     }
+ 
+     pub fn advance(&mut self, duration: SimDuration) -> Result<Vec<SimEvent>, CanwuError> {
+-        self.simulation.advance(duration)
++        gated!(self, "advance", |sim| sim.advance(duration))
+     }
+ 
+     pub fn settle_boundary(
+         &mut self,
+         request: BoundaryRequest,
+     ) -> Result<BoundaryReceipt, CanwuError> {
+-        self.simulation.settle_boundary(request)
++        gated!(self, "settle_boundary", |sim| sim
++            .settle_boundary(request.clone()))
+     }
+ 
+     /// Turns the wall-time profile of settled boundaries on or off. It is off
+@@ -1071,6 +1127,8 @@ impl Canwu {
+     }
+ 
+     pub fn step(&mut self) -> Result<Vec<SimEvent>, CanwuError> {
++        #[cfg(feature = "continuation-gate")]
++        self.gate.drop_shadow();
+         self.simulation.step()
+     }
+ 
+@@ -1085,55 +1143,51 @@ impl Canwu {
+ 
+     pub fn from_snapshot_json(json: &str) -> Result<Self, CanwuError> {
+         let simulation = Simulation::from_snapshot_json(json)?;
+-        Ok(Self { simulation })
++        Ok(Self::wrap(simulation))
+     }
+ 
+     pub fn from_snapshot_json_with_plugins(
+         json: &str,
+         plugins: &[&dyn SimulationPlugin],
+     ) -> Result<Self, CanwuError> {
+-        Ok(Self {
+-            simulation: Simulation::from_snapshot_json_with_plugins(json, plugins)?,
+-        })
++        Ok(Self::wrap(Simulation::from_snapshot_json_with_plugins(
++            json, plugins,
++        )?))
+     }
+ 
+     pub fn from_checkpoint_and_journal(
+         checkpoint: SimulationCheckpoint,
+         segments: Vec<EvidenceJournalSegment>,
+     ) -> Result<Self, CanwuError> {
+-        Ok(Self {
+-            simulation: Simulation::from_checkpoint_and_journal(checkpoint, segments)?,
+-        })
++        Ok(Self::wrap(Simulation::from_checkpoint_and_journal(
++            checkpoint, segments,
++        )?))
+     }
+ 
+     pub fn from_checkpoint_journal(bundle: CheckpointJournal) -> Result<Self, CanwuError> {
+-        Ok(Self {
+-            simulation: Simulation::from_checkpoint_journal(bundle)?,
+-        })
++        Ok(Self::wrap(Simulation::from_checkpoint_journal(bundle)?))
+     }
+ 
+     pub fn from_checkpoint_journal_with_plugins(
+         bundle: CheckpointJournal,
+         plugins: &[&dyn SimulationPlugin],
+     ) -> Result<Self, CanwuError> {
+-        Ok(Self {
+-            simulation: Simulation::from_checkpoint_journal_with_plugins(bundle, plugins)?,
+-        })
++        Ok(Self::wrap(
++            Simulation::from_checkpoint_journal_with_plugins(bundle, plugins)?,
++        ))
+     }
+ 
+     pub fn from_checkpoint_journal_json(json: &str) -> Result<Self, CanwuError> {
+-        Ok(Self {
+-            simulation: Simulation::from_checkpoint_journal_json(json)?,
+-        })
++        Ok(Self::wrap(Simulation::from_checkpoint_journal_json(json)?))
+     }
+ 
+     pub fn from_checkpoint_journal_json_with_plugins(
+         json: &str,
+         plugins: &[&dyn SimulationPlugin],
+     ) -> Result<Self, CanwuError> {
+-        Ok(Self {
+-            simulation: Simulation::from_checkpoint_journal_json_with_plugins(json, plugins)?,
+-        })
++        Ok(Self::wrap(
++            Simulation::from_checkpoint_journal_json_with_plugins(json, plugins)?,
++        ))
+     }
+ 
+     /// Restores a paged checkpoint after proving the contiguous evidence
+@@ -1158,11 +1212,9 @@ impl Canwu {
+         provider: &dyn StatePageProvider,
+         segments: Vec<EvidenceJournalSegment>,
+     ) -> Result<Self, CanwuError> {
+-        Ok(Self {
+-            simulation: Simulation::from_paged_checkpoint_and_journal(
+-                checkpoint, provider, segments,
+-            )?,
+-        })
++        Ok(Self::wrap(Simulation::from_paged_checkpoint_and_journal(
++            checkpoint, provider, segments,
++        )?))
+     }
+ 
+     /// Restores a paged checkpoint and its evidence prefix, then rehydrates
+@@ -1173,11 +1225,11 @@ impl Canwu {
+         segments: Vec<EvidenceJournalSegment>,
+         plugins: &[&dyn SimulationPlugin],
+     ) -> Result<Self, CanwuError> {
+-        Ok(Self {
+-            simulation: Simulation::from_paged_checkpoint_and_journal_with_plugins(
++        Ok(Self::wrap(
++            Simulation::from_paged_checkpoint_and_journal_with_plugins(
+                 checkpoint, provider, segments, plugins,
+             )?,
+-        })
++        ))
+     }
+ 
+     pub fn replay_from_journal(
+@@ -1185,7 +1237,7 @@ impl Canwu {
+         journal: &ReplayJournal,
+     ) -> Result<Self, CanwuError> {
+         let simulation = Simulation::replay_from_journal(plugins, journal)?;
+-        Ok(Self { simulation })
++        Ok(Self::wrap(simulation))
+     }
+ 
+     /// Replays with package archive storage attached before the first
+@@ -1202,7 +1254,7 @@ impl Canwu {
+             journal,
+             archive_provider,
+         )?;
+-        Ok(Self { simulation })
++        Ok(Self::wrap(simulation))
+     }
+ 
+     /// Replays exactly, as [`Self::replay_from_journal_with_archive_provider`]
+@@ -1232,16 +1284,16 @@ impl Canwu {
+             archive_provider,
+             on_profile,
+         )?;
+-        Ok(Self { simulation })
++        Ok(Self::wrap(simulation))
+     }
+ 
+     pub fn replay_from_journal_json(
+         plugins: &[&dyn SimulationPlugin],
+         json: &str,
+     ) -> Result<Self, CanwuError> {
+-        Ok(Self {
+-            simulation: Simulation::replay_from_journal_json(plugins, json)?,
+-        })
++        Ok(Self::wrap(Simulation::replay_from_journal_json(
++            plugins, json,
++        )?))
+     }
+ 
+     /// An independent copy of the run for a look-ahead, an alternative
+@@ -1250,9 +1302,7 @@ impl Canwu {
+     /// checkpoint, or save it on another thread.
+     #[must_use]
+     pub fn fork(&self) -> Self {
+-        Self {
+-            simulation: self.simulation.fork(),
+-        }
++        Self::wrap(self.simulation.fork())
+     }
+ 
+     /// Trusted host/admin holder query. Player-facing callers must use a
+diff --git a/crates/runtime/canwu-sim/Cargo.toml b/crates/runtime/canwu-sim/Cargo.toml
+index 213d0b8..f0cafac 100644
+--- a/crates/runtime/canwu-sim/Cargo.toml
++++ b/crates/runtime/canwu-sim/Cargo.toml
+@@ -23,5 +23,9 @@ canwu-time.workspace = true
+ serde.workspace = true
+ serde_json.workspace = true
+ 
++[features]
++# Test gate hooks that restore and replay with a live run's plugin registry.
++continuation-gate = []
++
+ [lints]
+ workspace = true
+diff --git a/crates/runtime/canwu-sim/src/runtime/gate.rs b/crates/runtime/canwu-sim/src/runtime/gate.rs
+new file mode 100644
+index 0000000..ebf9505
+--- /dev/null
++++ b/crates/runtime/canwu-sim/src/runtime/gate.rs
+@@ -0,0 +1,74 @@
++//! Continuation gate hooks (feature `continuation-gate`, tests only).
++//!
++//! A host that wraps a live run can restore a continuation checkpoint and
++//! replay a journal with the plugin registry of that run, without holding the
++//! plugin objects. These hooks are not part of the public contract.
++
++use super::{
++    CanwuError, CommitmentDomains, CompactedSimulation, ContinuationCheckpoint, ErrorCode,
++    RandomStreamState, Simulation,
++};
++use std::sync::Arc;
++
++impl Simulation {
++    /// Takes the plugin registry and type schema of `source`, as registering
++    /// the same plugins would.
++    pub(super) fn adopt_registry_of(&mut self, source: &Self) -> Result<(), CanwuError> {
++        self.plugins = source.plugins.clone();
++        self.schema = source.schema.clone();
++        for stream in self.plugins.random_stream_owners.keys() {
++            self.state
++                .current
++                .random_streams
++                .entry(stream.clone())
++                .or_insert_with(|| {
++                    RandomStreamState::initial(self.state.current.root_seed, stream.clone())
++                });
++        }
++        self.invalidate_commitments(
++            CommitmentDomains::RANDOM_STREAMS | CommitmentDomains::IDENTITY,
++        );
++        self.refresh_checkpoint_hash()
++    }
++
++    /// Restores `checkpoint`, whose stored hash is `hash`, with this run's
++    /// plugin registry and archive provider.
++    #[doc(hidden)]
++    pub fn gate_restore_continuation(
++        &self,
++        checkpoint: ContinuationCheckpoint,
++        hash: &str,
++    ) -> Result<CompactedSimulation, CanwuError> {
++        if checkpoint.compute_continuation_hash()? != hash {
++            return Err(CanwuError::new(
++                ErrorCode::InvalidSnapshot,
++                "continuation checkpoint does not match the stored continuation hash",
++            ));
++        }
++        let mut simulation = Self::restore_continuation(checkpoint)?;
++        simulation.plugin_archive_provider = Arc::clone(&self.plugin_archive_provider);
++        simulation.adopt_registry_of(self)?;
++        simulation.ensure_runtime_ready()?;
++        simulation.verify_continuation_round_trip(hash)?;
++        simulation.into_compacted()
++    }
++
++    /// Replays this run's journal with this run's plugin registry and
++    /// `provider`, or this run's archive provider, and returns the replayed
++    /// checkpoint hash.
++    #[doc(hidden)]
++    pub fn gate_replay_checkpoint_hash(
++        &self,
++        provider: Option<Arc<dyn super::PluginArchiveObjectProvider + Send + Sync>>,
++    ) -> Result<String, CanwuError> {
++        let journal = self.replay_journal();
++        let provider = provider.unwrap_or_else(|| Arc::clone(&self.plugin_archive_provider));
++        let mut replayed = Self::replay_from_journal_activated(
++            super::replay::Activation::Registry(self),
++            &journal,
++            provider,
++        )?;
++        replayed.plugin_archive_provider = Arc::clone(&self.plugin_archive_provider);
++        Ok(replayed.checkpoint_hash().to_owned())
++    }
++}
+diff --git a/crates/runtime/canwu-sim/src/runtime/mod.rs b/crates/runtime/canwu-sim/src/runtime/mod.rs
+index 866d69e..dfa3ea2 100644
+--- a/crates/runtime/canwu-sim/src/runtime/mod.rs
++++ b/crates/runtime/canwu-sim/src/runtime/mod.rs
+@@ -5,6 +5,8 @@ mod decision;
+ mod error;
+ mod evaluation;
+ mod event_payloads;
++#[cfg(feature = "continuation-gate")]
++mod gate;
+ mod hashing;
+ mod ingress;
+ mod knowledge;
+diff --git a/crates/runtime/canwu-sim/src/runtime/persistence.rs b/crates/runtime/canwu-sim/src/runtime/persistence.rs
+index dea71eb..5366b17 100644
+--- a/crates/runtime/canwu-sim/src/runtime/persistence.rs
++++ b/crates/runtime/canwu-sim/src/runtime/persistence.rs
+@@ -1836,6 +1836,14 @@ pub struct CompactedSimulation {
+ }
+ 
+ impl CompactedSimulation {
++    /// The wrapped runtime (continuation gate only).
++    #[cfg(feature = "continuation-gate")]
++    #[doc(hidden)]
++    #[must_use]
++    pub const fn gate_runtime(&self) -> &Simulation {
++        &self.simulation
++    }
++
+     /// The wrapped runtime, for in-crate tests of derived runtime state.
+     #[cfg(test)]
+     pub(super) const fn runtime(&self) -> &Simulation {
+diff --git a/crates/runtime/canwu-sim/src/runtime/replay.rs b/crates/runtime/canwu-sim/src/runtime/replay.rs
+index 7d8a972..b384d0d 100644
+--- a/crates/runtime/canwu-sim/src/runtime/replay.rs
++++ b/crates/runtime/canwu-sim/src/runtime/replay.rs
+@@ -11,6 +11,14 @@ use super::{
+ use super::{RunConfiguration, RunManifest, Scenario};
+ use std::{collections::BTreeSet, sync::Arc};
+ 
++/// How a replay activates its plugins.
++pub(super) enum Activation<'a> {
++    Plugins(&'a [&'a dyn SimulationPlugin]),
++    /// The registry of a live run (continuation gate only).
++    #[cfg(feature = "continuation-gate")]
++    Registry(&'a Simulation),
++}
++
+ impl Simulation {
+     /// Reconstructs caller-supplied core commands without proving a recorded
+     /// package environment. Use [`Self::replay_from_journal`] for exact replay.
+@@ -139,7 +147,12 @@ impl Simulation {
+         journal: &ReplayJournal,
+         archive_provider: Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
+     ) -> Result<Self, CanwuError> {
+-        Self::replay_exact_journal(plugins, journal, archive_provider, None)
++        Self::replay_exact_journal(
++            Activation::Plugins(plugins),
++            journal,
++            archive_provider,
++            None,
++        )
+     }
+ 
+     /// Replays like [`Self::replay_from_journal_with_archive_provider`] with
+@@ -163,11 +176,26 @@ impl Simulation {
+         archive_provider: Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
+         on_profile: &mut dyn FnMut(BoundaryProfile),
+     ) -> Result<Self, CanwuError> {
+-        Self::replay_exact_journal(plugins, journal, archive_provider, Some(on_profile))
++        Self::replay_exact_journal(
++            Activation::Plugins(plugins),
++            journal,
++            archive_provider,
++            Some(on_profile),
++        )
++    }
++
++    /// Replays with the plugins `activation` names and no boundary profile.
++    #[cfg(feature = "continuation-gate")]
++    pub(super) fn replay_from_journal_activated(
++        activation: Activation<'_>,
++        journal: &ReplayJournal,
++        archive_provider: Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
++    ) -> Result<Self, CanwuError> {
++        Self::replay_exact_journal(activation, journal, archive_provider, None)
+     }
+ 
+     fn replay_exact_journal(
+-        plugins: &[&dyn SimulationPlugin],
++        activation: Activation<'_>,
+         journal: &ReplayJournal,
+         archive_provider: Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
+         on_profile: Option<&mut dyn FnMut(BoundaryProfile)>,
+@@ -262,7 +290,16 @@ impl Simulation {
+         )?;
+         simulation.set_plugin_archive_object_provider(archive_provider);
+         simulation.state.current.authority_root_seed = normalized.authority_root_seed;
+-        let mut simulation = Self::activate_initial_plugins(simulation, plugins)?;
++        let mut simulation = match activation {
++            Activation::Plugins(plugins) => Self::activate_initial_plugins(simulation, plugins)?,
++            #[cfg(feature = "continuation-gate")]
++            Activation::Registry(source) => {
++                let mut simulation = simulation;
++                simulation.adopt_registry_of(source)?;
++                simulation.ensure_runtime_ready()?;
++                simulation
++            }
++        };
+         let actual_descriptors: Vec<_> = simulation.plugin_descriptors().cloned().collect();
+         if actual_descriptors != normalized.plugin_descriptors {
+             return Err(CanwuError::new(
+-- 
+2.56.0.windows.2
+
