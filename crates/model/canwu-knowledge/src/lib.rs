@@ -7,12 +7,16 @@ use canwu_core::{
 use canwu_time::SimTime;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
+mod encoding;
 mod ledger;
 
+pub use encoding::{KnowledgeBodyDigest, KnowledgeEncodingError};
 pub use ledger::{
-    CurrentRecords, HolderLedger, HolderLedgers, HolderLedgersIter, HolderRecordsIter, RecordsById,
+    BodiesById, CurrentRecords, HolderEntriesIter, HolderLedger, HolderLedgers, HolderLedgersIter,
+    HolderRecordsIter, KNOWLEDGE_COMMITMENT_CHUNK_ENTRIES,
 };
 
 pub const DEFAULT_KNOWLEDGE_PAGE_SIZE: u32 = 100;
@@ -87,6 +91,10 @@ pub struct KnowledgeRecordDraft {
     pub contradicts: Vec<KnowledgeRecordId>,
 }
 
+/// One holder's record as a reader gets it: the fields of its body with
+/// the holder and the relations of the holder's entry. The ledgers store the
+/// body once and an entry per holder; see [`KnowledgeRecordBody`] and
+/// [`HolderEntry`].
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct KnowledgeRecord {
     pub id: KnowledgeRecordId,
@@ -101,6 +109,107 @@ pub struct KnowledgeRecord {
     pub supersedes: Vec<KnowledgeRecordId>,
     pub contradicts: Vec<KnowledgeRecordId>,
 }
+
+impl KnowledgeRecord {
+    /// The record `holder` holds through `entry`, assembled with its body.
+    #[must_use]
+    pub fn assemble(
+        holder: &KnowledgeHolderRef,
+        entry: &HolderEntry,
+        body: &KnowledgeRecordBody,
+    ) -> Self {
+        Self {
+            id: body.id,
+            holder: holder.clone(),
+            schema: body.schema.clone(),
+            subjects: body.subjects.clone(),
+            payload: body.payload.clone(),
+            as_of: body.as_of,
+            learned_at: body.learned_at,
+            confidence_per_mille: body.confidence_per_mille,
+            origin: body.origin.clone(),
+            supersedes: entry.supersedes.clone(),
+            contradicts: entry.contradicts.clone(),
+        }
+    }
+
+    /// The record split into its holder, its body, and the relations of its
+    /// entry (`supersedes`, then `contradicts`).
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        KnowledgeHolderRef,
+        KnowledgeRecordBody,
+        Vec<KnowledgeRecordId>,
+        Vec<KnowledgeRecordId>,
+    ) {
+        (
+            self.holder,
+            KnowledgeRecordBody {
+                id: self.id,
+                schema: self.schema,
+                subjects: self.subjects,
+                payload: self.payload,
+                as_of: self.as_of,
+                learned_at: self.learned_at,
+                confidence_per_mille: self.confidence_per_mille,
+                origin: self.origin,
+            },
+            self.supersedes,
+            self.contradicts,
+        )
+    }
+}
+
+/// What one publication stores once, whichever holders hold it: everything
+/// of a record but its holder and relations.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct KnowledgeRecordBody {
+    /// Global ID, allocated in staging order.
+    pub id: KnowledgeRecordId,
+    pub schema: KnowledgeSchemaId,
+    pub subjects: Vec<KnowledgeSubject>,
+    pub payload: Value,
+    pub as_of: Option<SimTime>,
+    pub learned_at: SimTime,
+    pub confidence_per_mille: u16,
+    pub origin: KnowledgeOrigin,
+}
+
+/// One holder's hold on one body: the holder's own local ID for it, from
+/// the holder's counter, and the holder's own relations, which name global
+/// IDs of entries of the same holder and schema kind.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HolderEntry {
+    pub record: KnowledgeRecordId,
+    pub local: HolderKnowledgeRecordId,
+    pub supersedes: Vec<KnowledgeRecordId>,
+    pub contradicts: Vec<KnowledgeRecordId>,
+}
+
+/// When an entry leaves its holder, as a knowledge schema declares it.
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeRetention {
+    /// Every entry stays for the life of the run.
+    #[default]
+    Keep,
+    /// An entry leaves its holder in the commit of the boundary that
+    /// publishes an entry of the same holder superseding it; its body leaves
+    /// when no holder holds it.
+    RetireWhenSuperseded,
+}
+
+/// Entries a settling boundary staged, by holder and global ID, each with its
+/// body: the same-boundary overlay a boundary system's reads see beside the
+/// committed ledgers.
+pub type StagedKnowledgeEntries = BTreeMap<
+    KnowledgeHolderRef,
+    BTreeMap<KnowledgeRecordId, (Arc<KnowledgeRecordBody>, HolderEntry)>,
+>;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct KnowledgeRecordView {
@@ -173,6 +282,38 @@ pub struct KnowledgeQueryResult {
     pub read_cut: KnowledgeReadCut,
     pub records: Vec<KnowledgeRecordView>,
     pub next: Option<KnowledgeCursor>,
+    /// The retention of each schema the query is about: every schema the
+    /// query names when it names any, otherwise every schema of the returned
+    /// records. A schema the run does not register is left out. Under
+    /// [`KnowledgeRetention::RetireWhenSuperseded`] a holder keeps only
+    /// current entries, so a `FullHistory` view of that schema shows what a
+    /// `CurrentHeads` view shows. The runtime fills it; a standalone ledger,
+    /// which knows no schema registry, leaves it empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub retention: BTreeMap<KnowledgeSchemaId, KnowledgeRetention>,
+}
+
+impl KnowledgeQueryResult {
+    /// Fills [`Self::retention`] for `query` from each schema's registered
+    /// policy, `None` for a schema the run does not register.
+    #[must_use]
+    pub fn with_retention(
+        mut self,
+        query: &KnowledgeQuery,
+        policy: impl Fn(&KnowledgeSchemaId) -> Option<KnowledgeRetention>,
+    ) -> Self {
+        let schemas: Vec<&KnowledgeSchemaId> = if query.schemas.is_empty() {
+            self.records.iter().map(|record| &record.schema).collect()
+        } else {
+            query.schemas.iter().collect()
+        };
+        let retention = schemas
+            .into_iter()
+            .filter_map(|schema| policy(schema).map(|retention| (schema.clone(), retention)))
+            .collect();
+        self.retention = retention;
+        self
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -182,11 +323,24 @@ pub struct GenericKnowledgeLedger {
     pub records: HolderLedgers,
 }
 
-/// Atomic append validation failures for the standalone generic ledger.
+/// Why the ledgers refused an insertion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KnowledgeLedgerError {
+    /// An entry names a different holder from the one it is filed under.
     HolderMismatch,
+    /// A body ID is already stored or repeats, or a holder would hold one
+    /// ID twice.
     DuplicateRecordId,
+    /// An entry names a body that is not stored.
+    MissingBody,
+    /// A published body received no entry.
+    UnheldBody,
+    /// A local ID is zero or not above the holder's previous one.
+    LocalOutOfOrder,
+    /// A relation names an entry its holder does not hold.
+    UnresolvedRelation,
+    /// A body could not be encoded.
+    Encoding,
 }
 
 impl GenericKnowledgeLedger {
@@ -196,31 +350,20 @@ impl GenericKnowledgeLedger {
         self.records.get(holder)
     }
 
-    /// Atomically appends records after validating holder and global ID invariants.
+    /// Atomically stores one body and gives it to each listed holder, as
+    /// [`HolderLedgers::insert_body`] does, computing the body's digest.
     ///
     /// # Errors
     ///
-    /// Returns [`KnowledgeLedgerError::HolderMismatch`] when any record names a
-    /// different holder, or [`KnowledgeLedgerError::DuplicateRecordId`] when an
-    /// ID already exists anywhere in the ledger or repeats within the batch.
-    #[allow(clippy::needless_pass_by_value)]
+    /// [`KnowledgeLedgerError::Encoding`] when the body cannot be encoded,
+    /// and the errors of [`HolderLedgers::insert_publication`].
     pub fn insert_records(
         &mut self,
-        holder: KnowledgeHolderRef,
-        records: impl IntoIterator<Item = KnowledgeRecord>,
+        body: Arc<KnowledgeRecordBody>,
+        entries: impl IntoIterator<Item = (KnowledgeHolderRef, HolderEntry)>,
     ) -> Result<(), KnowledgeLedgerError> {
-        let records = records.into_iter().collect::<Vec<_>>();
-        let mut incoming_ids = BTreeSet::new();
-        for record in &records {
-            if record.holder != holder {
-                return Err(KnowledgeLedgerError::HolderMismatch);
-            }
-            if !incoming_ids.insert(record.id) || self.records.record(record.id).is_some() {
-                return Err(KnowledgeLedgerError::DuplicateRecordId);
-            }
-        }
-        self.records.extend(records);
-        Ok(())
+        let digest = KnowledgeBodyDigest::of(&body).map_err(|_| KnowledgeLedgerError::Encoding)?;
+        self.records.insert_body(body, digest, entries)
     }
 
     /// Returns one deterministic page from a holder's ledger at the supplied cut.
@@ -268,52 +411,54 @@ fn query_records(
             read_cut,
             records: Vec::new(),
             next: None,
+            retention: BTreeMap::new(),
         });
     };
-    if records.iter().any(|(id, record)| {
-        *id != record.id
-            || record.id.get() == 0
-            || record.holder != holder
-            || record
+    if records.entries().any(|(entry, body)| {
+        entry.record != body.id
+            || body.id.get() == 0
+            || entry.local.get() == 0
+            || entry
                 .supersedes
                 .iter()
-                .chain(&record.contradicts)
+                .chain(&entry.contradicts)
                 .any(|related| !records.contains_key(related))
     }) {
         return Err(KnowledgeQueryError::InvalidLedger);
     }
-    let local_ids = holder_local_ids(records);
     if let Some(cursor) = &query.after
-        && !records.iter().any(|(id, record)| {
-            local_ids[id] == cursor.record && record.learned_at == cursor.learned_at
-        })
+        && records
+            .id_of(cursor.record)
+            .and_then(|id| records.body(&id))
+            .is_none_or(|body| body.learned_at != cursor.learned_at)
     {
         return Err(KnowledgeQueryError::InvalidCursor);
     }
     let current_only = query.view == KnowledgeHistoryView::CurrentHeads;
     let mut candidates = records
-        .iter()
-        .filter(|(id, record)| {
-            (!current_only || records.is_current(id))
-                && (query.schemas.is_empty() || query.schemas.contains(&record.schema))
+        .entries()
+        .filter(|(entry, body)| {
+            (!current_only || records.is_current(&entry.record))
+                && (query.schemas.is_empty() || query.schemas.contains(&body.schema))
                 && query
                     .subjects
                     .iter()
-                    .all(|subject| record.subjects.contains(subject))
+                    .all(|subject| body.subjects.contains(subject))
                 && query
                     .learned_after
-                    .is_none_or(|time| record.learned_at > time)
+                    .is_none_or(|time| body.learned_at > time)
                 && query
                     .learned_at_or_before
-                    .is_none_or(|time| record.learned_at <= time)
+                    .is_none_or(|time| body.learned_at <= time)
         })
-        .map(|(id, record)| (*id, record))
         .collect::<Vec<_>>();
-    candidates.sort_by_key(|(_, record)| (record.learned_at, record.id));
+    // Pages follow the holder's own order, learned time then local ID, so a
+    // cursor never depends on another holder's records.
+    candidates.sort_by_key(|(entry, body)| (body.learned_at, entry.local));
 
     if let Some(cursor) = &query.after {
-        candidates.retain(|(id, record)| {
-            (record.learned_at, local_ids[id]) > (cursor.learned_at, cursor.record)
+        candidates.retain(|(entry, body)| {
+            (body.learned_at, entry.local) > (cursor.learned_at, cursor.record)
         });
     }
 
@@ -321,26 +466,27 @@ fn query_records(
     let has_more = candidates.len() > limit;
     let page = candidates.into_iter().take(limit).collect::<Vec<_>>();
     let next = if has_more {
-        page.last().map(|(_, record)| KnowledgeCursor {
+        page.last().map(|(entry, body)| KnowledgeCursor {
             holder: holder.clone(),
             query_hash: query_hash.clone(),
             read_cut: read_cut.clone(),
             binding_hash: binding_hash.clone(),
-            learned_at: record.learned_at,
-            record: local_ids[&record.id],
+            learned_at: body.learned_at,
+            record: entry.local,
         })
     } else {
         None
     };
     let views = page
         .iter()
-        .map(|(id, record)| to_view(record, local_ids[id], &local_ids))
+        .map(|(entry, body)| to_view(&holder, entry, body, records))
         .collect();
     Ok(KnowledgeQueryResult {
         holder,
         read_cut,
         records: views,
         next,
+        retention: BTreeMap::new(),
     })
 }
 
@@ -423,17 +569,15 @@ impl KnowledgeSnapshot {
         holder: KnowledgeHolderRef,
         query: &KnowledgeQuery,
         boundary: Option<BoundaryId>,
-        overlay: &BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>,
+        overlay: &StagedKnowledgeEntries,
     ) -> Result<KnowledgeQueryResult, KnowledgeQueryError> {
-        let mut merged = self.records.clone();
-        if let Some(records) = overlay.get(&holder) {
-            for (id, record) in records {
-                if *id != record.id || record.holder != holder || merged.record(*id).is_some() {
-                    return Err(KnowledgeQueryError::InvalidLedger);
-                }
-                merged.insert(record.clone());
-            }
-        }
+        let merged = match overlay.get(&holder) {
+            Some(staged) => self
+                .records
+                .with_staged(&holder, staged)
+                .map_err(|_| KnowledgeQueryError::InvalidLedger)?,
+            None => self.records.clone(),
+        };
         let read_cut = KnowledgeReadCut {
             boundary,
             holder_projection_root: holder_projection_root(&holder, &self.records)?,
@@ -459,12 +603,12 @@ fn holder_projection_root(
     holder: &KnowledgeHolderRef,
     ledger: &HolderLedgers,
 ) -> Result<String, KnowledgeQueryError> {
-    let records = ledger.get(holder).cloned().unwrap_or_default();
-    let local_ids = holder_local_ids(&records);
-    let views = records
-        .values()
-        .map(|record| to_view(record, local_ids[&record.id], &local_ids))
-        .collect();
+    let views = ledger.get(holder).map_or_else(Vec::new, |records| {
+        records
+            .entries()
+            .map(|(entry, body)| to_view(holder, entry, body, records))
+            .collect()
+    });
     hash_material(
         b"canwu.knowledge.holder-projection.v1",
         &HolderProjectionCutMaterial {
@@ -477,16 +621,15 @@ fn holder_projection_root(
 fn holder_overlay_root(
     holder: &KnowledgeHolderRef,
     merged: &HolderLedgers,
-    overlay: &BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>,
+    overlay: &StagedKnowledgeEntries,
 ) -> Result<String, KnowledgeQueryError> {
-    let merged_records = merged.get(holder).cloned().unwrap_or_default();
-    let local_ids = holder_local_ids(&merged_records);
-    let views = overlay
-        .get(holder)
-        .into_iter()
-        .flat_map(|records| records.values())
-        .map(|record| to_view(record, local_ids[&record.id], &local_ids))
-        .collect();
+    let views = match (merged.get(holder), overlay.get(holder)) {
+        (Some(records), Some(staged)) => staged
+            .values()
+            .map(|(body, entry)| to_view(holder, entry, body, records))
+            .collect(),
+        _ => Vec::new(),
+    };
     hash_material(
         b"canwu.knowledge.holder-overlay.v1",
         &HolderOverlayCutMaterial {
@@ -590,44 +733,30 @@ fn validate_cursor(
     Ok(())
 }
 
-fn holder_local_ids(
-    records: &HolderLedger,
-) -> BTreeMap<KnowledgeRecordId, HolderKnowledgeRecordId> {
-    records
-        .keys()
-        .enumerate()
-        .map(|(index, id)| {
-            (
-                *id,
-                HolderKnowledgeRecordId::new(u64::try_from(index + 1).unwrap_or(u64::MAX)),
-            )
-        })
-        .collect()
-}
-
 fn to_view(
-    record: &KnowledgeRecord,
-    local_id: HolderKnowledgeRecordId,
-    local_ids: &BTreeMap<KnowledgeRecordId, HolderKnowledgeRecordId>,
+    holder: &KnowledgeHolderRef,
+    entry: &HolderEntry,
+    body: &KnowledgeRecordBody,
+    records: &HolderLedger,
 ) -> KnowledgeRecordView {
     KnowledgeRecordView {
-        id: local_id,
-        holder: record.holder.clone(),
-        schema: record.schema.clone(),
-        subjects: record.subjects.clone(),
-        payload: record.payload.clone(),
-        as_of: record.as_of,
-        learned_at: record.learned_at,
-        confidence_per_mille: record.confidence_per_mille,
-        supersedes: record
+        id: entry.local,
+        holder: holder.clone(),
+        schema: body.schema.clone(),
+        subjects: body.subjects.clone(),
+        payload: body.payload.clone(),
+        as_of: body.as_of,
+        learned_at: body.learned_at,
+        confidence_per_mille: body.confidence_per_mille,
+        supersedes: entry
             .supersedes
             .iter()
-            .filter_map(|id| local_ids.get(id).copied())
+            .filter_map(|id| records.local_of(id))
             .collect(),
-        contradicts: record
+        contradicts: entry
             .contradicts
             .iter()
-            .filter_map(|id| local_ids.get(id).copied())
+            .filter_map(|id| records.local_of(id))
             .collect(),
     }
 }
@@ -667,6 +796,27 @@ mod tests {
         }
     }
 
+    fn body(id: u64) -> Arc<KnowledgeRecordBody> {
+        let (_, body, _, _) = record(
+            &KnowledgeHolderRef::Person(PersonId::new(1)),
+            id,
+            SimTime::from_minutes(i64::try_from(id).unwrap()),
+            vec![],
+            vec![],
+        )
+        .into_parts();
+        Arc::new(body)
+    }
+
+    fn entry(id: u64, local: u64, supersedes: Vec<u64>) -> HolderEntry {
+        HolderEntry {
+            record: KnowledgeRecordId::new(id),
+            local: HolderKnowledgeRecordId::new(local),
+            supersedes: supersedes.into_iter().map(KnowledgeRecordId::new).collect(),
+            contradicts: vec![],
+        }
+    }
+
     fn history_query(
         schemas: Vec<KnowledgeSchemaId>,
         limit: u32,
@@ -694,28 +844,23 @@ mod tests {
         let holder =
             KnowledgeHolderRef::Entity(canwu_core::EntityRef::Organization(OrganizationId::new(4)));
         let mut ledger = GenericKnowledgeLedger::default();
-        ledger
-            .insert_records(
-                holder.clone(),
-                [
-                    record(&holder, 1, SimTime::from_minutes(1), vec![], vec![]),
-                    record(
-                        &holder,
-                        2,
-                        SimTime::from_minutes(2),
-                        vec![KnowledgeRecordId::new(1)],
-                        vec![],
-                    ),
-                    record(
-                        &holder,
-                        3,
-                        SimTime::from_minutes(3),
-                        vec![],
-                        vec![KnowledgeRecordId::new(1)],
-                    ),
-                ],
-            )
-            .expect("fixture records should be admitted");
+        ledger.records.extend([
+            record(&holder, 1, SimTime::from_minutes(1), vec![], vec![]),
+            record(
+                &holder,
+                2,
+                SimTime::from_minutes(2),
+                vec![KnowledgeRecordId::new(1)],
+                vec![],
+            ),
+            record(
+                &holder,
+                3,
+                SimTime::from_minutes(3),
+                vec![],
+                vec![KnowledgeRecordId::new(1)],
+            ),
+        ]);
 
         let current = ledger
             .query(
@@ -755,15 +900,10 @@ mod tests {
     fn holder_local_ids_hide_global_gaps_and_cursor_is_stable() {
         let holder = KnowledgeHolderRef::Person(PersonId::new(9));
         let mut ledger = GenericKnowledgeLedger::default();
-        ledger
-            .insert_records(
-                holder.clone(),
-                [
-                    record(&holder, 10, SimTime::from_minutes(1), vec![], vec![]),
-                    record(&holder, 42, SimTime::from_minutes(1), vec![], vec![]),
-                ],
-            )
-            .expect("fixture records should be admitted");
+        ledger.records.extend([
+            record(&holder, 10, SimTime::from_minutes(1), vec![], vec![]),
+            record(&holder, 42, SimTime::from_minutes(1), vec![], vec![]),
+        ]);
         let cut = read_cut("holder-root-4");
         let first = ledger
             .query(
@@ -803,136 +943,194 @@ mod tests {
         );
     }
 
+    /// A publication is admitted whole or not at all: a duplicate body ID, an
+    /// entry for another body, a local ID out of order, a relation the holder
+    /// cannot resolve, and a body nobody holds each leave the ledger as it
+    /// was.
     #[test]
-    fn generic_ledger_admission_is_atomic_and_globally_append_only() {
-        let first_holder = KnowledgeHolderRef::Person(PersonId::new(1));
-        let second_holder = KnowledgeHolderRef::Person(PersonId::new(2));
+    fn generic_ledger_admission_is_atomic() {
+        let first = KnowledgeHolderRef::Person(PersonId::new(1));
+        let second = KnowledgeHolderRef::Person(PersonId::new(2));
         let mut ledger = GenericKnowledgeLedger::default();
         ledger
-            .insert_records(
-                first_holder.clone(),
-                [record(
-                    &first_holder,
-                    1,
-                    SimTime::from_minutes(1),
-                    vec![],
-                    vec![],
-                )],
-            )
-            .expect("the first global ID should be admitted");
-
+            .insert_records(body(1), [(first.clone(), entry(1, 1, vec![]))])
+            .expect("the first body should be admitted");
         let before = ledger.clone();
+        let refused = |ledger: &mut GenericKnowledgeLedger,
+                       body: Arc<KnowledgeRecordBody>,
+                       entries: Vec<(KnowledgeHolderRef, HolderEntry)>| {
+            let error = ledger
+                .insert_records(body, entries)
+                .expect_err("the publication must be refused");
+            assert_eq!(ledger, &before);
+            error
+        };
         assert_eq!(
-            ledger.insert_records(
-                first_holder.clone(),
-                [record(
-                    &second_holder,
-                    2,
-                    SimTime::from_minutes(2),
-                    vec![],
-                    vec![],
-                )],
+            refused(
+                &mut ledger,
+                body(1),
+                vec![(second.clone(), entry(1, 1, vec![]))]
             ),
-            Err(KnowledgeLedgerError::HolderMismatch)
+            KnowledgeLedgerError::DuplicateRecordId
         );
-        assert_eq!(ledger, before);
-
         assert_eq!(
-            ledger.insert_records(
-                second_holder.clone(),
-                [record(
-                    &second_holder,
-                    1,
-                    SimTime::from_minutes(2),
-                    vec![],
-                    vec![],
-                )],
+            refused(
+                &mut ledger,
+                body(2),
+                vec![(second.clone(), entry(3, 1, vec![]))]
             ),
-            Err(KnowledgeLedgerError::DuplicateRecordId)
+            KnowledgeLedgerError::MissingBody
         );
-        assert_eq!(ledger, before);
-
         assert_eq!(
-            ledger.insert_records(
-                second_holder.clone(),
+            refused(
+                &mut ledger,
+                body(2),
+                vec![(first.clone(), entry(2, 1, vec![]))]
+            ),
+            KnowledgeLedgerError::LocalOutOfOrder
+        );
+        assert_eq!(
+            refused(
+                &mut ledger,
+                body(2),
+                vec![
+                    (first.clone(), entry(2, 2, vec![1])),
+                    (second.clone(), entry(2, 1, vec![1])),
+                ]
+            ),
+            KnowledgeLedgerError::UnresolvedRelation
+        );
+        assert_eq!(
+            refused(&mut ledger, body(2), vec![]),
+            KnowledgeLedgerError::UnheldBody
+        );
+
+        // One body for two holders is stored once with an entry each.
+        ledger
+            .insert_records(
+                body(2),
                 [
-                    record(&second_holder, 2, SimTime::from_minutes(2), vec![], vec![],),
-                    record(&second_holder, 2, SimTime::from_minutes(3), vec![], vec![],),
+                    (first.clone(), entry(2, 2, vec![1])),
+                    (second.clone(), entry(2, 1, vec![])),
                 ],
-            ),
-            Err(KnowledgeLedgerError::DuplicateRecordId)
+            )
+            .expect("a shared body should be admitted");
+        assert_eq!(ledger.records.body_count(), 2);
+        assert_eq!(ledger.records.entry_count(), 3);
+        assert_eq!(
+            ledger.records.body_holder_count(KnowledgeRecordId::new(2)),
+            2
         );
-        assert_eq!(ledger, before);
+        assert!(Arc::ptr_eq(
+            ledger.records[&first]
+                .body(&KnowledgeRecordId::new(2))
+                .unwrap(),
+            ledger.records[&second]
+                .body(&KnowledgeRecordId::new(2))
+                .unwrap(),
+        ));
     }
 
+    /// The format-9 encoding of the ledgers and every refusal its decoding
+    /// makes: a local ID at or above `next_local`, a relation to an ID the
+    /// holder does not hold, a body no holder holds, an empty holder that
+    /// never used a local ID, an entry for a missing body, and unordered or
+    /// duplicate bodies and holders. An emptied holder that used local IDs
+    /// decodes and continues its count.
     #[test]
-    fn empty_snapshot_preserves_wire_and_holder_ledgers_are_canonical() {
+    fn snapshot_wire_is_canonical_and_refuses_tampering() {
         assert_eq!(
             serde_json::to_value(KnowledgeSnapshot::default())
                 .expect("empty knowledge should serialize"),
             json!({ "actors": {} })
         );
 
-        let first_holder = KnowledgeHolderRef::Person(PersonId::new(1));
-        let second_holder = KnowledgeHolderRef::Person(PersonId::new(2));
-        let mut ledger = GenericKnowledgeLedger::default();
-        ledger
-            .insert_records(
-                second_holder.clone(),
-                [record(
-                    &second_holder,
-                    3,
-                    SimTime::from_minutes(3),
-                    vec![],
-                    vec![],
-                )],
-            )
-            .expect("second holder fixture should be admitted");
-        ledger
-            .insert_records(
-                first_holder.clone(),
-                [
-                    record(&first_holder, 2, SimTime::from_minutes(2), vec![], vec![]),
-                    record(&first_holder, 1, SimTime::from_minutes(1), vec![], vec![]),
-                ],
-            )
-            .expect("first holder fixture should be admitted");
+        let first = KnowledgeHolderRef::Person(PersonId::new(1));
+        let second = KnowledgeHolderRef::Person(PersonId::new(2));
+        let mut records = HolderLedgers::new();
+        records.extend([
+            record(&second, 3, SimTime::from_minutes(3), vec![], vec![]),
+            record(&first, 2, SimTime::from_minutes(2), vec![], vec![]),
+            record(
+                &first,
+                4,
+                SimTime::from_minutes(4),
+                vec![KnowledgeRecordId::new(2)],
+                vec![],
+            ),
+        ]);
         let snapshot = KnowledgeSnapshot {
             actors: BTreeMap::new(),
-            records: ledger.records,
+            records,
         };
-
         let encoded = serde_json::to_value(&snapshot).expect("knowledge snapshot should serialize");
         assert_eq!(
-            encoded["records"][0]["holder"],
-            json!({ "type": "person", "value": 1 })
+            encoded["records"]["bodies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|body| body["id"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4]
         );
-        assert_eq!(encoded["records"][0]["records"][0]["id"], json!(1));
-        assert_eq!(encoded["records"][0]["records"][1]["id"], json!(2));
         assert_eq!(
-            serde_json::from_value::<KnowledgeSnapshot>(encoded.clone())
-                .expect("canonical holder ledger should deserialize"),
-            snapshot
+            encoded["records"]["holders"][0],
+            json!({
+                "holder": { "type": "person", "value": 1 },
+                "next_local": 3,
+                "entries": [
+                    { "record": 2, "local": 1, "supersedes": [], "contradicts": [] },
+                    { "record": 4, "local": 2, "supersedes": [2], "contradicts": [] },
+                ],
+            })
+        );
+        let decoded = serde_json::from_value::<KnowledgeSnapshot>(encoded.clone())
+            .expect("canonical holder ledgers should deserialize");
+        assert_eq!(decoded, snapshot);
+        assert_eq!(
+            decoded.records.commitment_root(),
+            snapshot.records.commitment_root()
         );
 
-        let mut duplicate_global_id = encoded.clone();
-        duplicate_global_id["records"][1]["records"][0]["id"] = json!(1);
-        assert!(serde_json::from_value::<KnowledgeSnapshot>(duplicate_global_id).is_err());
+        let refused = |edit: &dyn Fn(&mut Value)| {
+            let mut wire = encoded.clone();
+            edit(&mut wire["records"]);
+            assert!(serde_json::from_value::<KnowledgeSnapshot>(wire).is_err());
+        };
+        refused(&|wire| wire["holders"][0]["entries"][1]["local"] = json!(3));
+        refused(&|wire| wire["holders"][0]["entries"][1]["local"] = json!(1));
+        refused(&|wire| wire["holders"][0]["entries"][0]["local"] = json!(0));
+        refused(&|wire| wire["holders"][0]["entries"][1]["supersedes"] = json!([3]));
+        refused(&|wire| wire["holders"][1]["entries"] = json!([]));
+        refused(&|wire| wire["holders"][0]["entries"][0]["record"] = json!(5));
+        refused(&|wire| wire["holders"][1]["holder"] = json!({ "type": "person", "value": 1 }));
+        refused(&|wire| {
+            wire["holders"] = json!([wire["holders"][1].clone(), wire["holders"][0].clone()]);
+        });
+        refused(&|wire| wire["bodies"][1]["id"] = json!(2));
+        refused(&|wire| {
+            wire["holders"][1]["entries"] = json!([]);
+            wire["holders"][1]["next_local"] = json!(1);
+        });
 
-        // A record is filed under its own holder and ID, so a key can never
-        // disagree with its record; a wire that would need one is refused.
-        let mut foreign_record = encoded.clone();
-        foreign_record["records"][0]["records"][0]["holder"] =
-            json!({ "type": "person", "value": 2 });
-        assert!(serde_json::from_value::<KnowledgeSnapshot>(foreign_record).is_err());
-        let mut empty_holder = encoded.clone();
-        empty_holder["records"][1]["records"] = json!([]);
-        assert!(serde_json::from_value::<KnowledgeSnapshot>(empty_holder).is_err());
-        let mut duplicate_holder = encoded;
-        duplicate_holder["records"][1]["holder"] = json!({ "type": "person", "value": 1 });
-        duplicate_holder["records"][1]["records"][0]["holder"] =
-            json!({ "type": "person", "value": 1 });
-        assert!(serde_json::from_value::<KnowledgeSnapshot>(duplicate_holder).is_err());
+        // A holder whose entries all left keeps its next local ID.
+        let mut emptied = encoded.clone();
+        emptied["records"]["bodies"] = json!([
+            encoded["records"]["bodies"][0].clone(),
+            encoded["records"]["bodies"][2].clone(),
+        ]);
+        emptied["records"]["holders"][1]["entries"] = json!([]);
+        let mut emptied = serde_json::from_value::<KnowledgeSnapshot>(emptied)
+            .expect("an emptied holder decodes");
+        assert!(emptied.records[&second].is_empty());
+        assert_eq!(emptied.records[&second].next_local().get(), 2);
+        emptied
+            .records
+            .insert(record(&second, 9, SimTime::from_minutes(9), vec![], vec![]));
+        assert_eq!(
+            emptied.records[&second].local_of(&KnowledgeRecordId::new(9)),
+            Some(HolderKnowledgeRecordId::new(2))
+        );
     }
 
     #[test]
@@ -944,18 +1142,13 @@ mod tests {
             DomainRecordRef::new("fixture.organization", "office", "successor"),
         ));
         let mut ledger = GenericKnowledgeLedger::default();
-        ledger
-            .insert_records(
-                retired.clone(),
-                [record(
-                    &retired,
-                    1,
-                    SimTime::from_minutes(1),
-                    vec![],
-                    vec![],
-                )],
-            )
-            .expect("retired holder history should remain addressable");
+        ledger.records.extend([record(
+            &retired,
+            1,
+            SimTime::from_minutes(1),
+            vec![],
+            vec![],
+        )]);
         assert!(ledger.for_holder(&successor).is_none());
 
         assert!(

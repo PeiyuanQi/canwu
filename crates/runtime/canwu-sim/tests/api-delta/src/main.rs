@@ -38,11 +38,14 @@ fn exercise_information_flow_api_delta() {
         version: 1,
     };
     let publication = BoundaryDirective::PublishKnowledge {
-        holder: holder.clone(),
         visibility: StateVisibility::SameBoundary,
         producer_correlation: Some("fixture-correlation".to_owned()),
-        records: Vec::new(),
-        summary: "exercise the format-7 publication shape".to_owned(),
+        supersession: canwu_sim::KnowledgeSupersession::CurrentOnSubjects,
+        groups: vec![canwu_sim::KnowledgePublicationGroup {
+            holders: vec![holder.clone()],
+            records: Vec::new(),
+        }],
+        summary: "exercise the publication shape".to_owned(),
     };
     let cross_plugin_ingress = BoundaryDirective::SchedulePluginIngress {
         target_plugin: "fixture-target".to_owned(),
@@ -87,6 +90,7 @@ fn exercise_information_flow_api_delta() {
             writable: true,
             payload_schema: canwu_sim::PayloadSchema::Any,
             subjects: Vec::new(),
+            retention: canwu_sim::KnowledgeRetention::RetireWhenSuperseded,
         }],
         ..PluginDescriptor::default()
     };
@@ -101,6 +105,7 @@ fn exercise_information_flow_api_delta() {
         record_change_count: 0,
         knowledge_batch_count: 1,
         knowledge_record_count: 0,
+        knowledge_entry_count: 0,
         allocations: Vec::new(),
         created_persons: Vec::new(),
         transition_audits: Vec::new(),
@@ -109,15 +114,16 @@ fn exercise_information_flow_api_delta() {
         "knowledge_published",
         [
             (
-                "holder".to_owned(),
-                serde_json::to_value(&holder).expect("holder should serialize"),
+                "holders".to_owned(),
+                serde_json::to_value(vec![&holder]).expect("holders should serialize"),
             ),
             ("record_count".to_owned(), serde_json::json!(0)),
+            ("entry_count".to_owned(), serde_json::json!(0)),
         ]
         .into(),
     )
     .expect("event payload should be valid");
-    let audience = EventAudience::KnowledgeHolder(holder);
+    let audience = EventAudience::KnowledgeHolders(vec![holder]);
     let emission = BoundaryEmissionKind::KnowledgeChange { change_index: 0 };
     let target = DomainReferenceTargetKind::AnyEntity;
     let knowledge_errors = [

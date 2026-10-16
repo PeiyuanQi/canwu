@@ -374,21 +374,24 @@ fn know(
         .records;
     Ok(BoundaryProposal {
         directives: vec![BoundaryDirective::PublishKnowledge {
-            holder: knowledge_holder(),
             visibility: StateVisibility::SameBoundary,
             producer_correlation: None,
-            records: vec![KnowledgeRecordDraft {
-                schema: knowledge_schema(),
-                subjects: vec![about()],
-                payload: json!({ "boundary": context.boundary_id.get() }),
-                as_of: Some(context.at),
-                confidence_per_mille: 1_000,
-                origin: KnowledgeOrigin {
-                    method: "profile.continuation".to_owned(),
-                    evidence: Vec::new(),
-                },
-                supersedes: heads,
-                contradicts: Vec::new(),
+            supersession: canwu_api::KnowledgeSupersession::Explicit,
+            groups: vec![canwu_api::KnowledgePublicationGroup {
+                holders: vec![knowledge_holder()],
+                records: vec![KnowledgeRecordDraft {
+                    schema: knowledge_schema(),
+                    subjects: vec![about()],
+                    payload: json!({ "boundary": context.boundary_id.get() }),
+                    as_of: Some(context.at),
+                    confidence_per_mille: 1_000,
+                    origin: KnowledgeOrigin {
+                        method: "profile.continuation".to_owned(),
+                        evidence: Vec::new(),
+                    },
+                    supersedes: heads,
+                    contradicts: Vec::new(),
+                }],
             }],
             summary: "The standing record".to_owned(),
         }],
@@ -447,6 +450,7 @@ impl SimulationPlugin for ContinuationProfilePlugin {
                 required: true,
                 multiple: false,
             }],
+            retention: canwu_api::KnowledgeRetention::Keep,
         })?;
         registrar.register_ingress(PluginIngressDescriptor {
             name: "work".to_owned(),

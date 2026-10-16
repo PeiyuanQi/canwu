@@ -144,24 +144,27 @@ fn teach_ward(
     };
     Ok(BoundaryProposal {
         directives: vec![BoundaryDirective::PublishKnowledge {
-            holder: KnowledgeHolderRef::Person(ward),
             visibility: StateVisibility::SameBoundary,
             producer_correlation: None,
-            records: vec![KnowledgeRecordDraft {
-                schema: lesson_schema(),
-                subjects: vec![KnowledgeSubject {
-                    role: "pupil".to_owned(),
-                    target: KnowledgeSubjectTarget::Entity(EntityRef::Person(ward)),
+            supersession: canwu_api::KnowledgeSupersession::Explicit,
+            groups: vec![canwu_api::KnowledgePublicationGroup {
+                holders: vec![KnowledgeHolderRef::Person(ward)],
+                records: vec![KnowledgeRecordDraft {
+                    schema: lesson_schema(),
+                    subjects: vec![KnowledgeSubject {
+                        role: "pupil".to_owned(),
+                        target: KnowledgeSubjectTarget::Entity(EntityRef::Person(ward)),
+                    }],
+                    payload: json!({ "has_person_record": view.person(ward)?.is_some() }),
+                    as_of: None,
+                    confidence_per_mille: 1_000,
+                    origin: KnowledgeOrigin {
+                        method: "fixture.lesson".to_owned(),
+                        evidence: Vec::new(),
+                    },
+                    supersedes: Vec::new(),
+                    contradicts: Vec::new(),
                 }],
-                payload: json!({ "has_person_record": view.person(ward)?.is_some() }),
-                as_of: None,
-                confidence_per_mille: 1_000,
-                origin: KnowledgeOrigin {
-                    method: "fixture.lesson".to_owned(),
-                    evidence: Vec::new(),
-                },
-                supersedes: Vec::new(),
-                contradicts: Vec::new(),
             }],
             summary: "The ward was taught".to_owned(),
         }],
@@ -197,6 +200,7 @@ impl SimulationPlugin for HouseholdPlugin {
                 required: true,
                 multiple: false,
             }],
+            retention: canwu_api::KnowledgeRetention::Keep,
         })?;
         for (name, cadence, handler) in [
             (

@@ -2110,10 +2110,13 @@ fn install_planning_knowledge(
             )?);
         }
         directives.push(BoundaryDirective::PublishKnowledge {
-            holder: seed.holder.clone(),
             visibility: StateVisibility::SameBoundary,
             producer_correlation: Some(format!("knowledge-seed:{}", seed.seed_key)),
-            records,
+            supersession: canwu_api::KnowledgeSupersession::Explicit,
+            groups: vec![canwu_api::KnowledgePublicationGroup {
+                holders: vec![seed.holder.clone()],
+                records,
+            }],
             summary: "Publish holder-relative correspondence planning knowledge".to_owned(),
         });
         let receipt = KnowledgeSeedReceipt {
@@ -2201,24 +2204,27 @@ fn attempt_report_publication(
     ];
     evidence.sort();
     Ok(BoundaryDirective::PublishKnowledge {
-        holder: operation.intent.carrier.clone(),
         visibility: StateVisibility::SameBoundary,
         producer_correlation: Some(format!(
             "attempt-report:{}:{}",
             report.operation_key, report.attempt_number
         )),
-        records: vec![KnowledgeRecordDraft {
-            schema: schema_id(ATTEMPT_REPORT_KNOWLEDGE_SCHEMA),
-            subjects: Vec::new(),
-            payload: serde_json::to_value(&report).map_err(encode_error)?,
-            as_of: None,
-            confidence_per_mille: 1_000,
-            origin: KnowledgeOrigin {
-                method: REPORT_ORIGIN_METHOD.to_owned(),
-                evidence,
-            },
-            supersedes: Vec::new(),
-            contradicts: Vec::new(),
+        supersession: canwu_api::KnowledgeSupersession::Explicit,
+        groups: vec![canwu_api::KnowledgePublicationGroup {
+            holders: vec![operation.intent.carrier.clone()],
+            records: vec![KnowledgeRecordDraft {
+                schema: schema_id(ATTEMPT_REPORT_KNOWLEDGE_SCHEMA),
+                subjects: Vec::new(),
+                payload: serde_json::to_value(&report).map_err(encode_error)?,
+                as_of: None,
+                confidence_per_mille: 1_000,
+                origin: KnowledgeOrigin {
+                    method: REPORT_ORIGIN_METHOD.to_owned(),
+                    evidence,
+                },
+                supersedes: Vec::new(),
+                contradicts: Vec::new(),
+            }],
         }],
         summary: "Publish a holder-relative correspondence attempt report".to_owned(),
     })

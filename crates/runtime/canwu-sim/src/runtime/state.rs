@@ -1,12 +1,12 @@
 use super::{
     ArchivedEvidenceReceipt, ArchivedSegmentHeader, Army, ArmyId, BoundaryRecord, CanwuError,
     CommandAttemptRecord, CommandOutcome, CommandRecord, CommandRequestId, CommitmentRoots,
-    DecisionRequestId, DecisionState, DomainRecordRef, EntityRef, ErrorCode, EvidenceCursor,
-    EvidenceRef, Government, GovernmentId, IngressPayload, IngressQueueKey, IngressReceipt,
-    IngressRecord, KnowledgeSnapshot, PersistentDomainRecordStore, Person, PersonAvailability,
-    PersonId, PluginComponentKey, PluginComponentRecord, RandomDrawRecord, RandomStreamKey,
-    RandomStreamState, Route, RouteId, RunConfigurationSnapshot, RunManifest, Scenario,
-    ScheduleKey, ScheduledAction, SimEvent, SimTime, Territory, TerritoryId,
+    DecisionRequestId, DecisionState, DomainRecord, DomainRecordRef, EntityRef, ErrorCode,
+    EvidenceCursor, EvidenceRef, Government, GovernmentId, IngressPayload, IngressQueueKey,
+    IngressReceipt, IngressRecord, KnowledgeSnapshot, PersistentDomainRecordStore, Person,
+    PersonAvailability, PersonId, PluginComponentKey, PluginComponentRecord, RandomDrawRecord,
+    RandomStreamKey, RandomStreamState, Route, RouteId, RunConfigurationSnapshot, RunManifest,
+    Scenario, ScheduleKey, ScheduledAction, SimEvent, SimTime, Territory, TerritoryId,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -702,73 +702,6 @@ impl OrderedCommitmentAccumulator {
     }
 }
 
-/// Running commitment over every generic knowledge record in global ID
-/// order: the records sub-root of the knowledge root.
-///
-/// The runtime gives a published record an ID above every ID it holds and
-/// never changes or removes a committed record, so the ledger only grows at
-/// the end of this order, and a boundary feeds only the records it published.
-/// It lives in the commitment cache: a failed boundary restores it with the
-/// cache, and a restore, which builds a new cache, rebuilds it from the
-/// ledger. Load validation never reads it; it recomputes the root from the
-/// snapshot.
-///
-/// The accumulator trusts that invariant. It notices a ledger that lost
-/// records or gained records below the last one fed, because the counts no
-/// longer add up, but not a committed record changed in place: every path
-/// that replaces the knowledge state must restore or drop the cache with it.
-#[derive(Clone)]
-pub(super) struct KnowledgeRecordAccumulator {
-    records: OrderedCommitmentAccumulator,
-    last: Option<super::KnowledgeRecordId>,
-}
-
-impl KnowledgeRecordAccumulator {
-    pub(super) fn new() -> Result<Self, CanwuError> {
-        Ok(Self {
-            records: OrderedCommitmentAccumulator::new(
-                super::hashing::KNOWLEDGE_RECORD_COMMITMENT_DOMAIN,
-            )?,
-            last: None,
-        })
-    }
-
-    /// Feeds the records the ledgers gained after the last record fed.
-    /// Returns `false`, having fed nothing, when the record counts show that
-    /// the ledgers do not extend what was fed (they hold fewer records, or
-    /// records below the last one fed that it has not seen); the caller then
-    /// starts again from empty.
-    pub(super) fn sync(&mut self, ledgers: &super::HolderLedgers) -> Result<bool, CanwuError> {
-        let tail: Vec<_> = ledgers.records_after(self.last).collect();
-        if self.records.len.checked_add(tail.len()) != Some(ledgers.record_count()) {
-            return Ok(false);
-        }
-        for record in tail {
-            self.records.append(record)?;
-            self.last = Some(record.id);
-        }
-        Ok(true)
-    }
-
-    /// Builds the accumulator of a whole ledger.
-    pub(super) fn of(ledgers: &super::HolderLedgers) -> Result<Self, CanwuError> {
-        let mut accumulator = Self::new()?;
-        accumulator.sync(ledgers)?;
-        Ok(accumulator)
-    }
-
-    /// Returns the records sub-root and keeps it until the next record.
-    pub(super) fn root(&mut self) -> Result<String, CanwuError> {
-        self.records.refresh_root()
-    }
-
-    /// The ID of the last record fed.
-    #[cfg(test)]
-    pub(super) const fn last(&self) -> Option<super::KnowledgeRecordId> {
-        self.last
-    }
-}
-
 #[derive(Clone)]
 pub(super) struct RuntimeCommitmentCache {
     pub(super) commands: OrderedCommitmentAccumulator,
@@ -780,10 +713,9 @@ pub(super) struct RuntimeCommitmentCache {
     pub(super) knowledge: Option<String>,
     /// Sub-root of the knowledge root over the compatibility actor
     /// projection; cleared with [`CommitmentDomains::KNOWLEDGE`] and kept by
-    /// [`CommitmentDomains::KNOWLEDGE_RECORDS`].
+    /// [`CommitmentDomains::KNOWLEDGE_RECORDS`]. The generic ledger keeps its
+    /// own chunked roots.
     pub(super) knowledge_actors: Option<String>,
-    /// Records sub-root of the knowledge root, extended rather than cleared.
-    pub(super) knowledge_records: Option<KnowledgeRecordAccumulator>,
     pub(super) plugin_components: Option<String>,
     pub(super) domain_records: Option<String>,
     pub(super) decisions: Option<String>,
@@ -831,7 +763,6 @@ impl RuntimeCommitmentCache {
             world: None,
             knowledge: None,
             knowledge_actors: None,
-            knowledge_records: None,
             plugin_components: None,
             domain_records: None,
             decisions: None,
@@ -866,7 +797,6 @@ impl RuntimeCommitmentCache {
             world: None,
             knowledge: None,
             knowledge_actors: None,
-            knowledge_records: None,
             plugin_components: None,
             domain_records: None,
             decisions: None,
@@ -971,9 +901,6 @@ impl RuntimeCommitmentCache {
         if let Some(root) = updates.knowledge_actors {
             self.knowledge_actors = Some(root);
         }
-        if let Some(records) = updates.knowledge_records {
-            self.knowledge_records = Some(records);
-        }
         if let Some(root) = updates.plugin_components {
             self.plugin_components = Some(root);
         }
@@ -1037,9 +964,9 @@ impl CommitmentDomains {
     pub(super) const RANDOM_STREAMS: Self = Self(1 << 5);
     pub(super) const IDENTITY: Self = Self(1 << 6);
     pub(super) const DECISIONS: Self = Self(1 << 7);
-    /// Generic knowledge records were appended. The knowledge root is
-    /// recombined from the cached actor sub-root and the extended records
-    /// accumulator, so the ledger is not hashed again.
+    /// The generic knowledge ledger changed. The knowledge root is
+    /// recombined from the cached actor sub-root and the ledger's chunked
+    /// root, whose unchanged chunks are not hashed again.
     pub(super) const KNOWLEDGE_RECORDS: Self = Self(1 << 8);
 
     pub(super) const fn contains(self, domain: Self) -> bool {
@@ -1064,7 +991,6 @@ pub(super) struct RuntimeCommitmentRootUpdates {
     pub(super) world: Option<String>,
     pub(super) knowledge: Option<String>,
     pub(super) knowledge_actors: Option<String>,
-    pub(super) knowledge_records: Option<KnowledgeRecordAccumulator>,
     pub(super) plugin_components: Option<String>,
     pub(super) domain_records: Option<String>,
     pub(super) decisions: Option<String>,
@@ -1127,10 +1053,59 @@ pub(super) struct RuntimeCounters {
     pub(super) admitted_event_count: u64,
 }
 
+/// The position of each initial-scenario domain record in the scenario's
+/// list, by reference: built once per scenario and shared, through an `Arc`,
+/// by the runtime, its forks, and the snapshot it was validated from.
+/// Evidence that cites an initial-scenario version resolves through it in
+/// O(log n) instead of a scan of the scenario.
+#[derive(Debug, Default)]
+pub(super) struct InitialRecordIndex(BTreeMap<DomainRecordRef, usize>);
+
+#[cfg(test)]
+thread_local! {
+    /// Scenario records [`InitialRecordIndex::version`] has read on this
+    /// thread, so a test can count what resolving evidence reads.
+    pub(super) static INITIAL_RECORDS_READ: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+impl InitialRecordIndex {
+    pub(super) fn of(scenario: Option<&Scenario>) -> Arc<Self> {
+        Arc::new(Self(
+            scenario
+                .iter()
+                .flat_map(|scenario| scenario.domain_records.iter().enumerate())
+                .map(|(index, record)| (record.reference.clone(), index))
+                .collect(),
+        ))
+    }
+
+    /// The position of a record in the scenario's list.
+    pub(super) fn get(&self, reference: &DomainRecordRef) -> Option<&usize> {
+        self.0.get(reference)
+    }
+
+    /// The initial record `reference` names at its version, if the scenario
+    /// holds it at that version.
+    pub(super) fn version<'a>(
+        &self,
+        scenario: Option<&'a Scenario>,
+        reference: &super::DomainRecordVersionRef,
+    ) -> Option<&'a DomainRecord> {
+        let record = scenario?
+            .domain_records
+            .get(*self.get(&reference.record)?)?;
+        #[cfg(test)]
+        INITIAL_RECORDS_READ.set(INITIAL_RECORDS_READ.get() + 1);
+        (record.reference == reference.record && record.version == reference.version)
+            .then_some(record)
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct RuntimeMetadata {
     pub(super) initial_scenario: Option<Scenario>,
-    pub(super) initial_domain_record_indexes: BTreeMap<DomainRecordRef, usize>,
+    pub(super) initial_domain_record_indexes: Arc<InitialRecordIndex>,
     /// Exact provenance and establishment time for each current domain-record
     /// version. This is maintained incrementally at boundary commit time and
     /// rebuilt from the retained journal during restore, keeping hot-path

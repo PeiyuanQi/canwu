@@ -22,8 +22,8 @@
 //! builds, as in the main harness: `--mode elapsed` without the
 //! `allocation-counting` feature, `--mode allocations` with it. The
 //! allocation build also reports `run_heap_bytes`, the bytes the built run
-//! holds. The binary uses only public API that 0.15.0 also has, so the same
-//! source measures both versions.
+//! holds. The binary publishes through the 0.17.0 directive (one group of
+//! one holder per line), so it measures 0.17.0 and later.
 
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundaryRequest,
@@ -320,10 +320,13 @@ fn fill(
                 .map(|copy| draft(line_index, copy, heads.records.clone(), context))
                 .collect();
             directives.push(BoundaryDirective::PublishKnowledge {
-                holder: holder.clone(),
                 visibility: StateVisibility::SameBoundary,
                 producer_correlation: None,
-                records,
+                supersession: canwu_api::KnowledgeSupersession::Explicit,
+                groups: vec![canwu_api::KnowledgePublicationGroup {
+                    holders: vec![holder.clone()],
+                    records,
+                }],
                 summary: "Fill one line".to_owned(),
             });
         }
@@ -344,10 +347,13 @@ fn publish(
     let heads = view.knowledge_heads(&holder, &kind(), &[line(0)])?;
     Ok(BoundaryProposal {
         directives: vec![BoundaryDirective::PublishKnowledge {
-            holder,
             visibility: StateVisibility::SameBoundary,
             producer_correlation: None,
-            records: vec![draft(0, 0, heads.records, context)],
+            supersession: canwu_api::KnowledgeSupersession::Explicit,
+            groups: vec![canwu_api::KnowledgePublicationGroup {
+                holders: vec![holder],
+                records: vec![draft(0, 0, heads.records, context)],
+            }],
             summary: "Publish one record".to_owned(),
         }],
         ..BoundaryProposal::default()
@@ -399,6 +405,7 @@ impl SimulationPlugin for KnowledgeLedgerPlugin {
                 required: true,
                 multiple: false,
             }],
+            retention: canwu_api::KnowledgeRetention::Keep,
         })?;
         registrar.register_boundary_system(contract("fill", SystemCadence::Monthly, true), fill)?;
         registrar

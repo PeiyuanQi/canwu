@@ -699,7 +699,9 @@ fn schedule_operation_progress(
 /// record of its holder, kind, and subjects. The publication system publishes
 /// each holder, kind, and subjects at most once per boundary, so that record
 /// is the one the chunk's boundary published. A sealed run, an unsealed run,
-/// and exact replay therefore record the same IDs.
+/// and exact replay therefore record the same IDs. An empty chunk, which the
+/// knowledge publication budget deferred whole, records nothing and returns
+/// the operation to publication.
 fn finalize_operation(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
@@ -729,7 +731,12 @@ fn finalize_operation(
         .continuation
         .as_ref()
         .map_or(total, |continuation| continuation.cursor);
-    if request.publication_start >= request.publication_end
+    // A chunk the publication budget deferred whole is empty: it starts and
+    // ends at the continuation's cursor, and its finalization only returns
+    // the operation to publication.
+    let deferred =
+        request.publication_start == request.publication_end && previous.continuation.is_some();
+    if (request.publication_start >= request.publication_end && !deferred)
         || request.publication_end != published_end
     {
         return Err(invalid_record(
@@ -805,6 +812,7 @@ fn publish_lifecycle_boundary(
     let operations = all_domain_records_of_kind(view, &kind)?;
     let mut directives = Vec::new();
     let mut published = BTreeSet::<PublicationKey>::new();
+    let mut budget = view.knowledge_publication_budget();
     for record in operations {
         let previous = record.decode_payload::<InformationOperationRecord>()?;
         if previous.status == InformationOperationStatus::AwaitingFinalization
@@ -849,7 +857,7 @@ fn publish_lifecycle_boundary(
             .map_err(|_| invalid_record("information publication cursor is not representable"))?;
         let take = usize::try_from(u64::from(continuation.chunk_size).min(continuation.remaining))
             .map_err(|_| invalid_record("information publication chunk is not representable"))?;
-        let end = start
+        let mut end = start
             .checked_add(take)
             .ok_or_else(|| invalid_record("information publication chunk overflow"))?;
         let slice = publications.get(start..end).ok_or_else(|| {
@@ -870,9 +878,23 @@ fn publish_lifecycle_boundary(
                 unpublished.push(index);
                 continue;
             }
-            if !published.insert((holder.clone(), draft.schema.clone(), draft.subjects.clone())) {
+            let key = (holder, draft.schema.clone(), draft.subjects.clone());
+            if published.contains(&key) {
                 continue;
             }
+            // The chunk also stops at the engine's publication budget, which
+            // every publisher of the boundary shares: the rest of the chunk
+            // is the next chunk. When not even the chunk's first record fits,
+            // the chunk is empty and the whole of it waits for a later
+            // boundary.
+            if !budget.take(1, 1, draft.payload_bytes()?) {
+                end = usize::try_from(index).map_err(|_| {
+                    invalid_record("information publication cursor is not representable")
+                })?;
+                break;
+            }
+            let holder = key.0.clone();
+            published.insert(key);
             batches.entry(holder).or_default().push(draft);
         }
         if batches.len() > MAX_PUBLICATION_BATCHES {
@@ -890,10 +912,13 @@ fn publish_lifecycle_boundary(
                 .ok_or_else(|| invalid_record("information batch index overflow"))?;
             let correlation = format!("{correlation_prefix}{absolute_batch_index:020}");
             directives.push(BoundaryDirective::PublishKnowledge {
-                holder,
                 visibility: StateVisibility::SameBoundary,
                 producer_correlation: Some(correlation.clone()),
-                records,
+                supersession: canwu_api::KnowledgeSupersession::Explicit,
+                groups: vec![canwu_api::KnowledgePublicationGroup {
+                    holders: vec![holder],
+                    records,
+                }],
                 summary: "Publish neutral information lifecycle record".to_owned(),
             });
         }

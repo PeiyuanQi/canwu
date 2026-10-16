@@ -383,6 +383,10 @@ pub enum EventAudience {
     Actor(PersonId),
     Actors(Vec<PersonId>),
     KnowledgeHolder(KnowledgeHolderRef),
+    /// The event is visible to each of the listed knowledge holders, sorted
+    /// and unique: the audience of one knowledge publication to many
+    /// holders.
+    KnowledgeHolders(Vec<KnowledgeHolderRef>),
     /// The event is visible to actors represented by `EntityRef::Person` in
     /// the event's affected-entity list.
     AffectedActors,

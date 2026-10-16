@@ -39,9 +39,10 @@ pub use boundary::{
     BoundaryChange, BoundaryContext, BoundaryDirective, BoundaryEmission, BoundaryEmissionKind,
     BoundaryIngressGeneration, BoundaryKnowledgeChange, BoundaryProposal, BoundaryReceipt,
     BoundaryRecord, BoundaryRequest, BoundarySystemContract, BoundarySystemHandler,
-    KnowledgeWriteGrant, OutboxEntry, PluginIngressTarget, RandomDecisionResolution,
-    ReservationAllocation, ReservationDisposition, ReservationOffer, ReservationOfferRecord,
-    ReservationPoolKey, ReservationRef, ReservationRequest, ReservationRequestRecord,
+    HolderPublication, KnowledgePublicationGroup, KnowledgeSupersession, KnowledgeWriteGrant,
+    OutboxEntry, PluginIngressTarget, RandomDecisionResolution, ReservationAllocation,
+    ReservationDisposition, ReservationOffer, ReservationOfferRecord, ReservationPoolKey,
+    ReservationRef, ReservationRequest, ReservationRequestRecord,
 };
 pub use boundary_window::{
     BoundaryIngressCount, BoundaryIngressKind, BoundaryIngressOrigin, BoundarySummary,
@@ -94,8 +95,8 @@ pub use ingress::{
     PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest,
 };
 pub use knowledge::{
-    KnowledgeHeads, KnowledgeLimitsV1, KnowledgeSubjectSchema, KnowledgeSubjectTargetKind,
-    PluginKnowledgeSchema,
+    KnowledgeHeads, KnowledgeLimitsV1, KnowledgePublicationBudget, KnowledgeSubjectSchema,
+    KnowledgeSubjectTargetKind, PluginKnowledgeSchema,
 };
 pub use maintenance::{
     MAX_OWNER_AUTHORIZED_MUTATIONS, MAX_OWNER_AUTHORIZED_PARTICIPANTS,
@@ -175,10 +176,13 @@ use canwu_core::{
 };
 pub use canwu_event::{CauseRef, EventAudience, EventKind, SimEvent};
 pub use canwu_knowledge::{
-    ActorKnowledge, ArmyKnowledge, CurrentRecords, EstimateRange, HolderLedger, HolderLedgers,
-    HolderLedgersIter, HolderRecordsIter, KnowledgeCursor, KnowledgeHistoryView, KnowledgeOrigin,
-    KnowledgeQuery, KnowledgeReadCut, KnowledgeRecord, KnowledgeRecordDraft, KnowledgeRecordView,
-    KnowledgeSnapshot, KnowledgeSource, KnowledgeSubject, KnowledgeSubjectTarget, RecordsById,
+    ActorKnowledge, ArmyKnowledge, BodiesById, CurrentRecords, EstimateRange, HolderEntriesIter,
+    HolderEntry, HolderLedger, HolderLedgers, HolderLedgersIter, HolderRecordsIter,
+    KNOWLEDGE_COMMITMENT_CHUNK_ENTRIES, KnowledgeBodyDigest, KnowledgeCursor,
+    KnowledgeEncodingError, KnowledgeHistoryView, KnowledgeOrigin, KnowledgeQuery,
+    KnowledgeReadCut, KnowledgeRecord, KnowledgeRecordBody, KnowledgeRecordDraft,
+    KnowledgeRecordView, KnowledgeRetention, KnowledgeSnapshot, KnowledgeSource, KnowledgeSubject,
+    KnowledgeSubjectTarget,
 };
 use canwu_time::{SimDuration, SimTime};
 pub use legacy_world::{
@@ -196,10 +200,12 @@ use event_payloads::{
     DebugFieldChanged, KNOWLEDGE_PUBLISHED, KnowledgePublished, MoveOrdered, PLUGIN,
     PersonMoveOrdered, RuntimeEventPayload,
 };
+#[cfg(test)]
+use hashing::compute_boundary_hash;
 use hashing::{
     ControlCommitmentMaterial, StateHashMaterial, authoritative_run_identity,
     boundary_state_hash_for_commitments, checkpoint_hash_for_commitments,
-    checkpoint_hash_for_configuration, commitment_roots_are_canonical, compute_boundary_hash,
+    checkpoint_hash_for_configuration, commitment_roots_are_canonical, compute_boundary_hash_with,
     decision_commitment_root, identity_commitment_root, is_canonical_hash,
     knowledge_actor_commitment_root, knowledge_commitment_root_from_parts,
     plugin_component_commitment_root, random_stream_commitment_root, runtime_commitment_roots,
@@ -212,9 +218,10 @@ use revision::{
 };
 use settlement::{PendingBoundaryRandomDraw, boundary_has_event_ingress, boundary_system_due};
 use state::{
-    CommitmentDomains, CurrentDomainRecordVersion, EvidenceTimeIndex, JournalCommitmentRoots,
-    RuntimeCommitmentCache, RuntimeCommitmentRootUpdates, RuntimeCounters, RuntimeCurrentState,
-    RuntimeDomainCommitmentRoots, RuntimeEvidence, RuntimeMetadata, RuntimeScheduler, RuntimeState,
+    CommitmentDomains, CurrentDomainRecordVersion, EvidenceTimeIndex, InitialRecordIndex,
+    JournalCommitmentRoots, RuntimeCommitmentCache, RuntimeCommitmentRootUpdates, RuntimeCounters,
+    RuntimeCurrentState, RuntimeDomainCommitmentRoots, RuntimeEvidence, RuntimeMetadata,
+    RuntimeScheduler, RuntimeState,
 };
 use transactions::{
     BoundaryTransactionCheckpoint, ClockTransactionCheckpoint, CommandTransactionCheckpoint,
@@ -233,25 +240,27 @@ use validation::{
 };
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Format 8 binds every decision attempt to its complete ingress request and
-/// activates content-addressed state-page persistence. Older
-/// snapshots, journals, and sub-contract versions are rejected before any
-/// mutable runtime state is constructed.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 8;
+/// Format 9 stores generic knowledge as record bodies, each once, and holder
+/// entries with stored local IDs and each holder's next local ID (format 8
+/// stored one record per holder). Older snapshots, journals, and
+/// sub-contract versions are rejected before any mutable runtime state is
+/// constructed.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 9;
 /// Version of the authoritative revision commitment.
 pub const STATE_REVISION_FORMAT_VERSION: u32 = 3;
 /// Version of persisted monotonic boundary-admission cursors.
 pub const ADMISSION_CURSOR_FORMAT_VERSION: u32 = 3;
 /// Version of the domain-separated checkpoint commitment contract.
 ///
-/// Format 5 changes two commitments of format 4. A boundary record's hash
-/// covers its knowledge changes, every field of each, so an edit to one is
-/// refused at load unless the boundary chain is rehashed. The knowledge
-/// root commits to the compatibility actor projection and to the generic
-/// records in global ID order as two sub-roots, so the runtime extends it
-/// with each publication instead of hashing the whole ledger again. Snapshot,
-/// journal, and checkpoint shapes are unchanged; format 4 is refused.
-pub const COMMITMENT_FORMAT_VERSION: u32 = 5;
+/// Format 6 commits to generic knowledge through the chunked ledger root
+/// (`canwu.commitment.knowledge.v3`): a leaf hash per holder entry over its
+/// local ID, global ID, body digest, and relations; a root per chunk of 256
+/// local IDs; a root per holder over its next local ID and chunk roots; and a
+/// root over every holder. A publication or a retirement rehashes only the
+/// chunks it touches and the holder roots. A boundary record's hash covers
+/// its knowledge changes with each body as its ID and digest. Format 5 is
+/// refused.
+pub const COMMITMENT_FORMAT_VERSION: u32 = 6;
 /// Maximum nested depth of the compatibility synchronous event-reactor path.
 ///
 /// New plugin mechanics should use phased boundary systems instead of relying
@@ -297,7 +306,7 @@ fn reject_unknown_current_fields(
                 };
                 let Some(expected) = encoded.get(key) else {
                     return Err(invalid_snapshot_error(format!(
-                        "format 8 wire contains unknown field `{field_path}`"
+                        "format 9 wire contains unknown field `{field_path}`"
                     )));
                 };
                 reject_unknown_current_fields(value, expected, &field_path)?;
@@ -306,7 +315,7 @@ fn reject_unknown_current_fields(
         (Value::Array(input), Value::Array(encoded)) => {
             if input.len() != encoded.len() {
                 return Err(invalid_snapshot_error(format!(
-                    "format 8 wire array `{path}` changed shape during decoding"
+                    "format 9 wire array `{path}` changed shape during decoding"
                 )));
             }
             for (index, (value, expected)) in input.iter().zip(encoded).enumerate() {
@@ -323,7 +332,7 @@ where
     T: for<'de> Deserialize<'de> + Serialize,
 {
     let input: Value = serde_json::from_str(json).map_err(|error| {
-        invalid_snapshot_error(format!("could not parse format 8 {label}: {error}"))
+        invalid_snapshot_error(format!("could not parse format 9 {label}: {error}"))
     })?;
     deserialize_current_value(&input, label)
 }
@@ -333,10 +342,10 @@ where
     T: for<'de> Deserialize<'de> + Serialize,
 {
     let decoded: T = serde_json::from_value(input.clone()).map_err(|error| {
-        invalid_snapshot_error(format!("could not deserialize format 8 {label}: {error}"))
+        invalid_snapshot_error(format!("could not deserialize format 9 {label}: {error}"))
     })?;
     let encoded = serde_json::to_value(&decoded).map_err(|error| {
-        invalid_snapshot_error(format!("could not re-encode format 8 {label}: {error}"))
+        invalid_snapshot_error(format!("could not re-encode format 9 {label}: {error}"))
     })?;
     reject_unknown_current_fields(input, &encoded, "")?;
     Ok(decoded)
@@ -344,7 +353,7 @@ where
 
 fn deserialize_current_snapshot_json(json: &str) -> Result<SimulationSnapshot, CanwuError> {
     let input: Value = serde_json::from_str(json).map_err(|error| {
-        invalid_snapshot_error(format!("could not parse format 8 snapshot: {error}"))
+        invalid_snapshot_error(format!("could not parse format 9 snapshot: {error}"))
     })?;
     let engine_version = input.get("engine_version").and_then(Value::as_str);
     let snapshot_format_version = input.get("snapshot_format_version").and_then(Value::as_u64);
@@ -370,17 +379,17 @@ fn validate_current_snapshot_contract(snapshot: &SimulationSnapshot) -> Result<(
         || snapshot.legacy_rng.is_some()
     {
         return Err(invalid_snapshot_error(
-            "format 8 snapshots must use the current commitment, revision, admission, and authority contracts",
+            "format 9 snapshots must use the current commitment, revision, admission, and authority contracts",
         ));
     }
     let Some(run_manifest @ RunManifest::Declared { .. }) = snapshot.run_manifest.as_ref() else {
         return Err(invalid_snapshot_error(
-            "format 8 snapshots require a declared run manifest",
+            "format 9 snapshots require a declared run manifest",
         ));
     };
     let Some(initial_scenario) = snapshot.initial_scenario.as_ref() else {
         return Err(invalid_snapshot_error(
-            "format 8 snapshots must retain their canonical initial scenario",
+            "format 9 snapshots must retain their canonical initial scenario",
         ));
     };
     if matches!(
@@ -390,27 +399,27 @@ fn validate_current_snapshot_contract(snapshot: &SimulationSnapshot) -> Result<(
         )
     ) {
         return Err(invalid_snapshot_error(
-            "format 8 snapshots cannot use legacy or manifest-only run configuration provenance",
+            "format 9 snapshots cannot use legacy or manifest-only run configuration provenance",
         ));
     }
     manifest::validate(run_manifest, Some(initial_scenario))?;
     let expected_manifest_hash = manifest::hash(run_manifest)?;
     if snapshot.run_manifest_hash != expected_manifest_hash {
         return Err(invalid_snapshot_error(
-            "format 8 snapshot run manifest hash is inconsistent",
+            "format 9 snapshot run manifest hash is inconsistent",
         ));
     }
     let run_configuration = snapshot
         .run_configuration
         .as_ref()
-        .ok_or_else(|| invalid_snapshot_error("format 8 snapshots require run configuration"))?;
+        .ok_or_else(|| invalid_snapshot_error("format 9 snapshots require run configuration"))?;
     let (_, authority_manifest_hash) =
         authoritative_run_identity(run_manifest, &expected_manifest_hash, run_configuration)?;
     let expected_authority_root =
         fresh_authority_root_seed(snapshot.root_seed, &authority_manifest_hash)?;
     if snapshot.authority_root_seed != expected_authority_root {
         return Err(invalid_snapshot_error(
-            "format 8 snapshot authority root is not bound to its run identity",
+            "format 9 snapshot authority root is not bound to its run identity",
         ));
     }
     Ok(())
@@ -1542,17 +1551,7 @@ impl Simulation {
         let authority_root_seed = fresh_authority_root_seed(seed, &authority_manifest_hash)?;
         let core_stream = RandomStreamState::initial(seed, random::core_report_delay_stream());
         let initial_scenario = Some(scenario.clone());
-        let initial_domain_record_indexes = initial_scenario
-            .as_ref()
-            .map(|scenario| {
-                scenario
-                    .domain_records
-                    .iter()
-                    .enumerate()
-                    .map(|(index, record)| (record.reference.clone(), index))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let initial_domain_record_indexes = InitialRecordIndex::of(initial_scenario.as_ref());
         let current_domain_record_versions = build_current_domain_record_versions(
             initial_scenario.as_ref(),
             scenario.start_time,
@@ -1862,6 +1861,16 @@ impl Simulation {
         &self.state.current.knowledge
     }
 
+    /// The retention a registered knowledge schema declares, or `None` for a
+    /// schema this run does not register.
+    #[must_use]
+    pub fn knowledge_retention(&self, schema: &KnowledgeSchemaId) -> Option<KnowledgeRetention> {
+        self.plugins
+            .knowledge_schemas
+            .get(schema)
+            .map(|(_, schema)| schema.retention)
+    }
+
     #[must_use]
     pub fn events(&self) -> &[SimEvent] {
         &self.state.evidence.events
@@ -2085,7 +2094,7 @@ impl Simulation {
                 }),
             KNOWLEDGE_PUBLISHED => KnowledgePublished::decode(&event.kind)
                 .map_or(EventAudience::Private, |payload| {
-                    EventAudience::KnowledgeHolder(payload.holder)
+                    EventAudience::KnowledgeHolders(payload.holders)
                 }),
             _ => EventAudience::Private,
         }
@@ -2095,7 +2104,7 @@ impl Simulation {
     /// # Panics
     ///
     /// Panics only if a runtime object was constructed without its required
-    /// Format 8 initial scenario, which is prevented by the public loaders.
+    /// Format 9 initial scenario, which is prevented by the public loaders.
     #[must_use]
     pub fn replay_journal(&self) -> ReplayJournal {
         ReplayJournal {
@@ -2107,7 +2116,7 @@ impl Simulation {
                 .metadata
                 .initial_scenario
                 .clone()
-                .expect("Format 8 runs always retain their initial scenario"),
+                .expect("Format 9 runs always retain their initial scenario"),
             authority_root_seed: self.state.current.authority_root_seed,
             run_manifest: self.state.metadata.run_manifest.clone(),
             run_manifest_hash: self.state.metadata.run_manifest_hash.clone(),
@@ -2370,15 +2379,14 @@ impl Simulation {
         } else {
             None
         };
-        let (knowledge, knowledge_actors, knowledge_records) = match knowledge {
-            Some((root, actors, records)) => (Some(root), Some(actors), Some(records)),
-            None => (None, None, None),
+        let (knowledge, knowledge_actors) = match knowledge {
+            Some((root, actors)) => (Some(root), Some(actors)),
+            None => (None, None),
         };
         Ok(RuntimeCommitmentRootUpdates {
             world,
             knowledge,
             knowledge_actors,
-            knowledge_records,
             plugin_components,
             domain_records,
             decisions,
@@ -2388,30 +2396,20 @@ impl Simulation {
         })
     }
 
-    /// Recombines the knowledge root from its cached sub-roots. The actor
-    /// sub-root is hashed again only when the actor projection changed; the
-    /// records accumulator is fed the records published since it last ran,
-    /// so its cost follows what was published, not what is held. It starts
-    /// again from empty only when the cache has none, which happens once
-    /// after a restore, or the ledger does not extend it.
-    fn knowledge_commitment_update(
-        &self,
-    ) -> Result<(String, String, state::KnowledgeRecordAccumulator), CanwuError> {
+    /// Recombines the knowledge root from the cached actor sub-root and the
+    /// ledgers' chunked root. The actor sub-root is hashed again only when
+    /// the actor projection changed; the ledgers keep their chunk and holder
+    /// roots, refreshed when a boundary commits, so the root costs a pass
+    /// over the holder roots, not a hash of what is held.
+    fn knowledge_commitment_update(&self) -> Result<(String, String), CanwuError> {
         let cache = self.state.metadata.commitment_cache.as_ref();
         let knowledge = &self.state.current.knowledge;
         let actors = match cache.and_then(|cache| cache.knowledge_actors.clone()) {
             Some(actors) => actors,
             None => knowledge_actor_commitment_root(&knowledge.actors)?,
         };
-        let mut records = match cache.and_then(|cache| cache.knowledge_records.clone()) {
-            Some(records) => records,
-            None => state::KnowledgeRecordAccumulator::new()?,
-        };
-        if !records.sync(&knowledge.records)? {
-            records = state::KnowledgeRecordAccumulator::of(&knowledge.records)?;
-        }
-        let root = knowledge_commitment_root_from_parts(&actors, &records.root()?)?;
-        Ok((root, actors, records))
+        let root = knowledge_commitment_root_from_parts(&actors, &knowledge.records)?;
+        Ok((root, actors))
     }
 
     fn invalidate_commitments(&mut self, domains: CommitmentDomains) {
@@ -2591,7 +2589,12 @@ impl Simulation {
             domain_records: snapshot.domain_records.clone(),
         })?;
         let plugins = PluginRegistry::from_descriptors(snapshot.plugin_descriptors.clone())?;
-        let keyed_draws = validate_snapshot(&snapshot, &plugins)?;
+        let (keyed_draws, mut knowledge_ledger) = validate_snapshot(&snapshot, &plugins)?;
+        // The ledger validation rebuilt from the journal equals the decoded
+        // one and shares its bodies with the journal; the runtime keeps it,
+        // so each body is held once.
+        knowledge_ledger.refresh_commitment();
+        snapshot.knowledge.records = knowledge_ledger;
         let admitted_ingress: BTreeSet<_> = snapshot
             .boundaries
             .iter()
@@ -2616,19 +2619,11 @@ impl Simulation {
             .map(IngressQueueKey::from_record)
             .collect();
         let initial_scenario = Some(snapshot.initial_scenario.clone().ok_or_else(|| {
-            invalid_snapshot_error("format 8 validation requires an initial scenario")
+            invalid_snapshot_error("format 9 validation requires an initial scenario")
         })?);
-        let initial_domain_record_indexes = initial_scenario
-            .as_ref()
-            .map(|scenario| {
-                scenario
-                    .domain_records
-                    .iter()
-                    .enumerate()
-                    .map(|(index, record)| (record.reference.clone(), index))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Validation built the index of the snapshot's initial scenario; the
+        // restored runtime shares it.
+        let initial_domain_record_indexes = snapshot.initial_record_index();
         let current_domain_record_versions = build_current_domain_record_versions(
             initial_scenario.as_ref(),
             snapshot.initial_time,
@@ -2694,7 +2689,7 @@ impl Simulation {
         snapshot: SimulationSnapshot,
         plugins: PluginRegistry,
         initial_scenario: Option<Scenario>,
-        initial_domain_record_indexes: BTreeMap<DomainRecordRef, usize>,
+        initial_domain_record_indexes: Arc<InitialRecordIndex>,
         pending_ingress: BTreeSet<IngressQueueKey>,
         cancelled_ingress: BTreeSet<IngressId>,
         current_domain_record_versions: im::OrdMap<

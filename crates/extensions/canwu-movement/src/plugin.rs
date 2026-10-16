@@ -153,6 +153,7 @@ impl SimulationPlugin for MovementPlugin {
                 required: true,
                 multiple: false,
             }],
+            retention: canwu_api::KnowledgeRetention::Keep,
         };
         registrar.register_knowledge_schema(report_schema.clone())?;
         registrar.register_command(
@@ -748,6 +749,10 @@ fn publish_movement_reports(
     let mut published = 0_usize;
     let mut holders = 0_usize;
     let mut index = 0_usize;
+    // The engine's publication budget is shared by every publisher of the
+    // boundary; a report that does not fit waits for the wake, as one past
+    // movement's own limits does.
+    let mut budget = view.knowledge_publication_budget();
     while index < due.len() {
         let holder = due[index].0.clone();
         let group_end = due[index..]
@@ -764,6 +769,7 @@ fn publish_movement_reports(
         }
         let take_end = group_end.min(index + room);
         let mut records = Vec::new();
+        let mut processed = index;
         for (holder, execution, report) in &due[index..take_end] {
             let payload = encode(report)?;
             let head = MovementObservationHeadV1 {
@@ -774,9 +780,9 @@ fn publish_movement_reports(
                 published_at: at,
                 report_digest: report.digest.clone(),
             };
-            if serde_json::to_vec(&payload).map_or(true, |bytes| {
-                bytes.len() > KnowledgeLimitsV1::CURRENT.payload_bytes_per_record
-            }) {
+            let payload_bytes =
+                serde_json::to_vec(&payload).map_or(usize::MAX, |bytes| bytes.len());
+            if payload_bytes > KnowledgeLimitsV1::CURRENT.payload_bytes_per_record {
                 // An oversized report is withheld instead of failing the
                 // boundary. The head still advances, so the report is not
                 // recomputed and the execution can retire, and an event
@@ -791,7 +797,11 @@ fn publish_movement_reports(
                     ),
                     affected: Vec::new(),
                 });
+                processed += 1;
                 continue;
+            }
+            if !budget.take(1, 1, payload_bytes) {
+                break;
             }
             records.push(KnowledgeRecordDraft {
                 schema: movement_report_knowledge_schema_id(),
@@ -826,9 +836,10 @@ fn publish_movement_reports(
             });
             upsert_head(&mut state, head);
             heads_changed = true;
+            processed += 1;
         }
         if records.is_empty() {
-            if take_end < group_end {
+            if processed < group_end {
                 deferred = true;
                 break;
             }
@@ -836,18 +847,21 @@ fn publish_movement_reports(
             continue;
         }
         directives.push(BoundaryDirective::PublishKnowledge {
-            holder,
             visibility: StateVisibility::SameBoundary,
             producer_correlation: Some(format!(
                 "{MOVEMENT_REPORT_KNOWLEDGE}::{}::{holders}",
                 context.boundary_id
             )),
-            records,
+            supersession: canwu_api::KnowledgeSupersession::Explicit,
+            groups: vec![canwu_api::KnowledgePublicationGroup {
+                holders: vec![holder],
+                records,
+            }],
             summary: "Publish holder-relative movement reports".to_owned(),
         });
-        published += take_end - index;
+        published += processed - index;
         holders += 1;
-        if take_end < group_end {
+        if processed < group_end {
             deferred = true;
             break;
         }

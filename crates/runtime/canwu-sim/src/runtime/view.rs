@@ -4,14 +4,13 @@ use super::{
     DecisionRequestId, DecisionTicket, DecisionTicketId, DomainRecord, DomainRecordKind,
     DomainRecordRef, DomainRecordType, DomainRecordVersionRef, DomainRecordVersionSource,
     EntityRef, ErrorCode, EventId, EvidenceRef, Government, GovernmentId, HashSet, IngressId,
-    IngressPayload, IngressQueueKey, IngressRecord, KnowledgeHolderRef, KnowledgeQuery,
-    KnowledgeRecord, KnowledgeRecordId, Person, PersonAvailability, PersonId, PluginComponentKey,
-    PluginComponentRecord, RandomOperationTarget, RandomStreamKey, RefCell, ReservationAllocation,
-    ReservationRef, Route, RouteId, RuntimeCurrentState, RuntimeEvidence, RuntimeState, SimEvent,
-    SimTime, StateKey, Territory, TerritoryId, TypedDomainRecordRef, Value, component_key,
-    domain_record_candidates, live_current_domain_record_version, random, records,
-    retained_domain_record_version, retained_evidence_time, validate_domain_record_page_request,
-    validation,
+    IngressPayload, IngressQueueKey, IngressRecord, KnowledgeHolderRef, KnowledgeQuery, Person,
+    PersonAvailability, PersonId, PluginComponentKey, PluginComponentRecord, RandomOperationTarget,
+    RandomStreamKey, RefCell, ReservationAllocation, ReservationRef, Route, RouteId,
+    RuntimeCurrentState, RuntimeEvidence, RuntimeState, SimEvent, SimTime, StateKey, Territory,
+    TerritoryId, TypedDomainRecordRef, Value, component_key, domain_record_candidates,
+    live_current_domain_record_version, random, records, retained_domain_record_version,
+    retained_evidence_time, validate_domain_record_page_request, validation,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -69,8 +68,11 @@ pub struct SimulationView<'a> {
     pub(super) proposed_records: Option<&'a super::records::DomainRecordOverlay>,
     pub(super) boundary_id: Option<BoundaryId>,
     pub(super) proposal_evidence: Option<&'a BTreeSet<EvidenceRef>>,
-    pub(super) knowledge_overlay:
-        Option<&'a BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>>,
+    pub(super) knowledge_overlay: Option<&'a canwu_knowledge::StagedKnowledgeEntries>,
+    /// Registered knowledge schemas, for the retention a query reports.
+    pub(super) knowledge_schemas: &'a super::knowledge::KnowledgeSchemas,
+    /// The publication budget left at this view's cut.
+    pub(super) knowledge_budget: super::KnowledgePublicationBudget,
     pub(super) allocations: Option<&'a BTreeMap<ReservationRef, ReservationAllocation>>,
     pub(super) allowed_reservations: Option<&'a [ReservationRef]>,
     pub(super) random_session: Option<RefCell<random::RandomSession>>,
@@ -148,6 +150,26 @@ impl SimulationView<'_> {
         .is_ok())
     }
 
+    /// The knowledge publication budget left at this system's cut: the
+    /// boundary's limits less what every proposal validated earlier in the
+    /// boundary (systems of earlier phases, and earlier systems of this
+    /// phase in the registry's dispatch order) has taken, with the
+    /// per-directive bounds a publisher splits its groups against. Outside a
+    /// boundary it is the whole budget.
+    ///
+    /// It needs no read declaration: the answer is the check the engine
+    /// applies to this system's own proposal, as
+    /// [`Self::knowledge_holder_accepts_publication`] is. A proposal that
+    /// publishes more record bodies, holder entries, or payload bytes (each
+    /// draft charged [`crate::KnowledgeRecordDraft::payload_bytes`]) than this
+    /// fails the boundary with [`ErrorCode::KnowledgeLimitExceeded`]; a
+    /// publisher that reads it first and defers what does not fit never
+    /// does.
+    #[must_use]
+    pub const fn knowledge_publication_budget(&self) -> super::KnowledgePublicationBudget {
+        self.knowledge_budget
+    }
+
     /// Returns committed core availability for a person after an explicit
     /// `canwu.core.person_availability` read. `None` means alive and free.
     pub fn person_availability(
@@ -198,7 +220,8 @@ impl SimulationView<'_> {
         Ok(self.state.current().knowledge.for_actor(actor))
     }
 
-    /// Counts records in a knowledge namespace at the current proposal-visible cut.
+    /// Counts record bodies in a knowledge namespace at the current
+    /// proposal-visible cut. A body shared by several holders counts once.
     ///
     /// The committed ledgers keep a count per namespace, so the read costs
     /// the records the settling boundary has staged, not the records held.
@@ -216,8 +239,10 @@ impl SimulationView<'_> {
             overlay
                 .values()
                 .flat_map(BTreeMap::values)
-                .filter(|record| record.schema.kind.namespace == namespace)
-                .count()
+                .filter(|(body, _)| body.schema.kind.namespace == namespace)
+                .map(|(body, _)| body.id)
+                .collect::<BTreeSet<_>>()
+                .len()
         });
         settled.checked_add(proposed).ok_or_else(|| {
             CanwuError::new(
@@ -230,7 +255,8 @@ impl SimulationView<'_> {
     /// Queries holder-relative records for an omniscient plugin system.
     ///
     /// This enforces the declared `canwu.core.knowledge` read and returns an
-    /// owned projection. It is not an actor-facing authorization API.
+    /// owned projection, with the retention of the schemas it is about. It is
+    /// not an actor-facing authorization API.
     pub fn knowledge_records(
         &self,
         holder: KnowledgeHolderRef,
@@ -250,22 +276,29 @@ impl SimulationView<'_> {
                 .knowledge
                 .query_current(holder, query, self.boundary_id)
         };
-        result.map_err(|error| match error {
-            canwu_knowledge::KnowledgeQueryError::ReadCutUnavailable => CanwuError::new(
-                ErrorCode::KnowledgeReadCutUnavailable,
-                "knowledge cursor read cut is no longer available",
-            ),
-            canwu_knowledge::KnowledgeQueryError::InvalidLimit => CanwuError::new(
-                ErrorCode::KnowledgeLimitExceeded,
-                "knowledge query page size is outside the supported range",
-            ),
-            canwu_knowledge::KnowledgeQueryError::InvalidCursor
-            | canwu_knowledge::KnowledgeQueryError::InvalidLedger
-            | canwu_knowledge::KnowledgeQueryError::Encoding => CanwuError::new(
-                ErrorCode::InvalidKnowledgeRecord,
-                "knowledge query, cursor, or ledger is invalid",
-            ),
-        })
+        let schemas = self.knowledge_schemas;
+        result
+            .map(|result| {
+                result.with_retention(query, |schema| {
+                    schemas.get(schema).map(|(_, schema)| schema.retention)
+                })
+            })
+            .map_err(|error| match error {
+                canwu_knowledge::KnowledgeQueryError::ReadCutUnavailable => CanwuError::new(
+                    ErrorCode::KnowledgeReadCutUnavailable,
+                    "knowledge cursor read cut is no longer available",
+                ),
+                canwu_knowledge::KnowledgeQueryError::InvalidLimit => CanwuError::new(
+                    ErrorCode::KnowledgeLimitExceeded,
+                    "knowledge query page size is outside the supported range",
+                ),
+                canwu_knowledge::KnowledgeQueryError::InvalidCursor
+                | canwu_knowledge::KnowledgeQueryError::InvalidLedger
+                | canwu_knowledge::KnowledgeQueryError::Encoding => CanwuError::new(
+                    ErrorCode::InvalidKnowledgeRecord,
+                    "knowledge query, cursor, or ledger is invalid",
+                ),
+            })
     }
 
     /// Returns the global IDs of a holder's current records of one schema

@@ -434,22 +434,31 @@ fn publish_knowledge(
     let limits = TechnologyLimitsV1::canonical();
     let retained_capacity = limits.max_knowledge_records.saturating_sub(existing);
     let publication_capacity = retained_capacity.min(limits.max_publications_per_boundary);
-    let directives = publications
-        .into_iter()
-        .enumerate()
-        .map(|(index, (holder, record))| {
-            if index < publication_capacity {
+    // The engine's publication budget is shared by every publisher of the
+    // boundary; a publication past it is a recorded rejection, as one past
+    // the plugin's own budget is.
+    let mut budget = view.knowledge_publication_budget();
+    let mut directives = Vec::with_capacity(publications.len());
+    for (index, (holder, record)) in publications.into_iter().enumerate() {
+        let fits = index < publication_capacity && budget.take(1, 1, record.payload_bytes()?);
+        directives.push(if fits {
                 BoundaryDirective::PublishKnowledge {
-                    holder,
                     visibility: StateVisibility::SameBoundary,
                     producer_correlation: None,
-                    records: vec![record],
+                    supersession: canwu_api::KnowledgeSupersession::Explicit,
+                    groups: vec![canwu_api::KnowledgePublicationGroup {
+                        holders: vec![holder],
+                        records: vec![record],
+                    }],
                     summary: "Publish holder-relative technology evidence".to_owned(),
                 }
             } else {
                 BoundaryDirective::Emit {
                     event_type: KNOWLEDGE_CAPACITY_REJECTION_EVENT.to_owned(),
-                    summary: if index >= limits.max_publications_per_boundary {
+                    summary: if index < publication_capacity {
+                        "Reject technology knowledge publication: the engine's shared knowledge publication budget is exhausted"
+                            .to_owned()
+                    } else if index >= limits.max_publications_per_boundary {
                         "Reject technology knowledge publication: boundary publication budget is exhausted"
                             .to_owned()
                     } else {
@@ -458,9 +467,8 @@ fn publish_knowledge(
                     },
                     affected: affected_holder_entities(&holder),
                 }
-            }
-        })
-        .collect();
+            });
+    }
     Ok(BoundaryProposal {
         directives,
         ..BoundaryProposal::default()

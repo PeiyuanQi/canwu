@@ -731,16 +731,16 @@ pub fn published_report_records(
     canwu: &Canwu,
     actor: PersonId,
 ) -> Vec<(KnowledgeRecord, FiscalReportRecord)> {
+    let holder = KnowledgeHolderRef::Person(actor);
     canwu
         .boundaries()
         .iter()
         .flat_map(|boundary| &boundary.knowledge_changes)
-        .filter(|change| change.holder == KnowledgeHolderRef::Person(actor))
-        .flat_map(|change| &change.records)
+        .flat_map(|change| change.records_of(&holder).collect::<Vec<_>>())
         .map(|record| {
             let payload = serde_json::from_value(record.payload.clone())
                 .expect("a fiscal report record payload");
-            (record.clone(), payload)
+            (record, payload)
         })
         .collect()
 }

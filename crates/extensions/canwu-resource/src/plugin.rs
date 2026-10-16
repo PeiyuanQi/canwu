@@ -2642,13 +2642,16 @@ fn materialize_reports_on<S: crate::HotTerminalSource + ?Sized>(
             }
         }
         directives.push(BoundaryDirective::PublishKnowledge {
-            holder,
             visibility: StateVisibility::SameBoundary,
             producer_correlation: Some(format!(
                 "resource-report-batch::{}::{batch_ordinal}",
                 context.boundary_id
             )),
-            records,
+            supersession: canwu_api::KnowledgeSupersession::Explicit,
+            groups: vec![canwu_api::KnowledgePublicationGroup {
+                holders: vec![holder],
+                records,
+            }],
             summary: "Publish holder-relative resource reports".to_owned(),
         });
     }
@@ -4625,6 +4628,7 @@ fn resource_report_knowledge_schema() -> PluginKnowledgeSchema {
             required: true,
             multiple: false,
         }],
+        retention: canwu_api::KnowledgeRetention::Keep,
     }
 }
 

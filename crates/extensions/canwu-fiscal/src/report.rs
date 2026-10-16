@@ -81,6 +81,7 @@ pub(crate) fn fiscal_report_knowledge_schema() -> PluginKnowledgeSchema {
         writable: true,
         payload_schema: PayloadSchema::Any,
         subjects: report_subject_schemas(),
+        retention: canwu_api::KnowledgeRetention::Keep,
     }
 }
 
@@ -238,10 +239,13 @@ impl Publisher<'_, '_> {
         self.publications_left = self.publications_left.saturating_sub(1);
         self.records_left = self.records_left.saturating_sub(records.len());
         self.directives.push(BoundaryDirective::PublishKnowledge {
-            holder: holder.clone(),
             visibility: StateVisibility::SameBoundary,
             producer_correlation: Some(correlation),
-            records,
+            supersession: canwu_api::KnowledgeSupersession::Explicit,
+            groups: vec![canwu_api::KnowledgePublicationGroup {
+                holders: vec![holder.clone()],
+                records,
+            }],
             summary: summary.to_owned(),
         });
     }
@@ -292,7 +296,7 @@ pub(crate) fn materialize_reports(
         kind: fiscal_report_knowledge_schema_id().kind,
         at: context.at,
         boundary: context.boundary_id.get(),
-        publications_left: KnowledgeLimitsV1::CURRENT.batches_per_system_boundary,
+        publications_left: 64,
         records_left: MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY,
         directives: Vec::new(),
     };

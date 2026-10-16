@@ -578,6 +578,7 @@ fn knowledge_schema(
         writable: true,
         payload_schema,
         subjects,
+        retention: canwu_api::KnowledgeRetention::Keep,
     }
 }
 

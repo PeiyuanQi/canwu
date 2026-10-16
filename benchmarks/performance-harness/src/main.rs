@@ -287,6 +287,7 @@ impl SimulationPlugin for SchemaStressPlugin {
                 writable: true,
                 payload_schema: PayloadSchema::Any,
                 subjects: Vec::new(),
+                retention: canwu_api::KnowledgeRetention::Keep,
             })?;
         }
         Ok(())
@@ -319,6 +320,7 @@ impl SimulationPlugin for InformationFlowPlugin {
             writable: true,
             payload_schema: PayloadSchema::Any,
             subjects: Vec::new(),
+            retention: canwu_api::KnowledgeRetention::Keep,
         })?;
         let mut contract = BoundarySystemContract::new(
             information_system_name(self.target_records),
@@ -483,13 +485,16 @@ fn publication_directive(
         .map(|offset| information_draft(first_sequence + offset, context))
         .collect();
     Ok(BoundaryDirective::PublishKnowledge {
-        holder: KnowledgeHolderRef::Person(PersonId::new(holder_id)),
         visibility: StateVisibility::SameBoundary,
         producer_correlation: Some(format!(
             "boundary-{}-holder-{holder}-batch-{batch}",
             context.boundary_id.get()
         )),
-        records,
+        supersession: canwu_api::KnowledgeSupersession::Explicit,
+        groups: vec![canwu_api::KnowledgePublicationGroup {
+            holders: vec![KnowledgeHolderRef::Person(PersonId::new(holder_id))],
+            records,
+        }],
         summary: "Publish deterministic information-flow profile records".to_owned(),
     })
 }
@@ -1534,7 +1539,7 @@ fn validate_information_counts(
 }
 
 fn knowledge_record_count(knowledge: &KnowledgeSnapshot) -> usize {
-    knowledge.records.record_count()
+    knowledge.records.entry_count()
 }
 
 fn query_holder_pages(
@@ -2465,6 +2470,151 @@ mod tests {
         assert_eq!(samples.allocations[0].alloc_calls, 1);
         assert!(samples.allocations[0].allocated_bytes >= size_of::<u64>() as u64);
         assert!(samples.allocations[0].allocated_bytes < 1024);
+    }
+
+    /// Bodies and payload bytes of the one-copy publication.
+    #[cfg(feature = "allocation-counting")]
+    const ONE_COPY_BODIES: usize = 64;
+    #[cfg(feature = "allocation-counting")]
+    const ONE_COPY_PAYLOAD_BYTES: usize = 64_000;
+
+    #[cfg(feature = "allocation-counting")]
+    fn one_copy_schema() -> KnowledgeSchemaId {
+        KnowledgeSchemaId::new(KnowledgeRecordKind::new("benchmark.one_copy", "body"), 1)
+    }
+
+    /// Phase 13: `ONE_COPY_BODIES` bodies of `ONE_COPY_PAYLOAD_BYTES` bytes
+    /// each to person 1.
+    #[cfg(feature = "allocation-counting")]
+    fn publish_one_copy(
+        _view: &SimulationView<'_>,
+        context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        let records = (0..ONE_COPY_BODIES)
+            .map(|index| KnowledgeRecordDraft {
+                schema: one_copy_schema(),
+                subjects: Vec::new(),
+                // One allocation of the payload's size.
+                payload: Value::String({
+                    let mut text = String::with_capacity(ONE_COPY_PAYLOAD_BYTES);
+                    text.push_str(&format!("{index:08}"));
+                    text.extend(std::iter::repeat_n('z', ONE_COPY_PAYLOAD_BYTES - 10));
+                    text
+                }),
+                as_of: Some(context.at),
+                confidence_per_mille: 1_000,
+                origin: KnowledgeOrigin {
+                    method: "one_copy".to_owned(),
+                    evidence: Vec::new(),
+                },
+                supersedes: Vec::new(),
+                contradicts: Vec::new(),
+            })
+            .collect();
+        Ok(BoundaryProposal {
+            directives: vec![BoundaryDirective::PublishKnowledge {
+                visibility: StateVisibility::SameBoundary,
+                producer_correlation: None,
+                supersession: canwu_api::KnowledgeSupersession::Explicit,
+                groups: vec![canwu_api::KnowledgePublicationGroup {
+                    holders: vec![KnowledgeHolderRef::Person(PersonId::new(1))],
+                    records,
+                }],
+                summary: "Publish large bodies".to_owned(),
+            }],
+            ..BoundaryProposal::default()
+        })
+    }
+
+    #[cfg(feature = "allocation-counting")]
+    struct OneCopyPlugin;
+
+    #[cfg(feature = "allocation-counting")]
+    impl SimulationPlugin for OneCopyPlugin {
+        fn name(&self) -> &'static str {
+            "benchmark-one-copy"
+        }
+
+        fn version(&self) -> &'static str {
+            "1.0.0"
+        }
+
+        fn semantic_hash(&self) -> &'static str {
+            "00000000000000000000000000000000000000000000000000000000000c0c01"
+        }
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            registrar.register_knowledge_schema(PluginKnowledgeSchema {
+                id: one_copy_schema(),
+                schema_hash: "00000000000000000000000000000000000000000000000000000000000c0c02"
+                    .to_owned(),
+                writable: true,
+                payload_schema: PayloadSchema::Any,
+                subjects: Vec::new(),
+                retention: canwu_api::KnowledgeRetention::Keep,
+            })?;
+            let mut contract = BoundarySystemContract::new(
+                "publish",
+                BoundaryPhase::PerspectiveAndReportMaterialization,
+                SystemCadence::Daily,
+            );
+            contract.knowledge_writes = vec![KnowledgeWriteGrant {
+                schema: one_copy_schema(),
+                visibilities: vec![StateVisibility::SameBoundary],
+            }];
+            registrar.register_boundary_system(contract, publish_one_copy)
+        }
+    }
+
+    /// One copy per body: a boundary that publishes `n` bodies of `b`
+    /// payload bytes allocates about `n * b` bytes, the payloads the
+    /// publisher builds. Validation streams the one canonical encoding of
+    /// each body into its digest instead of building it, and the overlay,
+    /// the ledger, the journal, and both hashes share the publisher's copy.
+    /// An encoding built into a buffer, or a clone into any of them, adds
+    /// another `n * b`.
+    #[cfg(feature = "allocation-counting")]
+    #[test]
+    fn a_publication_allocates_each_body_once() {
+        let plugin = OneCopyPlugin;
+        let mut canwu = Canwu::new_with_plugins(
+            11,
+            Scenario::new(
+                canwu_api::SimTime::EPOCH,
+                vec![EntityRef::Person(PersonId::new(1))],
+            ),
+            &[&plugin],
+        )
+        .expect("the one-copy fixture should start");
+        start_allocation_sample();
+        let receipt = canwu.settle_boundary(
+            BoundaryRequest::at(canwu_api::SimTime::EPOCH).with_cadence(SystemCadence::Daily),
+        );
+        let sample = finish_allocation_sample();
+        let receipt = receipt.expect("the publication should settle");
+        assert_eq!(receipt.knowledge_record_count, ONE_COPY_BODIES);
+        let payloads = u64::try_from(ONE_COPY_BODIES * ONE_COPY_PAYLOAD_BYTES).unwrap();
+        assert!(
+            sample.allocated_bytes >= payloads,
+            "the publisher builds the payloads: {sample:?}"
+        );
+        assert!(
+            sample.allocated_bytes < payloads + payloads / 2,
+            "a body was copied or encoded into a buffer: {} bytes allocated for {payloads} bytes of payload",
+            sample.allocated_bytes
+        );
+        let change = &canwu.boundaries()[0].knowledge_changes[0];
+        assert!(
+            change.records.iter().all(|body| std::sync::Arc::ptr_eq(
+                body,
+                canwu
+                    .knowledge()
+                    .records
+                    .body(body.id)
+                    .expect("the body is stored")
+            )),
+            "the journal shares the ledger's bodies"
+        );
     }
 
     #[test]

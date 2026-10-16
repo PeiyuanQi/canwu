@@ -119,17 +119,23 @@ fn phase4_publish_knowledge(
     Ok(BoundaryProposal {
         directives: vec![
             BoundaryDirective::PublishKnowledge {
-                holder: KnowledgeHolderRef::Person(PersonId::new(1)),
                 visibility: StateVisibility::SameBoundary,
                 producer_correlation: Some("phase4-visible".to_owned()),
-                records: vec![fixture_knowledge_draft(1)],
+                supersession: crate::KnowledgeSupersession::Explicit,
+                groups: vec![crate::KnowledgePublicationGroup {
+                    holders: vec![KnowledgeHolderRef::Person(PersonId::new(1))],
+                    records: vec![fixture_knowledge_draft(1)],
+                }],
                 summary: "Publish a same-boundary observation".to_owned(),
             },
             BoundaryDirective::PublishKnowledge {
-                holder: KnowledgeHolderRef::Person(PersonId::new(1)),
                 visibility: StateVisibility::NextBoundary,
                 producer_correlation: Some("phase4-deferred".to_owned()),
-                records: vec![fixture_knowledge_draft(2)],
+                supersession: crate::KnowledgeSupersession::Explicit,
+                groups: vec![crate::KnowledgePublicationGroup {
+                    holders: vec![KnowledgeHolderRef::Person(PersonId::new(1))],
+                    records: vec![fixture_knowledge_draft(2)],
+                }],
                 summary: "Publish a deferred observation".to_owned(),
             },
         ],
@@ -143,10 +149,13 @@ fn phase13_publish_knowledge(
 ) -> Result<BoundaryProposal, CanwuError> {
     Ok(BoundaryProposal {
         directives: vec![BoundaryDirective::PublishKnowledge {
-            holder: KnowledgeHolderRef::Person(PersonId::new(1)),
             visibility: StateVisibility::SameBoundary,
             producer_correlation: Some("phase13-visible".to_owned()),
-            records: vec![fixture_knowledge_draft(3)],
+            supersession: crate::KnowledgeSupersession::Explicit,
+            groups: vec![crate::KnowledgePublicationGroup {
+                holders: vec![KnowledgeHolderRef::Person(PersonId::new(1))],
+                records: vec![fixture_knowledge_draft(3)],
+            }],
             summary: "Publish a same-boundary projection".to_owned(),
         }],
         ..BoundaryProposal::default()
@@ -219,6 +228,7 @@ impl SimulationPlugin for KnowledgePublicationPlugin {
             writable: true,
             payload_schema: PayloadSchema::Any,
             subjects: Vec::new(),
+            retention: crate::KnowledgeRetention::Keep,
         })?;
         let grant = KnowledgeWriteGrant {
             schema: fixture_knowledge_schema(),
@@ -292,10 +302,13 @@ fn publish_from_archived_boundary(
     draft.origin.evidence = vec![EvidenceRef::Boundary(BoundaryId::new(1))];
     Ok(BoundaryProposal {
         directives: vec![BoundaryDirective::PublishKnowledge {
-            holder: KnowledgeHolderRef::Person(PersonId::new(1)),
             visibility: StateVisibility::SameBoundary,
             producer_correlation: Some("archived-boundary-evidence".to_owned()),
-            records: vec![draft],
+            supersession: crate::KnowledgeSupersession::Explicit,
+            groups: vec![crate::KnowledgePublicationGroup {
+                holders: vec![KnowledgeHolderRef::Person(PersonId::new(1))],
+                records: vec![draft],
+            }],
             summary: "Publish from a verified archived boundary identity".to_owned(),
         }],
         ..BoundaryProposal::default()
@@ -317,6 +330,7 @@ impl SimulationPlugin for ArchivedEvidencePublicationPlugin {
             writable: true,
             payload_schema: PayloadSchema::Any,
             subjects: Vec::new(),
+            retention: crate::KnowledgeRetention::Keep,
         })?;
         let mut phase13 = BoundarySystemContract::new(
             "publish-archived-evidence",
@@ -380,10 +394,13 @@ fn phase13_publish_pending_evidence(
     })];
     Ok(BoundaryProposal {
         directives: vec![BoundaryDirective::PublishKnowledge {
-            holder: KnowledgeHolderRef::Person(PersonId::new(1)),
             visibility: StateVisibility::SameBoundary,
             producer_correlation: Some("pending-evidence".to_owned()),
-            records: vec![draft],
+            supersession: crate::KnowledgeSupersession::Explicit,
+            groups: vec![crate::KnowledgePublicationGroup {
+                holders: vec![KnowledgeHolderRef::Person(PersonId::new(1))],
+                records: vec![draft],
+            }],
             summary: "Publish from an earlier committed stage".to_owned(),
         }],
         ..BoundaryProposal::default()
@@ -409,6 +426,7 @@ impl SimulationPlugin for PendingEvidencePublicationPlugin {
             writable: true,
             payload_schema: PayloadSchema::Any,
             subjects: Vec::new(),
+            retention: crate::KnowledgeRetention::Keep,
         })?;
         let mut phase7 = BoundarySystemContract::new(
             "phase7-create-evidence",
@@ -551,10 +569,13 @@ fn reject_after_keyed_draw(
 ) -> Result<BoundaryProposal, CanwuError> {
     Ok(BoundaryProposal {
         directives: vec![BoundaryDirective::PublishKnowledge {
-            holder: KnowledgeHolderRef::Person(PersonId::new(1)),
             visibility: StateVisibility::SameBoundary,
             producer_correlation: Some("undeclared-after-keyed-draw".to_owned()),
-            records: vec![fixture_knowledge_draft(99)],
+            supersession: crate::KnowledgeSupersession::Explicit,
+            groups: vec![crate::KnowledgePublicationGroup {
+                holders: vec![KnowledgeHolderRef::Person(PersonId::new(1))],
+                records: vec![fixture_knowledge_draft(99)],
+            }],
             summary: "Trigger a later validation failure".to_owned(),
         }],
         ..BoundaryProposal::default()
@@ -1639,6 +1660,84 @@ fn try_rehash_tampered_snapshot(snapshot: &mut SimulationSnapshot) -> Result<(),
     }
     snapshot.checkpoint_hash = snapshot_checkpoint_hash(snapshot)?;
     Ok(())
+}
+
+/// Rewrites the snapshot's knowledge ledger through its wire form, as a
+/// tampered save carries it. Returns whether the edited wire still decodes:
+/// a ledger the wire refuses cannot be loaded at all.
+fn tamper_knowledge_ledger(
+    snapshot: &mut SimulationSnapshot,
+    edit: impl FnOnce(&mut Value),
+) -> bool {
+    let mut wire =
+        serde_json::to_value(&snapshot.knowledge.records).expect("the ledger should encode");
+    edit(&mut wire);
+    match serde_json::from_value(wire) {
+        Ok(ledger) => {
+            snapshot.knowledge.records = ledger;
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Edits one stored body of the snapshot's ledger in place, keeping every
+/// entry that holds it.
+fn tamper_knowledge_body(
+    snapshot: &mut SimulationSnapshot,
+    id: KnowledgeRecordId,
+    edit: impl FnOnce(&mut KnowledgeRecordBody),
+) -> bool {
+    tamper_knowledge_ledger(snapshot, |wire| {
+        let body = wire["bodies"]
+            .as_array_mut()
+            .expect("the ledger lists its bodies")
+            .iter_mut()
+            .find(|body| body["id"] == serde_json::json!(id))
+            .expect("the body is stored");
+        let mut decoded: KnowledgeRecordBody =
+            serde_json::from_value(body.clone()).expect("a stored body decodes");
+        edit(&mut decoded);
+        *body = serde_json::to_value(decoded).expect("the body encodes");
+    })
+}
+
+/// Edits one holder entry of the snapshot's ledger in place.
+fn tamper_knowledge_entry(
+    snapshot: &mut SimulationSnapshot,
+    holder: &KnowledgeHolderRef,
+    id: KnowledgeRecordId,
+    edit: impl FnOnce(&mut HolderEntry),
+) -> bool {
+    let holder = serde_json::to_value(holder).expect("the holder encodes");
+    tamper_knowledge_ledger(snapshot, |wire| {
+        let entry = wire["holders"]
+            .as_array_mut()
+            .expect("the ledger lists its holders")
+            .iter_mut()
+            .find(|ledger| ledger["holder"] == holder)
+            .expect("the holder is listed")["entries"]
+            .as_array_mut()
+            .expect("the holder lists its entries")
+            .iter_mut()
+            .find(|entry| entry["record"] == serde_json::json!(id))
+            .expect("the holder holds the entry");
+        let mut decoded: HolderEntry =
+            serde_json::from_value(entry.clone()).expect("a stored entry decodes");
+        edit(&mut decoded);
+        *entry = serde_json::to_value(decoded).expect("the entry encodes");
+    })
+}
+
+/// The entry of `id` among a boundary's published entries.
+fn published_entry_mut(boundary: &mut BoundaryRecord, id: KnowledgeRecordId) -> &mut HolderEntry {
+    boundary
+        .knowledge_changes
+        .iter_mut()
+        .flat_map(|change| &mut change.holders)
+        .flat_map(|publication| &mut publication.entries)
+        .find(|entry| entry.record == id)
+        .expect("the boundary published the entry")
 }
 
 fn rehash_tampered_snapshot(snapshot: &mut SimulationSnapshot) {

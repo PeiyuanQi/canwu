@@ -40,6 +40,7 @@ fn register_schema(registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError
         writable: true,
         payload_schema: PayloadSchema::Any,
         subjects: Vec::new(),
+        retention: canwu_sim::KnowledgeRetention::Keep,
     })
 }
 
@@ -60,24 +61,33 @@ fn interleaved_publication(
     Ok(BoundaryProposal {
         directives: vec![
             BoundaryDirective::PublishKnowledge {
-                holder: KnowledgeHolderRef::Person(PersonId::new(1)),
                 visibility: StateVisibility::SameBoundary,
                 producer_correlation: Some("first-holder-one".to_owned()),
-                records: vec![draft(1)],
+                supersession: canwu_sim::KnowledgeSupersession::Explicit,
+                groups: vec![canwu_sim::KnowledgePublicationGroup {
+                    holders: vec![KnowledgeHolderRef::Person(PersonId::new(1))],
+                    records: vec![draft(1)],
+                }],
                 summary: "Publish first holder record".to_owned(),
             },
             BoundaryDirective::PublishKnowledge {
-                holder: KnowledgeHolderRef::Person(PersonId::new(2)),
                 visibility: StateVisibility::SameBoundary,
                 producer_correlation: Some("holder-two".to_owned()),
-                records: vec![draft(2)],
+                supersession: canwu_sim::KnowledgeSupersession::Explicit,
+                groups: vec![canwu_sim::KnowledgePublicationGroup {
+                    holders: vec![KnowledgeHolderRef::Person(PersonId::new(2))],
+                    records: vec![draft(2)],
+                }],
                 summary: "Publish second holder record".to_owned(),
             },
             BoundaryDirective::PublishKnowledge {
-                holder: KnowledgeHolderRef::Person(PersonId::new(1)),
                 visibility: StateVisibility::SameBoundary,
                 producer_correlation: Some("second-holder-one".to_owned()),
-                records: vec![draft(3)],
+                supersession: canwu_sim::KnowledgeSupersession::Explicit,
+                groups: vec![canwu_sim::KnowledgePublicationGroup {
+                    holders: vec![KnowledgeHolderRef::Person(PersonId::new(1))],
+                    records: vec![draft(3)],
+                }],
                 summary: "Publish second record for first holder".to_owned(),
             },
             BoundaryDirective::SetComponent {
@@ -126,17 +136,23 @@ fn duplicate_correlation(
     Ok(BoundaryProposal {
         directives: vec![
             BoundaryDirective::PublishKnowledge {
-                holder: KnowledgeHolderRef::Person(PersonId::new(1)),
                 visibility: StateVisibility::SameBoundary,
                 producer_correlation: Some("duplicate".to_owned()),
-                records: vec![draft(1)],
+                supersession: canwu_sim::KnowledgeSupersession::Explicit,
+                groups: vec![canwu_sim::KnowledgePublicationGroup {
+                    holders: vec![KnowledgeHolderRef::Person(PersonId::new(1))],
+                    records: vec![draft(1)],
+                }],
                 summary: "First duplicate correlation".to_owned(),
             },
             BoundaryDirective::PublishKnowledge {
-                holder: KnowledgeHolderRef::Person(PersonId::new(2)),
                 visibility: StateVisibility::SameBoundary,
                 producer_correlation: Some("duplicate".to_owned()),
-                records: vec![draft(2)],
+                supersession: canwu_sim::KnowledgeSupersession::Explicit,
+                groups: vec![canwu_sim::KnowledgePublicationGroup {
+                    holders: vec![KnowledgeHolderRef::Person(PersonId::new(2))],
+                    records: vec![draft(2)],
+                }],
                 summary: "Second duplicate correlation".to_owned(),
             },
         ],
@@ -177,10 +193,13 @@ fn stage_early_publication(
 ) -> Result<BoundaryProposal, CanwuError> {
     Ok(BoundaryProposal {
         directives: vec![BoundaryDirective::PublishKnowledge {
-            holder: KnowledgeHolderRef::Person(PersonId::new(1)),
             visibility: StateVisibility::SameBoundary,
             producer_correlation: Some("must-roll-back".to_owned()),
-            records: vec![draft(1)],
+            supersession: canwu_sim::KnowledgeSupersession::Explicit,
+            groups: vec![canwu_sim::KnowledgePublicationGroup {
+                holders: vec![KnowledgeHolderRef::Person(PersonId::new(1))],
+                records: vec![draft(1)],
+            }],
             summary: "Stage publication before later failure".to_owned(),
         }],
         ..BoundaryProposal::default()
@@ -313,10 +332,13 @@ fn publish_from_all_committed_stages(
     knowledge.origin.evidence = evidence;
     Ok(BoundaryProposal {
         directives: vec![BoundaryDirective::PublishKnowledge {
-            holder: KnowledgeHolderRef::Person(PersonId::new(1)),
             visibility: StateVisibility::SameBoundary,
             producer_correlation: Some("all-committed-stages".to_owned()),
-            records: vec![knowledge],
+            supersession: canwu_sim::KnowledgeSupersession::Explicit,
+            groups: vec![canwu_sim::KnowledgePublicationGroup {
+                holders: vec![KnowledgeHolderRef::Person(PersonId::new(1))],
+                records: vec![knowledge],
+            }],
             summary: "Publish from phase 9, 11, and 12 evidence".to_owned(),
         }],
         ..BoundaryProposal::default()

@@ -351,7 +351,7 @@ impl Simulation {
         Ok(simulation)
     }
 
-    /// Deserializes a Format 8 replay journal with recursive unknown-field
+    /// Deserializes a Format 9 replay journal with recursive unknown-field
     /// rejection, then performs the exact environment-bound replay.
     pub fn replay_from_journal_json(
         plugins: &[&dyn SimulationPlugin],

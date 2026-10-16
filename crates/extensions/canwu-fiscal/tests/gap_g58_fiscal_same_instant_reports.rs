@@ -241,12 +241,12 @@ fn assess_now(canwu: &mut Canwu, action_id: &str) {
 /// The auditor's report records, in the order the run published them. Each
 /// report here is a summary followed by its one part.
 fn reports(canwu: &Canwu) -> Vec<KnowledgeRecord> {
+    let auditor = KnowledgeHolderRef::Person(AUDITOR);
     canwu
         .boundaries()
         .iter()
         .flat_map(|boundary| &boundary.knowledge_changes)
-        .filter(|change| change.holder == KnowledgeHolderRef::Person(AUDITOR))
-        .flat_map(|change| change.records.iter().cloned())
+        .flat_map(|change| change.records_of(&auditor).collect::<Vec<_>>())
         .collect()
 }
 

@@ -379,8 +379,9 @@ impl Simulation {
     }
 }
 
-/// Version of the continuation checkpoint.
-pub const CONTINUATION_CHECKPOINT_FORMAT_VERSION: u32 = 1;
+/// Version of the continuation checkpoint. Version 2 embeds snapshot format
+/// 9.
+pub const CONTINUATION_CHECKPOINT_FORMAT_VERSION: u32 = 2;
 /// Hash domain of the continuation checkpoint's own identity.
 const CONTINUATION_CHECKPOINT_DOMAIN: &str = "canwu.continuation-checkpoint.v1";
 
@@ -1368,11 +1369,8 @@ impl Simulation {
                 .clone()
                 .ok_or_else(|| invalid("continuation state requires its initial scenario"))?,
         );
-        let initial_domain_record_indexes: BTreeMap<_, _> = initial_scenario
-            .iter()
-            .flat_map(|scenario| scenario.domain_records.iter().enumerate())
-            .map(|(index, record)| (record.reference.clone(), index))
-            .collect();
+        let initial_domain_record_indexes =
+            super::state::InitialRecordIndex::of(initial_scenario.as_ref());
         let current_domain_record_versions: im::OrdMap<
             Arc<super::DomainRecordRef>,
             Arc<super::CurrentDomainRecordVersion>,

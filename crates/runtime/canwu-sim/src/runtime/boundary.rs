@@ -9,10 +9,11 @@ use canwu_core::{
     EntityRef, EvaluationTraceRecord, EventId, IngressId, KnowledgeHolderRef, KnowledgeSchemaId,
     PersonId, RandomDrawId,
 };
-use canwu_knowledge::{KnowledgeRecord, KnowledgeRecordDraft};
+use canwu_knowledge::{HolderEntry, KnowledgeRecord, KnowledgeRecordBody, KnowledgeRecordDraft};
 use canwu_time::{SimDuration, SimTime};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct ReservationPoolKey {
@@ -162,28 +163,41 @@ pub enum BoundaryDirective {
     ResolveDecisionRandomly {
         resolution: RandomDecisionResolution,
     },
-    /// Publishes knowledge records to one holder's ledger. Accepted from a
+    /// Publishes knowledge records to holders' ledgers. Accepted from a
     /// phase-4 or phase-13 system that lists each record's schema in its
-    /// `knowledge_writes` with this `visibility`. The records are committed
-    /// at the end of the boundary; `SameBoundary` records are also readable
-    /// by systems of later phases of the same boundary.
+    /// `knowledge_writes` with this `visibility`, which applies to every
+    /// group. Each draft of a group becomes one body, stored once, and every
+    /// holder of the group receives an entry for it with its own local ID
+    /// and relations. The records are committed at the end of the boundary;
+    /// `SameBoundary` records are also readable by systems of later phases of
+    /// the same boundary.
     ///
-    /// A record may name in `supersedes` or `contradicts` only records of the
+    /// A directive carries at most
+    /// [`crate::KnowledgeLimitsV1::records_per_batch`] drafts over all of
+    /// its groups and at most
+    /// [`crate::KnowledgeLimitsV1::holder_entries_per_batch`] entries (the
+    /// sum over groups of holders times drafts), and draws on the boundary's
+    /// publication budget, which a system reads with
+    /// [`crate::SimulationView::knowledge_publication_budget`]. A holder may
+    /// appear in several groups of one directive but not twice in one group.
+    ///
+    /// An entry may name in `supersedes` or `contradicts` only entries of the
     /// same holder and schema kind that are visible at the publisher's cut:
-    /// records committed by an earlier boundary, whatever their learned time,
-    /// and records the same boundary published with `SameBoundary` visibility
-    /// in an earlier phase. A record of the publisher's own phase, or one
-    /// published with `NextBoundary` visibility in the same boundary, is not
-    /// visible. A target that does not resolve fails the boundary with
+    /// entries committed by an earlier boundary, whatever their learned time,
+    /// and entries the same boundary published with `SameBoundary` visibility
+    /// in an earlier phase. Under [`KnowledgeSupersession::Explicit`] the
+    /// draft names them, for its group's one holder; a target that does not
+    /// resolve fails the boundary with
     /// [`crate::ErrorCode::KnowledgeRecordNotFound`], and a target of another
-    /// schema kind with [`crate::ErrorCode::InvalidKnowledgeRecord`].
-    /// Snapshot validation applies the same rule, so a load accepts exactly
-    /// the relations that settlement admitted.
+    /// schema kind with [`crate::ErrorCode::InvalidKnowledgeRecord`]. Under
+    /// [`KnowledgeSupersession::CurrentOnSubjects`] the engine computes each
+    /// holder's list. Snapshot validation applies the same rules, so a load
+    /// accepts exactly the relations that settlement admitted.
     PublishKnowledge {
-        holder: KnowledgeHolderRef,
         visibility: StateVisibility,
         producer_correlation: Option<String>,
-        records: Vec<KnowledgeRecordDraft>,
+        supersession: KnowledgeSupersession,
+        groups: Vec<KnowledgePublicationGroup>,
         summary: String,
     },
     /// Replaces one person's core life and custody state. Accepted from a
@@ -321,6 +335,36 @@ pub struct BoundaryProposal {
     pub offers: Vec<ReservationOffer>,
     pub requests: Vec<ReservationRequest>,
     pub directives: Vec<BoundaryDirective>,
+}
+
+/// Drafts published to every one of `holders`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct KnowledgePublicationGroup {
+    /// Sorted and unique. Every record of the group is published to every
+    /// holder.
+    pub holders: Vec<KnowledgeHolderRef>,
+    /// The drafts, each stored once as a body and given to every holder of
+    /// the group as an entry of its own. Under
+    /// [`KnowledgeSupersession::CurrentOnSubjects`] a draft's `supersedes`
+    /// and `contradicts` must be empty.
+    pub records: Vec<KnowledgeRecordDraft>,
+}
+
+/// How a publication's entries name what they supersede.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeSupersession {
+    /// Each draft's `supersedes` and `contradicts` apply to the one holder of
+    /// its group. Allowed only for groups of one holder.
+    Explicit,
+    /// The engine computes, per holder, the holder's current records of the
+    /// draft's kind that carry every subject of the draft at the publisher's
+    /// cut (the rule of [`crate::SimulationView::knowledge_heads`]) and names
+    /// them in that holder's entry. Drafts must carry empty `supersedes` and
+    /// `contradicts`. A draft whose match for some holder is truncated (more
+    /// than [`crate::KnowledgeLimitsV1::relations_per_record`] current
+    /// records) fails the boundary: a shared line is meant to have one head.
+    CurrentOnSubjects,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -485,16 +529,86 @@ pub struct BoundaryIngressGeneration {
     pub visibility: StateVisibility,
 }
 
+/// The evidence of one `PublishKnowledge` directive: the bodies it stored,
+/// in global ID order, and each holder's entries, in holder order. The
+/// bodies are the ledger's own: the journal shares them instead of copying
+/// them. The entries are as published: a retention policy that later clears
+/// an entry, or a name in it, does not change this evidence.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct BoundaryKnowledgeChange {
     pub plugin: String,
     pub system: String,
     pub phase: crate::BoundaryPhase,
-    pub holder: KnowledgeHolderRef,
     pub producer_correlation: Option<String>,
-    pub records: Vec<KnowledgeRecord>,
     pub visibility: StateVisibility,
     pub summary: String,
+    pub supersession: KnowledgeSupersession,
+    pub records: Vec<Arc<KnowledgeRecordBody>>,
+    pub holders: Vec<HolderPublication>,
+}
+
+/// One holder's entries of one publication, in local and global ID order.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HolderPublication {
+    /// The holder that received the entries.
+    pub holder: KnowledgeHolderRef,
+    /// The holder's entries, one per body of its group, each naming its body
+    /// by global ID and carrying the holder-local ID and the supersession it
+    /// was published with.
+    pub entries: Vec<HolderEntry>,
+}
+
+impl BoundaryKnowledgeChange {
+    /// The number of entries over every holder.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.holders
+            .iter()
+            .map(|publication| publication.entries.len())
+            .sum()
+    }
+
+    /// The body with a global ID among this publication's bodies.
+    #[must_use]
+    pub fn body(&self, id: canwu_core::KnowledgeRecordId) -> Option<&Arc<KnowledgeRecordBody>> {
+        self.records
+            .binary_search_by_key(&id, |body| body.id)
+            .ok()
+            .map(|index| &self.records[index])
+    }
+
+    /// The entries this publication gave `holder`, in ID order; none when
+    /// the holder received nothing. `holders` is sorted, so this is a binary
+    /// search.
+    #[must_use]
+    pub fn entries_of(&self, holder: &KnowledgeHolderRef) -> &[HolderEntry] {
+        self.holders
+            .binary_search_by(|publication| publication.holder.cmp(holder))
+            .map_or(&[], |index| self.holders[index].entries.as_slice())
+    }
+
+    /// The bodies this publication gave `holder`, in ID order, without
+    /// assembling records.
+    pub fn bodies_of<'a>(
+        &'a self,
+        holder: &KnowledgeHolderRef,
+    ) -> impl Iterator<Item = &'a KnowledgeRecordBody> + 'a {
+        self.entries_of(holder)
+            .iter()
+            .filter_map(|entry| self.body(entry.record).map(Arc::as_ref))
+    }
+
+    /// The records this publication gave `holder`, assembled as published,
+    /// in ID order; none when the holder received nothing.
+    pub fn records_of<'a>(
+        &'a self,
+        holder: &'a KnowledgeHolderRef,
+    ) -> impl Iterator<Item = KnowledgeRecord> + 'a {
+        self.entries_of(holder).iter().filter_map(move |entry| {
+            self.body(entry.record)
+                .map(|body| KnowledgeRecord::assemble(holder, entry, body))
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -559,8 +673,12 @@ pub struct BoundaryReceipt {
     pub boundary_hash: String,
     pub change_count: usize,
     pub record_change_count: usize,
+    /// `PublishKnowledge` directives committed.
     pub knowledge_batch_count: usize,
+    /// Knowledge record bodies stored.
     pub knowledge_record_count: usize,
+    /// Holder entries added, one per holder and body.
+    pub knowledge_entry_count: usize,
     pub allocations: Vec<ReservationAllocation>,
     /// Engine-allocated IDs of persons created in this boundary, keyed by
     /// producing plugin, system, and correlation.

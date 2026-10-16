@@ -166,5 +166,6 @@ fn knowledge_schema<T: DomainRecordType>(name: &str, hash: &str) -> PluginKnowle
             required: true,
             multiple: false,
         }],
+        retention: canwu_api::KnowledgeRetention::Keep,
     }
 }

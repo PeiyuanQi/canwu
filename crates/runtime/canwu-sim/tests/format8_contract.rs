@@ -318,10 +318,10 @@ fn format8_snapshot_rejects_format7_and_exposes_page_contract() {
             .expect("snapshot should serialize"),
     )
     .expect("snapshot JSON should be an object");
-    assert_eq!(wire["snapshot_format_version"], serde_json::json!(8));
-    wire["snapshot_format_version"] = serde_json::json!(7);
+    assert_eq!(wire["snapshot_format_version"], serde_json::json!(9));
+    wire["snapshot_format_version"] = serde_json::json!(8);
     let Err(error) = Simulation::from_snapshot_json(&wire.to_string()) else {
-        panic!("format 7 rejected");
+        panic!("format 8 rejected");
     };
     assert_eq!(error.code, ErrorCode::UnsupportedSnapshotVersion);
 

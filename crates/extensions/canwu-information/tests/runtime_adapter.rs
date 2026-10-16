@@ -1955,3 +1955,203 @@ fn a_crafted_packet_for_a_persisted_operation_does_not_displace_its_progress() {
         vec!["release_available".to_owned()]
     );
 }
+
+const HOG_PLUGIN: &str = "a-hog";
+
+fn hog_schema() -> canwu_api::KnowledgeSchemaId {
+    canwu_api::KnowledgeSchemaId::new(
+        canwu_api::KnowledgeRecordKind::new("fixture.hog", "spent"),
+        1,
+    )
+}
+
+/// Spends every holder entry of the boundary's publication budget: eight
+/// directives, each publishing 64 bodies, one per slot, to persons 1 to 64.
+fn spend_the_budget(
+    view: &SimulationView<'_>,
+    _context: &BoundaryContext,
+) -> Result<BoundaryProposal, canwu_api::CanwuError> {
+    let holders: Vec<_> = (1..=64).map(holder).collect();
+    let mut budget = view.knowledge_publication_budget();
+    let mut directives = Vec::new();
+    for batch in 0..8_u64 {
+        let records: Vec<_> = (0..64_u64)
+            .map(|index| canwu_api::KnowledgeRecordDraft {
+                schema: hog_schema(),
+                subjects: vec![canwu_api::KnowledgeSubject {
+                    role: "slot".to_owned(),
+                    target: canwu_api::KnowledgeSubjectTarget::Event(canwu_api::EventId::new(
+                        batch * 64 + index + 1,
+                    )),
+                }],
+                payload: json!({ "batch": batch, "index": index }),
+                as_of: None,
+                confidence_per_mille: 1_000,
+                origin: canwu_api::KnowledgeOrigin {
+                    method: "fixture.hog".to_owned(),
+                    evidence: Vec::new(),
+                },
+                supersedes: Vec::new(),
+                contradicts: Vec::new(),
+            })
+            .collect();
+        let mut payload_bytes = 0;
+        for record in &records {
+            payload_bytes += record.payload_bytes()?;
+        }
+        assert!(
+            budget.take(64, 4_096, payload_bytes),
+            "each of the hog's directives fits what is left"
+        );
+        directives.push(BoundaryDirective::PublishKnowledge {
+            visibility: StateVisibility::SameBoundary,
+            producer_correlation: None,
+            supersession: canwu_api::KnowledgeSupersession::CurrentOnSubjects,
+            groups: vec![canwu_api::KnowledgePublicationGroup {
+                holders: holders.clone(),
+                records,
+            }],
+            summary: "Spend the publication budget".to_owned(),
+        });
+    }
+    assert!(!budget.admits(1, 1, 0), "no holder entry is left");
+    Ok(BoundaryProposal {
+        directives,
+        ..BoundaryProposal::default()
+    })
+}
+
+/// A plugin whose name sorts before `canwu-information` and whose Daily
+/// phase-13 system runs before the information publisher and spends the
+/// boundary's whole holder-entry budget.
+struct HogPlugin;
+
+impl SimulationPlugin for HogPlugin {
+    fn name(&self) -> &'static str {
+        HOG_PLUGIN
+    }
+
+    fn version(&self) -> &'static str {
+        "1"
+    }
+
+    fn semantic_hash(&self) -> &'static str {
+        "0000000000000000000000000000000000000000000000000000000000000c04"
+    }
+
+    fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), canwu_api::CanwuError> {
+        registrar.register_knowledge_schema(canwu_api::PluginKnowledgeSchema {
+            id: hog_schema(),
+            schema_hash: "0000000000000000000000000000000000000000000000000000000000000c05"
+                .to_owned(),
+            writable: true,
+            payload_schema: PayloadSchema::Any,
+            subjects: vec![canwu_api::KnowledgeSubjectSchema {
+                role: "slot".to_owned(),
+                targets: vec![canwu_api::KnowledgeSubjectTargetKind::Event],
+                required: true,
+                multiple: false,
+            }],
+            retention: canwu_api::KnowledgeRetention::Keep,
+        })?;
+        let mut contract = BoundarySystemContract::new(
+            "spend-the-budget",
+            BoundaryPhase::PerspectiveAndReportMaterialization,
+            SystemCadence::Daily,
+        );
+        contract.reads = vec![StateKey::core_knowledge()];
+        contract.knowledge_writes = vec![canwu_api::KnowledgeWriteGrant {
+            schema: hog_schema(),
+            visibilities: vec![StateVisibility::SameBoundary],
+        }];
+        registrar.register_boundary_system(contract, spend_the_budget)
+    }
+}
+
+fn information_changes(boundary: &canwu_api::BoundaryRecord) -> usize {
+    boundary
+        .knowledge_changes
+        .iter()
+        .filter(|change| change.plugin == PLUGIN_NAME)
+        .count()
+}
+
+/// A publisher that sorts before `canwu-information` spends the boundary's
+/// whole publication budget, so not even the first record of the release's
+/// chunk fits: the information publisher defers the whole chunk, the
+/// boundary commits, the chunk's finalization returns the operation to
+/// publication, and the operation completes with every record at later
+/// boundaries.
+#[test]
+fn a_chunk_whose_first_record_does_not_fit_the_budget_is_deferred_whole() {
+    let fixture = release_scenario_with_members(64, vec![holder(1), holder(2)]);
+    let information = InformationPlugin;
+    let plugins: [&dyn SimulationPlugin; 2] = [&HogPlugin, &information];
+    let envelope = activate_release_operation(fixture.release.clone(), "deferred");
+    // A twin run without the hog finds the boundary that publishes.
+    let publishing = {
+        let mut twin = Canwu::new_with_plugins(44, fixture.scenario.clone(), &plugins)
+            .expect("release fixture should initialize");
+        queue(&mut twin, 1, &envelope);
+        (1..=8)
+            .find(|_| {
+                settle(&mut twin);
+                information_changes(twin.boundaries().last().expect("a boundary")) > 0
+            })
+            .expect("the release publishes within eight boundaries")
+    };
+
+    let mut canwu = Canwu::new_with_plugins(44, fixture.scenario.clone(), &plugins)
+        .expect("release fixture should initialize");
+    queue(&mut canwu, 1, &envelope);
+    for _ in 1..publishing {
+        settle(&mut canwu);
+    }
+    canwu
+        .settle_boundary(BoundaryRequest::at(canwu.time()).with_cadence(SystemCadence::Daily))
+        .expect("a boundary whose chunk is deferred commits");
+    let boundary = canwu.boundaries().last().expect("the deferring boundary");
+    assert_eq!(
+        boundary
+            .knowledge_changes
+            .iter()
+            .filter(|change| change.plugin == HOG_PLUGIN)
+            .map(canwu_api::BoundaryKnowledgeChange::entry_count)
+            .sum::<usize>(),
+        32_768
+    );
+    assert_eq!(information_changes(boundary), 0);
+    let deferred = operation_payload(&canwu, &envelope.id);
+    assert_eq!(
+        deferred.status,
+        InformationOperationStatus::AwaitingFinalization
+    );
+    let continuation = deferred
+        .continuation
+        .as_ref()
+        .expect("the whole chunk is left");
+    assert_eq!((continuation.cursor, continuation.remaining), (0, 2));
+    assert!(deferred.publication_result_ids.is_empty());
+
+    // The empty chunk's finalization returns the operation to publication,
+    // and the same boundary publishes the chunk.
+    settle(&mut canwu);
+    assert_eq!(
+        information_changes(canwu.boundaries().last().expect("a boundary")),
+        2
+    );
+    let published = operation_payload(&canwu, &envelope.id);
+    assert_eq!(
+        published.status,
+        InformationOperationStatus::AwaitingFinalization
+    );
+    assert!(published.continuation.is_none());
+
+    settle(&mut canwu);
+    let completed = operation_payload(&canwu, &envelope.id);
+    assert_eq!(completed.status, InformationOperationStatus::Completed);
+    assert_eq!(completed.publication_result_ids.len(), 2);
+    let replayed = Canwu::replay_from_journal(&plugins, &canwu.replay_journal())
+        .expect("the run replays exactly");
+    assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
+}

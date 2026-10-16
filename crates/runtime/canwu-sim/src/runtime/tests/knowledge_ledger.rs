@@ -1,7 +1,7 @@
-//! The committed knowledge ledger, its index of current records, and the
-//! incremental knowledge commitment follow one contract on every run path:
-//! live, forked, restored, sealed, and replayed runs, and a boundary that
-//! fails after its records were committed.
+//! The committed knowledge ledger, its index of current records, its
+//! retention, and the chunked knowledge commitment follow one contract on
+//! every run path: live, forked, restored, sealed, and replayed runs, and a
+//! boundary that fails after its records were committed.
 
 use super::*;
 use std::sync::Arc;
@@ -66,17 +66,23 @@ fn publish_lines(
     Ok(BoundaryProposal {
         directives: vec![
             BoundaryDirective::PublishKnowledge {
-                holder: line_holder(),
                 visibility: StateVisibility::SameBoundary,
                 producer_correlation: Some(format!("lines-{}", context.boundary_id.get())),
-                records: visible,
+                supersession: crate::KnowledgeSupersession::Explicit,
+                groups: vec![crate::KnowledgePublicationGroup {
+                    holders: vec![line_holder()],
+                    records: visible,
+                }],
                 summary: "Publish the visible lines".to_owned(),
             },
             BoundaryDirective::PublishKnowledge {
-                holder: line_holder(),
                 visibility: StateVisibility::NextBoundary,
                 producer_correlation: Some(format!("deferred-{}", context.boundary_id.get())),
-                records: vec![line_draft(view, context, LINES)?],
+                supersession: crate::KnowledgeSupersession::Explicit,
+                groups: vec![crate::KnowledgePublicationGroup {
+                    holders: vec![line_holder()],
+                    records: vec![line_draft(view, context, LINES)?],
+                }],
                 summary: "Publish the deferred line".to_owned(),
             },
         ],
@@ -92,17 +98,22 @@ fn revise_first_line(
 ) -> Result<BoundaryProposal, CanwuError> {
     Ok(BoundaryProposal {
         directives: vec![BoundaryDirective::PublishKnowledge {
-            holder: line_holder(),
             visibility: StateVisibility::SameBoundary,
             producer_correlation: None,
-            records: vec![line_draft(view, context, 0)?],
+            supersession: crate::KnowledgeSupersession::Explicit,
+            groups: vec![crate::KnowledgePublicationGroup {
+                holders: vec![line_holder()],
+                records: vec![line_draft(view, context, 0)?],
+            }],
             summary: "Revise the first line".to_owned(),
         }],
         ..BoundaryProposal::default()
     })
 }
 
-struct KnowledgeLinePlugin;
+/// Publishes every line each boundary, under the schema retention it
+/// carries.
+struct KnowledgeLinePlugin(KnowledgeRetention);
 
 impl SimulationPlugin for KnowledgeLinePlugin {
     fn name(&self) -> &'static str {
@@ -124,6 +135,7 @@ impl SimulationPlugin for KnowledgeLinePlugin {
                 required: true,
                 multiple: false,
             }],
+            retention: self.0,
         })?;
         let mut phase4 = BoundarySystemContract::new(
             "publish-lines",
@@ -164,12 +176,24 @@ fn line_heads(knowledge: &KnowledgeSnapshot, line: u64) -> Vec<KnowledgeRecordId
 }
 
 /// Every line holds exactly its newest record, and the cached commitment
-/// equals the one a load recomputes from the snapshot.
-fn assert_ledger(simulation: &Simulation) {
+/// equals the one a load recomputes from the snapshot. Under
+/// `RetireWhenSuperseded` the holder holds nothing else: one entry and one
+/// body per line, none of whose entries still names what it superseded.
+fn assert_ledger(simulation: &Simulation, retention: KnowledgeRetention) {
     let knowledge = simulation.knowledge();
     let ledger = knowledge
         .for_holder(&line_holder())
         .expect("the fixture holder holds records");
+    if retention == KnowledgeRetention::RetireWhenSuperseded {
+        let lines = usize::try_from(LINES + 1).unwrap();
+        assert_eq!(ledger.len(), lines);
+        assert_eq!(knowledge.records.body_count(), lines);
+        assert!(
+            ledger
+                .entries()
+                .all(|(entry, _)| entry.supersedes.is_empty())
+        );
+    }
     for line in 0..=LINES {
         let newest = ledger
             .values()
@@ -197,33 +221,64 @@ fn day(index: i64) -> SimTime {
     SimTime::EPOCH + SimDuration::days(index)
 }
 
-fn knowledge_records_accumulator_end(simulation: &Simulation) -> Option<KnowledgeRecordId> {
-    simulation
-        .state
-        .metadata
-        .commitment_cache
-        .as_ref()
-        .and_then(|cache| cache.knowledge_records.as_ref())
-        .and_then(super::super::state::KnowledgeRecordAccumulator::last)
-}
-
 #[test]
 fn knowledge_ledger_and_commitment_follow_every_run_path() {
+    ledger_follows_every_run_path(KnowledgeRetention::Keep);
+}
+
+/// Retirement at publication is part of the boundary's state transition:
+/// a run that retires what each publication supersedes keeps one entry per
+/// line, keeps counting local IDs, and stays equal, boundary by boundary, to
+/// its fork, its restore, its replay, and its sealed and restored-from-seal
+/// twins, by checkpoint hash and by ledger.
+#[test]
+fn retirement_at_publication_follows_every_run_path() {
+    ledger_follows_every_run_path(KnowledgeRetention::RetireWhenSuperseded);
+}
+
+#[allow(clippy::too_many_lines)]
+fn ledger_follows_every_run_path(retention: KnowledgeRetention) {
     let (scenario, _) = demo_scenario();
-    let plugin = KnowledgeLinePlugin;
+    let plugin = KnowledgeLinePlugin(retention);
     let mut live = Simulation::new(71, scenario.clone()).expect("the fixture should load");
     live.register_plugin(&plugin)
         .expect("the line plugin should register");
     for index in 0..4 {
         live.settle_boundary(publishing_boundary(day(index)))
             .expect("a publishing boundary should settle");
-        assert_ledger(&live);
+        assert_ledger(&live, retention);
     }
-    let held = live
+    let ledger = live
         .knowledge()
         .for_holder(&line_holder())
-        .map_or(0, HolderLedger::len);
-    assert_eq!(held, 4 * (usize::try_from(LINES).unwrap() + 2));
+        .expect("the fixture holder holds records");
+    let published = 4 * (usize::try_from(LINES).unwrap() + 2);
+    assert_eq!(
+        ledger.len(),
+        match retention {
+            KnowledgeRetention::Keep => published,
+            KnowledgeRetention::RetireWhenSuperseded => usize::try_from(LINES + 1).unwrap(),
+        }
+    );
+    // Local IDs come from the holder's counter, which never goes back, and a
+    // held entry keeps the local ID it was published with.
+    assert_eq!(
+        ledger.next_local().get(),
+        u64::try_from(published).unwrap() + 1
+    );
+    assert!(
+        ledger
+            .entries()
+            .all(|(entry, _)| ledger.id_of(entry.local) == Some(entry.record))
+    );
+    // The boundary evidence keeps what each entry superseded when it was
+    // published, whatever retention cleared since.
+    let revised = live.boundaries()[3]
+        .knowledge_changes
+        .iter()
+        .find(|change| change.phase == BoundaryPhase::PerspectiveAndReportMaterialization)
+        .expect("the last boundary revised the first line");
+    assert_eq!(revised.holders[0].entries[0].supersedes.len(), 1);
 
     // A boundary that publishes nothing neither copies nor rehashes the
     // knowledge it carries: the state is the same allocation afterwards, and
@@ -249,8 +304,7 @@ fn knowledge_ledger_and_commitment_follow_every_run_path() {
     let control = live.fork();
     let before = live.snapshot();
     let ledger = Arc::clone(&live.state.current.knowledge);
-    let accumulated = knowledge_records_accumulator_end(&live);
-    assert_eq!(accumulated, live.knowledge().records.last_record_id());
+    let root = live.knowledge().records.commitment_root();
     let revision = live.state.counters.state_revision;
     live.state.counters.state_revision = u64::MAX;
     let error = live
@@ -260,7 +314,7 @@ fn knowledge_ledger_and_commitment_follow_every_run_path() {
     live.state.counters.state_revision = revision;
     assert_eq!(live.snapshot(), before);
     assert!(Arc::ptr_eq(&ledger, &live.state.current.knowledge));
-    assert_eq!(knowledge_records_accumulator_end(&live), accumulated);
+    assert_eq!(live.knowledge().records.commitment_root(), root);
     drop(ledger);
 
     // The same boundary then settles exactly as on a run that never failed,
@@ -295,7 +349,7 @@ fn knowledge_ledger_and_commitment_follow_every_run_path() {
         for run in &mut runs {
             run.settle_boundary(publishing_boundary(day(index)))
                 .expect("every run should settle the boundary");
-            assert_ledger(run);
+            assert_ledger(run, retention);
         }
         replayed
             .settle_boundary(publishing_boundary(day(index)))
@@ -319,4 +373,266 @@ fn knowledge_ledger_and_commitment_follow_every_run_path() {
             }
         }
     }
+}
+
+fn shared_line_kind() -> KnowledgeRecordKind {
+    KnowledgeRecordKind::new("fixture.shared_lines", "line")
+}
+
+fn shared_line_schema() -> KnowledgeSchemaId {
+    KnowledgeSchemaId::new(shared_line_kind(), 1)
+}
+
+pub(super) fn shared_line_holder(index: u64) -> KnowledgeHolderRef {
+    KnowledgeHolderRef::Person(PersonId::new(index))
+}
+
+/// The holders of boundary `boundary`'s shared line record: persons 1 and
+/// 2, except that odd boundaries from the third on publish to person 1
+/// alone, so person 2 keeps a body person 1 has retired.
+fn shared_line_holders(boundary: u64) -> Vec<KnowledgeHolderRef> {
+    if boundary >= 3 && boundary % 2 == 1 {
+        vec![shared_line_holder(1)]
+    } else {
+        vec![shared_line_holder(1), shared_line_holder(2)]
+    }
+}
+
+/// Phase 13: one `CurrentOnSubjects` record on one line for
+/// [`shared_line_holders`], each entry superseding its holder's current
+/// record on the line.
+fn publish_shared_line(
+    _view: &SimulationView<'_>,
+    context: &BoundaryContext,
+) -> Result<BoundaryProposal, CanwuError> {
+    let boundary = context.boundary_id.get();
+    Ok(BoundaryProposal {
+        directives: vec![BoundaryDirective::PublishKnowledge {
+            visibility: StateVisibility::SameBoundary,
+            producer_correlation: None,
+            supersession: crate::KnowledgeSupersession::CurrentOnSubjects,
+            groups: vec![crate::KnowledgePublicationGroup {
+                holders: shared_line_holders(boundary),
+                records: vec![KnowledgeRecordDraft {
+                    schema: shared_line_schema(),
+                    subjects: vec![line_subject(0)],
+                    payload: serde_json::json!({ "boundary": boundary }),
+                    as_of: None,
+                    confidence_per_mille: 1_000,
+                    origin: KnowledgeOrigin {
+                        method: "fixture_shared_line".to_owned(),
+                        evidence: Vec::new(),
+                    },
+                    supersedes: Vec::new(),
+                    contradicts: Vec::new(),
+                }],
+            }],
+            summary: "Publish the shared line".to_owned(),
+        }],
+        ..BoundaryProposal::default()
+    })
+}
+
+/// Publishes one shared line record each Daily boundary, under the schema
+/// retention it carries.
+pub(super) struct SharedLinePlugin(pub(super) KnowledgeRetention);
+
+impl SimulationPlugin for SharedLinePlugin {
+    fn name(&self) -> &'static str {
+        "fixture-knowledge-shared-lines"
+    }
+
+    test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000c1a");
+
+    fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+        registrar.register_knowledge_schema(PluginKnowledgeSchema {
+            id: shared_line_schema(),
+            schema_hash: "0000000000000000000000000000000000000000000000000000000000000c1b"
+                .to_owned(),
+            writable: true,
+            payload_schema: PayloadSchema::Any,
+            subjects: vec![KnowledgeSubjectSchema {
+                role: "line".to_owned(),
+                targets: vec![KnowledgeSubjectTargetKind::Event],
+                required: true,
+                multiple: false,
+            }],
+            retention: self.0,
+        })?;
+        let mut contract = BoundarySystemContract::new(
+            "publish-shared-line",
+            BoundaryPhase::PerspectiveAndReportMaterialization,
+            SystemCadence::Daily,
+        );
+        contract.reads = vec![StateKey::core_knowledge()];
+        contract.knowledge_writes = vec![KnowledgeWriteGrant {
+            schema: shared_line_schema(),
+            visibilities: vec![StateVisibility::SameBoundary],
+        }];
+        registrar.register_boundary_system(contract, publish_shared_line)
+    }
+}
+
+pub(super) fn shared_line_boundary(index: i64) -> BoundaryRequest {
+    publishing_boundary(day(index))
+}
+
+/// Each tamper of a retiring ledger, written so that every commitment over
+/// it is recomputed, is refused by the one check that owns it. After four
+/// boundaries, each publishing record `b` at boundary `b`, both persons hold
+/// record 4 alone: person 1 retired record 3 at boundary 4, and person 2
+/// retired record 2, which it had kept while person 1 retired it at
+/// boundary 3.
+///
+/// - P1: person 1's record 3 back, named by nobody: only the rebuilt
+///   ledger differs.
+/// - P2: P1, with record 4 still naming record 3: a retiring schema's entry
+///   names what its publication retired.
+/// - P3: person 1's local-ID counter one higher: only the rebuilt ledger
+///   differs.
+/// - P5: person 2's computed list at boundary 4 emptied in the evidence,
+///   with the ledger keeping record 2 as that evidence implies: only the
+///   recomputed list differs.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_tampered_retiring_ledger_is_refused_by_the_check_that_owns_it() {
+    let (scenario, _) = demo_scenario();
+    let plugin = SharedLinePlugin(KnowledgeRetention::RetireWhenSuperseded);
+    let mut simulation = Simulation::new(73, scenario).expect("the fixture should load");
+    simulation
+        .register_plugin(&plugin)
+        .expect("the shared line plugin should register");
+    for index in 0..4 {
+        simulation
+            .settle_boundary(shared_line_boundary(index))
+            .expect("a publishing boundary should settle");
+    }
+    let snapshot = simulation.snapshot();
+    let (first, second) = (shared_line_holder(1), shared_line_holder(2));
+    let record = |boundary: usize| {
+        Arc::clone(&snapshot.boundaries[boundary].knowledge_changes[0].records[0])
+    };
+    // A holder's entry as its boundary published it, with the names its
+    // retirement since cleared.
+    let published = |boundary: usize, holder: &KnowledgeHolderRef| {
+        let mut entry =
+            snapshot.boundaries[boundary].knowledge_changes[0].entries_of(holder)[0].clone();
+        entry.supersedes.clear();
+        entry.contradicts.clear();
+        entry
+    };
+    let (second_record, third, fourth) = (record(1), record(2), record(3));
+    let ledger = &snapshot.knowledge.records;
+    assert_eq!(ledger.body_count(), 1);
+    for holder in [&first, &second] {
+        let held = ledger.get(holder).expect("the holder is listed");
+        assert_eq!(held.len(), 1);
+        assert!(
+            held.entry(&fourth.id)
+                .expect("record 4 is held")
+                .supersedes
+                .is_empty()
+        );
+    }
+
+    // Puts a retired entry back, with its body.
+    let resurrect = |tampered: &mut SimulationSnapshot,
+                     holder: &KnowledgeHolderRef,
+                     body: &KnowledgeRecordBody,
+                     entry: &HolderEntry| {
+        let holder = serde_json::to_value(holder).expect("the holder encodes");
+        let body = serde_json::to_value(body).expect("the body encodes");
+        let entry = serde_json::to_value(entry).expect("the entry encodes");
+        assert!(tamper_knowledge_ledger(tampered, |wire| {
+            let bodies = wire["bodies"].as_array_mut().expect("bodies");
+            let at = bodies
+                .iter()
+                .position(|stored| stored["id"].as_u64() > body["id"].as_u64())
+                .unwrap_or(bodies.len());
+            bodies.insert(at, body);
+            let entries = wire["holders"]
+                .as_array_mut()
+                .expect("holders")
+                .iter_mut()
+                .find(|ledger| ledger["holder"] == holder)
+                .expect("the holder is listed")["entries"]
+                .as_array_mut()
+                .expect("entries");
+            let at = entries
+                .iter()
+                .position(|stored| stored["local"].as_u64() > entry["local"].as_u64())
+                .unwrap_or(entries.len());
+            entries.insert(at, entry);
+        }));
+    };
+    let load = |mut tampered: SimulationSnapshot| {
+        refresh_snapshot_commitments_and_checkpoint(&mut tampered);
+        let head = tampered.boundaries.len() - 1;
+        tampered.boundaries[head].state_hash = Some(
+            snapshot_boundary_head_state_hash(&tampered)
+                .expect("the tampered head should have a state commitment"),
+        );
+        rehash_tampered_snapshot(&mut tampered);
+        Simulation::from_snapshot_with_plugins(tampered, &[&plugin])
+    };
+    let refuse = |label: &str, tampered: SimulationSnapshot, check: &str| {
+        let error = load(tampered)
+            .err()
+            .unwrap_or_else(|| panic!("{label} unexpectedly loaded"));
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot, "{label}");
+        assert!(error.message.contains(check), "{label}: {}", error.message);
+    };
+    let rebuilt = "boundary knowledge changes do not reconstruct the persisted generic ledger";
+    load(snapshot.clone()).expect("the untampered snapshot loads through the same rehash");
+
+    let mut unnamed = snapshot.clone();
+    resurrect(&mut unnamed, &first, &third, &published(2, &first));
+    refuse("P1", unnamed.clone(), rebuilt);
+
+    let mut named = unnamed;
+    assert!(tamper_knowledge_entry(
+        &mut named,
+        &first,
+        fourth.id,
+        |entry| entry.supersedes = vec![third.id],
+    ));
+    refuse(
+        "P2",
+        named,
+        "a knowledge entry of a retiring schema still names what its publication retired",
+    );
+
+    let mut counter = snapshot.clone();
+    let holder = serde_json::to_value(&first).expect("the holder encodes");
+    assert!(tamper_knowledge_ledger(&mut counter, |wire| {
+        let ledger = wire["holders"]
+            .as_array_mut()
+            .expect("holders")
+            .iter_mut()
+            .find(|ledger| ledger["holder"] == holder)
+            .expect("the holder is listed");
+        let raised = ledger["next_local"].as_u64().expect("a counter") + 1;
+        ledger["next_local"] = serde_json::json!(raised);
+    }));
+    refuse("P3", counter, rebuilt);
+
+    let mut emptied = snapshot.clone();
+    let evidence = emptied.boundaries[3].knowledge_changes[0]
+        .holders
+        .iter_mut()
+        .find(|publication| publication.holder == second)
+        .expect("person 2 received record 4");
+    assert_eq!(evidence.entries[0].supersedes, vec![second_record.id]);
+    evidence.entries[0].supersedes.clear();
+    resurrect(
+        &mut emptied,
+        &second,
+        &second_record,
+        &published(1, &second),
+    );
+    refuse(
+        "P5",
+        emptied,
+        "boundary knowledge supersession list is not the one its rule gives at the publisher's cut",
+    );
 }

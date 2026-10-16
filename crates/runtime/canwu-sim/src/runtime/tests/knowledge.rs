@@ -42,7 +42,7 @@ fn knowledge_publication_is_phase_scoped_atomic_persisted_and_replayable() {
     missing_record
         .knowledge
         .records
-        .remove(KnowledgeRecordId::new(2))
+        .remove_body(KnowledgeRecordId::new(2))
         .expect("the record exists");
     rehash_tampered_snapshot(&mut missing_record);
     let error = Simulation::from_snapshot_with_plugins(missing_record, &[&plugin])
@@ -69,22 +69,20 @@ fn phase13_publication_resolves_exact_current_boundary_record_evidence() {
         .expect("exact current-boundary evidence should restore");
 
     let mut wrong_index = snapshot;
-    let holder = KnowledgeHolderRef::Person(PersonId::new(1));
-    let mut record = wrong_index
-        .knowledge
-        .for_holder(&holder)
-        .and_then(|records| records.values().next())
-        .cloned()
-        .expect("published record exists");
-    let EvidenceRef::DomainRecordVersion(version) = &mut record.origin.evidence[0] else {
-        panic!("fixture origin should contain a record version");
+    let retarget = |body: &mut KnowledgeRecordBody| {
+        let EvidenceRef::DomainRecordVersion(version) = &mut body.origin.evidence[0] else {
+            panic!("fixture origin should contain a record version");
+        };
+        version.established_by = DomainRecordVersionSource::BoundaryChange {
+            boundary: BoundaryId::new(1),
+            change_index: 1,
+        };
     };
-    version.established_by = DomainRecordVersionSource::BoundaryChange {
-        boundary: BoundaryId::new(1),
-        change_index: 1,
-    };
-    wrong_index.knowledge.records.insert(record.clone());
-    wrong_index.boundaries[0].knowledge_changes[0].records[0] = record;
+    let id = wrong_index.boundaries[0].knowledge_changes[0].records[0].id;
+    assert!(tamper_knowledge_body(&mut wrong_index, id, retarget));
+    retarget(std::sync::Arc::make_mut(
+        &mut wrong_index.boundaries[0].knowledge_changes[0].records[0],
+    ));
     rehash_tampered_snapshot(&mut wrong_index);
     let error = Simulation::from_snapshot_with_plugins(wrong_index, &[&plugin])
         .err()
@@ -117,22 +115,28 @@ fn knowledge_snapshot_tamper_matrix_covers_ledger_evidence_and_batch_metadata() 
         assert_eq!(error.code, ErrorCode::InvalidSnapshot, "{label}");
     };
 
+    let first = KnowledgeRecordId::new(1);
+    // A body edit the wire refuses cannot be loaded; one it accepts must be
+    // refused by validation.
     let mutate_first_record =
-        |snapshot: &mut SimulationSnapshot, mutate: &dyn Fn(&mut KnowledgeRecord)| {
-            let mut record = snapshot
-                .knowledge
-                .for_holder(&holder)
-                .and_then(|records| records.values().next())
-                .cloned()
-                .expect("fixture holder record should exist");
-            mutate(&mut record);
-            snapshot.knowledge.records.insert(record);
+        |snapshot: &mut SimulationSnapshot, mutate: &dyn Fn(&mut KnowledgeRecordBody)| {
+            tamper_knowledge_body(snapshot, first, mutate)
         };
 
+    // The first entry moved to another holder.
     let mut record_holder = snapshot.clone();
-    mutate_first_record(&mut record_holder, &|record| {
-        record.holder = KnowledgeHolderRef::Person(PersonId::new(2));
-    });
+    assert!(tamper_knowledge_ledger(&mut record_holder, |wire| {
+        let holders = wire["holders"].as_array_mut().expect("holders");
+        let entry = holders[0]["entries"]
+            .as_array_mut()
+            .expect("entries")
+            .remove(0);
+        holders.push(serde_json::json!({
+            "holder": KnowledgeHolderRef::Person(PersonId::new(2)),
+            "next_local": 2,
+            "entries": [entry],
+        }));
+    }));
     reject("record holder", record_holder);
 
     let mut schema_version = snapshot.clone();
@@ -173,9 +177,12 @@ fn knowledge_snapshot_tamper_matrix_covers_ledger_evidence_and_batch_metadata() 
     reject("record learned time", learned_at);
 
     let mut forward_relation = snapshot.clone();
-    mutate_first_record(&mut forward_relation, &|record| {
-        record.supersedes = vec![KnowledgeRecordId::new(3)];
-    });
+    assert!(tamper_knowledge_entry(
+        &mut forward_relation,
+        &holder,
+        first,
+        |entry| entry.supersedes = vec![KnowledgeRecordId::new(3)],
+    ));
     reject("forward relation", forward_relation);
 
     // The fixture publishes record 1 in phase 4 for the same boundary, record
@@ -188,21 +195,13 @@ fn knowledge_snapshot_tamper_matrix_covers_ledger_evidence_and_batch_metadata() 
         let mut tampered = snapshot.clone();
         let record = KnowledgeRecordId::new(record);
         let target = vec![KnowledgeRecordId::new(target)];
-        let mut stored = tampered
-            .knowledge
-            .records
-            .record(record)
-            .cloned()
-            .expect("fixture ledger record should exist");
-        stored.supersedes.clone_from(&target);
-        tampered.knowledge.records.insert(stored);
-        tampered.boundaries[0]
-            .knowledge_changes
-            .iter_mut()
-            .flat_map(|change| &mut change.records)
-            .find(|stored| stored.id == record)
-            .expect("fixture boundary record should exist")
-            .supersedes = target;
+        assert!(tamper_knowledge_entry(
+            &mut tampered,
+            &holder,
+            record,
+            |entry| entry.supersedes.clone_from(&target),
+        ));
+        published_entry_mut(&mut tampered.boundaries[0], record).supersedes = target;
         refresh_snapshot_commitments_and_checkpoint(&mut tampered);
         tampered.boundaries[0].state_hash = Some(
             snapshot_boundary_head_state_hash(&tampered)
@@ -256,8 +255,13 @@ fn knowledge_snapshot_tamper_matrix_covers_ledger_evidence_and_batch_metadata() 
     reject("batch order", batch_order);
 
     let mut first_id = snapshot.clone();
-    first_id.boundaries[0].knowledge_changes[0].records[0].id = KnowledgeRecordId::new(99);
+    std::sync::Arc::make_mut(&mut first_id.boundaries[0].knowledge_changes[0].records[0]).id =
+        KnowledgeRecordId::new(99);
     reject("batch first record ID", first_id);
+
+    let mut local_id = snapshot.clone();
+    published_entry_mut(&mut local_id.boundaries[0], first).local = HolderKnowledgeRecordId::new(7);
+    reject("published local ID", local_id);
 
     let mut event_holder = snapshot.clone();
     let event = event_holder
@@ -267,8 +271,11 @@ fn knowledge_snapshot_tamper_matrix_covers_ledger_evidence_and_batch_metadata() 
         .expect("fixture publication event should exist");
     event
         .kind
-        .set_field("holder", &KnowledgeHolderRef::Person(PersonId::new(2)))
-        .expect("publication event should have a holder");
+        .set_field(
+            "holders",
+            &vec![KnowledgeHolderRef::Person(PersonId::new(2))],
+        )
+        .expect("publication event should have holders");
     reject("event holder", event_holder);
 
     let mut emission_index = snapshot.clone();
@@ -317,21 +324,24 @@ fn publish_across_holders(
     };
     Ok(BoundaryProposal {
         directives: vec![BoundaryDirective::PublishKnowledge {
-            holder,
             visibility: StateVisibility::SameBoundary,
             producer_correlation: None,
-            records: vec![KnowledgeRecordDraft {
-                schema: cross_holder_schema(),
-                subjects: Vec::new(),
-                payload: serde_json::json!({ "boundary": context.boundary_id.get() }),
-                as_of: None,
-                confidence_per_mille: 1_000,
-                origin: KnowledgeOrigin {
-                    method: "fixture".to_owned(),
-                    evidence: Vec::new(),
-                },
-                supersedes,
-                contradicts: Vec::new(),
+            supersession: crate::KnowledgeSupersession::Explicit,
+            groups: vec![crate::KnowledgePublicationGroup {
+                holders: vec![holder],
+                records: vec![KnowledgeRecordDraft {
+                    schema: cross_holder_schema(),
+                    subjects: Vec::new(),
+                    payload: serde_json::json!({ "boundary": context.boundary_id.get() }),
+                    as_of: None,
+                    confidence_per_mille: 1_000,
+                    origin: KnowledgeOrigin {
+                        method: "fixture".to_owned(),
+                        evidence: Vec::new(),
+                    },
+                    supersedes,
+                    contradicts: Vec::new(),
+                }],
             }],
             summary: "Publish across holders".to_owned(),
         }],
@@ -356,6 +366,7 @@ impl SimulationPlugin for CrossHolderPlugin {
             writable: true,
             payload_schema: PayloadSchema::Any,
             subjects: Vec::new(),
+            retention: crate::KnowledgeRetention::Keep,
         })?;
         let mut contract = BoundarySystemContract::new(
             "publish-across-holders",
@@ -400,28 +411,33 @@ fn a_relation_cannot_name_another_holders_record() {
     assert_eq!(error.code, ErrorCode::KnowledgeRecordNotFound);
     assert_eq!(simulation.snapshot(), snapshot);
 
-    // The same relation written into the snapshot, with every commitment
-    // over it recomputed, is refused by a load.
+    // The same relation written into the boundary evidence, with every
+    // commitment over it recomputed, is refused by a load: the ledger a load
+    // rebuilds from evidence cannot resolve it in person 2's ledger. (A
+    // stored ledger with the relation does not even decode.)
     let first = KnowledgeRecordId::new(1);
     let mut tampered = snapshot;
-    let mut stored = tampered
-        .knowledge
-        .records
-        .record(KnowledgeRecordId::new(2))
-        .cloned()
-        .expect("person 2 holds the second record");
-    assert_eq!(stored.holder, KnowledgeHolderRef::Person(PersonId::new(2)));
-    assert_eq!(
+    assert!(
         tampered
             .knowledge
             .records
-            .record(first)
-            .map(|record| &record.holder),
-        Some(&KnowledgeHolderRef::Person(PersonId::new(1)))
+            .get(&KnowledgeHolderRef::Person(PersonId::new(2)))
+            .is_some_and(|ledger| ledger.contains_key(&KnowledgeRecordId::new(2)))
     );
-    stored.supersedes = vec![first];
-    tampered.knowledge.records.insert(stored);
-    tampered.boundaries[1].knowledge_changes[0].records[0].supersedes = vec![first];
+    assert!(
+        tampered
+            .knowledge
+            .records
+            .get(&KnowledgeHolderRef::Person(PersonId::new(1)))
+            .is_some_and(|ledger| ledger.contains_key(&first))
+    );
+    assert!(!tamper_knowledge_entry(
+        &mut tampered.clone(),
+        &KnowledgeHolderRef::Person(PersonId::new(2)),
+        KnowledgeRecordId::new(2),
+        |entry| entry.supersedes = vec![first],
+    ));
+    tampered.boundaries[1].knowledge_changes[0].holders[0].entries[0].supersedes = vec![first];
     refresh_snapshot_commitments_and_checkpoint(&mut tampered);
     tampered.boundaries[1].state_hash = Some(
         snapshot_boundary_head_state_hash(&tampered)
@@ -591,4 +607,64 @@ fn read_only_runs_reject_live_plugin_ingress_without_mutation() {
         .err()
         .expect("snapshot validation must reject impossible read-only live ingress");
     assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+}
+
+/// Evidence citing an initial-scenario record version resolves through the
+/// scenario's index of record positions, not a scan of the scenario: each
+/// resolution reads exactly one scenario record, the one the index names,
+/// in a scenario of 65,536 records as in one of 256 (the cited records are
+/// the last a scan reaches). A wrong version reads its record and is
+/// refused; version zero and an unknown record are refused without reading
+/// any.
+#[test]
+fn initial_scenario_evidence_resolves_without_scanning_the_scenario() {
+    use super::super::state::{INITIAL_RECORDS_READ, InitialRecordIndex};
+    use super::super::validation::initial_domain_record_matches;
+
+    let scenario_of = |records: usize| -> Scenario {
+        let mut scenario = Scenario::new(SimTime::EPOCH, Vec::new());
+        scenario.domain_records = (0..records)
+            .map(|index| DomainRecord {
+                reference: DomainRecordRef::new(
+                    "fixture.initial",
+                    "record",
+                    format!("r{index:06}"),
+                ),
+                owner: "fixture".to_owned(),
+                class: DomainRecordClass::Record,
+                version: 1 + u64::try_from(index % 3).unwrap(),
+                lifecycle: DomainRecordLifecycle::Active,
+                payload: Value::Null,
+                references: Vec::new(),
+            })
+            .collect();
+        scenario
+    };
+    let version_ref = |record: &DomainRecord, version: u64| DomainRecordVersionRef {
+        record: record.reference.clone(),
+        version,
+        established_by: DomainRecordVersionSource::InitialScenario,
+    };
+    for records in [256, 65_536] {
+        let scenario = scenario_of(records);
+        let index = InitialRecordIndex::of(Some(&scenario));
+        let last = scenario.domain_records.last().expect("records");
+        let reads = |reference: &DomainRecordVersionRef, matches: bool| -> usize {
+            INITIAL_RECORDS_READ.set(0);
+            assert_eq!(
+                initial_domain_record_matches(&index, Some(&scenario), reference),
+                matches,
+                "{reference:?}"
+            );
+            INITIAL_RECORDS_READ.get()
+        };
+        for record in &scenario.domain_records[records - 64..] {
+            assert_eq!(reads(&version_ref(record, record.version), true), 1);
+        }
+        assert_eq!(reads(&version_ref(last, last.version + 1), false), 1);
+        assert_eq!(reads(&version_ref(last, 0), false), 0);
+        let mut unknown = version_ref(last, last.version);
+        unknown.record.id.push_str("-unknown");
+        assert_eq!(reads(&unknown, false), 0);
+    }
 }

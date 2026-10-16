@@ -2385,6 +2385,7 @@ mod tests {
             writable,
             payload_schema: PayloadSchema::Any,
             subjects: vec![],
+            retention: crate::KnowledgeRetention::Keep,
         }
     }
 
@@ -2618,6 +2619,7 @@ mod tests {
                 writable: true,
                 payload_schema: PayloadSchema::Any,
                 subjects: Vec::new(),
+                retention: crate::KnowledgeRetention::Keep,
             }],
         };
         let mut registry = PluginRegistry::default();

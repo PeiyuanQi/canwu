@@ -14,8 +14,10 @@ use super::{
     invalid_snapshot_error, is_one_u64, is_zero_u64, maintenance_change_slice_is_empty, manifest,
     policy,
 };
+use canwu_knowledge::KnowledgeBodyDigest;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 /// Canonical roots for independent authoritative state and evidence domains.
@@ -299,31 +301,30 @@ pub(super) fn world_commitment_root(
     )
 }
 
-/// Domain of the records sub-root of the knowledge root: one JSON array of
-/// every generic knowledge record in global ID order, hashed as it grows.
-pub(super) const KNOWLEDGE_RECORD_COMMITMENT_DOMAIN: &str = "canwu.commitment.knowledge.records.v1";
-
 #[derive(Serialize)]
 struct KnowledgeCommitmentMaterial<'a> {
     actors: &'a str,
-    records: &'a str,
+    ledger: &'a str,
 }
 
-/// The knowledge root of commitment format 5 from its two sub-roots.
+/// The knowledge root of commitment format 6 from the actor sub-root and the
+/// generic ledger's chunked root.
 ///
-/// Format 4 hashed the whole knowledge snapshot as one value, so every
-/// publication hashed every record again. Format 5 commits to the
-/// compatibility actor projection and to the generic records separately; the
-/// records sub-root is an ordered hash in global ID order, the order the
-/// runtime allocates IDs in, so a boundary extends it with the records it
-/// published and never hashes earlier ones again.
+/// Format 5 kept a running hash of every record in global ID order, which
+/// assumed records never change or leave; retention retires entries, so
+/// format 6 commits to the ledger through cached leaf, chunk, and holder
+/// roots instead, and a publication or retirement rehashes what it touched.
 pub(super) fn knowledge_commitment_root_from_parts(
     actors: &str,
-    records: &str,
+    ledger: &super::HolderLedgers,
 ) -> Result<String, CanwuError> {
+    let ledger = blake3::Hash::from_bytes(ledger.commitment_root()).to_hex();
     canonical_hash(
-        "canwu.commitment.knowledge.v2",
-        &KnowledgeCommitmentMaterial { actors, records },
+        "canwu.commitment.knowledge.v3",
+        &KnowledgeCommitmentMaterial {
+            actors,
+            ledger: ledger.as_str(),
+        },
     )
 }
 
@@ -334,17 +335,15 @@ pub(super) fn knowledge_actor_commitment_root(
     canonical_hash("canwu.commitment.knowledge.actors.v1", actors)
 }
 
-/// The knowledge root of a whole snapshot, computed from scratch as one
-/// canonical array. Load validation uses it; the runtime keeps the records
-/// sub-root as a running hash of the same bytes and must reach the same
-/// value.
+/// The knowledge root of a whole snapshot. Load validation uses it; a decoded
+/// ledger computed every root from its entries, and the runtime, which keeps
+/// them cached, must reach the same value.
 pub(super) fn knowledge_commitment_root(
     knowledge: &KnowledgeSnapshot,
 ) -> Result<String, CanwuError> {
-    let records: Vec<_> = knowledge.records.records().collect();
     knowledge_commitment_root_from_parts(
         &knowledge_actor_commitment_root(&knowledge.actors)?,
-        &canonical_hash(KNOWLEDGE_RECORD_COMMITMENT_DOMAIN, &records)?,
+        &knowledge.records,
     )
 }
 
@@ -1011,9 +1010,22 @@ pub(super) fn snapshot_is_at_boundary_head(snapshot: &SimulationSnapshot) -> boo
 /// `record_change_encodings`, aligned with `record.record_changes`, supplies
 /// the encodings the record store already computed, and `None` encodes the
 /// versions afresh. Both give the same hash.
+#[cfg(test)]
 pub(super) fn compute_boundary_hash(
     record: &BoundaryRecord,
     record_change_encodings: Option<&[RecordChangeEncodings]>,
+) -> Result<String, CanwuError> {
+    compute_boundary_hash_with(record, record_change_encodings, None)
+}
+
+/// The boundary hash, with the body digests of the boundary's knowledge
+/// changes when the caller has them (aligned with `record.knowledge_changes`
+/// and their bodies); `None` encodes the bodies afresh. Both give the same
+/// hash.
+pub(super) fn compute_boundary_hash_with(
+    record: &BoundaryRecord,
+    record_change_encodings: Option<&[RecordChangeEncodings]>,
+    knowledge_digests: Option<&[Vec<KnowledgeBodyDigest>]>,
 ) -> Result<String, CanwuError> {
     #[derive(Serialize)]
     struct BoundaryHashMaterial<'a> {
@@ -1036,12 +1048,13 @@ pub(super) fn compute_boundary_hash(
         changes: &'a [BoundaryChange],
         #[serde(skip_serializing_if = "RecordChangeCommitments::is_empty")]
         record_changes: RecordChangeCommitments<'a>,
-        // Commitment format 5: every field of every knowledge change,
-        // including the visibility and producer correlation that load
-        // validation and the holder views read. Omitted while empty, so the
-        // material of a boundary without knowledge changes is unchanged.
+        // Every field of every knowledge change, including the visibility,
+        // producer correlation, and supersession mode that load validation
+        // and the holder views read, with each body as its ID and digest.
+        // Omitted while empty, so the material of a boundary without
+        // knowledge changes is unchanged.
         #[serde(skip_serializing_if = "Option::is_none")]
-        knowledge_changes: Option<&'a [super::BoundaryKnowledgeChange]>,
+        knowledge_changes: Option<KnowledgeChangeCommitments<'a>>,
         #[serde(skip_serializing_if = "maintenance_change_slice_is_empty")]
         maintenance_changes: &'a [super::MaintenanceChangeRecord],
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1061,6 +1074,22 @@ pub(super) fn compute_boundary_hash(
         previous_hash: &'a str,
     }
 
+    let computed;
+    let knowledge_digests = match knowledge_digests {
+        Some(digests)
+            if digests.len() == record.knowledge_changes.len()
+                && digests
+                    .iter()
+                    .zip(&record.knowledge_changes)
+                    .all(|(digests, change)| digests.len() == change.records.len()) =>
+        {
+            digests
+        }
+        _ => {
+            computed = knowledge_change_digests(&record.knowledge_changes)?;
+            computed.as_slice()
+        }
+    };
     let encoded;
     let record_change_encodings = match record_change_encodings {
         Some(encodings) if encodings.len() == record.record_changes.len() => encodings,
@@ -1096,8 +1125,12 @@ pub(super) fn compute_boundary_hash(
                 changes: &record.record_changes,
                 encodings: record_change_encodings,
             },
-            knowledge_changes: (!record.knowledge_changes.is_empty())
-                .then_some(record.knowledge_changes.as_slice()),
+            knowledge_changes: (!record.knowledge_changes.is_empty()).then_some(
+                KnowledgeChangeCommitments {
+                    changes: &record.knowledge_changes,
+                    digests: knowledge_digests,
+                },
+            ),
             maintenance_changes: &record.maintenance_changes,
             maintenance_terminal_root: &record.maintenance_terminal_root,
             person_availability_changes: (!record.person_availability_changes.is_empty())
@@ -1115,6 +1148,86 @@ pub(super) fn compute_boundary_hash(
             previous_hash: &record.previous_hash,
         },
     )
+}
+
+/// The body digests of a boundary's knowledge changes, encoding each body.
+pub(super) fn knowledge_change_digests(
+    changes: &[super::BoundaryKnowledgeChange],
+) -> Result<Vec<Vec<KnowledgeBodyDigest>>, CanwuError> {
+    changes
+        .iter()
+        .map(|change| {
+            change
+                .records
+                .iter()
+                .map(|body| KnowledgeBodyDigest::of(body).map_err(CanwuError::from))
+                .collect()
+        })
+        .collect()
+}
+
+/// The knowledge changes of a boundary as its hash commits to them: every
+/// field of each change, each body replaced by its ID and digest.
+struct KnowledgeChangeCommitments<'a> {
+    changes: &'a [super::BoundaryKnowledgeChange],
+    digests: &'a [Vec<KnowledgeBodyDigest>],
+}
+
+impl Serialize for KnowledgeChangeCommitments<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        #[derive(Serialize)]
+        struct BodyCommitment<'a> {
+            id: super::KnowledgeRecordId,
+            digest: &'a KnowledgeBodyDigest,
+        }
+
+        struct Bodies<'a>(
+            &'a [Arc<super::KnowledgeRecordBody>],
+            &'a [KnowledgeBodyDigest],
+        );
+
+        impl Serialize for Bodies<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.collect_seq(self.0.iter().zip(self.1).map(|(body, digest)| {
+                    BodyCommitment {
+                        id: body.id,
+                        digest,
+                    }
+                }))
+            }
+        }
+
+        struct Change<'a>(
+            &'a super::BoundaryKnowledgeChange,
+            &'a [KnowledgeBodyDigest],
+        );
+
+        impl Serialize for Change<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let change = self.0;
+                let mut state = serializer.serialize_struct("BoundaryKnowledgeChange", 9)?;
+                state.serialize_field("plugin", &change.plugin)?;
+                state.serialize_field("system", &change.system)?;
+                state.serialize_field("phase", &change.phase)?;
+                state.serialize_field("producer_correlation", &change.producer_correlation)?;
+                state.serialize_field("visibility", &change.visibility)?;
+                state.serialize_field("summary", &change.summary)?;
+                state.serialize_field("supersession", &change.supersession)?;
+                state.serialize_field("records", &Bodies(&change.records, self.1))?;
+                state.serialize_field("holders", &change.holders)?;
+                state.end()
+            }
+        }
+
+        serializer.collect_seq(
+            self.changes
+                .iter()
+                .zip(self.digests)
+                .map(|(change, digests)| Change(change, digests)),
+        )
+    }
 }
 
 /// The record changes of a boundary as its hash commits to them: each change

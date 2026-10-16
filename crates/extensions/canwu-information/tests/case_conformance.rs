@@ -634,7 +634,9 @@ fn fixture_information_claimed_source_divergence_separates_claim_from_audit_orig
             .is_none()
     );
     assert!(
-        snapshot.records[&person(8_001)][&KnowledgeRecordId::new(30)]
+        snapshot.records[&person(8_001)]
+            .get(&KnowledgeRecordId::new(30))
+            .ok_or("record 30 is held")?
             .origin
             .evidence
             .contains(&EvidenceRef::Boundary(BoundaryId::new(30)))
@@ -842,15 +844,16 @@ fn fixture_information_contradictory_multi_source_history_views() -> Result<(), 
     assert_eq!(full.records[1].payload["source_code"], "SYN-SOURCE-2");
     assert_eq!(full.records[2].payload["source_code"], "SYN-SOURCE-3");
     let stored = &snapshot.records[&holder];
+    let held = |id| stored.get(&id).ok_or("the holder holds the record");
     assert_ne!(
-        stored[&first_id].origin.evidence,
-        stored[&second_id].origin.evidence
+        held(first_id)?.origin.evidence,
+        held(second_id)?.origin.evidence
     );
     assert_ne!(
-        stored[&first_id].origin.method,
-        stored[&second_id].origin.method
+        held(first_id)?.origin.method,
+        held(second_id)?.origin.method
     );
-    assert_eq!(stored[&synthesis_id].supersedes, vec![first_id, second_id]);
+    assert_eq!(held(synthesis_id)?.supersedes, vec![first_id, second_id]);
     Ok(())
 }
 

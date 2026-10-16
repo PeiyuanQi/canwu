@@ -19,11 +19,14 @@ pub use canwu_core::{
 };
 pub use canwu_event::{CauseRef, EventAudience, EventKind, EventKindError, SimEvent};
 pub use canwu_knowledge::{
-    ActorKnowledge, ArmyKnowledge, CurrentRecords, EstimateRange, HolderLedger, HolderLedgers,
-    HolderLedgersIter, HolderRecordsIter, KnowledgeCursor, KnowledgeHistoryView, KnowledgeOrigin,
+    ActorKnowledge, ArmyKnowledge, BodiesById, CurrentRecords, EstimateRange, HolderEntriesIter,
+    HolderEntry, HolderLedger, HolderLedgers, HolderLedgersIter, HolderRecordsIter,
+    KNOWLEDGE_COMMITMENT_CHUNK_ENTRIES, KnowledgeBodyDigest, KnowledgeCursor,
+    KnowledgeEncodingError, KnowledgeHistoryView, KnowledgeLedgerError, KnowledgeOrigin,
     KnowledgeQuery, KnowledgeQueryError, KnowledgeQueryResult, KnowledgeReadCut, KnowledgeRecord,
-    KnowledgeRecordDraft, KnowledgeRecordView, KnowledgeSnapshot, KnowledgeSource,
-    KnowledgeSubject, KnowledgeSubjectTarget, MAX_KNOWLEDGE_PAGE_SIZE, RecordsById,
+    KnowledgeRecordBody, KnowledgeRecordDraft, KnowledgeRecordView, KnowledgeRetention,
+    KnowledgeSnapshot, KnowledgeSource, KnowledgeSubject, KnowledgeSubjectTarget,
+    MAX_KNOWLEDGE_PAGE_SIZE,
 };
 pub use canwu_routing::{
     DepartureSlot, DurationSample, PlanningSnapshot, ROUTING_ALGORITHM_VERSION, RouteCost,
@@ -66,12 +69,13 @@ pub use canwu_sim::{
     ErrorCode, EvaluationLimitsV1, EvidenceArchiveIndex, EvidenceCursor, EvidenceIndexEntry,
     EvidenceItemLocator, EvidenceJournalKind, EvidenceJournalRoots, EvidenceJournalSegment,
     EvidenceNestedLocator, EvidenceSealToken, ExternalDecisionOption, ExternalDecisionRequest,
-    ExternalDecisionResponse, ExternalPolicy, Government, GuardedUtilityPolicy,
+    ExternalDecisionResponse, ExternalPolicy, Government, GuardedUtilityPolicy, HolderPublication,
     HumanDecisionResponse, HumanPolicy, IDENTITY_EVIDENCE_DEPENDENCIES_FIELD,
     IDENTITY_EVIDENCE_DEPENDENCIES_FORMAT_VERSION, IdentityEvidenceDependenciesV1,
     IngressCancellationAuthority, IngressClass, IngressPayload, IngressReceipt, IngressRecord,
-    InteractionPolicy, Issuer, KnowledgeLimitsV1, KnowledgeSubjectSchema,
-    KnowledgeSubjectTargetKind, KnowledgeWriteGrant, LetterCargo, LetterStatus, LifeState,
+    InteractionPolicy, Issuer, KnowledgeLimitsV1, KnowledgePublicationBudget,
+    KnowledgePublicationGroup, KnowledgeSubjectSchema, KnowledgeSubjectTargetKind,
+    KnowledgeSupersession, KnowledgeWriteGrant, LetterCargo, LetterStatus, LifeState,
     LlmModelIdentity, LlmPolicy, MAX_DECISION_ARCHIVE_BATCH_ENTRIES,
     MAX_DECISION_HISTORY_PAGE_BYTES, MAX_DECISION_HISTORY_PAGE_SIZE,
     MAX_INGRESS_CANCELLATION_REASON_BYTES, MAX_OWNER_AUTHORIZED_MUTATIONS,
@@ -1341,6 +1345,7 @@ impl Canwu {
 /// runtime retains.
 trait ViewerSource {
     fn source_knowledge(&self) -> &KnowledgeSnapshot;
+    fn source_knowledge_retention(&self, schema: &KnowledgeSchemaId) -> Option<KnowledgeRetention>;
     fn source_checkpoint_hash(&self) -> &str;
     fn source_events(&self) -> &[SimEvent];
     fn source_event_audience(&self, event: &SimEvent) -> EventAudience;
@@ -1353,6 +1358,9 @@ trait ViewerSource {
 impl ViewerSource for Simulation {
     fn source_knowledge(&self) -> &KnowledgeSnapshot {
         self.knowledge()
+    }
+    fn source_knowledge_retention(&self, schema: &KnowledgeSchemaId) -> Option<KnowledgeRetention> {
+        self.knowledge_retention(schema)
     }
     fn source_checkpoint_hash(&self) -> &str {
         self.checkpoint_hash()
@@ -1380,6 +1388,9 @@ impl ViewerSource for Simulation {
 impl ViewerSource for CompactedSimulation {
     fn source_knowledge(&self) -> &KnowledgeSnapshot {
         self.knowledge()
+    }
+    fn source_knowledge_retention(&self, schema: &KnowledgeSchemaId) -> Option<KnowledgeRetention> {
+        self.knowledge_retention(schema)
     }
     fn source_checkpoint_hash(&self) -> &str {
         self.checkpoint_hash()
@@ -1412,6 +1423,9 @@ fn admin_query_knowledge(
     source
         .source_knowledge()
         .query_current(holder, query, source.source_latest_boundary_id())
+        .map(|result| {
+            result.with_retention(query, |schema| source.source_knowledge_retention(schema))
+        })
         .map_err(map_knowledge_query_error)
 }
 
@@ -2518,17 +2532,12 @@ impl CanwuViewer<'_> {
                 "the requested knowledge holder does not exist",
             ));
         }
-        let index = usize::try_from(record.get().saturating_sub(1)).map_err(|_| {
-            CanwuError::new(
-                ErrorCode::KnowledgeRecordNotFound,
-                "holder-relative knowledge record ID is outside the supported range",
-            )
-        })?;
+        // Local IDs are stored and never reused, so a record keeps its local
+        // ID when other entries of the holder are retired.
         self.source
             .source_knowledge()
             .for_holder(holder)
-            .and_then(|records| records.values().nth(index))
-            .cloned()
+            .and_then(|records| records.id_of(record).and_then(|id| records.get(&id)))
             .ok_or_else(|| {
                 CanwuError::new(
                     ErrorCode::KnowledgeRecordNotFound,
@@ -2605,11 +2614,9 @@ impl CanwuViewer<'_> {
                 .knowledge_changes
                 .iter()
                 .filter(|change| {
-                    change.holder == holder
-                        && change
-                            .records
-                            .iter()
-                            .any(|record| knowledge_names_subject(record, subject))
+                    change
+                        .bodies_of(&holder)
+                        .any(|body| knowledge_names_subject(&body.subjects, subject))
                 })
                 .map(|change| match change.visibility {
                     StateVisibility::SameBoundary => (boundary.id, change.phase),
@@ -2651,8 +2658,8 @@ fn evaluation_trace_views(
         .collect()
 }
 
-fn knowledge_names_subject(record: &KnowledgeRecord, subject: &EntityRef) -> bool {
-    record.subjects.iter().any(|named| match &named.target {
+fn knowledge_names_subject(subjects: &[KnowledgeSubject], subject: &EntityRef) -> bool {
+    subjects.iter().any(|named| match &named.target {
         KnowledgeSubjectTarget::Entity(entity) => entity == subject,
         KnowledgeSubjectTarget::DomainRecord(reference) => {
             matches!(subject, EntityRef::Domain(domain) if domain == reference)
@@ -2784,11 +2791,26 @@ fn event_visible_to(viewer: &ViewerContext, event: &SimEvent, audience: &EventAu
         EventAudience::KnowledgeHolder(holder) => {
             principal_matches_holder(&viewer.principal, holder)
         }
+        EventAudience::KnowledgeHolders(holders) => principal_holder(&viewer.principal)
+            .is_some_and(|holder| holders.binary_search(&holder).is_ok()),
         EventAudience::AffectedActors => viewer
             .principal
             .person()
             .is_some_and(|actor| event.affected_entities.contains(&EntityRef::Person(actor))),
         EventAudience::Private => false,
+    }
+}
+
+/// The knowledge holder a person or institution principal reads as.
+fn principal_holder(principal: &ObservationPrincipal) -> Option<KnowledgeHolderRef> {
+    match principal {
+        ObservationPrincipal::Person(actor) => Some(KnowledgeHolderRef::Person(*actor)),
+        ObservationPrincipal::Institution(institution) => {
+            Some(KnowledgeHolderRef::Entity(institution.clone()))
+        }
+        ObservationPrincipal::Research
+        | ObservationPrincipal::Developer
+        | ObservationPrincipal::Public => None,
     }
 }
 

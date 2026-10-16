@@ -192,6 +192,7 @@ impl SimulationPlugin for ProductionPlugin {
                 required: true,
                 multiple: false,
             }],
+            retention: canwu_api::KnowledgeRetention::Keep,
         };
         registrar.register_knowledge_schema(report_schema.clone())?;
         registrar.register_archive_reachability_participant(production_archive_reachability)?;
@@ -1321,28 +1322,32 @@ fn publish_holder_reports(
             && holder_count < limits.max_observation_records_per_holder
         {
             directives.push(BoundaryDirective::PublishKnowledge {
-                holder: holder.clone(),
                 visibility: StateVisibility::SameBoundary,
                 producer_correlation: Some(report.id.to_string()),
-                records: vec![KnowledgeRecordDraft {
-                    schema: production_report_knowledge_schema_id(),
-                    subjects: vec![KnowledgeSubject {
-                        role: "site".to_owned(),
-                        target: KnowledgeSubjectTarget::Entity(place),
+                supersession: canwu_api::KnowledgeSupersession::Explicit,
+                groups: vec![canwu_api::KnowledgePublicationGroup {
+                    holders: vec![holder.clone()],
+                    records: vec![KnowledgeRecordDraft {
+                        schema: production_report_knowledge_schema_id(),
+                        subjects: vec![KnowledgeSubject {
+                            role: "site".to_owned(),
+                            target: KnowledgeSubjectTarget::Entity(place),
+                        }],
+                        payload: serde_json::to_value(&report)
+                            .map_err(|error| encode_error(&error))?,
+                        as_of: Some(report.observed_at),
+                        confidence_per_mille: match report.role {
+                            crate::ProductionObservationRole::Operator => 1_000,
+                            crate::ProductionObservationRole::LocalOwner => 900,
+                            crate::ProductionObservationRole::RemoteOwner => 700,
+                        },
+                        origin: KnowledgeOrigin {
+                            method: "production_holder_report_v1".to_owned(),
+                            evidence: source_evidence,
+                        },
+                        supersedes: Vec::new(),
+                        contradicts: Vec::new(),
                     }],
-                    payload: serde_json::to_value(&report).map_err(|error| encode_error(&error))?,
-                    as_of: Some(report.observed_at),
-                    confidence_per_mille: match report.role {
-                        crate::ProductionObservationRole::Operator => 1_000,
-                        crate::ProductionObservationRole::LocalOwner => 900,
-                        crate::ProductionObservationRole::RemoteOwner => 700,
-                    },
-                    origin: KnowledgeOrigin {
-                        method: "production_holder_report_v1".to_owned(),
-                        evidence: source_evidence,
-                    },
-                    supersedes: Vec::new(),
-                    contradicts: Vec::new(),
                 }],
                 summary: "Publish one bounded holder-relative production report".to_owned(),
             });

@@ -80,21 +80,24 @@ fn publish(
 ) -> Result<BoundaryProposal, CanwuError> {
     Ok(BoundaryProposal {
         directives: vec![BoundaryDirective::PublishKnowledge {
-            holder: holder(),
             visibility,
             producer_correlation: None,
-            records: vec![KnowledgeRecordDraft {
-                schema: report_schema(),
-                subjects: vec![about(subject)],
-                payload: json!({ "source": label, "boundary": context.boundary_id.get() }),
-                as_of: Some(context.at),
-                confidence_per_mille: 1_000,
-                origin: KnowledgeOrigin {
-                    method: "fixture.report".to_owned(),
-                    evidence: Vec::new(),
-                },
-                supersedes,
-                contradicts: Vec::new(),
+            supersession: canwu_api::KnowledgeSupersession::Explicit,
+            groups: vec![canwu_api::KnowledgePublicationGroup {
+                holders: vec![holder()],
+                records: vec![KnowledgeRecordDraft {
+                    schema: report_schema(),
+                    subjects: vec![about(subject)],
+                    payload: json!({ "source": label, "boundary": context.boundary_id.get() }),
+                    as_of: Some(context.at),
+                    confidence_per_mille: 1_000,
+                    origin: KnowledgeOrigin {
+                        method: "fixture.report".to_owned(),
+                        evidence: Vec::new(),
+                    },
+                    supersedes,
+                    contradicts: Vec::new(),
+                }],
             }],
             summary: format!("The holder received a {label}"),
         }],
@@ -207,6 +210,7 @@ impl SimulationPlugin for ReportPlugin {
                 required: true,
                 multiple: false,
             }],
+            retention: canwu_api::KnowledgeRetention::Keep,
         })?;
         let (early, late) = (
             BoundaryPhase::PerceptionAndAttentionRefresh,
@@ -277,7 +281,11 @@ fn load(snapshot: &SimulationSnapshot, plugin: &ReportPlugin) -> Result<Canwu, C
 
 /// The record a boundary's `index`-th knowledge change published.
 fn published(canwu: &Canwu, boundary: usize, index: usize) -> KnowledgeRecord {
-    canwu.boundaries()[boundary].knowledge_changes[index].records[0].clone()
+    let change = &canwu.boundaries()[boundary].knowledge_changes[index];
+    change
+        .records_of(&change.holders[0].holder)
+        .next()
+        .expect("the change published a record")
 }
 
 #[test]
@@ -493,16 +501,10 @@ fn gap_g58_sim_same_instant_supersession() {
     refused(&hidden_target);
 
     // A relation cannot point at a later boundary of the same instant: the
-    // first report did not have the second in its ledger.
+    // first report did not have the second in its ledger. The load rebuilds
+    // the ledger boundary by boundary and refuses the first boundary's
+    // relation at its cut, before it compares the ledger it built.
     let mut wrong_way = snapshot;
-    wrong_way.boundaries[0].knowledge_changes[0].records[0].supersedes = vec![second.id];
-    let mut first_report = wrong_way
-        .knowledge
-        .records
-        .record(first.id)
-        .cloned()
-        .expect("first report");
-    first_report.supersedes = vec![second.id];
-    wrong_way.knowledge.records.insert(first_report);
+    wrong_way.boundaries[0].knowledge_changes[0].holders[0].entries[0].supersedes = vec![second.id];
     refused(&wrong_way);
 }

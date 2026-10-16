@@ -1,6 +1,6 @@
 //! Every field of a boundary's knowledge changes is covered by the boundary
-//! hash (commitment format 5), so an edit that load validation would accept
-//! on its own is refused unless the boundary chain is rehashed.
+//! hash (commitment formats 5 and 6), so an edit that load validation would
+//! accept on its own is refused unless the boundary chain is rehashed.
 
 use super::*;
 
@@ -77,7 +77,7 @@ fn boundary_hash_covers_knowledge_change_visibility_and_correlation() {
         snapshot.commitment_format_version,
         COMMITMENT_FORMAT_VERSION
     );
-    assert_eq!(COMMITMENT_FORMAT_VERSION, 5);
+    assert_eq!(COMMITMENT_FORMAT_VERSION, 6);
     let first = &snapshot.boundaries[0].knowledge_changes[0];
     assert_eq!(first.phase, BoundaryPhase::PerceptionAndAttentionRefresh);
     assert_eq!(first.visibility, StateVisibility::SameBoundary);
@@ -97,7 +97,7 @@ fn boundary_hash_covers_knowledge_change_visibility_and_correlation() {
 
     // A snapshot that declares the previous commitment format is refused.
     let mut previous_format = snapshot;
-    previous_format.commitment_format_version = 4;
-    let error = load(previous_format, &plugin).expect_err("a format 4 snapshot must not load");
+    previous_format.commitment_format_version = 5;
+    let error = load(previous_format, &plugin).expect_err("a format 5 snapshot must not load");
     assert_eq!(error.code, ErrorCode::InvalidSnapshot);
 }

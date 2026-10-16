@@ -35,7 +35,6 @@ fn ledger(knowledge: &canwu_api::KnowledgeSnapshot) -> Vec<KnowledgeRecord> {
         .for_holder(&KnowledgeHolderRef::Person(PRINCIPAL))
         .expect("the observer's ledger")
         .values()
-        .cloned()
         .collect()
 }
 

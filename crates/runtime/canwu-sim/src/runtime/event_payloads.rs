@@ -90,8 +90,9 @@ runtime_event_payload!(KnowledgeUpdated, KNOWLEDGE_UPDATED, {
     known_location: TerritoryId,
 });
 runtime_event_payload!(KnowledgePublished, KNOWLEDGE_PUBLISHED, {
-    holder: KnowledgeHolderRef,
+    holders: Vec<KnowledgeHolderRef>,
     record_count: u32,
+    entry_count: u32,
 });
 runtime_event_payload!(DebugFieldChanged, DEBUG_FIELD_CHANGED, {
     entity: EntityRef,

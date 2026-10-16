@@ -5,13 +5,13 @@ use canwu_api::{
     CanwuError, Command, CommandContext, CommandIngress, DomainRecord, DomainRecordClass,
     DomainRecordDraft, DomainRecordKind, DomainRecordLifecycle, DomainRecordMutation,
     DomainRecordRef, DomainRecordSchema, DomainRecordType, EntityRef, ErrorCode, EvidenceRef,
-    IngressClass, IngressId, IngressPayload, Issuer, KnowledgeHolderRef, KnowledgeLimitsV1,
-    KnowledgeOrigin, KnowledgeRecordDraft, KnowledgeRecordKind, KnowledgeSchemaId,
+    IngressClass, IngressId, IngressPayload, Issuer, KnowledgeHolderRef, KnowledgeOrigin,
+    KnowledgePublicationGroup, KnowledgeRecordDraft, KnowledgeRecordKind, KnowledgeSchemaId,
     KnowledgeSubject, KnowledgeSubjectSchema, KnowledgeSubjectTarget, KnowledgeSubjectTargetKind,
-    KnowledgeWriteGrant, LifeState, PayloadSchema, PersonId, PluginActionDescriptor,
-    PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar, RandomOperationTarget,
-    RandomStreamKey, SimDuration, SimTime, SimulationPlugin, SimulationView, StateKey,
-    StateVisibility, SystemCadence, SystemDirective, TypedDomainRecordRef,
+    KnowledgeSupersession, KnowledgeWriteGrant, LifeState, PayloadSchema, PersonId,
+    PluginActionDescriptor, PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar,
+    RandomOperationTarget, RandomStreamKey, SimDuration, SimTime, SimulationPlugin, SimulationView,
+    StateKey, StateVisibility, SystemCadence, SystemDirective, TypedDomainRecordRef,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -183,6 +183,7 @@ fn report_schema() -> canwu_api::PluginKnowledgeSchema {
             required: true,
             multiple: false,
         }],
+        retention: canwu_api::KnowledgeRetention::Keep,
     }
 }
 
@@ -2009,23 +2010,33 @@ fn materialize_reports(
             },
         ));
     }
-    // One batch per commander keeps the pass within the kernel's batch limit;
-    // commanders past that limit, in ID order, get no report this boundary.
+    // One publication per commander, in ID order, while the boundary's
+    // knowledge budget has room for the commander's whole report; the
+    // commanders after the first that does not fit get no report this
+    // boundary.
+    let mut budget = view.knowledge_publication_budget();
     let mut directives = Vec::new();
-    for (commander, forces) in reports
-        .into_iter()
-        .take(KnowledgeLimitsV1::CURRENT.batches_per_system_boundary)
-    {
+    for (commander, forces) in reports {
         let (sources, records): (Vec<String>, Vec<KnowledgeRecordDraft>) =
             forces.into_iter().unzip();
+        let mut payload_bytes = 0_usize;
+        for record in &records {
+            payload_bytes = payload_bytes.saturating_add(record.payload_bytes()?);
+        }
+        if !budget.take(records.len(), records.len(), payload_bytes) {
+            break;
+        }
         directives.push(BoundaryDirective::PublishKnowledge {
-            holder: KnowledgeHolderRef::Person(commander),
             visibility: StateVisibility::SameBoundary,
             producer_correlation: Some(format!(
                 "military-report:{commander}:{}",
                 digest(&sources)?
             )),
-            records,
+            supersession: KnowledgeSupersession::Explicit,
+            groups: vec![KnowledgePublicationGroup {
+                holders: vec![KnowledgeHolderRef::Person(commander)],
+                records,
+            }],
             summary: "Publish actor-relative military force report".to_owned(),
         });
     }

@@ -20,18 +20,17 @@ use super::{
     DomainRecordRef, DomainRecordVersionRef, DomainRecordVersionSource, EntityRef, ErrorCode,
     EventId, EvidenceRef, GENESIS_BOUNDARY_HASH, IngressClass, IngressId, IngressPayload,
     IngressQueueKey, IngressRecord, InteractionPolicy, Issuer, KnowledgeHolderPolicy,
-    KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId, LetterStatus,
-    PersistedAdmissionCursors, PersonId, PluginComponentKey, PluginComponentRecord,
-    PluginIngressTarget, PluginRegistry, RandomAlgorithm, RandomDrawAddress, RandomDrawId,
-    RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, RandomOperationTarget,
-    ReservationAllocation, ReservationDisposition, ReservationPoolKey, ReservationRequestRecord,
-    RunConfigurationSnapshot, RunManifest, RuntimeCurrentState, RuntimeState,
-    STATE_REVISION_FORMAT_VERSION, ScheduleKey, ScheduledAction, SimDuration, SimEvent,
-    SimulationSnapshot, StateVisibility, SystemCadence, SystemDirective, WorldSnapshot,
-    authoritative_revision_count, base_schema, boundaries_before_attempts,
+    KnowledgeHolderRef, KnowledgeSupersession, LetterStatus, PersistedAdmissionCursors, PersonId,
+    PluginComponentKey, PluginComponentRecord, PluginIngressTarget, PluginRegistry,
+    RandomAlgorithm, RandomDrawAddress, RandomDrawId, RandomDrawOutcome, RandomDrawProducer,
+    RandomDrawRecord, RandomOperationTarget, ReservationAllocation, ReservationDisposition,
+    ReservationPoolKey, ReservationRequestRecord, RunConfigurationSnapshot, RunManifest,
+    RuntimeCurrentState, RuntimeState, STATE_REVISION_FORMAT_VERSION, ScheduleKey, ScheduledAction,
+    SimDuration, SimEvent, SimulationSnapshot, StateVisibility, SystemCadence, SystemDirective,
+    WorldSnapshot, authoritative_revision_count, base_schema, boundaries_before_attempts,
     boundary_has_event_ingress, boundary_state_hash_format, boundary_system_due,
     boundary_write_stage, canonical_hash, canonical_text, canonicalize_scenario,
-    commitment_roots_are_canonical, component_key, compute_boundary_hash,
+    commitment_roots_are_canonical, component_key, compute_boundary_hash_with,
     domain_record_commit_stage, invalid_snapshot, invalid_snapshot_error, is_canonical_hash,
     is_domain_record_state, is_expected_command_rejection, maintenance, manifest, plugins, random,
     record_change_affected_entities, records, snapshot_boundary_head_state_hash,
@@ -39,7 +38,9 @@ use super::{
     snapshot_is_at_boundary_head, validate_command_authority, validate_directives,
     validate_scenario, validate_strict_id_order, validate_type_schema,
 };
+use canwu_knowledge::{HolderLedgers, KnowledgeBodyDigest, StagedKnowledgeEntries};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// Describes how an evidence reference can be resolved by a validation backend.
 ///
@@ -329,7 +330,7 @@ fn validate_snapshot_header(
     };
     let Some(initial_scenario) = snapshot.initial_scenario.as_ref() else {
         return invalid_snapshot(
-            "format 8 snapshots require their manifest-bound initial scenario",
+            "format 9 snapshots require their manifest-bound initial scenario",
         );
     };
     let mut canonical = initial_scenario.clone();
@@ -632,10 +633,13 @@ pub(super) fn validate_continuation_state(
     Ok(())
 }
 
+/// The snapshot's keyed random draws, and the generic knowledge ledger
+/// rebuilt from its boundary evidence, which equals the persisted ledger and
+/// shares its bodies with the journal.
 pub(super) fn validate_snapshot(
     snapshot: &SimulationSnapshot,
     plugins: &PluginRegistry,
-) -> Result<random::KeyedDrawLedger, CanwuError> {
+) -> Result<(random::KeyedDrawLedger, HolderLedgers), CanwuError> {
     let initial_domain_records = validate_snapshot_header(snapshot, true)?;
     let domain_records = validate_snapshot_domain_records(snapshot, plugins)?;
     let max_knowledge_record_id = super::knowledge::validate_snapshot_records(
@@ -647,26 +651,28 @@ pub(super) fn validate_snapshot(
         invalid_snapshot_error(format!("invalid generic knowledge ledger: {error}"))
     })?;
     let evidence_context = SnapshotValidationContext::new(snapshot);
-    for records in snapshot.knowledge.records.values() {
-        for record in records.values() {
-            for reference in &record.origin.evidence {
-                if resolve_evidence_reference(&evidence_context, reference)
-                    != EvidenceAvailability::Retained
-                {
-                    return invalid_snapshot(
-                        "generic knowledge origin references missing or wrong-version evidence",
-                    );
-                }
+    for body in snapshot.knowledge.records.bodies() {
+        for reference in &body.origin.evidence {
+            if resolve_evidence_reference(&evidence_context, reference)
+                != EvidenceAvailability::Retained
+            {
+                return invalid_snapshot(
+                    "generic knowledge origin references missing or wrong-version evidence",
+                );
             }
         }
     }
-    let (max_boundary_id, max_boundary_correlation, domain_history, admission_cursors) =
-        validate_boundary_records(
-            snapshot,
-            plugins,
-            &domain_records,
-            initial_domain_records.as_ref(),
-        )?;
+    let (
+        (max_boundary_id, max_boundary_correlation),
+        domain_history,
+        admission_cursors,
+        knowledge_ledger,
+    ) = validate_boundary_records(
+        snapshot,
+        plugins,
+        &domain_records,
+        initial_domain_records.as_ref(),
+    )?;
     super::persons::validate_snapshot_persons(snapshot, plugins)?;
     super::transitions::validate_snapshot_transitions(snapshot, plugins)?;
     if snapshot.admitted_attempt_count != admission_cursors.attempts
@@ -1266,7 +1272,7 @@ pub(super) fn validate_snapshot(
             "persisted state revision does not match committed command, rejection, and boundary evidence",
         );
     }
-    Ok(keyed_draws)
+    Ok((keyed_draws, knowledge_ledger))
 }
 
 fn validate_random_evidence(
@@ -2852,16 +2858,15 @@ fn snapshot_random_draw_by_id(
     journal_record_by_id(&snapshot.random_draws, id.get(), |draw| draw.id.get())
 }
 
-fn initial_domain_record_matches(
+/// Whether `reference` names an initial-scenario record at its initial
+/// version, read through the scenario's index of record positions instead of
+/// a scan of its records.
+pub(super) fn initial_domain_record_matches(
+    index: &super::InitialRecordIndex,
     scenario: Option<&super::Scenario>,
     reference: &DomainRecordVersionRef,
 ) -> bool {
-    reference.version != 0
-        && scenario.is_some_and(|scenario| {
-            scenario.domain_records.iter().any(|record| {
-                record.reference == reference.record && record.version == reference.version
-            })
-        })
+    reference.version != 0 && index.version(scenario, reference).is_some()
 }
 
 fn boundary_domain_record_matches(
@@ -2887,7 +2892,11 @@ fn resolve_runtime_domain_record_version(
     }
     match reference.established_by {
         DomainRecordVersionSource::InitialScenario => {
-            if initial_domain_record_matches(state.metadata.initial_scenario.as_ref(), reference) {
+            if initial_domain_record_matches(
+                &state.metadata.initial_domain_record_indexes,
+                state.metadata.initial_scenario.as_ref(),
+                reference,
+            ) {
                 EvidenceAvailability::Retained
             } else {
                 EvidenceAvailability::Missing
@@ -2934,7 +2943,11 @@ pub(super) fn sealed_version_is_known(
         change_index,
     } = reference.established_by
     else {
-        return initial_domain_record_matches(state.metadata.initial_scenario.as_ref(), reference);
+        return initial_domain_record_matches(
+            &state.metadata.initial_domain_record_indexes,
+            state.metadata.initial_scenario.as_ref(),
+            reference,
+        );
     };
     state
         .metadata
@@ -2966,7 +2979,11 @@ fn resolve_snapshot_domain_record_version(
     }
     match reference.established_by {
         DomainRecordVersionSource::InitialScenario => {
-            if initial_domain_record_matches(snapshot.initial_scenario.as_ref(), reference) {
+            if initial_domain_record_matches(
+                &snapshot.initial_record_index(),
+                snapshot.initial_scenario.as_ref(),
+                reference,
+            ) {
                 EvidenceAvailability::Retained
             } else {
                 EvidenceAvailability::Missing
@@ -2993,14 +3010,24 @@ fn validate_boundary_records(
     plugins: &PluginRegistry,
     final_domain_records: &BTreeMap<DomainRecordRef, DomainRecord>,
     initial_domain_records: Option<&BTreeMap<DomainRecordRef, DomainRecord>>,
-) -> Result<(u64, u64, DomainRecordHistory, PersistedAdmissionCursors), CanwuError> {
+) -> Result<
+    (
+        (u64, u64),
+        DomainRecordHistory,
+        PersistedAdmissionCursors,
+        HolderLedgers,
+    ),
+    CanwuError,
+> {
     let mut boundary_ids = BTreeSet::new();
     let mut emitted_events = BTreeSet::new();
     let mut boundary_correlations = BTreeSet::new();
     let mut boundary_values = BTreeMap::new();
-    // Records rebuilt from boundary evidence, by global ID. A plain map: the
-    // persisted ledgers already built their index when they were decoded.
-    let mut knowledge_values: BTreeMap<KnowledgeRecordId, &KnowledgeRecord> = BTreeMap::new();
+    // The generic ledger rebuilt from boundary evidence, boundary by
+    // boundary, with each schema's retention applied as settlement applied
+    // it. Relations resolve against it, and at the end it must equal the
+    // persisted ledger.
+    let mut knowledge_ledger = HolderLedgers::new();
     let mut next_knowledge_id = 1_u64;
     let mut domain_record_values = final_domain_records.clone();
     for boundary in snapshot.boundaries.iter().rev() {
@@ -3104,13 +3131,13 @@ fn validate_boundary_records(
         )?;
         validate_boundary_reservations(record, snapshot, plugins, &domain_record_values, &cuts)?;
         validate_boundary_changes(record, snapshot, plugins, &domain_record_values, &cuts)?;
-        validate_boundary_knowledge_changes(
+        let knowledge_digests = validate_boundary_knowledge_changes(
             record,
             snapshot,
             plugins,
             &domain_record_values,
             &cuts,
-            &mut knowledge_values,
+            &mut knowledge_ledger,
             &mut next_knowledge_id,
         )?;
         super::evaluation::validate_snapshot_boundary_traces(
@@ -3184,9 +3211,9 @@ fn validate_boundary_records(
         if record.previous_hash != previous_hash
             || !is_canonical_hash(&record.hash)
             || (requires_state_hash && record.state_hash.is_none())
-            || compute_boundary_hash(record, None).map_err(|error| {
-                invalid_snapshot_error(format!("could not verify boundary hash: {error}"))
-            })? != record.hash
+            || compute_boundary_hash_with(record, None, Some(&knowledge_digests)).map_err(
+                |error| invalid_snapshot_error(format!("could not verify boundary hash: {error}")),
+            )? != record.hash
         {
             return invalid_snapshot("boundary hash chain is inconsistent");
         }
@@ -3229,18 +3256,13 @@ fn validate_boundary_records(
             "boundary domain-record changes do not materialize the persisted record state",
         );
     }
-    if knowledge_values.len() != snapshot.knowledge.records.record_count()
-        || knowledge_values
-            .iter()
-            .any(|(id, record)| snapshot.knowledge.records.record(*id) != Some(*record))
-    {
+    if knowledge_ledger != snapshot.knowledge.records {
         return invalid_snapshot(
             "boundary knowledge changes do not reconstruct the persisted generic ledger",
         );
     }
     Ok((
-        max_boundary_id,
-        max_correlation_id,
+        (max_boundary_id, max_correlation_id),
         history,
         PersistedAdmissionCursors {
             attempts: u64::try_from(next_attempt).map_err(|_| {
@@ -3253,6 +3275,7 @@ fn validate_boundary_records(
                 invalid_snapshot_error("admitted event cursor exceeds persisted range")
             })?,
         },
+        knowledge_ledger,
     ))
 }
 
@@ -3967,31 +3990,54 @@ fn expected_owner_authorized_record_changes(
     Ok(expected_changes)
 }
 
-fn validate_boundary_knowledge_changes<'a>(
-    record: &'a BoundaryRecord,
+/// Validates one boundary's knowledge changes against the ledger rebuilt
+/// from earlier boundaries, then commits them into it with each schema's
+/// retention, as settlement did. Returns each change's body digests, from
+/// the one encoding this validation makes of each body.
+///
+/// Per change: the publishing system, its phase and due cadence, the
+/// dispatch order, the per-directive bounds, the producer correlation, and
+/// holders sorted, unique, and eligible at the change's cut. Per body: the
+/// next global ID, the boundary's time, the grant, and the payload charged
+/// to the boundary's budget. Per entry: a body of the change, the holder's
+/// next local ID, valid relation lists, and either relations that resolve at
+/// the publisher's cut (`Explicit`, one holder per body) or exactly the list
+/// the supersession rule gives from the ledger built so far
+/// (`CurrentOnSubjects`), so a tampered list is refused.
+fn validate_boundary_knowledge_changes(
+    record: &BoundaryRecord,
     snapshot: &SimulationSnapshot,
     plugins: &PluginRegistry,
     final_records: &BTreeMap<DomainRecordRef, DomainRecord>,
     cuts: &BoundaryDomainEntityCuts,
-    values: &mut BTreeMap<KnowledgeRecordId, &'a KnowledgeRecord>,
+    ledger: &mut HolderLedgers,
     next_id: &mut u64,
-) -> Result<(), CanwuError> {
+) -> Result<Vec<Vec<KnowledgeBodyDigest>>, CanwuError> {
+    let limits = crate::KnowledgeLimitsV1::CURRENT;
     let mut previous_order = None;
     let mut correlations = BTreeSet::new();
     // Settlement resolves a relation against the ledger earlier boundaries
-    // committed (`values`, which this boundary joins only at its end) and the
-    // records this boundary staged with same-boundary visibility in an earlier
-    // phase. `visible` rebuilds that overlay: a phase's records enter it when
-    // the next phase begins, as settlement stages a phase after its systems ran.
-    let mut visible = super::knowledge::HolderKnowledgeRecords::new();
+    // committed (`ledger`, which this boundary joins only at its end) and the
+    // entries this boundary staged with same-boundary visibility in an
+    // earlier phase. `visible` rebuilds that overlay: a phase's entries enter
+    // it when the next phase begins, as settlement stages a phase after its
+    // systems ran.
+    let mut visible = StagedKnowledgeEntries::new();
     let mut staged_phase = None;
-    let mut staged: Vec<&KnowledgeRecord> = Vec::new();
+    let mut staged: Vec<(
+        &KnowledgeHolderRef,
+        (&Arc<super::KnowledgeRecordBody>, &super::HolderEntry),
+    )> = Vec::new();
+    let mut next_locals = BTreeMap::<&KnowledgeHolderRef, u64>::new();
+    let mut usage = super::knowledge::KnowledgeBudgetUsage::default();
+    let mut digests = Vec::with_capacity(record.knowledge_changes.len());
     for change in &record.knowledge_changes {
         let Some(contract) = snapshot_boundary_contract(plugins, &change.plugin, &change.system)
         else {
             return invalid_snapshot("knowledge change references an unknown boundary system");
         };
         let order = (change.phase, change.plugin.clone(), change.system.clone());
+        let entry_count = change.entry_count();
         if previous_order
             .as_ref()
             .is_some_and(|previous| previous > &order)
@@ -4007,12 +4053,18 @@ fn validate_boundary_knowledge_changes<'a>(
                 boundary_has_event_ingress(record),
             )
             || change.records.is_empty()
-            || change.records.len() > crate::KnowledgeLimitsV1::CURRENT.records_per_batch
+            || change.records.len() > limits.records_per_batch
+            || change.holders.is_empty()
+            || entry_count > limits.holder_entries_per_batch
+            || change
+                .holders
+                .windows(2)
+                .any(|pair| pair[0].holder >= pair[1].holder)
             || !canonical_text(&change.summary)
-            || change.summary.len() > crate::KnowledgeLimitsV1::CURRENT.text_bytes
+            || change.summary.len() > limits.text_bytes
         {
             return invalid_snapshot(
-                "boundary knowledge change is unauthorized, empty, or noncanonical",
+                "boundary knowledge change is unauthorized, empty, unordered, or noncanonical",
             );
         }
         previous_order = Some(order);
@@ -4027,86 +4079,168 @@ fn validate_boundary_knowledge_changes<'a>(
         {
             return invalid_snapshot("boundary knowledge producer correlation is invalid");
         }
-        if !snapshot_knowledge_holder_exists_for_change(
-            snapshot,
-            plugins,
-            final_records,
-            cuts,
-            change.phase,
-            &change.holder,
-        ) {
-            return invalid_snapshot(
-                "boundary knowledge holder was unavailable at its proposal cut",
-            );
-        }
         if staged_phase != Some(change.phase) {
-            for stored in staged.drain(..) {
+            for (holder, (body, entry)) in staged.drain(..) {
                 visible
-                    .entry(stored.holder.clone())
+                    .entry(holder.clone())
                     .or_default()
-                    .insert(stored.id, stored.clone());
+                    .insert(entry.record, (Arc::clone(body), entry.clone()));
             }
             staged_phase = Some(change.phase);
         }
-        for stored in &change.records {
-            if stored.id.get() != *next_id
-                || stored.holder != change.holder
-                || stored.learned_at != record.at
-            {
-                return invalid_snapshot(
-                    "boundary knowledge IDs, holder, or learned time are inconsistent",
-                );
+        let mut change_digests = Vec::with_capacity(change.records.len());
+        let mut payload_bytes = 0_usize;
+        for body in &change.records {
+            if body.id.get() != *next_id || body.learned_at != record.at {
+                return invalid_snapshot("boundary knowledge IDs or learned time are inconsistent");
             }
             let Some(grant) = contract
                 .knowledge_writes
                 .iter()
-                .find(|grant| grant.schema == stored.schema)
+                .find(|grant| grant.schema == body.schema)
             else {
                 return invalid_snapshot("boundary knowledge schema was not granted");
             };
             if !grant.visibilities.contains(&change.visibility)
                 || plugins
                     .knowledge_schemas
-                    .get(&stored.schema)
+                    .get(&body.schema)
                     .is_none_or(|(owner, schema)| owner != &change.plugin || !schema.writable)
             {
                 return invalid_snapshot("boundary knowledge schema ownership is inconsistent");
             }
-            super::knowledge::validate_relation_targets(
-                &change.holder,
-                &stored.schema.kind,
-                stored.supersedes.iter().chain(&stored.contradicts),
-                |id| values.get(&id).copied(),
-                &visible,
-            )
-            .map_err(|error| {
-                invalid_snapshot_error(match error {
-                    super::knowledge::KnowledgeRelationError::Unresolved => {
-                        "boundary knowledge relation target is not in its holder's ledger at the publisher's cut"
-                    }
-                    super::knowledge::KnowledgeRelationError::CrossKind => {
-                        "boundary knowledge relation crosses schema kinds"
-                    }
-                })
-            })?;
-            if change.visibility == StateVisibility::SameBoundary {
-                staged.push(stored);
+            let (digest, bytes) = KnowledgeBodyDigest::with_payload_bytes(body)
+                .map_err(|error| invalid_snapshot_error(error.message()))?;
+            if bytes > limits.payload_bytes_per_record {
+                return invalid_snapshot("boundary knowledge payload exceeds its byte limit");
             }
+            payload_bytes = payload_bytes.saturating_add(bytes);
+            change_digests.push(digest);
             *next_id = next_id.checked_add(1).ok_or_else(|| {
                 invalid_snapshot_error("knowledge record identifier space is exhausted")
             })?;
         }
-    }
-    // Commit, as settlement does at the end of the boundary: later boundaries
-    // resolve relations against these records, whatever their learned time.
-    for change in &record.knowledge_changes {
-        for stored in &change.records {
-            if values.insert(stored.id, stored).is_some() {
-                return invalid_snapshot("boundary knowledge record ID is duplicated");
+        let mut holders_of_body = vec![0_usize; change.records.len()];
+        for publication in &change.holders {
+            let holder = &publication.holder;
+            if publication.entries.is_empty()
+                || !snapshot_knowledge_holder_exists_for_change(
+                    snapshot,
+                    plugins,
+                    final_records,
+                    cuts,
+                    change.phase,
+                    holder,
+                )
+            {
+                return invalid_snapshot(
+                    "boundary knowledge holder was unavailable at its proposal cut",
+                );
+            }
+            let next_local = next_locals.entry(holder).or_insert_with(|| {
+                ledger
+                    .get(holder)
+                    .map_or(1, |ledger| ledger.next_local().get())
+            });
+            let mut previous_record = None;
+            for entry in &publication.entries {
+                let Ok(index) = change
+                    .records
+                    .binary_search_by_key(&entry.record, |body| body.id)
+                else {
+                    return invalid_snapshot(
+                        "boundary knowledge entry names a body of another publication",
+                    );
+                };
+                let body = &change.records[index];
+                holders_of_body[index] += 1;
+                if previous_record.is_some_and(|previous| previous >= entry.record)
+                    || entry.local.get() != *next_local
+                {
+                    return invalid_snapshot(
+                        "boundary knowledge entries or local IDs are out of order",
+                    );
+                }
+                previous_record = Some(entry.record);
+                *next_local = next_local.checked_add(1).ok_or_else(|| {
+                    invalid_snapshot_error("holder-local knowledge ID space is exhausted")
+                })?;
+                super::knowledge::validate_relation_lists(&entry.supersedes, &entry.contradicts)
+                    .map_err(|error| invalid_snapshot_error(error.message))?;
+                match change.supersession {
+                    KnowledgeSupersession::Explicit => {
+                        super::knowledge::validate_relation_targets(
+                            holder,
+                            &body.schema.kind,
+                            entry.supersedes.iter().chain(&entry.contradicts),
+                            ledger,
+                            &visible,
+                        )
+                        .map_err(|error| {
+                            invalid_snapshot_error(match error {
+                                super::knowledge::KnowledgeRelationError::Unresolved => {
+                                    "boundary knowledge relation target is not in its holder's ledger at the publisher's cut"
+                                }
+                                super::knowledge::KnowledgeRelationError::CrossKind => {
+                                    "boundary knowledge relation crosses schema kinds"
+                                }
+                            })
+                        })?;
+                    }
+                    KnowledgeSupersession::CurrentOnSubjects => {
+                        let expected = super::knowledge::current_heads_at_cut(
+                            holder,
+                            &body.schema.kind,
+                            &body.subjects,
+                            ledger,
+                            Some(&visible),
+                            limits.relations_per_record,
+                        );
+                        if expected.truncated
+                            || expected.records != entry.supersedes
+                            || !entry.contradicts.is_empty()
+                        {
+                            return invalid_snapshot(
+                                "boundary knowledge supersession list is not the one its rule gives at the publisher's cut",
+                            );
+                        }
+                    }
+                }
+                if change.visibility == StateVisibility::SameBoundary {
+                    staged.push((holder, (body, entry)));
+                }
             }
         }
+        if holders_of_body.contains(&0)
+            || (change.supersession == KnowledgeSupersession::Explicit
+                && holders_of_body.iter().any(|holders| *holders != 1))
+        {
+            return invalid_snapshot(
+                "boundary knowledge body is unheld, or an Explicit body has more than one holder",
+            );
+        }
+        usage = usage
+            .checked_add(super::knowledge::KnowledgeBudgetUsage {
+                records: change.records.len(),
+                entries: entry_count,
+                payload_bytes,
+            })
+            .map_err(|_| {
+                invalid_snapshot_error("boundary knowledge exceeds the boundary's budget")
+            })?;
+        digests.push(change_digests);
     }
-    Ok(())
+    // Commit, as settlement does at the end of the boundary: later boundaries
+    // resolve relations against these entries, whatever their learned time,
+    // and retention clears what the new entries supersede.
+    super::settlement::commit_knowledge_changes(
+        ledger,
+        &plugins.knowledge_schemas,
+        &record.knowledge_changes,
+        &digests,
+    )
+    .map_err(|error| invalid_snapshot_error(error.message))?;
+    Ok(digests)
 }
 
 fn snapshot_knowledge_holder_exists_for_change(
@@ -4242,23 +4376,20 @@ fn validate_boundary_emissions(
                         "boundary emission references an unknown knowledge change",
                     );
                 };
-                let KnowledgePublished {
-                    holder,
-                    record_count,
-                } = KnowledgePublished::decode(&event.kind).map_err(|_| {
+                let published = KnowledgePublished::decode(&event.kind).map_err(|_| {
                     invalid_snapshot_error("knowledge change emitted the wrong event kind")
                 })?;
-                let expected_affected = match &change.holder {
-                    KnowledgeHolderRef::Person(person) => vec![EntityRef::Person(*person)],
-                    KnowledgeHolderRef::Entity(entity) => vec![entity.clone()],
-                };
+                let expected = super::settlement::knowledge_published(change)
+                    .map_err(|error| invalid_snapshot_error(error.message))?;
                 if !matched_knowledge_changes.insert(change_index)
                     || emission.plugin != change.plugin
                     || emission.system != change.system
-                    || holder != change.holder
-                    || usize::try_from(record_count).ok() != Some(change.records.len())
+                    || published.holders != expected.holders
+                    || published.record_count != expected.record_count
+                    || published.entry_count != expected.entry_count
                     || event.summary != change.summary
-                    || event.affected_entities != expected_affected
+                    || event.affected_entities
+                        != super::settlement::knowledge_published_affected(&expected.holders)
                 {
                     return invalid_snapshot(
                         "boundary knowledge evidence provenance is inconsistent",
@@ -4499,9 +4630,11 @@ fn validate_event_kind(
                 && snapshot.world.army(payload.army).is_some()
                 && snapshot.world.territory(payload.known_location).is_some()
         }),
-        KNOWLEDGE_PUBLISHED => {
-            KnowledgePublished::decode(&event.kind).is_ok_and(|payload| payload.record_count > 0)
-        }
+        KNOWLEDGE_PUBLISHED => KnowledgePublished::decode(&event.kind).is_ok_and(|payload| {
+            payload.record_count > 0
+                && payload.entry_count >= payload.record_count
+                && !payload.holders.is_empty()
+        }),
         DEBUG_FIELD_CHANGED => DebugFieldChanged::decode(&event.kind)
             .is_ok_and(|payload| entity_exists(&payload.entity)),
         PLUGIN => event

@@ -1,5 +1,6 @@
 use super::event_payloads::{KnowledgePublished, RuntimeEventPayload};
 use super::ingress::{PluginIngressCancellationProof, valid_ingress_cancellation_reason};
+use super::knowledge::{BodyShape, KnowledgeBudgetUsage, schema_retention};
 use super::validation::{
     EvidenceAvailability, RuntimeValidationContext, resolve_evidence_reference,
 };
@@ -13,19 +14,24 @@ use super::{
     DecisionOutcome, DecisionPolicyKind, DecisionRandomEvidence, DecisionStage, DomainRecordChange,
     DomainRecordMutation, DomainRecordVersionSource, EntityRef, ErrorCode, EventKind, EvidenceRef,
     GENESIS_BOUNDARY_HASH, HashSet, IngressCancellationAuthority, IngressPayload,
-    KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId, PluginComponentKey,
-    PluginComponentRecord, PluginRegistry, PolicyDecision, RandomDrawAddress, RandomDrawOutcome,
-    RandomOperationTarget, RefCell, ReservationAllocation, ReservationDisposition,
-    ReservationOffer, ReservationOfferRecord, ReservationPoolKey, ReservationRef,
-    ReservationRequest, ReservationRequestRecord, RunConfigurationSnapshot, RuntimeCurrentState,
-    RuntimeState, ScheduleKey, ScheduledAction, SimTime, Simulation, SimulationView,
-    SimulationViewState, StateKey, StateVisibility, SystemCadence, SystemDirective, Value,
-    canonical_hash, canonical_text, catch_unwind, claim_counter, component_key,
-    compute_boundary_hash, invalid_snapshot_error, is_domain_record_state, proposal_entity_exists,
+    KnowledgeHolderRef, KnowledgeRecordId, PluginComponentKey, PluginComponentRecord,
+    PluginRegistry, PolicyDecision, RandomDrawAddress, RandomDrawOutcome, RandomOperationTarget,
+    RefCell, ReservationAllocation, ReservationDisposition, ReservationOffer,
+    ReservationOfferRecord, ReservationPoolKey, ReservationRef, ReservationRequest,
+    ReservationRequestRecord, RunConfigurationSnapshot, RuntimeCurrentState, RuntimeState,
+    ScheduleKey, ScheduledAction, SimTime, Simulation, SimulationView, SimulationViewState,
+    StateKey, StateVisibility, SystemCadence, SystemDirective, Value, canonical_hash,
+    canonical_text, catch_unwind, claim_counter, component_key, compute_boundary_hash_with,
+    invalid_snapshot_error, is_domain_record_state, proposal_entity_exists,
     proposal_entity_identity_exists, random, record_change_affected_entities, records,
     runtime_current_entity_exists, runtime_entity_exists,
     runtime_entity_exists_with_record_overlay, runtime_entity_identity_exists,
     validate_domain_dependents_with_records, validate_runtime_domain_dependents,
+};
+use super::{HolderPublication, KnowledgeSupersession};
+use canwu_knowledge::{
+    HolderEntry, KnowledgeBodyDigest, KnowledgeRecordBody, KnowledgeRetention,
+    StagedKnowledgeEntries,
 };
 use std::sync::Arc;
 
@@ -310,9 +316,15 @@ impl Simulation {
         // The record stages phase 7 and phase 10 prepared for their commits.
         let mut prepared_ordinary_records = None;
         let mut prepared_transition_records = None;
-        let mut visible_knowledge_overlay = BTreeMap::new();
+        let mut visible_knowledge_overlay = StagedKnowledgeEntries::new();
         let mut pending_knowledge_changes = Vec::new();
+        let mut pending_knowledge_digests = Vec::new();
         let mut knowledge_correlations = BTreeSet::new();
+        // What the knowledge publications validated so far in this boundary
+        // took from its budget, system by system in dispatch order, and the
+        // next local ID of each holder the boundary has published to.
+        let mut knowledge_budget_used = KnowledgeBudgetUsage::default();
+        let mut knowledge_next_locals = BTreeMap::new();
         let mut ordinary = Vec::new();
         let mut transitions = Vec::new();
         let mut deferred = Vec::new();
@@ -459,6 +471,8 @@ impl Simulation {
                     boundary_id: Some(boundary_id),
                     proposal_evidence: Some(&proposal_evidence),
                     knowledge_overlay: Some(&visible_knowledge_overlay),
+                    knowledge_schemas: &self.plugins.knowledge_schemas,
+                    knowledge_budget: knowledge_budget_used.remaining(),
                     allocations: Some(&allocations),
                     allowed_reservations: Some(&registered.contract.reservation_reads),
                     random_session: Some(RefCell::new(random_session)),
@@ -518,7 +532,7 @@ impl Simulation {
                     &proposal.directives,
                     evaluation_limits,
                 )?;
-                validate_boundary_proposal(
+                let validated_knowledge = validate_boundary_proposal(
                     &registered.plugin,
                     &registered.contract,
                     view_current,
@@ -533,6 +547,9 @@ impl Simulation {
                     &proposal,
                     &random_execution.draws,
                 )?;
+                knowledge_budget_used =
+                    knowledge_budget_used.checked_add(validated_knowledge.usage)?;
+                let mut validated_publications = validated_knowledge.publications.into_iter();
                 person_writes.stage(
                     &registered.plugin,
                     &registered.contract.name,
@@ -592,12 +609,21 @@ impl Simulation {
                     } else {
                         registered.contract.visibility
                     };
+                    // Validation returned one result per publication, in
+                    // directive order.
+                    let knowledge =
+                        if matches!(directive, BoundaryDirective::PublishKnowledge { .. }) {
+                            validated_publications.next()
+                        } else {
+                            None
+                        };
                     StagedBoundaryDirective {
                         plugin: registered.plugin.clone(),
                         system: registered.contract.name.clone(),
                         phase,
                         visibility,
                         directive,
+                        knowledge,
                     }
                 }));
             }
@@ -633,9 +659,13 @@ impl Simulation {
                     self.stage_knowledge_publications(
                         phase,
                         knowledge_directives,
-                        &mut visible_knowledge_overlay,
-                        &mut pending_knowledge_changes,
-                        &mut knowledge_correlations,
+                        &mut KnowledgeStage {
+                            visible: &mut visible_knowledge_overlay,
+                            pending: &mut pending_knowledge_changes,
+                            digests: &mut pending_knowledge_digests,
+                            correlations: &mut knowledge_correlations,
+                            next_locals: &mut knowledge_next_locals,
+                        },
                     )?;
                 }
                 BoundaryPhase::ReservationAndAllocation => {
@@ -743,9 +773,13 @@ impl Simulation {
                         self.stage_knowledge_publications(
                             phase,
                             knowledge_directives,
-                            &mut visible_knowledge_overlay,
-                            &mut pending_knowledge_changes,
-                            &mut knowledge_correlations,
+                            &mut KnowledgeStage {
+                                visible: &mut visible_knowledge_overlay,
+                                pending: &mut pending_knowledge_changes,
+                                digests: &mut pending_knowledge_digests,
+                                correlations: &mut knowledge_correlations,
+                                next_locals: &mut knowledge_next_locals,
+                            },
                         )?;
                         self.boundary_profiler
                             .enter(super::BoundaryEnginePhase::Staging);
@@ -778,6 +812,7 @@ impl Simulation {
             boundary_id,
             correlation_id,
             &pending_knowledge_changes,
+            &pending_knowledge_digests,
             &mut evidence.emissions,
         )?;
         self.boundary_profiler
@@ -882,6 +917,15 @@ impl Simulation {
         // no record or component value is copied to journal it.
         let change_count = changes.len();
         let record_change_count = record_changes.len();
+        let knowledge_batch_count = pending_knowledge_changes.len();
+        let knowledge_record_count = pending_knowledge_changes
+            .iter()
+            .map(|change| change.records.len())
+            .sum();
+        let knowledge_entry_count = pending_knowledge_changes
+            .iter()
+            .map(BoundaryKnowledgeChange::entry_count)
+            .sum();
         let mut record = BoundaryRecord {
             id: boundary_id,
             at: request.at,
@@ -898,7 +942,8 @@ impl Simulation {
             random_draws: random_draws.clone(),
             changes,
             record_changes,
-            knowledge_changes: pending_knowledge_changes.clone(),
+            // The changes share their bodies with the ledger.
+            knowledge_changes: pending_knowledge_changes,
             maintenance_changes,
             maintenance_terminal_root,
             person_availability_changes,
@@ -913,7 +958,11 @@ impl Simulation {
         };
         self.boundary_profiler
             .enter(super::BoundaryEnginePhase::Hashing);
-        record.hash = compute_boundary_hash(&record, Some(&record_change_encodings))?;
+        record.hash = compute_boundary_hash_with(
+            &record,
+            Some(&record_change_encodings),
+            Some(&pending_knowledge_digests),
+        )?;
         self.boundary_profiler
             .enter(super::BoundaryEnginePhase::Journal);
         let boundary_hash = record.hash.clone();
@@ -947,11 +996,9 @@ impl Simulation {
             boundary_hash,
             change_count,
             record_change_count,
-            knowledge_batch_count: pending_knowledge_changes.len(),
-            knowledge_record_count: pending_knowledge_changes
-                .iter()
-                .map(|change| change.records.len())
-                .sum(),
+            knowledge_batch_count,
+            knowledge_record_count,
+            knowledge_entry_count,
             allocations: allocation_records,
             created_persons: created_persons
                 .iter()
@@ -1660,47 +1707,23 @@ impl Simulation {
         Ok(())
     }
 
+    /// Stages the knowledge publications of one phase, in dispatch order:
+    /// one global ID per body, one local ID per holder entry from the
+    /// holder's counter, one `Arc` per body shared by the overlay, the
+    /// journal, and the ledger, and the digests validation computed.
     fn stage_knowledge_publications(
         &mut self,
         phase: BoundaryPhase,
         directives: Vec<StagedBoundaryDirective>,
-        visible_overlay: &mut BTreeMap<
-            KnowledgeHolderRef,
-            BTreeMap<KnowledgeRecordId, KnowledgeRecord>,
-        >,
-        pending: &mut Vec<BoundaryKnowledgeChange>,
-        correlations: &mut BTreeSet<(String, String, String)>,
+        stage: &mut KnowledgeStage<'_>,
     ) -> Result<(), CanwuError> {
-        let new_record_count = directives
-            .iter()
-            .map(|staged| match &staged.directive {
-                BoundaryDirective::PublishKnowledge { records, .. } => records.len(),
-                _ => 0,
-            })
-            .sum::<usize>();
-        let total_records = pending
-            .iter()
-            .map(|change| change.records.len())
-            .sum::<usize>()
-            .checked_add(new_record_count)
-            .ok_or_else(|| {
-                CanwuError::new(
-                    ErrorCode::KnowledgeLimitExceeded,
-                    "boundary knowledge record count exceeds platform range",
-                )
-            })?;
-        if total_records > crate::KnowledgeLimitsV1::CURRENT.records_per_boundary {
-            return Err(CanwuError::new(
-                ErrorCode::KnowledgeLimitExceeded,
-                "boundary knowledge record limit exceeded",
-            ));
-        }
+        let learned_at = self.state.scheduler.now;
         for staged in directives {
             let BoundaryDirective::PublishKnowledge {
-                holder,
                 visibility,
                 producer_correlation,
-                records: drafts,
+                supersession,
+                groups,
                 summary,
             } = staged.directive
             else {
@@ -1709,8 +1732,14 @@ impl Simulation {
                     "knowledge stage received an ordinary directive",
                 ));
             };
+            let Some(validated) = staged.knowledge else {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidBoundary,
+                    "knowledge stage received an unvalidated publication",
+                ));
+            };
             if let Some(value) = &producer_correlation
-                && !correlations.insert((
+                && !stage.correlations.insert((
                     staged.plugin.clone(),
                     staged.system.clone(),
                     value.clone(),
@@ -1721,93 +1750,153 @@ impl Simulation {
                     "producer correlation is duplicated within one system and boundary",
                 ));
             }
-            let mut records = Vec::with_capacity(drafts.len());
-            for draft in drafts {
-                let (id, next_id) = claim_counter(
-                    self.state.counters.next_knowledge_record_id,
-                    "knowledge record ID",
-                )?;
-                self.state.counters.next_knowledge_record_id = next_id;
-                let record = KnowledgeRecord {
-                    id: KnowledgeRecordId::new(id),
-                    holder: holder.clone(),
-                    schema: draft.schema,
-                    subjects: draft.subjects,
-                    payload: draft.payload,
-                    as_of: draft.as_of,
-                    learned_at: self.state.scheduler.now,
-                    confidence_per_mille: draft.confidence_per_mille,
-                    origin: draft.origin,
-                    supersedes: draft.supersedes,
-                    contradicts: draft.contradicts,
-                };
-                if visibility == StateVisibility::SameBoundary {
-                    visible_overlay
-                        .entry(holder.clone())
-                        .or_default()
-                        .insert(record.id, record.clone());
-                }
-                records.push(record);
+            let mut records = Vec::new();
+            let mut digests = Vec::new();
+            let mut holders = BTreeMap::<KnowledgeHolderRef, Vec<HolderEntry>>::new();
+            if validated.groups.len() != groups.len() {
+                return Err(knowledge_stage_misaligned());
             }
-            pending.push(BoundaryKnowledgeChange {
+            for (group, validated) in groups.into_iter().zip(validated.groups) {
+                let aligned = validated.digests.len() == group.records.len()
+                    && match supersession {
+                        KnowledgeSupersession::Explicit => {
+                            group.holders.len() == 1 && validated.computed.is_empty()
+                        }
+                        KnowledgeSupersession::CurrentOnSubjects => {
+                            validated.computed.len() == group.holders.len()
+                                && validated
+                                    .computed
+                                    .iter()
+                                    .all(|lists| lists.len() == group.records.len())
+                        }
+                    };
+                if !aligned {
+                    return Err(knowledge_stage_misaligned());
+                }
+                let mut computed = validated.computed.into_iter();
+                let mut ids = Vec::with_capacity(group.records.len());
+                let mut relations = Vec::with_capacity(group.records.len());
+                for mut draft in group.records {
+                    let (id, next_id) = claim_counter(
+                        self.state.counters.next_knowledge_record_id,
+                        "knowledge record ID",
+                    )?;
+                    self.state.counters.next_knowledge_record_id = next_id;
+                    let id = KnowledgeRecordId::new(id);
+                    relations.push((
+                        std::mem::take(&mut draft.supersedes),
+                        std::mem::take(&mut draft.contradicts),
+                    ));
+                    ids.push(id);
+                    records.push(Arc::new(KnowledgeRecordBody {
+                        id,
+                        schema: draft.schema,
+                        subjects: draft.subjects,
+                        payload: draft.payload,
+                        as_of: draft.as_of,
+                        learned_at,
+                        confidence_per_mille: draft.confidence_per_mille,
+                        origin: draft.origin,
+                    }));
+                }
+                digests.extend(validated.digests);
+                let first = records.len() - ids.len();
+                for holder in group.holders {
+                    // Under `Explicit` the group has one holder, which takes
+                    // the drafts' own lists; under `CurrentOnSubjects` each
+                    // holder takes the lists computed for it.
+                    let mut lists = computed.next().map(Vec::into_iter);
+                    let committed = &self.state.current.knowledge.records;
+                    let next_local = stage.next_locals.entry(holder.clone()).or_insert_with(|| {
+                        committed
+                            .get(&holder)
+                            .map_or(1, |ledger| ledger.next_local().get())
+                    });
+                    let entries = holders.entry(holder.clone()).or_default();
+                    for (draft_index, id) in ids.iter().enumerate() {
+                        let local = *next_local;
+                        *next_local = local.checked_add(1).ok_or_else(|| {
+                            CanwuError::new(
+                                ErrorCode::IdentifierExhausted,
+                                "holder-local knowledge record ID space is exhausted",
+                            )
+                        })?;
+                        let (supersedes, contradicts) = match lists.as_mut() {
+                            None => std::mem::take(&mut relations[draft_index]),
+                            Some(lists) => (
+                                lists.next().ok_or_else(knowledge_stage_misaligned)?,
+                                Vec::new(),
+                            ),
+                        };
+                        let entry = HolderEntry {
+                            record: *id,
+                            local: canwu_core::HolderKnowledgeRecordId::new(local),
+                            supersedes,
+                            contradicts,
+                        };
+                        if visibility == StateVisibility::SameBoundary {
+                            stage.visible.entry(holder.clone()).or_default().insert(
+                                *id,
+                                (Arc::clone(&records[first + draft_index]), entry.clone()),
+                            );
+                        }
+                        entries.push(entry);
+                    }
+                }
+            }
+            stage.pending.push(BoundaryKnowledgeChange {
                 plugin: staged.plugin,
                 system: staged.system,
                 phase,
-                holder,
                 producer_correlation,
-                records,
                 visibility,
                 summary,
+                supersession,
+                records,
+                holders: holders
+                    .into_iter()
+                    .map(|(holder, entries)| HolderPublication { holder, entries })
+                    .collect(),
             });
+            stage.digests.push(digests);
         }
         Ok(())
     }
 
+    /// Commits the boundary's publications into a shared clone of the
+    /// ledgers, then applies retention: in holder order, then ID order, each
+    /// new entry of a schema that retires what it supersedes retires its
+    /// targets, which drops their names and, at zero holders, their bodies.
     fn commit_knowledge_publications(
         &mut self,
         boundary_id: BoundaryId,
         correlation_id: u64,
         changes: &[BoundaryKnowledgeChange],
+        digests: &[Vec<KnowledgeBodyDigest>],
         emissions: &mut Vec<BoundaryEmission>,
     ) -> Result<(), CanwuError> {
         if changes.is_empty() {
             return Ok(());
         }
         // The ledgers are persistent: this clone shares them, and each
-        // insertion copies only the paths it changes and updates the holder's
-        // index of current records. The boundary's transaction checkpoint
-        // keeps the previous ledgers, so a later failure restores them.
+        // insertion copies only the paths it changes. The boundary's
+        // transaction checkpoint keeps the previous ledgers, so a later
+        // failure restores them.
         let mut ledger = self.state.current.knowledge.records.clone();
-        for change in changes {
-            for record in &change.records {
-                if record.holder != change.holder || ledger.record(record.id).is_some() {
-                    return Err(CanwuError::new(
-                        ErrorCode::InvalidKnowledgeRecord,
-                        "knowledge publication names another holder or reuses a global record ID",
-                    ));
-                }
-                ledger.insert(record.clone());
-            }
-        }
+        commit_knowledge_changes(
+            &mut ledger,
+            &self.plugins.knowledge_schemas,
+            changes,
+            digests,
+        )?;
+        ledger.refresh_commitment();
         std::sync::Arc::make_mut(&mut self.state.current.knowledge).records = ledger;
         self.invalidate_commitments(CommitmentDomains::KNOWLEDGE_RECORDS);
         for (index, change) in changes.iter().enumerate() {
-            let record_count = u32::try_from(change.records.len()).map_err(|_| {
-                CanwuError::new(
-                    ErrorCode::KnowledgeLimitExceeded,
-                    "knowledge publication event count exceeds u32",
-                )
-            })?;
-            let affected = match &change.holder {
-                KnowledgeHolderRef::Person(person) => vec![EntityRef::Person(*person)],
-                KnowledgeHolderRef::Entity(entity) => vec![entity.clone()],
-            };
+            let published = knowledge_published(change)?;
+            let affected = knowledge_published_affected(&published.holders);
             let event = self.append_event(
-                KnowledgePublished {
-                    holder: change.holder.clone(),
-                    record_count,
-                }
-                .into_kind(),
+                published.into_kind(),
                 affected,
                 change.summary.clone(),
                 Some(CauseRef::Boundary(boundary_id)),
@@ -2040,6 +2129,126 @@ struct StagedBoundaryDirective {
     phase: BoundaryPhase,
     visibility: StateVisibility,
     directive: BoundaryDirective,
+    /// What validation computed for a `PublishKnowledge` directive.
+    knowledge: Option<ValidatedPublication>,
+}
+
+/// The boundary-wide state the knowledge stage of each phase extends.
+struct KnowledgeStage<'a> {
+    visible: &'a mut StagedKnowledgeEntries,
+    pending: &'a mut Vec<BoundaryKnowledgeChange>,
+    /// Aligned with `pending`: each change's body digests.
+    digests: &'a mut Vec<Vec<KnowledgeBodyDigest>>,
+    correlations: &'a mut BTreeSet<(String, String, String)>,
+    next_locals: &'a mut BTreeMap<KnowledgeHolderRef, u64>,
+}
+
+/// What validating one system's proposal computed for its knowledge
+/// publications: what they take from the boundary's budget, and per
+/// publication the body digests and computed relation lists staging uses, so
+/// that a body is encoded and its supersession resolved once.
+#[derive(Default)]
+struct ValidatedKnowledge {
+    usage: KnowledgeBudgetUsage,
+    publications: Vec<ValidatedPublication>,
+}
+
+struct ValidatedPublication {
+    groups: Vec<ValidatedGroup>,
+}
+
+struct ValidatedGroup {
+    /// Aligned with the group's drafts.
+    digests: Vec<KnowledgeBodyDigest>,
+    /// Under `CurrentOnSubjects`, by holder then draft: the IDs the entry
+    /// supersedes. Empty under `Explicit`.
+    computed: Vec<Vec<Vec<KnowledgeRecordId>>>,
+}
+
+/// Inserts committed knowledge changes into `ledger` and applies each
+/// schema's retention, as a settling boundary commits them and as load
+/// validation replays them. `digests` are aligned with `changes` and their
+/// bodies.
+pub(super) fn commit_knowledge_changes(
+    ledger: &mut super::HolderLedgers,
+    schemas: &super::knowledge::KnowledgeSchemas,
+    changes: &[BoundaryKnowledgeChange],
+    digests: &[Vec<KnowledgeBodyDigest>],
+) -> Result<(), CanwuError> {
+    let mut retiring = Vec::new();
+    for (change, digests) in changes.iter().zip(digests) {
+        if digests.len() != change.records.len() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidKnowledgeRecord,
+                "knowledge publication digests do not match its bodies",
+            ));
+        }
+        ledger
+            .insert_publication(
+                change.records.iter().cloned().zip(digests.iter().copied()),
+                change
+                    .holders
+                    .iter()
+                    .map(|publication| (&publication.holder, publication.entries.as_slice())),
+            )
+            .map_err(|error| {
+                CanwuError::new(
+                    ErrorCode::InvalidKnowledgeRecord,
+                    format!("knowledge publication cannot be committed: {error:?}"),
+                )
+            })?;
+        for publication in &change.holders {
+            for entry in &publication.entries {
+                let retires = !entry.supersedes.is_empty()
+                    && change.body(entry.record).is_some_and(|body| {
+                        schema_retention(schemas, &body.schema)
+                            == KnowledgeRetention::RetireWhenSuperseded
+                    });
+                if retires {
+                    retiring.push((&publication.holder, entry.record));
+                }
+            }
+        }
+    }
+    retiring.sort_unstable();
+    for (holder, id) in retiring {
+        ledger.retire_superseded_by(holder, id);
+    }
+    Ok(())
+}
+
+/// The event one knowledge change emits.
+pub(super) fn knowledge_published(
+    change: &BoundaryKnowledgeChange,
+) -> Result<KnowledgePublished, CanwuError> {
+    let count = |count: usize| {
+        u32::try_from(count).map_err(|_| {
+            CanwuError::new(
+                ErrorCode::KnowledgeLimitExceeded,
+                "knowledge publication event count exceeds u32",
+            )
+        })
+    };
+    Ok(KnowledgePublished {
+        holders: change
+            .holders
+            .iter()
+            .map(|publication| publication.holder.clone())
+            .collect(),
+        record_count: count(change.records.len())?,
+        entry_count: count(change.entry_count())?,
+    })
+}
+
+/// The affected entities of a knowledge publication event: its holders.
+pub(super) fn knowledge_published_affected(holders: &[KnowledgeHolderRef]) -> Vec<EntityRef> {
+    holders
+        .iter()
+        .map(|holder| match holder {
+            KnowledgeHolderRef::Person(person) => EntityRef::Person(*person),
+            KnowledgeHolderRef::Entity(entity) => entity.clone(),
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -2131,10 +2340,10 @@ fn validate_boundary_proposal(
     pending_evidence: &PendingBoundaryEvidence,
     plugins: &PluginRegistry,
     record_overlay: &records::DomainRecordOverlay,
-    knowledge_overlay: &BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>,
+    knowledge_overlay: &StagedKnowledgeEntries,
     proposal: &BoundaryProposal,
     pending_random_draws: &[random::PendingRandomDraw],
-) -> Result<(), CanwuError> {
+) -> Result<ValidatedKnowledge, CanwuError> {
     if contract.phase != BoundaryPhase::ReservationAndAllocation
         && (!proposal.offers.is_empty() || !proposal.requests.is_empty())
     {
@@ -2205,21 +2414,11 @@ fn validate_boundary_proposal(
         }
     }
 
-    let publication_count = proposal
-        .directives
-        .iter()
-        .filter(|directive| matches!(directive, BoundaryDirective::PublishKnowledge { .. }))
-        .count();
-    if publication_count > crate::KnowledgeLimitsV1::CURRENT.batches_per_system_boundary {
-        return Err(CanwuError::new(
-            ErrorCode::KnowledgeLimitExceeded,
-            "system knowledge publication batch limit exceeded",
-        ));
-    }
+    let mut validated_knowledge = ValidatedKnowledge::default();
     let mut component_keys = BTreeSet::new();
     let mut record_targets = BTreeSet::new();
     let mut producer_correlations = BTreeSet::new();
-    let mut canonical_drafts = BTreeSet::new();
+    let mut published_entries = BTreeSet::new();
     let mut random_decision_samples = BTreeSet::new();
     let mut cancelled_ingress = BTreeSet::new();
     for directive in &proposal.directives {
@@ -2328,30 +2527,12 @@ fn validate_boundary_proposal(
                 }
             }
             BoundaryDirective::PublishKnowledge {
-                holder,
                 visibility,
                 producer_correlation,
-                records,
+                supersession,
+                groups,
                 summary,
             } => {
-                if !matches!(
-                    contract.phase,
-                    BoundaryPhase::PerceptionAndAttentionRefresh
-                        | BoundaryPhase::PerspectiveAndReportMaterialization
-                ) {
-                    return Err(CanwuError::new(
-                        ErrorCode::UndeclaredKnowledgeWrite,
-                        "knowledge publication is allowed only in phases 4 and 13",
-                    ));
-                }
-                if records.is_empty()
-                    || records.len() > crate::KnowledgeLimitsV1::CURRENT.records_per_batch
-                {
-                    return Err(CanwuError::new(
-                        ErrorCode::KnowledgeLimitExceeded,
-                        "knowledge publication batch is empty or exceeds its record limit",
-                    ));
-                }
                 if !canonical_text(summary)
                     || summary.len() > crate::KnowledgeLimitsV1::CURRENT.text_bytes
                 {
@@ -2370,86 +2551,25 @@ fn validate_boundary_proposal(
                         "producer correlation is invalid or duplicated",
                     ));
                 }
-                for draft in records {
-                    let Some(grant) = contract
-                        .knowledge_writes
-                        .iter()
-                        .find(|grant| grant.schema == draft.schema)
-                    else {
-                        return Err(CanwuError::new(
-                            ErrorCode::UndeclaredKnowledgeWrite,
-                            format!(
-                                "boundary system {plugin}.{} did not declare the knowledge schema",
-                                contract.name
-                            ),
-                        ));
-                    };
-                    if !grant.visibilities.contains(visibility) {
-                        return Err(CanwuError::new(
-                            ErrorCode::UndeclaredKnowledgeWrite,
-                            "knowledge publication visibility is not granted",
-                        ));
-                    }
-                    let Some((owner, schema)) = plugins.knowledge_schemas.get(&draft.schema) else {
-                        return Err(CanwuError::new(
-                            ErrorCode::InvalidKnowledgeSchema,
-                            "knowledge publication uses an unregistered schema",
-                        ));
-                    };
-                    if owner != plugin || !schema.writable {
-                        return Err(CanwuError::new(
-                            ErrorCode::UndeclaredKnowledgeWrite,
-                            "knowledge publication uses a foreign or read-only schema",
-                        ));
-                    }
-                    super::knowledge::validate_draft(
-                        draft,
-                        schema,
-                        holder,
+                let publication = validate_knowledge_publication(
+                    &KnowledgePublicationContext {
+                        plugin,
+                        contract,
                         current,
-                        &plugins.record_schemas,
-                    )?;
-                    for reference in &draft.origin.evidence {
-                        validate_proposal_evidence_reference(
-                            runtime,
-                            boundary_id,
-                            pending_evidence,
-                            reference,
-                        )?;
-                    }
-                    // Snapshot validation applies the same rule to the same
-                    // two sets, so a load accepts exactly what is admitted
-                    // here.
-                    super::knowledge::validate_relation_targets(
-                        holder,
-                        &draft.schema.kind,
-                        draft.supersedes.iter().chain(&draft.contradicts),
-                        |id| current.knowledge.records.record(id),
+                        runtime,
+                        boundary_id,
+                        pending_evidence,
+                        plugins,
                         knowledge_overlay,
-                    )
-                    .map_err(|error| match error {
-                        super::knowledge::KnowledgeRelationError::Unresolved => CanwuError::new(
-                            ErrorCode::KnowledgeRecordNotFound,
-                            "knowledge relation does not resolve for the same holder at this cut",
-                        ),
-                        super::knowledge::KnowledgeRelationError::CrossKind => CanwuError::new(
-                            ErrorCode::InvalidKnowledgeRecord,
-                            "knowledge supersession and contradiction cannot cross schema kinds",
-                        ),
-                    })?;
-                    let encoded = serde_json::to_vec(&(holder, draft)).map_err(|error| {
-                        CanwuError::new(
-                            ErrorCode::InvalidKnowledgeRecord,
-                            format!("holder-scoped knowledge draft could not be encoded: {error}"),
-                        )
-                    })?;
-                    if !canonical_drafts.insert(encoded) {
-                        return Err(CanwuError::new(
-                            ErrorCode::InvalidKnowledgeRecord,
-                            "one system proposal contains a duplicate canonical knowledge draft",
-                        ));
-                    }
-                }
+                        learned_at: now,
+                    },
+                    *visibility,
+                    *supersession,
+                    groups,
+                    &mut published_entries,
+                    &mut validated_knowledge.usage,
+                )?;
+                validated_knowledge.publications.push(publication);
             }
             BoundaryDirective::ScheduleIngress {
                 after,
@@ -2652,7 +2772,249 @@ fn validate_boundary_proposal(
             }
         }
     }
-    Ok(())
+    Ok(validated_knowledge)
+}
+
+/// What validating one knowledge publication reads.
+struct KnowledgePublicationContext<'a> {
+    plugin: &'a str,
+    contract: &'a BoundarySystemContract,
+    current: &'a RuntimeCurrentState,
+    runtime: &'a RuntimeState,
+    boundary_id: BoundaryId,
+    pending_evidence: &'a PendingBoundaryEvidence,
+    plugins: &'a PluginRegistry,
+    knowledge_overlay: &'a StagedKnowledgeEntries,
+    learned_at: SimTime,
+}
+
+/// Validates one `PublishKnowledge` directive at the publisher's cut and
+/// adds what it takes to `usage`.
+///
+/// Per directive: the phase, the per-directive bounds, sorted unique holders
+/// per group, and one holder per group under `Explicit`. Per group holder:
+/// eligibility. Per draft, once whatever the number of holders: the grant and
+/// schema, one canonical encoding giving the body digest and the payload
+/// bytes the budget charges, the body's shape, the relation lists, and the
+/// origin evidence. Per holder and draft: the relation rule under
+/// `Explicit`, or the computed list under `CurrentOnSubjects`, and the
+/// duplicate check, which keeps a digest per entry instead of its bytes.
+fn validate_knowledge_publication<'p>(
+    context: &KnowledgePublicationContext<'_>,
+    visibility: StateVisibility,
+    supersession: KnowledgeSupersession,
+    groups: &'p [super::KnowledgePublicationGroup],
+    published_entries: &mut BTreeSet<(&'p KnowledgeHolderRef, [u8; 32])>,
+    usage: &mut KnowledgeBudgetUsage,
+) -> Result<ValidatedPublication, CanwuError> {
+    let limits = crate::KnowledgeLimitsV1::CURRENT;
+    if !matches!(
+        context.contract.phase,
+        BoundaryPhase::PerceptionAndAttentionRefresh
+            | BoundaryPhase::PerspectiveAndReportMaterialization
+    ) {
+        return Err(CanwuError::new(
+            ErrorCode::UndeclaredKnowledgeWrite,
+            "knowledge publication is allowed only in phases 4 and 13",
+        ));
+    }
+    let bodies = groups
+        .iter()
+        .map(|group| group.records.len())
+        .fold(0_usize, usize::saturating_add);
+    let entries = groups
+        .iter()
+        .map(|group| group.holders.len().saturating_mul(group.records.len()))
+        .fold(0_usize, usize::saturating_add);
+    if groups.is_empty()
+        || groups
+            .iter()
+            .any(|group| group.holders.is_empty() || group.records.is_empty())
+        || bodies > limits.records_per_batch
+        || entries > limits.holder_entries_per_batch
+    {
+        return Err(CanwuError::new(
+            ErrorCode::KnowledgeLimitExceeded,
+            "knowledge publication has an empty group or exceeds its per-directive record or entry bound",
+        ));
+    }
+    let current = context.current;
+    let record_schemas = &context.plugins.record_schemas;
+    let committed = &current.knowledge.records;
+    let mut validated = Vec::with_capacity(groups.len());
+    for group in groups {
+        if group.holders.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidKnowledgeRecord,
+                "knowledge publication group holders must be sorted and unique",
+            ));
+        }
+        if supersession == KnowledgeSupersession::Explicit && group.holders.len() != 1 {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidKnowledgeRecord,
+                "an Explicit knowledge publication group must have exactly one holder",
+            ));
+        }
+        for holder in &group.holders {
+            super::knowledge::validate_holder_for_publication(holder, current, record_schemas)?;
+        }
+        let mut digests = Vec::with_capacity(group.records.len());
+        for draft in &group.records {
+            let Some(grant) = context
+                .contract
+                .knowledge_writes
+                .iter()
+                .find(|grant| grant.schema == draft.schema)
+            else {
+                return Err(CanwuError::new(
+                    ErrorCode::UndeclaredKnowledgeWrite,
+                    format!(
+                        "boundary system {}.{} did not declare the knowledge schema",
+                        context.plugin, context.contract.name
+                    ),
+                ));
+            };
+            if !grant.visibilities.contains(&visibility) {
+                return Err(CanwuError::new(
+                    ErrorCode::UndeclaredKnowledgeWrite,
+                    "knowledge publication visibility is not granted",
+                ));
+            }
+            let Some((owner, schema)) = context.plugins.knowledge_schemas.get(&draft.schema) else {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidKnowledgeSchema,
+                    "knowledge publication uses an unregistered schema",
+                ));
+            };
+            if owner != context.plugin || !schema.writable {
+                return Err(CanwuError::new(
+                    ErrorCode::UndeclaredKnowledgeWrite,
+                    "knowledge publication uses a foreign or read-only schema",
+                ));
+            }
+            let (digest, payload_bytes) = KnowledgeBodyDigest::of_draft(draft, context.learned_at)?;
+            super::knowledge::validate_body_shape(
+                &BodyShape::of_draft(draft),
+                payload_bytes,
+                schema,
+                current,
+                record_schemas,
+                true,
+            )?;
+            super::knowledge::validate_relation_lists(&draft.supersedes, &draft.contradicts)?;
+            for reference in &draft.origin.evidence {
+                validate_proposal_evidence_reference(
+                    context.runtime,
+                    context.boundary_id,
+                    context.pending_evidence,
+                    reference,
+                )?;
+            }
+            match supersession {
+                KnowledgeSupersession::Explicit => {
+                    // Load validation applies the same rule to the same two
+                    // sets, so a load accepts exactly what is admitted here.
+                    super::knowledge::validate_relation_targets(
+                        &group.holders[0],
+                        &draft.schema.kind,
+                        draft.supersedes.iter().chain(&draft.contradicts),
+                        committed,
+                        context.knowledge_overlay,
+                    )
+                    .map_err(knowledge_relation_error)?;
+                }
+                KnowledgeSupersession::CurrentOnSubjects => {
+                    if !draft.supersedes.is_empty() || !draft.contradicts.is_empty() {
+                        return Err(CanwuError::new(
+                            ErrorCode::InvalidKnowledgeRecord,
+                            "a CurrentOnSubjects knowledge draft must not name relations",
+                        ));
+                    }
+                }
+            }
+            usage.payload_bytes = usage.payload_bytes.saturating_add(payload_bytes);
+            digests.push(digest);
+        }
+        let mut computed = Vec::new();
+        if supersession == KnowledgeSupersession::CurrentOnSubjects {
+            for holder in &group.holders {
+                let mut lists = Vec::with_capacity(group.records.len());
+                for draft in &group.records {
+                    let heads = super::knowledge::current_heads_at_cut(
+                        holder,
+                        &draft.schema.kind,
+                        &draft.subjects,
+                        committed,
+                        Some(context.knowledge_overlay),
+                        limits.relations_per_record,
+                    );
+                    if heads.truncated {
+                        return Err(CanwuError::new(
+                            ErrorCode::InvalidKnowledgeRecord,
+                            "a CurrentOnSubjects knowledge draft matches more current records than one record may supersede",
+                        ));
+                    }
+                    lists.push(heads.records);
+                }
+                computed.push(lists);
+            }
+        }
+        for holder in &group.holders {
+            for (draft, digest) in group.records.iter().zip(&digests) {
+                if !published_entries.insert((holder, entry_key(digest, draft))) {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidKnowledgeRecord,
+                        "one system proposal publishes the same knowledge draft to one holder twice",
+                    ));
+                }
+            }
+        }
+        validated.push(ValidatedGroup { digests, computed });
+    }
+    usage.records = usage.records.saturating_add(bodies);
+    usage.entries = usage.entries.saturating_add(entries);
+    Ok(ValidatedPublication { groups: validated })
+}
+
+/// The duplicate-check key of a draft published to one holder: its body
+/// digest and its relation lists.
+fn entry_key(
+    digest: &KnowledgeBodyDigest,
+    draft: &canwu_knowledge::KnowledgeRecordDraft,
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"canwu.knowledge.proposal-entry.v1");
+    hasher.update(&[0]);
+    hasher.update(digest.as_bytes());
+    for list in [&draft.supersedes, &draft.contradicts] {
+        hasher.update(&(list.len() as u64).to_le_bytes());
+        for id in list {
+            hasher.update(&id.get().to_le_bytes());
+        }
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn knowledge_relation_error(error: super::knowledge::KnowledgeRelationError) -> CanwuError {
+    match error {
+        super::knowledge::KnowledgeRelationError::Unresolved => CanwuError::new(
+            ErrorCode::KnowledgeRecordNotFound,
+            "knowledge relation does not resolve for the same holder at this cut",
+        ),
+        super::knowledge::KnowledgeRelationError::CrossKind => CanwuError::new(
+            ErrorCode::InvalidKnowledgeRecord,
+            "knowledge supersession and contradiction cannot cross schema kinds",
+        ),
+    }
+}
+
+/// A publication reaches staging with its validation, group by group and
+/// draft by draft; any other shape is a kernel fault.
+fn knowledge_stage_misaligned() -> CanwuError {
+    CanwuError::new(
+        ErrorCode::InvalidBoundary,
+        "knowledge stage received a publication whose validation does not match it",
+    )
 }
 
 /// Transition directives are resolved by the boundary transition ledger

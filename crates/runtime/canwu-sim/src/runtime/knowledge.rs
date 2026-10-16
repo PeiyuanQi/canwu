@@ -8,18 +8,38 @@ use canwu_core::{
     KnowledgeRecordId, KnowledgeRecordKind, KnowledgeSchemaId,
 };
 use canwu_knowledge::{
-    DEFAULT_KNOWLEDGE_PAGE_SIZE, HolderLedgers, KnowledgeRecord, KnowledgeRecordDraft,
-    KnowledgeSubject, KnowledgeSubjectTarget, MAX_KNOWLEDGE_PAGE_SIZE,
+    DEFAULT_KNOWLEDGE_PAGE_SIZE, HolderLedgers, KnowledgeEncodingError, KnowledgeOrigin,
+    KnowledgeRecordBody, KnowledgeRecordDraft, KnowledgeRetention, KnowledgeSubject,
+    KnowledgeSubjectTarget, MAX_KNOWLEDGE_PAGE_SIZE, StagedKnowledgeEntries,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 
+/// Engine limits on generic knowledge.
+///
+/// A boundary has one publication budget of record bodies, holder entries,
+/// and payload bytes, spent in dispatch order by every publishing system: a
+/// system reads what is left with
+/// [`crate::SimulationView::knowledge_publication_budget`]. A proposal that
+/// exceeds it, or a directive that exceeds its per-directive bounds, fails
+/// the boundary with [`ErrorCode::KnowledgeLimitExceeded`].
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct KnowledgeLimitsV1 {
     pub schemas_per_plugin: usize,
+    /// Record bodies (drafts) in one `PublishKnowledge` directive, over all
+    /// of its groups.
     pub records_per_batch: usize,
-    pub batches_per_system_boundary: usize,
+    /// Holder entries in one directive: the sum over its groups of holders
+    /// times drafts.
+    pub holder_entries_per_batch: usize,
+    /// Record bodies one boundary may store.
     pub records_per_boundary: usize,
+    /// Holder entries one boundary may add.
+    pub holder_entries_per_boundary: usize,
+    /// Bytes of payload the bodies one boundary stores may carry, each
+    /// charged [`KnowledgeRecordDraft::payload_bytes`].
+    pub payload_bytes_per_boundary: usize,
     pub payload_bytes_per_record: usize,
     pub relations_per_record: usize,
     pub text_bytes: usize,
@@ -35,8 +55,10 @@ impl KnowledgeLimitsV1 {
     pub const CURRENT: Self = Self {
         schemas_per_plugin: 256,
         records_per_batch: 1_000,
-        batches_per_system_boundary: 64,
-        records_per_boundary: 10_000,
+        holder_entries_per_batch: 4_096,
+        records_per_boundary: 32_768,
+        holder_entries_per_boundary: 32_768,
+        payload_bytes_per_boundary: 64 * 1_024 * 1_024,
         payload_bytes_per_record: 65_536,
         relations_per_record: 64,
         text_bytes: 1_024,
@@ -47,6 +69,113 @@ impl KnowledgeLimitsV1 {
         relation_trace_depth: 32,
         relation_graph_records: 10_000,
     };
+}
+
+/// What a boundary may still publish at a system's cut, with the
+/// per-directive bounds a publisher splits its groups against. Returned by
+/// [`crate::SimulationView::knowledge_publication_budget`].
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct KnowledgePublicationBudget {
+    /// Record bodies the boundary may still store.
+    pub records: usize,
+    /// Holder entries the boundary may still add.
+    pub holder_entries: usize,
+    /// Payload bytes of new bodies the boundary may still take.
+    pub payload_bytes: usize,
+    /// [`KnowledgeLimitsV1::records_per_batch`].
+    pub records_per_batch: usize,
+    /// [`KnowledgeLimitsV1::holder_entries_per_batch`].
+    pub holder_entries_per_batch: usize,
+}
+
+impl KnowledgePublicationBudget {
+    /// Whether one more directive of `records` bodies, `holder_entries`
+    /// entries, and `payload_bytes` bytes of payload fits: within the
+    /// per-directive bounds and within what is left.
+    #[must_use]
+    pub const fn admits(
+        &self,
+        records: usize,
+        holder_entries: usize,
+        payload_bytes: usize,
+    ) -> bool {
+        records <= self.records_per_batch
+            && holder_entries <= self.holder_entries_per_batch
+            && records <= self.records
+            && holder_entries <= self.holder_entries
+            && payload_bytes <= self.payload_bytes
+    }
+
+    /// Takes one directive's bodies, entries, and payload bytes from what is
+    /// left when [`Self::admits`] them, and says whether it did.
+    #[must_use]
+    pub const fn take(
+        &mut self,
+        records: usize,
+        holder_entries: usize,
+        payload_bytes: usize,
+    ) -> bool {
+        if !self.admits(records, holder_entries, payload_bytes) {
+            return false;
+        }
+        self.records -= records;
+        self.holder_entries -= holder_entries;
+        self.payload_bytes -= payload_bytes;
+        true
+    }
+}
+
+/// What the knowledge publications of a boundary, or of one proposal, take
+/// from the budget.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct KnowledgeBudgetUsage {
+    pub(crate) records: usize,
+    pub(crate) entries: usize,
+    pub(crate) payload_bytes: usize,
+}
+
+impl KnowledgeBudgetUsage {
+    /// The budget left after this usage.
+    pub(crate) const fn remaining(self) -> KnowledgePublicationBudget {
+        let limits = KnowledgeLimitsV1::CURRENT;
+        KnowledgePublicationBudget {
+            records: limits.records_per_boundary.saturating_sub(self.records),
+            holder_entries: limits
+                .holder_entries_per_boundary
+                .saturating_sub(self.entries),
+            payload_bytes: limits
+                .payload_bytes_per_boundary
+                .saturating_sub(self.payload_bytes),
+            records_per_batch: limits.records_per_batch,
+            holder_entries_per_batch: limits.holder_entries_per_batch,
+        }
+    }
+
+    /// This usage plus `other`, refused past the boundary's budget.
+    pub(crate) fn checked_add(self, other: Self) -> Result<Self, CanwuError> {
+        let limits = KnowledgeLimitsV1::CURRENT;
+        let sum = Self {
+            records: self.records.saturating_add(other.records),
+            entries: self.entries.saturating_add(other.entries),
+            payload_bytes: self.payload_bytes.saturating_add(other.payload_bytes),
+        };
+        if sum.records > limits.records_per_boundary
+            || sum.entries > limits.holder_entries_per_boundary
+            || sum.payload_bytes > limits.payload_bytes_per_boundary
+        {
+            return Err(CanwuError::new(
+                ErrorCode::KnowledgeLimitExceeded,
+                "boundary knowledge publication budget exceeded: the system published past what knowledge_publication_budget left",
+            ));
+        }
+        Ok(sum)
+    }
+}
+
+impl From<KnowledgeEncodingError> for CanwuError {
+    fn from(error: KnowledgeEncodingError) -> Self {
+        Self::new(ErrorCode::InvalidKnowledgeRecord, error.message())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -73,6 +202,13 @@ pub struct PluginKnowledgeSchema {
     pub writable: bool,
     pub payload_schema: PayloadSchema,
     pub subjects: Vec<KnowledgeSubjectSchema>,
+    /// When an entry of this schema leaves its holder. Part of the plugin
+    /// descriptor: a run restores and replays only with a plugin that
+    /// declares the same policy. Under
+    /// [`KnowledgeRetention::RetireWhenSuperseded`] an entry a new entry of
+    /// the same holder supersedes is retired in the commit of the boundary
+    /// that publishes the new one, live and in replay alike.
+    pub retention: KnowledgeRetention,
 }
 
 impl PluginKnowledgeSchema {
@@ -126,11 +262,16 @@ impl PluginKnowledgeSchema {
 pub(crate) type KnowledgeSchemas = BTreeMap<KnowledgeSchemaId, (String, PluginKnowledgeSchema)>;
 pub(crate) type KnowledgeKindOwners = BTreeMap<KnowledgeRecordKind, String>;
 
-/// Knowledge records keyed by holder, then by global record ID: the records a
-/// settling boundary has staged with same-boundary visibility, which are few,
-/// beside the persistent committed [`HolderLedgers`].
-pub(crate) type HolderKnowledgeRecords =
-    BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>;
+/// The retention a registered schema declares; `Keep` for one that is not
+/// registered.
+pub(crate) fn schema_retention(
+    schemas: &KnowledgeSchemas,
+    schema: &KnowledgeSchemaId,
+) -> KnowledgeRetention {
+    schemas
+        .get(schema)
+        .map_or(KnowledgeRetention::Keep, |(_, schema)| schema.retention)
+}
 
 /// Why a record may not supersede or contradict a named target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -141,41 +282,41 @@ pub(crate) enum KnowledgeRelationError {
     CrossKind,
 }
 
-/// The one rule for the records a published record may supersede or
-/// contradict, shared by settlement and by snapshot validation.
+/// The one rule for the entries a published entry may supersede or
+/// contradict, shared by settlement and by load validation.
 ///
-/// Every target must be a record of the same `holder`, of the same schema
+/// Every target must be an entry of the same `holder`, of the same schema
 /// `kind`, that is visible at the publisher's cut:
 ///
-/// - `committed`: the ledger committed by earlier boundaries, whatever the
-///   target's learned time, so a target learned at the same instant in an
-///   earlier boundary resolves; or
-/// - `visible`: the records the settling boundary staged with same-boundary
-///   visibility in a phase before the publisher's.
+/// - `committed`: the holder's entries in the ledgers committed by earlier
+///   boundaries, whatever their learned time, so a target learned at the same
+///   instant in an earlier boundary resolves; or
+/// - `visible`: the entries the settling boundary staged for the holder with
+///   same-boundary visibility in a phase before the publisher's.
 ///
-/// A record of the publisher's own phase, a record staged for the next
-/// boundary, a record that does not exist yet, and a record of another holder
+/// An entry of the publisher's own phase, an entry staged for the next
+/// boundary, a record that does not exist yet, and an entry of another holder
 /// are in neither set. Record IDs are allocated in staging order, so every
 /// admitted target has a lower ID than the record naming it: a relation can
 /// never point forward, at itself, or around a cycle.
 ///
-/// `committed` looks a record up by global ID across every holder; the rule
-/// itself checks that the record is the holder's. Settlement passes the
-/// committed ledgers, and load validation the records it has rebuilt from
-/// boundary evidence so far, without building a second ledger index.
-pub(crate) fn validate_relation_targets<'a, 'r>(
+/// Settlement passes the committed ledgers, and load validation the ledgers
+/// it has rebuilt from boundary evidence so far.
+pub(crate) fn validate_relation_targets<'a>(
     holder: &KnowledgeHolderRef,
     kind: &KnowledgeRecordKind,
     related: impl IntoIterator<Item = &'a KnowledgeRecordId>,
-    committed: impl Fn(KnowledgeRecordId) -> Option<&'r KnowledgeRecord>,
-    visible: &HolderKnowledgeRecords,
+    committed: &HolderLedgers,
+    visible: &StagedKnowledgeEntries,
 ) -> Result<(), KnowledgeRelationError> {
+    let committed = committed.get(holder);
     let visible = visible.get(holder);
     for id in related {
-        let Some(target) = committed(*id)
-            .filter(|target| target.holder == *holder)
-            .or_else(|| visible.and_then(|records| records.get(id)))
-        else {
+        let Some(target) = committed.and_then(|ledger| ledger.body(id)).or_else(|| {
+            visible
+                .and_then(|entries| entries.get(id))
+                .map(|(body, _)| body)
+        }) else {
             return Err(KnowledgeRelationError::Unresolved);
         };
         if target.schema.kind != *kind {
@@ -199,59 +340,59 @@ pub struct KnowledgeHeads {
 }
 
 /// Returns the holder's records of `kind` that carry every one of `subjects`
-/// and that no record of the holder supersedes, over the same two sets the
+/// and that no entry of the holder supersedes, over the same two sets the
 /// relation rule reads: the ledgers `committed` by earlier boundaries and the
-/// records `visible` at the reader's cut. Every returned ID is therefore a
+/// entries `visible` at the reader's cut. Every returned ID is therefore a
 /// target [`validate_relation_targets`] admits for the same holder and kind.
 ///
 /// The newest `limit` matches are returned, in ascending ID order. Records of
 /// the settling boundary have higher IDs than committed ones, so the visible
-/// records are read first, from the highest ID down, then the committed ones,
+/// entries are read first, from the highest ID down, then the committed ones,
 /// and the result is reversed.
 ///
 /// The committed side reads the holder ledger's index of current records,
 /// never its superseded records: it walks, newest first, the current records
 /// of `kind` that carry the listed subject the fewest of them carry, skips
-/// those a visible record supersedes, and stops at `limit + 1` matches. The
-/// visible side is the holder's records of this boundary, which the boundary
-/// itself staged. A relation never crosses kinds, so only visible records of
+/// those a visible entry supersedes, and stops at `limit + 1` matches. The
+/// visible side is the holder's entries of this boundary, which the boundary
+/// itself staged. A relation never crosses kinds, so only visible entries of
 /// `kind` can supersede a record of `kind`.
 pub(crate) fn current_heads_at_cut(
     holder: &KnowledgeHolderRef,
     kind: &KnowledgeRecordKind,
     subjects: &[KnowledgeSubject],
     committed: &HolderLedgers,
-    visible: Option<&HolderKnowledgeRecords>,
+    visible: Option<&StagedKnowledgeEntries>,
     limit: usize,
 ) -> KnowledgeHeads {
-    let staged: Vec<&KnowledgeRecord> = visible
-        .and_then(|records| records.get(holder))
+    let staged: Vec<_> = visible
+        .and_then(|entries| entries.get(holder))
         .into_iter()
         .flat_map(BTreeMap::values)
-        .filter(|record| record.schema.kind == *kind)
+        .filter(|(body, _)| body.schema.kind == *kind)
         .collect();
     let superseded_at_cut: std::collections::BTreeSet<KnowledgeRecordId> = staged
         .iter()
-        .flat_map(|record| record.supersedes.iter().copied())
+        .flat_map(|(_, entry)| entry.supersedes.iter().copied())
         .collect();
-    let carries_subjects = |record: &KnowledgeRecord| {
+    let carries_subjects = |body: &KnowledgeRecordBody| {
         subjects
             .iter()
-            .all(|subject| record.subjects.contains(subject))
+            .all(|subject| body.subjects.contains(subject))
     };
     let staged_heads = staged
         .iter()
         .rev()
-        .copied()
-        .filter(|record| !superseded_at_cut.contains(&record.id) && carries_subjects(record));
+        .map(|(body, _)| body.as_ref())
+        .filter(|body| !superseded_at_cut.contains(&body.id) && carries_subjects(body));
     let committed_heads = committed
         .get(holder)
         .into_iter()
         .flat_map(|ledger| ledger.current_records(kind, subjects))
-        .filter(|record| !superseded_at_cut.contains(&record.id));
+        .filter(|body| !superseded_at_cut.contains(&body.id));
     let mut heads: Vec<KnowledgeRecordId> = staged_heads
         .chain(committed_heads)
-        .map(|record| record.id)
+        .map(|body| body.id)
         .take(limit.saturating_add(1))
         .collect();
     let truncated = heads.len() > limit;
@@ -268,6 +409,7 @@ pub(crate) fn validate_schema_set(
     owners: &KnowledgeKindOwners,
 ) -> Result<(), CanwuError> {
     let mut writable = BTreeMap::<KnowledgeRecordKind, usize>::new();
+    let mut retention = BTreeMap::<&KnowledgeRecordKind, KnowledgeRetention>::new();
     for (id, (owner, schema)) in schemas {
         if id != &schema.id || owners.get(&id.kind) != Some(owner) {
             return Err(invalid_schema(
@@ -277,6 +419,14 @@ pub(crate) fn validate_schema_set(
         schema.validate()?;
         if schema.writable {
             *writable.entry(id.kind.clone()).or_default() += 1;
+        }
+        // Retirement follows the superseding entry's schema, and a kind's
+        // entries supersede across its versions, so every version of a kind
+        // retires alike.
+        if *retention.entry(&id.kind).or_insert(schema.retention) != schema.retention {
+            return Err(invalid_schema(
+                "every version of a knowledge kind must declare the same retention",
+            ));
         }
     }
     if owners.keys().any(|kind| {
@@ -290,6 +440,41 @@ pub(crate) fn validate_schema_set(
     Ok(())
 }
 
+/// The fields of a body or draft that its shape is checked on.
+pub(crate) struct BodyShape<'a> {
+    pub(crate) schema: &'a KnowledgeSchemaId,
+    pub(crate) subjects: &'a [KnowledgeSubject],
+    pub(crate) payload: &'a Value,
+    pub(crate) confidence_per_mille: u16,
+    pub(crate) origin: &'a KnowledgeOrigin,
+}
+
+impl<'a> BodyShape<'a> {
+    pub(crate) const fn of_draft(draft: &'a KnowledgeRecordDraft) -> Self {
+        Self {
+            schema: &draft.schema,
+            subjects: draft.subjects.as_slice(),
+            payload: &draft.payload,
+            confidence_per_mille: draft.confidence_per_mille,
+            origin: &draft.origin,
+        }
+    }
+
+    pub(crate) const fn of_body(body: &'a KnowledgeRecordBody) -> Self {
+        Self {
+            schema: &body.schema,
+            subjects: body.subjects.as_slice(),
+            payload: &body.payload,
+            confidence_per_mille: body.confidence_per_mille,
+            origin: &body.origin,
+        }
+    }
+}
+
+/// Validates one draft for publication to one holder: the holder, the
+/// body's shape, and the draft's relation lists. Settlement checks the same
+/// things piecewise, once per body and once per holder.
+#[cfg(test)]
 pub(crate) fn validate_draft(
     draft: &KnowledgeRecordDraft,
     schema: &PluginKnowledgeSchema,
@@ -297,18 +482,30 @@ pub(crate) fn validate_draft(
     current: &RuntimeCurrentState,
     record_schemas: &DomainRecordSchemas,
 ) -> Result<(), CanwuError> {
-    validate_record_shape(draft, schema, holder, current, record_schemas, true)
+    validate_holder_for_publication(holder, current, record_schemas)?;
+    validate_body_shape(
+        &BodyShape::of_draft(draft),
+        draft.payload_bytes()?,
+        schema,
+        current,
+        record_schemas,
+        true,
+    )?;
+    validate_relation_lists(&draft.supersedes, &draft.contradicts)
 }
 
-fn validate_record_shape(
-    draft: &KnowledgeRecordDraft,
+/// Validates a body's shape against its schema: the schema version, its
+/// writability when publishing, confidence, origin method and evidence,
+/// subjects, and the payload, whose encoding took `payload_bytes`.
+pub(crate) fn validate_body_shape(
+    body: &BodyShape<'_>,
+    payload_bytes: usize,
     schema: &PluginKnowledgeSchema,
-    holder: &KnowledgeHolderRef,
     current: &RuntimeCurrentState,
     record_schemas: &DomainRecordSchemas,
     require_writable: bool,
 ) -> Result<(), CanwuError> {
-    if draft.schema != schema.id {
+    if body.schema != &schema.id {
         return Err(invalid_knowledge(
             "knowledge draft names the wrong schema version",
         ));
@@ -318,80 +515,70 @@ fn validate_record_shape(
             "knowledge draft uses a read-only schema version",
         ));
     }
-    if require_writable {
-        validate_holder_for_publication(holder, current, record_schemas)?;
-    } else {
-        validate_historical_holder(holder, current, record_schemas)?;
-    }
-    if draft.confidence_per_mille > 1_000 {
+    if body.confidence_per_mille > 1_000 {
         return Err(invalid_knowledge(
             "knowledge confidence exceeds 1000 per mille",
         ));
     }
-    if !canonical_text(&draft.origin.method)
-        || draft.origin.method.len() > KnowledgeLimitsV1::CURRENT.text_bytes
+    if !canonical_text(&body.origin.method)
+        || body.origin.method.len() > KnowledgeLimitsV1::CURRENT.text_bytes
     {
         return Err(invalid_knowledge(
             "knowledge origin method is not canonical or exceeds its limit",
         ));
     }
-    if draft.subjects.len() > KnowledgeLimitsV1::CURRENT.relations_per_record
-        || draft.origin.evidence.len() > KnowledgeLimitsV1::CURRENT.relations_per_record
-        || draft.supersedes.len() > KnowledgeLimitsV1::CURRENT.relations_per_record
-        || draft.contradicts.len() > KnowledgeLimitsV1::CURRENT.relations_per_record
+    if body.subjects.len() > KnowledgeLimitsV1::CURRENT.relations_per_record
+        || body.origin.evidence.len() > KnowledgeLimitsV1::CURRENT.relations_per_record
     {
         return Err(invalid_knowledge(
             "knowledge record relation limit exceeded",
         ));
     }
-    if !strictly_sorted(&draft.subjects) || !strictly_sorted(&draft.origin.evidence) {
+    if !strictly_sorted(body.subjects) || !strictly_sorted(&body.origin.evidence) {
         return Err(invalid_knowledge(
             "knowledge subjects and evidence references must be sorted and unique",
         ));
     }
-    let payload_bytes = serde_json::to_vec(&draft.payload).map_err(|error| {
-        invalid_knowledge(format!("knowledge payload encoding failed: {error}"))
-    })?;
-    if payload_bytes.len() > KnowledgeLimitsV1::CURRENT.payload_bytes_per_record {
+    if payload_bytes > KnowledgeLimitsV1::CURRENT.payload_bytes_per_record {
         return Err(invalid_knowledge("knowledge payload byte limit exceeded"));
     }
-    schema.payload_schema.validate(&draft.payload)?;
-    validate_subjects(&draft.subjects, schema, current, record_schemas)?;
-    validate_relations(draft)?;
+    schema.payload_schema.validate(body.payload)?;
+    validate_subjects(body.subjects, schema, current, record_schemas)?;
     Ok(())
 }
 
-pub(crate) fn validate_stored_record(
-    record: &KnowledgeRecord,
-    schemas: &KnowledgeSchemas,
-    current: &RuntimeCurrentState,
-    record_schemas: &DomainRecordSchemas,
+/// Validates one entry's relation lists: each within the relation limit,
+/// sorted, unique, and disjoint from the other.
+pub(crate) fn validate_relation_lists(
+    supersedes: &[KnowledgeRecordId],
+    contradicts: &[KnowledgeRecordId],
 ) -> Result<(), CanwuError> {
-    let Some((_, schema)) = schemas.get(&record.schema) else {
+    if supersedes.len() > KnowledgeLimitsV1::CURRENT.relations_per_record
+        || contradicts.len() > KnowledgeLimitsV1::CURRENT.relations_per_record
+    {
         return Err(invalid_knowledge(
-            "knowledge record uses an unregistered schema",
+            "knowledge record relation limit exceeded",
         ));
-    };
-    let draft = KnowledgeRecordDraft {
-        schema: record.schema.clone(),
-        subjects: record.subjects.clone(),
-        payload: record.payload.clone(),
-        as_of: record.as_of,
-        confidence_per_mille: record.confidence_per_mille,
-        origin: record.origin.clone(),
-        supersedes: record.supersedes.clone(),
-        contradicts: record.contradicts.clone(),
-    };
-    validate_record_shape(
-        &draft,
-        schema,
-        &record.holder,
-        current,
-        record_schemas,
-        false,
-    )
+    }
+    if !strictly_sorted(supersedes)
+        || !strictly_sorted(contradicts)
+        || supersedes.iter().any(|id| contradicts.contains(id))
+    {
+        return Err(invalid_knowledge(
+            "knowledge supersedes and contradicts relations must be sorted, unique, and disjoint",
+        ));
+    }
+    Ok(())
 }
 
+/// Validates the committed generic ledger of a snapshot or continuation
+/// checkpoint and returns its highest body ID. Each body's shape is checked
+/// once, however many holders hold it; each holder is checked once; each
+/// entry's relations must be valid lists naming entries of the same holder
+/// and kind. An entry of a schema whose retention is
+/// [`KnowledgeRetention::RetireWhenSuperseded`] cannot still supersede
+/// anything: the commit that published it retired its targets and dropped
+/// their names, so a retained name is a tampered ledger.
 pub(crate) fn validate_snapshot_records(
     snapshot: &SimulationSnapshot,
     schemas: &KnowledgeSchemas,
@@ -478,35 +665,65 @@ pub(crate) fn validate_snapshot_records(
             .map(|stream| (stream.key.clone(), stream))
             .collect(),
     };
-    let mut global_ids = std::collections::BTreeSet::new();
+    let ledgers = &snapshot.knowledge.records;
     let mut max_id = 0_u64;
-    for (holder, records) in &snapshot.knowledge.records {
-        for (id, record) in records {
-            if *id != record.id || &record.holder != holder || !global_ids.insert(*id) {
-                return Err(invalid_knowledge(
-                    "knowledge ledger keys, holders, and global IDs must be consistent and unique",
-                ));
-            }
-            if record.learned_at > snapshot.now {
-                return Err(invalid_knowledge(
-                    "knowledge records cannot be learned after the snapshot time",
-                ));
-            }
-            if record
+    for body in ledgers.bodies() {
+        if body.learned_at > snapshot.now {
+            return Err(invalid_knowledge(
+                "knowledge records cannot be learned after the snapshot time",
+            ));
+        }
+        let Some((_, schema)) = schemas.get(&body.schema) else {
+            return Err(invalid_knowledge(
+                "knowledge record uses an unregistered schema",
+            ));
+        };
+        let payload_bytes = body_payload_bytes(body)?;
+        validate_body_shape(
+            &BodyShape::of_body(body),
+            payload_bytes,
+            schema,
+            &current,
+            record_schemas,
+            false,
+        )?;
+        max_id = max_id.max(body.id.get());
+    }
+    for (holder, ledger) in ledgers {
+        validate_historical_holder(holder, &current, record_schemas)?;
+        for (entry, body) in ledger.entries() {
+            validate_relation_lists(&entry.supersedes, &entry.contradicts)?;
+            if entry
                 .supersedes
                 .iter()
-                .chain(&record.contradicts)
-                .any(|related| !records.contains_key(related))
+                .chain(&entry.contradicts)
+                .any(|target| {
+                    ledger
+                        .body(target)
+                        .is_none_or(|target| target.schema.kind != body.schema.kind)
+                })
             {
                 return Err(invalid_knowledge(
-                    "knowledge relations must resolve within the same holder ledger",
+                    "knowledge relations must resolve within the same holder ledger and kind",
                 ));
             }
-            validate_stored_record(record, schemas, &current, record_schemas)?;
-            max_id = max_id.max(id.get());
+            if !entry.supersedes.is_empty()
+                && schema_retention(schemas, &body.schema)
+                    == KnowledgeRetention::RetireWhenSuperseded
+            {
+                return Err(invalid_knowledge(
+                    "a knowledge entry of a retiring schema still names what its publication retired",
+                ));
+            }
         }
     }
     Ok(max_id)
+}
+
+/// The payload bytes of a stored body, measured as a publication of it was
+/// charged.
+pub(crate) fn body_payload_bytes(body: &KnowledgeRecordBody) -> Result<usize, CanwuError> {
+    Ok(body.payload_bytes()?)
 }
 
 pub(crate) fn validate_holder_for_publication(
@@ -719,21 +936,6 @@ fn entity_exists(current: &RuntimeCurrentState, entity: &EntityRef) -> bool {
     }
 }
 
-fn validate_relations(draft: &KnowledgeRecordDraft) -> Result<(), CanwuError> {
-    if !strictly_sorted(&draft.supersedes)
-        || !strictly_sorted(&draft.contradicts)
-        || draft
-            .supersedes
-            .iter()
-            .any(|id| draft.contradicts.contains(id))
-    {
-        return Err(invalid_knowledge(
-            "knowledge supersedes and contradicts relations must be sorted, unique, and disjoint",
-        ));
-    }
-    Ok(())
-}
-
 fn strictly_sorted<T: Ord>(values: &[T]) -> bool {
     values.windows(2).all(|pair| pair[0] < pair[1])
 }
@@ -768,14 +970,36 @@ mod tests {
     use super::*;
     use crate::DecisionState;
     use crate::runtime::{Government, MapPoint, Route, Territory};
+    use canwu_core::HolderKnowledgeRecordId;
     use canwu_core::{
         DomainRecordRef, EventId, EvidenceRef, GovernmentId, KnowledgeRecordId, PersonId,
         ResourceId, RouteId, TerritoryId,
     };
-    use canwu_knowledge::KnowledgeOrigin;
+    use canwu_knowledge::{HolderEntry, KnowledgeOrigin, KnowledgeRecord};
     use canwu_time::SimTime;
     use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+
+    /// A record staged by the settling boundary, as the overlay keeps it.
+    fn staged(
+        (id, record): (KnowledgeRecordId, KnowledgeRecord),
+        local: u64,
+    ) -> (KnowledgeRecordId, (Arc<KnowledgeRecordBody>, HolderEntry)) {
+        let (_, body, supersedes, contradicts) = record.into_parts();
+        (
+            id,
+            (
+                Arc::new(body),
+                HolderEntry {
+                    record: id,
+                    local: HolderKnowledgeRecordId::new(local),
+                    supersedes,
+                    contradicts,
+                },
+            ),
+        )
+    }
 
     fn knowledge_kind() -> KnowledgeRecordKind {
         KnowledgeRecordKind::new("fixture.knowledge", "assessment")
@@ -789,6 +1013,7 @@ mod tests {
             writable: true,
             payload_schema: PayloadSchema::Any,
             subjects,
+            retention: KnowledgeRetention::Keep,
         }
     }
 
@@ -1015,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_set_requires_exact_ownership_and_one_writable_version() {
+    fn schema_set_requires_exact_ownership_one_writable_version_and_one_retention() {
         let writable = knowledge_schema(vec![]);
         let read_only = PluginKnowledgeSchema {
             id: KnowledgeSchemaId::new(knowledge_kind(), 2),
@@ -1044,13 +1269,33 @@ mod tests {
             ..writable.clone()
         };
         let two_writable = BTreeMap::from([
-            (writable.id.clone(), ("fixture".to_owned(), writable)),
+            (
+                writable.id.clone(),
+                ("fixture".to_owned(), writable.clone()),
+            ),
             (
                 second_writable.id.clone(),
                 ("fixture".to_owned(), second_writable),
             ),
         ]);
         assert!(validate_schema_set(&two_writable, &owners).is_err());
+
+        let retiring_read_only = PluginKnowledgeSchema {
+            id: KnowledgeSchemaId::new(knowledge_kind(), 2),
+            writable: false,
+            retention: KnowledgeRetention::RetireWhenSuperseded,
+            ..writable.clone()
+        };
+        let mixed_retention = BTreeMap::from([
+            (writable.id.clone(), ("fixture".to_owned(), writable)),
+            (
+                retiring_read_only.id.clone(),
+                ("fixture".to_owned(), retiring_read_only),
+            ),
+        ]);
+        let error = validate_schema_set(&mixed_retention, &owners)
+            .expect_err("two versions of one kind must retire alike");
+        assert!(error.message.contains("same retention"), "{error}");
     }
 
     #[test]
@@ -1099,17 +1344,17 @@ mod tests {
         .map(|(_, stored)| stored)
         .collect();
         // Records the settling boundary staged for the same boundary.
-        let visible: HolderKnowledgeRecords = BTreeMap::from([(
+        let visible: StagedKnowledgeEntries = BTreeMap::from([(
             holder.clone(),
             BTreeMap::from([
-                record(6, &holder, &kind, 8, &[3]),
-                record(7, &holder, &kind, 9, &[]),
+                staged(record(6, &holder, &kind, 8, &[3]), 5),
+                staged(record(7, &holder, &kind, 9, &[]), 6),
             ]),
         )]);
         let heads = |holder: &KnowledgeHolderRef,
                      kind: &KnowledgeRecordKind,
                      subjects: &[KnowledgeSubject],
-                     visible: Option<&HolderKnowledgeRecords>,
+                     visible: Option<&StagedKnowledgeEntries>,
                      limit: usize| {
             let heads = current_heads_at_cut(holder, kind, subjects, &committed, visible, limit);
             (

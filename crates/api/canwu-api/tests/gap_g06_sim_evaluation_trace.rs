@@ -153,24 +153,27 @@ fn report_sighting(
         return proposal(Vec::new());
     }
     proposal(vec![BoundaryDirective::PublishKnowledge {
-        holder: KnowledgeHolderRef::Person(holder()),
         visibility: StateVisibility::SameBoundary,
         producer_correlation: None,
-        records: vec![KnowledgeRecordDraft {
-            schema: sighting_schema(),
-            subjects: vec![KnowledgeSubject {
-                role: "subject".to_owned(),
-                target: KnowledgeSubjectTarget::Entity(known_office()),
+        supersession: canwu_api::KnowledgeSupersession::Explicit,
+        groups: vec![canwu_api::KnowledgePublicationGroup {
+            holders: vec![KnowledgeHolderRef::Person(holder())],
+            records: vec![KnowledgeRecordDraft {
+                schema: sighting_schema(),
+                subjects: vec![KnowledgeSubject {
+                    role: "subject".to_owned(),
+                    target: KnowledgeSubjectTarget::Entity(known_office()),
+                }],
+                payload: json!({ "seen": true }),
+                as_of: None,
+                confidence_per_mille: 1_000,
+                origin: KnowledgeOrigin {
+                    method: "fixture.report".to_owned(),
+                    evidence: Vec::new(),
+                },
+                supersedes: Vec::new(),
+                contradicts: Vec::new(),
             }],
-            payload: json!({ "seen": true }),
-            as_of: None,
-            confidence_per_mille: 1_000,
-            origin: KnowledgeOrigin {
-                method: "fixture.report".to_owned(),
-                evidence: Vec::new(),
-            },
-            supersedes: Vec::new(),
-            contradicts: Vec::new(),
         }],
         summary: "The holder learned of the office".to_owned(),
     }])
@@ -204,6 +207,7 @@ impl SimulationPlugin for EvaluationPlugin {
                 required: true,
                 multiple: false,
             }],
+            retention: canwu_api::KnowledgeRetention::Keep,
         })?;
         for (name, phase, cadence, handler) in [
             (

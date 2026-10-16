@@ -2256,3 +2256,110 @@ fn rehashed_evaluation_trace_evidence_is_revalidated_on_load() {
     assert_eq!(error.code, ErrorCode::InvalidSnapshot);
     assert!(error.message.contains("traces exceed"), "{}", error.message);
 }
+
+/// Under retention, a continuation checkpoint is a function of the run's
+/// state alone. An unsealed run, its twin that seals after every boundary,
+/// and a run restored from the continuation checkpoint agree, boundary by
+/// boundary, on the checkpoint hash, the state hash, the ledger, and the
+/// continuation checkpoint itself, while person 2 keeps bodies person 1 has
+/// retired. A checkpoint whose ledger was changed is refused.
+#[test]
+fn continuation_checkpoints_agree_under_knowledge_retention() {
+    use super::knowledge_ledger::{SharedLinePlugin, shared_line_boundary, shared_line_holder};
+
+    let (scenario, _) = demo_scenario();
+    let plugin = SharedLinePlugin(KnowledgeRetention::RetireWhenSuperseded);
+    let mut unsealed = Simulation::new(152, scenario).unwrap();
+    unsealed.register_plugin(&plugin).unwrap();
+    for index in 0..3 {
+        unsealed
+            .settle_boundary(shared_line_boundary(index))
+            .unwrap();
+    }
+    // Boundary 3 published to person 1 alone: person 1 retired record 2,
+    // which person 2 still holds.
+    let kept_by_one = |knowledge: &KnowledgeSnapshot| {
+        let held = |holder: u64| -> Vec<KnowledgeRecordId> {
+            knowledge
+                .records
+                .get(&shared_line_holder(holder))
+                .expect("the holder is listed")
+                .iter()
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        let (first, second) = (held(1), held(2));
+        second.iter().any(|id| !first.contains(id))
+    };
+    assert!(kept_by_one(unsealed.knowledge()));
+
+    let mut sealed = unsealed.fork().into_compacted().unwrap();
+    sealed.seal_evidence().unwrap();
+    let (checkpoint, hash) = unsealed.continuation_checkpoint().unwrap();
+    assert_eq!(
+        sealed.continuation_checkpoint().unwrap(),
+        (checkpoint.clone(), hash.clone())
+    );
+
+    // A changed ledger is refused against the stored hash, and, rehashed,
+    // by the commitments its state carries.
+    let mut tampered = checkpoint.clone();
+    let holder = serde_json::to_value(shared_line_holder(1)).unwrap();
+    assert!(tamper_knowledge_ledger(&mut tampered.state, |wire| {
+        let ledger = wire["holders"]
+            .as_array_mut()
+            .expect("holders")
+            .iter_mut()
+            .find(|ledger| ledger["holder"] == holder)
+            .expect("the holder is listed");
+        let raised = ledger["next_local"].as_u64().expect("a counter") + 1;
+        ledger["next_local"] = serde_json::json!(raised);
+    }));
+    let error = CompactedSimulation::from_continuation_checkpoint_verified(
+        tampered.clone(),
+        &hash,
+        &[&plugin],
+    )
+    .err()
+    .expect("a changed ledger must not match the stored hash");
+    assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    tampered.continuation_hash = tampered.compute_continuation_hash().unwrap();
+    let error =
+        CompactedSimulation::from_continuation_checkpoint_with_plugins(tampered, &[&plugin])
+            .err()
+            .expect("a changed ledger must not match its state's commitments");
+    assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+    let mut restored = CompactedSimulation::from_continuation_checkpoint_json_verified(
+        &checkpoint.to_json().unwrap(),
+        &hash,
+        &[&plugin],
+    )
+    .expect("the continuation checkpoint restores");
+    assert_eq!(restored.checkpoint_hash(), unsealed.checkpoint_hash());
+    for index in 3..7 {
+        unsealed
+            .settle_boundary(shared_line_boundary(index))
+            .unwrap();
+        sealed.settle_boundary(shared_line_boundary(index)).unwrap();
+        restored
+            .settle_boundary(shared_line_boundary(index))
+            .unwrap();
+        let state_hash = unsealed.authoritative_state_hash().unwrap();
+        for (run, label) in [(&sealed, "sealed"), (&restored, "restored")] {
+            assert_eq!(run.checkpoint_hash(), unsealed.checkpoint_hash(), "{label}");
+            assert_eq!(
+                run.authoritative_state_hash().unwrap(),
+                state_hash,
+                "{label}"
+            );
+            assert_eq!(run.knowledge(), unsealed.knowledge(), "{label}");
+        }
+        sealed.seal_evidence().unwrap();
+        restored.seal_evidence().unwrap();
+        let expected = unsealed.continuation_checkpoint().unwrap();
+        assert_eq!(sealed.continuation_checkpoint().unwrap(), expected);
+        assert_eq!(restored.continuation_checkpoint().unwrap(), expected);
+    }
+    assert!(kept_by_one(unsealed.knowledge()));
+}

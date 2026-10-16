@@ -962,6 +962,8 @@ impl Simulation {
             boundary_id: None,
             proposal_evidence: None,
             knowledge_overlay: None,
+            knowledge_schemas: &self.plugins.knowledge_schemas,
+            knowledge_budget: super::knowledge::KnowledgeBudgetUsage::default().remaining(),
             allocations: None,
             allowed_reservations: None,
             random_session: None,

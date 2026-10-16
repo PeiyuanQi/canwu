@@ -565,23 +565,26 @@ fn publish_legal_facts(
 ) -> Result<BoundaryProposal, CanwuError> {
     Ok(BoundaryProposal {
         directives: vec![BoundaryDirective::PublishKnowledge {
-            holder: KnowledgeHolderRef::Person(PersonId::new(1)),
             visibility: StateVisibility::SameBoundary,
             producer_correlation: Some("legal-facts:person-1".to_owned()),
-            records: vec![KnowledgeRecordDraft {
-                schema: legal_fact_schema(),
-                subjects: Vec::new(),
-                payload: serde_json::json!({
-                    "facts": {"adult": true, "citizen": true, "disqualified": false}
-                }),
-                as_of: None,
-                confidence_per_mille: 1_000,
-                origin: KnowledgeOrigin {
-                    method: "test-observation".to_owned(),
-                    evidence: Vec::new(),
-                },
-                supersedes: Vec::new(),
-                contradicts: Vec::new(),
+            supersession: canwu_api::KnowledgeSupersession::Explicit,
+            groups: vec![canwu_api::KnowledgePublicationGroup {
+                holders: vec![KnowledgeHolderRef::Person(PersonId::new(1))],
+                records: vec![KnowledgeRecordDraft {
+                    schema: legal_fact_schema(),
+                    subjects: Vec::new(),
+                    payload: serde_json::json!({
+                        "facts": {"adult": true, "citizen": true, "disqualified": false}
+                    }),
+                    as_of: None,
+                    confidence_per_mille: 1_000,
+                    origin: KnowledgeOrigin {
+                        method: "test-observation".to_owned(),
+                        evidence: Vec::new(),
+                    },
+                    supersedes: Vec::new(),
+                    contradicts: Vec::new(),
+                }],
             }],
             summary: "Publish holder-relative legal predicate facts".to_owned(),
         }],
@@ -612,6 +615,7 @@ impl SimulationPlugin for ActorLegalFactsPlugin {
             writable: true,
             payload_schema: PayloadSchema::Any,
             subjects: Vec::new(),
+            retention: canwu_api::KnowledgeRetention::Keep,
         })?;
         let mut contract = BoundarySystemContract::new(
             "publish-legal-facts",

@@ -89,6 +89,7 @@ pub fn correspondence_knowledge_schemas() -> Vec<PluginKnowledgeSchema> {
         writable: true,
         payload_schema: PayloadSchema::Any,
         subjects: Vec::new(),
+        retention: canwu_api::KnowledgeRetention::Keep,
     })
     .collect()
 }
@@ -442,6 +443,7 @@ mod tests {
             },
             records,
             next: None,
+            retention: std::collections::BTreeMap::new(),
         };
 
         let (snapshot, address) =

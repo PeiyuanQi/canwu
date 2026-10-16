@@ -22,6 +22,50 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+/// The index of a snapshot's initial-scenario records, built the first time
+/// validation resolves evidence against it and then shared with the runtime
+/// restored from the snapshot. A clone starts empty, since it may be edited;
+/// the cache never takes part in equality or the encoding.
+#[derive(Default)]
+pub(super) struct InitialRecordIndexCache(
+    std::sync::OnceLock<Arc<super::state::InitialRecordIndex>>,
+);
+
+impl Clone for InitialRecordIndexCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PartialEq for InitialRecordIndexCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl InitialRecordIndexCache {
+    fn seeded(index: Arc<super::state::InitialRecordIndex>) -> Self {
+        Self(std::sync::OnceLock::from(index))
+    }
+}
+
+impl SimulationSnapshot {
+    /// The index of this snapshot's initial-scenario records, built once.
+    pub(super) fn initial_record_index(&self) -> Arc<super::state::InitialRecordIndex> {
+        Arc::clone(
+            self.initial_record_index.0.get_or_init(|| {
+                super::state::InitialRecordIndex::of(self.initial_scenario.as_ref())
+            }),
+        )
+    }
+}
+
+impl std::fmt::Debug for InitialRecordIndexCache {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InitialRecordIndexCache")
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SimulationSnapshot {
@@ -65,6 +109,8 @@ pub struct SimulationSnapshot {
     pub initial_time: SimTime,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_scenario: Option<Scenario>,
+    #[serde(skip)]
+    pub(super) initial_record_index: InitialRecordIndexCache,
     pub now: SimTime,
     pub plugin_registration_closed: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -133,8 +179,10 @@ pub struct SimulationSnapshot {
 /// Format of the paged-checkpoint envelope and of the decision pages it
 /// names. Format 5 names domain-record pages in state-page codec
 /// `raw-canonical-v2`, whose records may span record-value chunk pages, and
-/// embeds a `SimulationCheckpoint` without keyed-draw reservations.
-pub const PAGED_CHECKPOINT_FORMAT_VERSION: u32 = 5;
+/// embeds a `SimulationCheckpoint` without keyed-draw reservations. Format 6
+/// embeds snapshot format 9, whose generic knowledge is bodies and holder
+/// entries; the knowledge ledger stays inside the envelope page.
+pub const PAGED_CHECKPOINT_FORMAT_VERSION: u32 = 6;
 const MAX_PAGED_DECISION_DIRECTORY_ENTRIES: usize = 1_024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -453,7 +501,9 @@ pub struct ReplayJournal {
 }
 
 /// Version of current-state checkpoints plus append-only evidence segments.
-pub const CHECKPOINT_JOURNAL_FORMAT_VERSION: u32 = 5;
+/// Format 6 journals each knowledge publication as its bodies and per-holder
+/// entries, with one `KnowledgePublished` event naming every holder.
+pub const CHECKPOINT_JOURNAL_FORMAT_VERSION: u32 = 6;
 const ARCHIVED_SEGMENT_MANIFEST_DOMAIN: &str = "canwu.evidence.archived-segment-manifest.v1";
 pub(crate) const ARCHIVED_RECEIPT_DOMAIN: &str = "canwu.evidence.archived-receipts.v2";
 const EVIDENCE_DEPENDENCY_DOMAIN: &str = "canwu.evidence.dependencies.v1";
@@ -2420,6 +2470,16 @@ impl CompactedSimulation {
         self.simulation.entity_exists(entity)
     }
 
+    /// The retention a registered knowledge schema declares, or `None` for a
+    /// schema this run does not register.
+    #[must_use]
+    pub fn knowledge_retention(
+        &self,
+        schema: &super::KnowledgeSchemaId,
+    ) -> Option<super::KnowledgeRetention> {
+        self.simulation.knowledge_retention(schema)
+    }
+
     #[must_use]
     pub fn world(&self) -> super::WorldSnapshot {
         self.simulation.world()
@@ -2816,11 +2876,9 @@ impl Simulation {
         let mut dependencies = BTreeMap::new();
         let identity = EvidenceRequirement::IdentityOnly;
 
-        for records in self.state.current.knowledge.records.values() {
-            for record in records.values() {
-                for reference in &record.origin.evidence {
-                    promote_dependency(&mut dependencies, reference.clone(), identity);
-                }
+        for body in self.state.current.knowledge.records.bodies() {
+            for reference in &body.origin.evidence {
+                promote_dependency(&mut dependencies, reference.clone(), identity);
             }
         }
 
@@ -3276,6 +3334,9 @@ impl Simulation {
             admitted_event_count: self.state.counters.admitted_event_count,
             initial_time: self.state.scheduler.initial_time,
             initial_scenario: self.bound_initial_scenario().cloned(),
+            initial_record_index: InitialRecordIndexCache::seeded(Arc::clone(
+                &self.state.metadata.initial_domain_record_indexes,
+            )),
             now: self.state.scheduler.now,
             plugin_registration_closed: self.state.metadata.plugin_registration_closed,
             entities: self.state.current.entities.iter().cloned().collect(),
@@ -4544,13 +4605,16 @@ mod tests {
         };
         Ok(BoundaryProposal {
             directives: vec![BoundaryDirective::PublishKnowledge {
-                holder: KnowledgeHolderRef::Person(PersonId::new(1)),
                 visibility: StateVisibility::SameBoundary,
                 producer_correlation: Some(format!(
                     "archived-command-boundary-{}",
                     context.boundary_id.get()
                 )),
-                records: vec![record],
+                supersession: crate::KnowledgeSupersession::Explicit,
+                groups: vec![crate::KnowledgePublicationGroup {
+                    holders: vec![KnowledgeHolderRef::Person(PersonId::new(1))],
+                    records: vec![record],
+                }],
                 summary: "Publish knowledge from a retained or archived command identity"
                     .to_owned(),
             }],
@@ -4581,6 +4645,7 @@ mod tests {
                 writable: true,
                 payload_schema: PayloadSchema::Any,
                 subjects: Vec::new(),
+                retention: crate::KnowledgeRetention::Keep,
             })?;
             registrar.register_command(
                 PluginActionDescriptor {
