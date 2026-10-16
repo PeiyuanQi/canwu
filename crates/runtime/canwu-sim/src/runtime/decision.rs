@@ -1,3 +1,4 @@
+use super::state::ingress_command_request;
 use super::{
     BoundaryId, CanwuError, CauseRef, Command, CommandAuthority, CommandEnvelope, CommandIngress,
     CommandOutcome, CommandRequest, CommandRequestId, ControllerDecision, DecisionAction,
@@ -825,18 +826,42 @@ impl Simulation {
                 .evidence
                 .archived_decision_command_requests
                 .contains(&request_id)
-            || self
-                .state
-                .evidence
+            || self.retained_attempt_exists(request_id)
+            || self.retained_queued_request_count(request_id) > 0
+    }
+
+    /// Whether a retained attempt carries a command request, from the
+    /// command-history index; a debug build checks it against the scan.
+    fn retained_attempt_exists(&self, request_id: CommandRequestId) -> bool {
+        let evidence = &self.state.evidence;
+        let indexed = evidence.retained_attempt_for_request(request_id).is_some();
+        debug_assert_eq!(
+            indexed,
+            evidence
                 .command_attempts
                 .iter()
-                .any(|attempt| attempt.request_id == Some(request_id))
-            || self
-                .state
-                .evidence
+                .any(|attempt| attempt.request_id == Some(request_id)),
+            "the command-history index diverged from the retained attempts"
+        );
+        indexed
+    }
+
+    /// How many retained command and decision ingress records carry a
+    /// command request, from the command-history index; a debug build checks
+    /// it against the scan.
+    fn retained_queued_request_count(&self, request_id: CommandRequestId) -> usize {
+        let evidence = &self.state.evidence;
+        let indexed = evidence.retained_queued_request_count(request_id);
+        debug_assert_eq!(
+            indexed,
+            evidence
                 .ingress
                 .iter()
-                .any(|record| ingress_command_request_id(record) == Some(request_id))
+                .filter(|record| ingress_command_request(record) == Some(request_id))
+                .count(),
+            "the command-history index diverged from the retained ingress"
+        );
+        indexed
     }
 
     /// Whether the admitted decision is the only record that carries its
@@ -855,17 +880,10 @@ impl Simulation {
                 .archived_decision_command_requests
                 .contains(&request_id),
         );
-        let retained = evidence
-            .ingress
-            .iter()
-            .filter(|record| ingress_command_request_id(record) == Some(request_id))
-            .count();
+        let retained = self.retained_queued_request_count(request_id);
         !evidence.archived_command_requests.contains_key(&request_id)
             && !evidence.archived_ingress_requests.contains_key(&request_id)
-            && !evidence
-                .command_attempts
-                .iter()
-                .any(|attempt| attempt.request_id == Some(request_id))
+            && !self.retained_attempt_exists(request_id)
             && archived + retained == 1
     }
 
@@ -922,19 +940,6 @@ impl Simulation {
             | DecisionMutation::Cancel { .. } => {}
         }
         Ok(())
-    }
-}
-
-fn ingress_command_request_id(record: &super::IngressRecord) -> Option<CommandRequestId> {
-    match &record.payload {
-        IngressPayload::Command { request } => Some(request.request_id),
-        IngressPayload::Decision { request } => {
-            request.command.as_ref().map(|request| request.request_id)
-        }
-        IngressPayload::Plugin { .. }
-        | IngressPayload::Calendar { .. }
-        | IngressPayload::Maintenance { .. }
-        | IngressPayload::PluginCancellation { .. } => None,
     }
 }
 

@@ -2,9 +2,9 @@ use super::{
     ArchivedEvidenceReceipt, ArchivedSegmentHeader, Army, ArmyId, BoundaryRecord, CanwuError,
     CommandAttemptRecord, CommandOutcome, CommandRecord, CommandRequestId, CommitmentRoots,
     DecisionRequestId, DecisionState, DomainRecordRef, EntityRef, ErrorCode, EvidenceCursor,
-    EvidenceRef, Government, GovernmentId, IngressQueueKey, IngressReceipt, IngressRecord,
-    KnowledgeSnapshot, PersistentDomainRecordStore, Person, PersonAvailability, PersonId,
-    PluginComponentKey, PluginComponentRecord, RandomDrawRecord, RandomStreamKey,
+    EvidenceRef, Government, GovernmentId, IngressPayload, IngressQueueKey, IngressReceipt,
+    IngressRecord, KnowledgeSnapshot, PersistentDomainRecordStore, Person, PersonAvailability,
+    PersonId, PluginComponentKey, PluginComponentRecord, RandomDrawRecord, RandomStreamKey,
     RandomStreamState, Route, RouteId, RunConfigurationSnapshot, RunManifest, Scenario,
     ScheduleKey, ScheduledAction, SimEvent, SimTime, Territory, TerritoryId,
 };
@@ -30,9 +30,12 @@ pub(super) struct RuntimeEvidence {
     pub(super) archived_decision_requests: im::OrdMap<DecisionRequestId, ArchivedIngressRequest>,
     pub(super) archived_decision_command_requests: im::OrdSet<CommandRequestId>,
     pub(super) events: Vec<SimEvent>,
-    pub(super) commands: Vec<CommandRecord>,
-    pub(super) command_attempts: Vec<CommandAttemptRecord>,
-    pub(super) ingress: Vec<IngressRecord>,
+    pub(super) commands: RetainedJournal<CommandRecord>,
+    pub(super) command_attempts: RetainedJournal<CommandAttemptRecord>,
+    pub(super) ingress: RetainedJournal<IngressRecord>,
+    /// The derived index of the three journals above; see
+    /// [`CommandHistoryIndex`].
+    pub(super) command_index: CommandHistoryIndex,
     pub(super) boundaries: Vec<BoundaryRecord>,
     pub(super) random_draws: Vec<RandomDrawRecord>,
     pub(super) archived_segment_headers: im::Vector<ArchivedSegmentHeader>,
@@ -199,6 +202,274 @@ pub(super) struct ArchivedCommandRequestOutcome {
 pub(super) struct ArchivedIngressRequest {
     pub(super) input_hash: String,
     pub(super) receipt: IngressReceipt,
+}
+
+/// One retained journal of the command history: the accepted commands, the
+/// command attempts, or the ingress. Any module reads it as a slice; only the
+/// command-history methods of [`RuntimeEvidence`] change it, so the derived
+/// [`CommandHistoryIndex`] cannot drift from the records.
+#[derive(Clone)]
+pub(super) struct RetainedJournal<T>(Vec<T>);
+
+impl<T> Default for RetainedJournal<T> {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl<T> std::ops::Deref for RetainedJournal<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<'a, T> IntoIterator for &'a RetainedJournal<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+/// What admission asks of the retained command history, kept so that no
+/// question rescans it. It is derived from the three retained journals and
+/// the archived request tables: never part of a snapshot, a checkpoint, a
+/// hash, or a commitment. The push and truncate methods keep it in step, a
+/// seal and every restore rebuild it, and a failed transaction restores it
+/// with the journals it truncates.
+#[derive(Clone, Default)]
+pub(super) struct CommandHistoryIndex {
+    /// Retained command and decision ingress per command request.
+    queued_requests: BTreeMap<CommandRequestId, usize>,
+    /// The position of the first retained attempt of each command request.
+    attempt_by_request: BTreeMap<CommandRequestId, usize>,
+    /// The position of the first retained legacy-direct command.
+    first_direct_command: Option<usize>,
+    /// The position of the first retained attempt whose request was not
+    /// queued, neither as retained ingress nor as archived ingress.
+    first_unqueued_attempt: Option<usize>,
+}
+
+/// The command request a command or decision ingress record carries.
+pub(super) fn ingress_command_request(record: &IngressRecord) -> Option<CommandRequestId> {
+    match &record.payload {
+        IngressPayload::Command { request } => Some(request.request_id),
+        IngressPayload::Decision { request } => {
+            request.command.as_ref().map(|command| command.request_id)
+        }
+        IngressPayload::Plugin { .. }
+        | IngressPayload::Calendar { .. }
+        | IngressPayload::Maintenance { .. }
+        | IngressPayload::PluginCancellation { .. } => None,
+    }
+}
+
+impl RuntimeEvidence {
+    /// Whether a seal archived a command request as queued command or
+    /// decision ingress.
+    pub(super) fn archived_request_was_queued(&self, request: CommandRequestId) -> bool {
+        self.archived_ingress_requests.contains_key(&request)
+            || self.archived_decision_command_requests.contains(&request)
+    }
+
+    fn attempt_is_unqueued(&self, attempt: &CommandAttemptRecord) -> bool {
+        attempt.request_id.is_none_or(|request| {
+            !self.command_index.queued_requests.contains_key(&request)
+                && !self.archived_request_was_queued(request)
+        })
+    }
+
+    fn find_first_unqueued_attempt(&self) -> Option<usize> {
+        self.command_attempts
+            .iter()
+            .position(|attempt| self.attempt_is_unqueued(attempt))
+    }
+
+    /// Appends an ingress record.
+    pub(super) fn push_ingress(&mut self, record: IngressRecord) {
+        let request = ingress_command_request(&record);
+        self.ingress.0.push(record);
+        if let Some(request) = request {
+            *self
+                .command_index
+                .queued_requests
+                .entry(request)
+                .or_insert(0) += 1;
+            // Queuing the request of an unqueued attempt makes it queued.
+            // Canonical ingress is refused while such an attempt is
+            // retained, but the index answers exactly either way.
+            if self.command_index.first_unqueued_attempt.is_some() {
+                self.command_index.first_unqueued_attempt = self.find_first_unqueued_attempt();
+            }
+        }
+    }
+
+    /// Appends an accepted command.
+    pub(super) fn push_command(&mut self, record: CommandRecord) {
+        if record.attempt_id.is_none() && self.command_index.first_direct_command.is_none() {
+            self.command_index.first_direct_command = Some(self.commands.len());
+        }
+        self.commands.0.push(record);
+    }
+
+    /// Appends a command attempt.
+    pub(super) fn push_command_attempt(&mut self, record: CommandAttemptRecord) {
+        let position = self.command_attempts.len();
+        if self.command_index.first_unqueued_attempt.is_none() && self.attempt_is_unqueued(&record)
+        {
+            self.command_index.first_unqueued_attempt = Some(position);
+        }
+        if let Some(request) = record.request_id {
+            self.command_index
+                .attempt_by_request
+                .entry(request)
+                .or_insert(position);
+        }
+        self.command_attempts.0.push(record);
+    }
+
+    /// Truncates the three retained journals of the command history to the
+    /// given lengths, as a failed transaction restores them. A length at or
+    /// past a journal's end leaves that journal as it is.
+    pub(super) fn truncate_command_history(
+        &mut self,
+        commands: usize,
+        attempts: usize,
+        ingress: usize,
+    ) {
+        if attempts < self.command_attempts.len() {
+            for (offset, attempt) in self.command_attempts[attempts..].iter().enumerate() {
+                if let Some(request) = attempt.request_id
+                    && self.command_index.attempt_by_request.get(&request)
+                        == Some(&(attempts + offset))
+                {
+                    self.command_index.attempt_by_request.remove(&request);
+                }
+            }
+            self.command_attempts.0.truncate(attempts);
+            if self
+                .command_index
+                .first_unqueued_attempt
+                .is_some_and(|position| position >= attempts)
+            {
+                self.command_index.first_unqueued_attempt = None;
+            }
+        }
+        if commands < self.commands.len() {
+            self.commands.0.truncate(commands);
+            if self
+                .command_index
+                .first_direct_command
+                .is_some_and(|position| position >= commands)
+            {
+                self.command_index.first_direct_command = None;
+            }
+        }
+        if ingress < self.ingress.len() {
+            let mut unqueued_by_truncation = false;
+            for record in &self.ingress.0[ingress..] {
+                let Some(request) = ingress_command_request(record) else {
+                    continue;
+                };
+                let Some(count) = self.command_index.queued_requests.get_mut(&request) else {
+                    continue;
+                };
+                *count -= 1;
+                if *count == 0 {
+                    self.command_index.queued_requests.remove(&request);
+                    unqueued_by_truncation |=
+                        self.command_index.attempt_by_request.contains_key(&request);
+                }
+            }
+            self.ingress.0.truncate(ingress);
+            // A retained attempt whose request's ingress the truncation
+            // removed is unqueued now. Transactions truncate the attempts
+            // they appended with their ingress, but the index answers
+            // exactly either way.
+            if unqueued_by_truncation {
+                self.command_index.first_unqueued_attempt = self.find_first_unqueued_attempt();
+            }
+        }
+    }
+
+    /// Replaces the retained command history, as a restore does, and builds
+    /// its index. The archived request tables must already be in place.
+    pub(super) fn restore_command_history(
+        &mut self,
+        commands: Vec<CommandRecord>,
+        attempts: Vec<CommandAttemptRecord>,
+        ingress: Vec<IngressRecord>,
+    ) {
+        self.commands = RetainedJournal(commands);
+        self.command_attempts = RetainedJournal(attempts);
+        self.ingress = RetainedJournal(ingress);
+        self.rebuild_command_index();
+    }
+
+    /// Drops the sealed part of the command history: the first `commands`
+    /// commands, the first `attempts` attempts, and every ingress record. The
+    /// seal must already have extended the archived request tables.
+    pub(super) fn seal_command_history(&mut self, commands: usize, attempts: usize) {
+        self.commands.0.drain(..commands);
+        self.command_attempts.0.drain(..attempts);
+        self.ingress.0.clear();
+        self.rebuild_command_index();
+    }
+
+    fn rebuild_command_index(&mut self) {
+        let mut index = CommandHistoryIndex::default();
+        for record in &self.ingress {
+            if let Some(request) = ingress_command_request(record) {
+                *index.queued_requests.entry(request).or_insert(0) += 1;
+            }
+        }
+        index.first_direct_command = self
+            .commands
+            .iter()
+            .position(|record| record.attempt_id.is_none());
+        for (position, attempt) in self.command_attempts.iter().enumerate() {
+            if let Some(request) = attempt.request_id {
+                index.attempt_by_request.entry(request).or_insert(position);
+            }
+        }
+        self.command_index = index;
+        self.command_index.first_unqueued_attempt = self.find_first_unqueued_attempt();
+    }
+
+    /// Whether the retained commands hold a legacy-direct command.
+    pub(super) const fn has_retained_direct_command(&self) -> bool {
+        self.command_index.first_direct_command.is_some()
+    }
+
+    /// Whether the retained history holds a legacy-direct command or an
+    /// attempt whose request was never queued as ingress, retained or
+    /// archived.
+    pub(super) const fn has_retained_unqueued_command_history(&self) -> bool {
+        self.command_index.first_direct_command.is_some()
+            || self.command_index.first_unqueued_attempt.is_some()
+    }
+
+    /// The first retained attempt of a command request.
+    pub(super) fn retained_attempt_for_request(
+        &self,
+        request: CommandRequestId,
+    ) -> Option<&CommandAttemptRecord> {
+        let position = *self.command_index.attempt_by_request.get(&request)?;
+        self.command_attempts.get(position)
+    }
+
+    /// How many retained command and decision ingress records carry a
+    /// command request.
+    pub(super) fn retained_queued_request_count(&self, request: CommandRequestId) -> usize {
+        self.command_index
+            .queued_requests
+            .get(&request)
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 impl RuntimeEvidence {

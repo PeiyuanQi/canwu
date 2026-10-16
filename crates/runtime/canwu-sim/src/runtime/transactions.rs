@@ -36,8 +36,7 @@ impl RejectionTransactionCheckpoint {
         state.metadata.plugin_registration_closed = self.plugin_registration_closed;
         state
             .evidence
-            .command_attempts
-            .truncate(self.command_attempt_count);
+            .truncate_command_history(usize::MAX, self.command_attempt_count, usize::MAX);
         state.metadata.checkpoint_hash = self.checkpoint_hash;
         state.metadata.commitment_roots = self.commitment_roots;
         state.metadata.commitment_cache = self.commitment_cache;
@@ -71,7 +70,9 @@ impl IngressTransactionCheckpoint {
     pub(super) fn restore(self, state: &mut RuntimeState, queue_key: &IngressQueueKey) {
         state.counters.next_ingress_id = self.next_ingress_id;
         state.scheduler.pending_ingress.remove(queue_key);
-        state.evidence.ingress.truncate(self.ingress_count);
+        state
+            .evidence
+            .truncate_command_history(usize::MAX, usize::MAX, self.ingress_count);
         state.metadata.plugin_registration_closed = self.plugin_registration_closed;
         state.metadata.checkpoint_hash = self.checkpoint_hash;
         state.metadata.commitment_roots = self.commitment_roots;
@@ -83,7 +84,9 @@ impl IngressTransactionCheckpoint {
         state.counters.next_ingress_id = self.next_ingress_id;
         state.scheduler.pending_ingress.insert(target);
         state.scheduler.cancelled_ingress.remove(&target.id);
-        state.evidence.ingress.truncate(self.ingress_count);
+        state
+            .evidence
+            .truncate_command_history(usize::MAX, usize::MAX, self.ingress_count);
         state.evidence.pinned = self.pinned;
         state.metadata.plugin_registration_closed = self.plugin_registration_closed;
         state.metadata.checkpoint_hash = self.checkpoint_hash;
@@ -138,11 +141,11 @@ impl CommandTransactionCheckpoint {
         state.scheduler.actions = self.scheduled_actions;
         state.counters = self.counters;
         state.evidence.events.truncate(self.event_count);
-        state.evidence.commands.truncate(self.command_count);
-        state
-            .evidence
-            .command_attempts
-            .truncate(self.command_attempt_count);
+        state.evidence.truncate_command_history(
+            self.command_count,
+            self.command_attempt_count,
+            usize::MAX,
+        );
         state.metadata.plugin_registration_closed = self.plugin_registration_closed;
         state.metadata.checkpoint_hash = self.checkpoint_hash;
         state.metadata.commitment_roots = self.commitment_roots;
@@ -231,12 +234,11 @@ impl BoundaryTransactionCheckpoint {
         state.scheduler = self.scheduler;
         state.counters = self.counters;
         state.evidence.events.truncate(self.event_count);
-        state.evidence.commands.truncate(self.command_count);
-        state
-            .evidence
-            .command_attempts
-            .truncate(self.command_attempt_count);
-        state.evidence.ingress.truncate(self.ingress_count);
+        state.evidence.truncate_command_history(
+            self.command_count,
+            self.command_attempt_count,
+            self.ingress_count,
+        );
         state.evidence.boundaries.truncate(self.boundary_count);
         state.evidence.random_draws.truncate(self.random_draw_count);
         state.evidence.keyed_draws = self.keyed_draws;

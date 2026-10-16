@@ -975,7 +975,7 @@ impl Simulation {
             .evidence
             .pinned
             .set_ingress_status(target.id, super::PluginIngressStatus::Cancelled);
-        self.state.evidence.ingress.push(record);
+        self.state.evidence.push_ingress(record);
         self.state.metadata.plugin_registration_closed = true;
         if let Err(error) = self.refresh_checkpoint_hash() {
             transaction.restore_cancellation(&mut self.state, target);
@@ -1177,7 +1177,7 @@ impl Simulation {
         let queue_key = IngressQueueKey::from_record(&record);
         self.state.counters.next_ingress_id = next_id;
         self.state.scheduler.pending_ingress.insert(queue_key);
-        self.state.evidence.ingress.push(record.clone());
+        self.state.evidence.push_ingress(record.clone());
         self.state.metadata.plugin_registration_closed = true;
         if let Err(error) = self.refresh_checkpoint_hash() {
             transaction.restore(&mut self.state, &queue_key);
@@ -1385,7 +1385,7 @@ impl Simulation {
             .map(|event| event.id)
             .collect();
         self.state.metadata.plugin_registration_closed = true;
-        self.state.evidence.commands.push(CommandRecord {
+        self.state.evidence.push_command(CommandRecord {
             id: command_id,
             attempt_id: record_attempt.then_some(attempt_id),
             accepted_at: self.state.scheduler.now,
@@ -1400,8 +1400,7 @@ impl Simulation {
             self.state.counters.next_command_attempt_id = next_attempt_id;
             self.state
                 .evidence
-                .command_attempts
-                .push(CommandAttemptRecord {
+                .push_command_attempt(CommandAttemptRecord {
                     id: attempt_id,
                     at: self.state.scheduler.now,
                     revision_before: admission.revision_before,
@@ -1431,16 +1430,20 @@ impl Simulation {
     }
 
     fn ensure_command_ingress_family(&self, ingress: CommandIngress) -> Result<(), CanwuError> {
-        let has_legacy_commands = self.state.evidence.archived_legacy_commands
-            || self
-                .state
-                .evidence
+        let evidence = &self.state.evidence;
+        debug_assert_eq!(
+            evidence.has_retained_direct_command(),
+            evidence
                 .commands
                 .iter()
-                .any(|record| record.attempt_id.is_none());
-        let has_tracked_attempts = self.state.evidence.archived_tracked_attempts
-            || !self.state.evidence.command_attempts.is_empty()
-            || !self.state.evidence.ingress.is_empty();
+                .any(|record| record.attempt_id.is_none()),
+            "the command-history index diverged from the retained commands"
+        );
+        let has_legacy_commands =
+            evidence.archived_legacy_commands || evidence.has_retained_direct_command();
+        let has_tracked_attempts = evidence.archived_tracked_attempts
+            || !evidence.command_attempts.is_empty()
+            || !evidence.ingress.is_empty();
         if (ingress == CommandIngress::LegacyDirect && has_tracked_attempts)
             || (ingress != CommandIngress::LegacyDirect && has_legacy_commands)
         {
@@ -1497,13 +1500,19 @@ impl Simulation {
             }
             return Ok(Some(cached.outcome.clone()));
         }
-        let Some(attempt) = self
-            .state
-            .evidence
-            .command_attempts
-            .iter()
-            .find(|attempt| attempt.request_id == Some(request_id))
-        else {
+        let evidence = &self.state.evidence;
+        debug_assert_eq!(
+            evidence
+                .retained_attempt_for_request(request_id)
+                .map(|attempt| attempt.id),
+            evidence
+                .command_attempts
+                .iter()
+                .find(|attempt| attempt.request_id == Some(request_id))
+                .map(|attempt| attempt.id),
+            "the command-history index diverged from the retained attempts"
+        );
+        let Some(attempt) = evidence.retained_attempt_for_request(request_id) else {
             return Ok(None);
         };
         if attempt.expected_revision != expected_revision || &attempt.envelope != envelope {
@@ -1617,7 +1626,7 @@ impl Simulation {
         self.state.counters.next_command_attempt_id = next_attempt_id;
         self.state.counters.state_revision = revision;
         self.state.metadata.plugin_registration_closed = true;
-        self.state.evidence.command_attempts.push(attempt);
+        self.state.evidence.push_command_attempt(attempt);
         if let Err(hash_error) = self.refresh_checkpoint_hash() {
             transaction.restore(&mut self.state);
             return Err(hash_error);

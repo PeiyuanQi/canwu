@@ -1488,7 +1488,7 @@ impl Simulation {
         .map(|runs| import_time_runs(runs));
         let expected_checkpoint_hash = state.checkpoint_hash.clone();
         let expected_roots = state.commitment_roots.clone();
-        let evidence = super::state::RuntimeEvidence {
+        let mut evidence = super::state::RuntimeEvidence {
             archived: settled_cut,
             archived_boundary_head: boundary_head,
             archived_legacy_commands: history_flags.legacy_commands,
@@ -1535,9 +1535,10 @@ impl Simulation {
                 .collect(),
             archived_decision_command_requests: requests.decision_commands.into_iter().collect(),
             events: unadmitted.events,
-            commands: unadmitted.commands,
-            command_attempts: unadmitted.command_attempts,
-            ingress: Vec::new(),
+            commands: super::state::RetainedJournal::default(),
+            command_attempts: super::state::RetainedJournal::default(),
+            ingress: super::state::RetainedJournal::default(),
+            command_index: super::state::CommandHistoryIndex::default(),
             boundaries: Vec::new(),
             random_draws: Vec::new(),
             archived_segment_headers: im::Vector::new(),
@@ -1558,6 +1559,13 @@ impl Simulation {
                 continuation_hash,
             }),
         };
+        // The archived request tables are in place, so the restored history
+        // builds its index against them.
+        evidence.restore_command_history(
+            unadmitted.commands,
+            unadmitted.command_attempts,
+            Vec::new(),
+        );
         let mut simulation = Self::assemble_runtime(
             state,
             plugins,

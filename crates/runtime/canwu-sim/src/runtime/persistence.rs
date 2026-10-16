@@ -3109,15 +3109,7 @@ impl Simulation {
     /// Whether a command request was queued as command or decision ingress
     /// that a seal has already archived.
     pub(super) fn archived_request_was_queued(&self, request: super::CommandRequestId) -> bool {
-        self.state
-            .evidence
-            .archived_ingress_requests
-            .contains_key(&request)
-            || self
-                .state
-                .evidence
-                .archived_decision_command_requests
-                .contains(&request)
+        self.state.evidence.archived_request_was_queued(request)
     }
 
     /// The history flags of the given slices, as a seal records them. A
@@ -3171,7 +3163,7 @@ impl Simulation {
             events: evidence.events[..event_count].to_vec(),
             commands: evidence.commands[..command_count].to_vec(),
             command_attempts: evidence.command_attempts[..attempt_count].to_vec(),
-            ingress: evidence.ingress.clone(),
+            ingress: evidence.ingress.to_vec(),
             boundaries: evidence.boundaries.clone(),
             random_draws: evidence.random_draws.clone(),
             archive: None,
@@ -3220,9 +3212,7 @@ impl Simulation {
         evidence.sealed_times = sealed_times;
         evidence.archived = cut;
         evidence.events.drain(..event_count);
-        evidence.commands.drain(..command_count);
-        evidence.command_attempts.drain(..attempt_count);
-        evidence.ingress.clear();
+        evidence.seal_command_history(command_count, attempt_count);
         evidence.boundaries.clear();
         evidence.random_draws.clear();
         self.state.scheduler.cancelled_ingress.clear();

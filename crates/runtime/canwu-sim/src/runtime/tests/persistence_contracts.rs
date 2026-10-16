@@ -1714,12 +1714,6 @@ fn simulation_view_reports_sealed_payloads_as_unavailable() {
     let retained = simulation
         .submit(debug_command(64))
         .expect("the retained lookup command should commit");
-    let retained_command = simulation
-        .state
-        .evidence
-        .commands
-        .pop()
-        .expect("the retained command should be in the live tail");
     let retained_event = simulation
         .state
         .evidence
@@ -1728,9 +1722,8 @@ fn simulation_view_reports_sealed_payloads_as_unavailable() {
         .expect("the retained event should be in the live tail");
     simulation.state.evidence.archived.command_count = 1;
     simulation.state.evidence.archived.event_count = 1;
-    simulation.state.evidence.commands.clear();
+    simulation.state.evidence.seal_command_history(1, 0);
     simulation.state.evidence.events.clear();
-    simulation.state.evidence.commands.push(retained_command);
     simulation.state.evidence.events.push(retained_event);
     let reads = [StateKey::core_commands(), StateKey::core_events()];
     let view = simulation.plugin_view("lookup", &reads);

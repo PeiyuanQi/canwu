@@ -1660,9 +1660,10 @@ impl Simulation {
                     archived_decision_requests: im::OrdMap::new(),
                     archived_decision_command_requests: im::OrdSet::new(),
                     events: Vec::new(),
-                    commands: Vec::new(),
-                    command_attempts: Vec::new(),
-                    ingress: Vec::new(),
+                    commands: state::RetainedJournal::default(),
+                    command_attempts: state::RetainedJournal::default(),
+                    ingress: state::RetainedJournal::default(),
+                    command_index: state::CommandHistoryIndex::default(),
                     boundaries: Vec::new(),
                     random_draws: Vec::new(),
                     archived_segment_headers: im::Vector::new(),
@@ -2107,9 +2108,9 @@ impl Simulation {
             run_configuration: self.state.metadata.run_configuration.clone(),
             plugin_descriptors: self.plugins.descriptors().cloned().collect(),
             plugin_registration_closed: self.state.metadata.plugin_registration_closed,
-            commands: self.state.evidence.commands.clone(),
-            command_attempts: self.state.evidence.command_attempts.clone(),
-            ingress: self.state.evidence.ingress.clone(),
+            commands: self.state.evidence.commands.to_vec(),
+            command_attempts: self.state.evidence.command_attempts.to_vec(),
+            ingress: self.state.evidence.ingress.to_vec(),
             boundaries: self.state.evidence.boundaries.clone(),
             final_time: self.state.scheduler.now,
             checkpoint_hash: self.state.metadata.checkpoint_hash.clone(),
@@ -2543,11 +2544,9 @@ impl Simulation {
     pub fn snapshot(&self) -> SimulationSnapshot {
         let mut snapshot = self.checkpoint_state();
         snapshot.events.clone_from(&self.state.evidence.events);
-        snapshot.commands.clone_from(&self.state.evidence.commands);
-        snapshot
-            .command_attempts
-            .clone_from(&self.state.evidence.command_attempts);
-        snapshot.ingress.clone_from(&self.state.evidence.ingress);
+        snapshot.commands = self.state.evidence.commands.to_vec();
+        snapshot.command_attempts = self.state.evidence.command_attempts.to_vec();
+        snapshot.ingress = self.state.evidence.ingress.to_vec();
         snapshot
             .boundaries
             .clone_from(&self.state.evidence.boundaries);
@@ -2630,7 +2629,7 @@ impl Simulation {
             &snapshot.boundaries,
             &snapshot.domain_records,
         )?;
-        let evidence = RuntimeEvidence {
+        let mut evidence = RuntimeEvidence {
             archived: EvidenceCursor::default(),
             archived_boundary_head: None,
             archived_legacy_commands: false,
@@ -2641,9 +2640,10 @@ impl Simulation {
             archived_decision_requests: im::OrdMap::new(),
             archived_decision_command_requests: im::OrdSet::new(),
             events: std::mem::take(&mut snapshot.events),
-            commands: std::mem::take(&mut snapshot.commands),
-            command_attempts: std::mem::take(&mut snapshot.command_attempts),
-            ingress: std::mem::take(&mut snapshot.ingress),
+            commands: state::RetainedJournal::default(),
+            command_attempts: state::RetainedJournal::default(),
+            ingress: state::RetainedJournal::default(),
+            command_index: state::CommandHistoryIndex::default(),
             boundaries: std::mem::take(&mut snapshot.boundaries),
             random_draws: std::mem::take(&mut snapshot.random_draws),
             archived_segment_headers: im::Vector::new(),
@@ -2653,6 +2653,11 @@ impl Simulation {
             pinned: continuation::PinnedEvidence::default(),
             continuation_base: None,
         };
+        evidence.restore_command_history(
+            std::mem::take(&mut snapshot.commands),
+            std::mem::take(&mut snapshot.command_attempts),
+            std::mem::take(&mut snapshot.ingress),
+        );
         let mut simulation = Self::assemble_runtime(
             snapshot,
             plugins,

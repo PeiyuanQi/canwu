@@ -631,3 +631,122 @@ fn cross_plugin_ingress_requires_a_declared_target_and_waits_for_next_admission(
     .expect("cross-plugin ingress should replay exactly");
     assert_eq!(simulation.snapshot(), replayed.snapshot());
 }
+
+/// The command-history index answers every admission question as a scan of
+/// the retained journals does: after appends, after truncations (including
+/// one that leaves an attempt without its ingress), after a seal with and
+/// without the archived request tables, and after a restore.
+#[test]
+fn the_command_history_index_answers_as_the_retained_journals_do() {
+    let (scenario, ids) = demo_scenario();
+    let mut simulation = Simulation::new(41, scenario.clone()).expect("index fixture should load");
+    let due_at = SimTime::EPOCH
+        .checked_add(SimDuration::hours(1))
+        .expect("fixture due time should be representable");
+    for request in 1..=3 {
+        simulation
+            .enqueue_command(
+                due_at,
+                0,
+                CommandRequest::new(
+                    CommandRequestId::new(request),
+                    0,
+                    move_order(&ids).at_time(due_at),
+                ),
+            )
+            .expect("the command should queue");
+    }
+    simulation
+        .advance_canonical(SimDuration::hours(1))
+        .expect("the queued commands should settle");
+    let settled = simulation.state.evidence.clone();
+    assert_eq!(settled.command_attempts.len(), 3);
+    assert_command_index_matches_scans(&settled);
+    assert!(!settled.has_retained_unqueued_command_history());
+
+    let mut evidence = settled.clone();
+    evidence.truncate_command_history(usize::MAX, usize::MAX, 0);
+    assert_command_index_matches_scans(&evidence);
+    assert!(evidence.has_retained_unqueued_command_history());
+    for record in &settled.ingress {
+        evidence.push_ingress(record.clone());
+    }
+    assert_command_index_matches_scans(&evidence);
+    assert!(!evidence.has_retained_unqueued_command_history());
+
+    let mut evidence = settled.clone();
+    evidence.truncate_command_history(0, 1, usize::MAX);
+    assert_command_index_matches_scans(&evidence);
+
+    let mut evidence = settled.clone();
+    evidence.seal_command_history(0, 0);
+    assert_command_index_matches_scans(&evidence);
+    assert!(evidence.has_retained_unqueued_command_history());
+    let mut evidence = settled.clone();
+    for request in 1..=3 {
+        evidence
+            .archived_decision_command_requests
+            .insert(CommandRequestId::new(request));
+    }
+    evidence.seal_command_history(0, 0);
+    assert_command_index_matches_scans(&evidence);
+    assert!(!evidence.has_retained_unqueued_command_history());
+
+    let mut restored = settled.clone();
+    restored.restore_command_history(
+        settled.commands.to_vec(),
+        settled.command_attempts.to_vec(),
+        settled.ingress.to_vec(),
+    );
+    assert_command_index_matches_scans(&restored);
+
+    let mut legacy = Simulation::new(41, scenario).expect("legacy fixture should load");
+    legacy
+        .submit(move_order(&ids))
+        .expect("a legacy-direct command should be accepted");
+    let mut evidence = legacy.state.evidence.clone();
+    assert!(evidence.has_retained_direct_command());
+    assert_command_index_matches_scans(&evidence);
+    evidence.truncate_command_history(0, usize::MAX, usize::MAX);
+    assert!(!evidence.has_retained_direct_command());
+    assert_command_index_matches_scans(&evidence);
+}
+
+fn assert_command_index_matches_scans(evidence: &state::RuntimeEvidence) {
+    assert_eq!(
+        evidence.has_retained_unqueued_command_history(),
+        has_unqueued_command_history(
+            &evidence.commands,
+            &evidence.command_attempts,
+            &evidence.ingress,
+            &|request| evidence.archived_request_was_queued(request),
+        )
+    );
+    assert_eq!(
+        evidence.has_retained_direct_command(),
+        evidence
+            .commands
+            .iter()
+            .any(|record| record.attempt_id.is_none())
+    );
+    for request in (1..=4).map(CommandRequestId::new) {
+        assert_eq!(
+            evidence
+                .retained_attempt_for_request(request)
+                .map(|attempt| attempt.id),
+            evidence
+                .command_attempts
+                .iter()
+                .find(|attempt| attempt.request_id == Some(request))
+                .map(|attempt| attempt.id)
+        );
+        assert_eq!(
+            evidence.retained_queued_request_count(request),
+            evidence
+                .ingress
+                .iter()
+                .filter(|record| state::ingress_command_request(record) == Some(request))
+                .count()
+        );
+    }
+}

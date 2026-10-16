@@ -5075,20 +5075,23 @@ fn runtime_current_entity_identity_exists(
     }
 }
 
+/// Whether the run holds legacy-direct command history or an attempt whose
+/// request was never queued, sealed or retained. Answered from the derived
+/// command-history index; a debug build checks it against the scan.
 pub(super) fn runtime_has_unqueued_command_history(state: &RuntimeState) -> bool {
     let evidence = &state.evidence;
-    evidence.archived_unqueued_command_history
-        || has_unqueued_command_history(
+    let retained = evidence.has_retained_unqueued_command_history();
+    debug_assert_eq!(
+        retained,
+        has_unqueued_command_history(
             &evidence.commands,
             &evidence.command_attempts,
             &evidence.ingress,
-            &|request| {
-                evidence.archived_ingress_requests.contains_key(&request)
-                    || evidence
-                        .archived_decision_command_requests
-                        .contains(&request)
-            },
-        )
+            &|request| evidence.archived_request_was_queued(request),
+        ),
+        "the command-history index diverged from the retained journals"
+    );
+    evidence.archived_unqueued_command_history || retained
 }
 
 /// Whether the slices hold a legacy command or a tracked attempt whose
