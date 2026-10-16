@@ -8,11 +8,12 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.16.0`. A live `SimulationSnapshot` has:
+The workspace version is `0.17.0`. A live `SimulationSnapshot` has:
 
-- snapshot format `8`;
-- commitment format `5`;
-- checkpoint/evidence-journal format `5`;
+- snapshot format `9`;
+- commitment format `6`;
+- checkpoint/evidence-journal format `6`;
+- paged-checkpoint envelope format `6` and continuation checkpoint format `2`;
 - state revision format `3`;
 - admission cursor format `3`;
 - exact replay revision format `3`;
@@ -24,6 +25,562 @@ The workspace version is `0.16.0`. A live `SimulationSnapshot` has:
 Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
+
+Version 0.17.0 is a pre-1.0 minor release. Its changes come from one design,
+[fiscal observers at scale](proposals/fiscal-observers-at-scale.md), Phase 3
+of [world-scale fiscal state](proposals/world-scale-fiscal.md) and the rest
+of downstream gap G-15/G-16, which changes the generic knowledge ledger,
+every plugin that publishes knowledge, and the fiscal extension; and from the
+continuation gate (E-27), which this release commits as a release test. What
+changed, in one list:
+
+- A boundary has one **publication budget** of record bodies, holder entries,
+  and payload bytes, shared by every publishing system in dispatch order and
+  read with `SimulationView::knowledge_publication_budget()`. The per-system
+  count of 64 publication batches is gone.
+- A `PublishKnowledge` directive carries **groups** of holders and drafts.
+  Each record body is stored **once**, and each holder holds a **holder
+  entry** with its own stored local ID and its own supersession, so one body
+  can serve many holders, and a body is encoded, hashed, and kept once per
+  boundary for the overlay, the ledger, and the journal.
+- A knowledge schema declares a **retention** policy. Under
+  `RetireWhenSuperseded` an entry a new entry of the same holder supersedes
+  is cleared at publication, in the same commit, live and in replay alike;
+  `Keep`, the default, is the 0.16.0 behaviour.
+- One `KnowledgePublished` event per directive, naming every holder.
+- Evidence that cites an initial-scenario record version resolves through an
+  index built once per scenario (E0), not a scan of every initial record.
+- The knowledge commitment is chunked (commitment format 6) and a snapshot
+  stores bodies and holder entries (snapshot format 9).
+- Fiscal reports gain a **report cadence** (`OnChange` or `Interval`), an
+  **institution granularity**, a report schedule record, a bounded parked
+  rotation, and cheaper part encoding, digests, and queue reads; the report
+  share of the engine's budget and the retention of report records are host
+  knobs, fixed for a run.
+
+**Same version only.** Canwu crates depend only on the exact same version of
+each other: every first-party crate requires `=0.17.0` of every other
+first-party crate it uses, and a host pins `canwu-api = "=0.17.0"` and the
+same version of every extension. Nothing written by 0.16.0 is read by
+0.17.0. There is no migration and no decoding of an old shape: the exact
+engine-version check refuses every 0.16.0 snapshot, checkpoint journal, paged
+checkpoint, continuation checkpoint, replay journal, evidence segment, and
+scenario that records its engine version, and most would also be refused by
+their format or schema versions (snapshot format 9, commitment format 6,
+checkpoint/journal format 6, paged envelope format 6, continuation format 2,
+fiscal runtime schema 6, `fiscal_report` schema 5). A scenario built with
+0.16.0 types is rebuilt with the 0.17.0 types; its `knowledge` ledgers are
+encoded as bodies and holder entries. Retain the 0.16.0 engine to read
+0.16.0 data.
+
+Formats and schemas that change, each deliberately versioned:
+
+| Item | 0.16.0 | 0.17.0 | What changed |
+| --- | --- | --- | --- |
+| Snapshot format | 8 | 9 | `KnowledgeSnapshot::records` (and a scenario's `knowledge`) encodes `{ bodies: [...], holders: [{ holder, next_local, entries: [{ record, local, supersedes, contradicts }] }] }`, bodies in ID order, holders in holder order, entries in local order; decoding refuses a body no holder holds, an entry naming a missing body, a local ID that is zero, out of order, or at or above `next_local`, an empty holder whose `next_local` is 1, a relation that does not resolve within its holder, and a duplicate or unordered body or holder; a holder emptied by retention stays encoded with its `next_local` |
+| `COMMITMENT_FORMAT_VERSION` | 5 | 6 | the knowledge root is `canwu.commitment.knowledge.v3` over the actor sub-root and a chunked ledger root: a 32-byte leaf hash per holder entry, cached and recomputed only where an entry changed, chunk roots over `KNOWLEDGE_COMMITMENT_CHUNK_ENTRIES` (256) local IDs, a holder root over its chunks, and the ledger root over the holder roots; the append-only records accumulator in global ID order is gone, so an entry can leave; the boundary record hash covers the new shape of `knowledge_changes` (bodies by digest, per-holder entries, the supersession mode); every checkpoint hash, `v1:` boundary state commitment, boundary hash, and `boundary_chain` root therefore differs from 0.16.0 |
+| Checkpoint/evidence-journal format | 5 | 6 | `BoundaryKnowledgeChange` carries `supersession`, the bodies it stored (`records: Vec<Arc<KnowledgeRecordBody>>`, shared with the ledger) and each holder's entries (`holders: Vec<HolderPublication>`); one `KnowledgePublished { holders, record_count, entry_count }` event per directive; segments keep their shape, item encoding, and IDs, and their `format_version` field reads 6 |
+| `PAGED_CHECKPOINT_FORMAT_VERSION` | 5 | 6 | the envelope embeds the format-6 checkpoint and the format-9 snapshot; the knowledge ledger still lives inside the 4 MiB envelope page (paging it, E4, is later work) |
+| `CONTINUATION_CHECKPOINT_FORMAT_VERSION` | 1 | 2 | embeds snapshot format 9; the hash domain stays `canwu.continuation-checkpoint.v1` |
+| `PluginDescriptor` | — | — | every registered `PluginKnowledgeSchema` carries its `retention`, so the persisted descriptor of a plugin that publishes knowledge records the policy and a run restores and replays only with a plugin that declares the same one |
+| `fiscal_report` knowledge schema | 4 | 5 | the summary carries the binding's `granularity` and `cadence`; a part of institution rows carries `books_summed`; versions 1 to 4 are no longer registered, so a scenario whose knowledge carries one is refused |
+| `FISCAL_RUNTIME_SCHEMA_VERSION` | 5 | 6 | `FiscalObserverBinding::granularity` and `cadence`; `FiscalReportQueueEntry::due_at` is the one due field, with the `Interval` meaning; the new record kind `report-schedule` (`FiscalReportSchedule { page_due, parked_pages }`, identity `primary`); `FiscalRoot::earliest_due`, `parked`, and `parked_cursor` replace `queue_pages`; `FiscalOffice::mechanisms` and `observers` (a map of `FiscalOfficeObserver { first_row, granularity, interval }`) |
+| `canwu-fiscal` plugin | `0.3.0-experimental` | `0.4.0-experimental` | a new semantic hash; the three knobs are in the descriptor: `with_report_cadence` as the wake cadence of `wake-fiscal-reports-on-cadence-v1`, `with_report_budget` in the report system's name (`materialize-fiscal-reports-v1/share/{bodies}/{entries}/{bytes}` for a custom share; the default keeps the plain name), and `with_report_retention` in the registered report schema |
+
+The `canwu-fiscal` semantic identity differs from 0.16.0 (version and hash).
+The other first-party plugins that register a knowledge schema (military,
+movement, information, correspondence, resource, production, technology)
+declare `KnowledgeRetention::Keep` and keep their semantic hash constants;
+their persisted descriptors gain the field, which no cross-version
+comparison ever sees, since no 0.16.0 save loads. As with any version
+change, the engine version in every checkpoint
+hash changes and first-party plugins that take their plugin version from the
+crate version report a new one.
+
+New and changed public contracts, by crate:
+
+- `canwu-knowledge`, re-exported by `canwu-sim` and `canwu-api`:
+  - A record is stored as a `KnowledgeRecordBody` (`id`, `schema`,
+    `subjects`, `payload`, `as_of`, `learned_at`, `confidence_per_mille`,
+    `origin`) held once, and a `HolderEntry { record, local, supersedes,
+    contradicts }` per holder. `KnowledgeRecord` keeps its fields and is the
+    assembled form a reader gets (`KnowledgeRecord::assemble(holder, entry,
+    body)` and `into_parts` convert); `HolderLedger::get`, `iter`, and
+    `values` return it by value, and `HolderLedger::entry`, `body`, and
+    `entries` read the stored forms. A holder's local IDs are stored, come
+    from the holder's own counter, never move when an entry leaves, and are
+    read with `HolderLedger::local_of` and `id_of`.
+  - `HolderLedgers` gains `insert_body`, `insert_publication` (bodies and
+    entries, atomically, with every relation resolved), `remove_entry`,
+    `remove_body`, `retire_superseded_by`, `body`, `body_digest`,
+    `body_holder_count`, `body_count`, `bodies` (`BodiesById`),
+    `last_body_id`, `commitment_root`, and `refresh_commitment`;
+    `insert(KnowledgeRecord)` stays as the authoring path. Removed: `record`,
+    `records`, `records_after`, `record_count`, `last_record_id`, `remove`,
+    indexing by record ID, and `RecordsById`. `KnowledgeBodyDigest`,
+    `KnowledgeEncodingError`, `KnowledgeLedgerError`, `HolderEntriesIter`,
+    and `KNOWLEDGE_COMMITMENT_CHUNK_ENTRIES` (256) are new and re-exported
+    by `canwu-api`; the runtime's overlay type `StagedKnowledgeEntries` is
+    public in `canwu-knowledge` only. Each holder's current-record index is
+    keyed by SipHash keys that store the exact kind or subject beside the
+    key and fall back to exact comparison after any collision, so a lookup
+    never depends on key values and neither the commitment nor a restore
+    uses them. Iteration stays forward only. Source-incompatible.
+  - `KnowledgeRetention::{Keep, RetireWhenSuperseded}` (default `Keep`).
+  - `KnowledgeRecordDraft::payload_bytes()` and
+    `KnowledgeRecordBody::payload_bytes()` return `Result<usize,
+    KnowledgeEncodingError>`: the compact JSON length of the payload, which
+    is exactly what the budget charges. Additive.
+  - `KnowledgeQueryResult` gains `retention: BTreeMap<KnowledgeSchemaId,
+    KnowledgeRetention>` (serde-default): the policy of every schema the
+    query named, or of the returned records' schemas when it named none, so
+    a research host can tell when `FullHistory` shows what `CurrentHeads`
+    shows. `with_retention` fills it. Additive, except for struct literals.
+  - The encoded ledger is the format-9 shape above. Source-incompatible for
+    JSON a host wrote by hand.
+- `canwu-sim`, re-exported by `canwu-api`:
+  - `BoundaryDirective::PublishKnowledge { visibility, producer_correlation,
+    supersession, groups, summary }` replaces `{ holder, visibility,
+    producer_correlation, records, summary }`. A
+    `KnowledgePublicationGroup { holders, records }` publishes every draft
+    to every holder of the group (`holders` sorted and unique).
+    `KnowledgeSupersession::Explicit` applies each draft's `supersedes` and
+    `contradicts` to the one holder of its group, so a group of one holder
+    with `Explicit` is the 0.16.0 directive; `CurrentOnSubjects` lets the
+    engine compute, per holder, the holder's current records of the draft's
+    kind that carry every subject of the draft (the `knowledge_heads` rule)
+    and name them in that holder's entry, and requires empty relation lists
+    on the drafts. A group with a duplicate holder, an `Explicit` group of
+    more than one holder, a `CurrentOnSubjects` draft with relations, or one
+    whose match is truncated fails the boundary with
+    `InvalidKnowledgeRecord`. Source-incompatible.
+  - `KnowledgeLimitsV1` loses `batches_per_system_boundary` and gains
+    `holder_entries_per_batch` (4,096), `holder_entries_per_boundary`
+    (32,768), and `payload_bytes_per_boundary` (64 MiB);
+    `records_per_boundary` rises from 10,000 to 32,768;
+    `records_per_batch` (1,000) now bounds the bodies of one directive over
+    all its groups. Source-incompatible for struct literals and for code
+    that read the removed field.
+  - `SimulationView::knowledge_publication_budget()` returns a
+    `KnowledgePublicationBudget { records, holder_entries, payload_bytes,
+    records_per_batch, holder_entries_per_batch }`: what the boundary may
+    still publish at this system's cut, after every proposal of earlier
+    phases and of earlier systems of this phase, with the per-directive
+    bounds a publisher splits its groups against. `admits(records,
+    holder_entries, payload_bytes)` and `take(...)` (which also says whether
+    it took; both `#[must_use]`) keep a publisher inside it. It needs no
+    read declaration. Additive.
+  - `PluginKnowledgeSchema::retention: KnowledgeRetention` is a new field
+    (struct literals must name it). `Simulation::knowledge_retention(&schema)`
+    and `CompactedSimulation::knowledge_retention` read a registered
+    schema's policy. Every version of a knowledge kind must declare the
+    same retention, because a kind's entries supersede across its versions:
+    plugin registration refuses a plugin whose versions differ, and a
+    snapshot whose descriptors do is refused at load.
+  - `BoundaryKnowledgeChange { plugin, system, phase, producer_correlation,
+    visibility, summary, supersession, records, holders }` with
+    `HolderPublication { holder, entries }`, `entry_count()`, `body(id)`,
+    and `records_of(&holder)`, which assembles the records one holder
+    received. The bodies are the ledger's own `Arc`s. Source-incompatible.
+  - `BoundaryReceipt` gains `knowledge_entry_count`; `knowledge_record_count`
+    counts bodies and `knowledge_batch_count` directives.
+    `SimulationView::knowledge_record_count_in_namespace` counts bodies.
+  - `KnowledgePublished { holders: Vec<KnowledgeHolderRef>, record_count,
+    entry_count }` replaces `{ holder, record_count }`; its audience is
+    `EventAudience::KnowledgeHolders(holders)`, a new variant in
+    `canwu-event` (`KnowledgeHolder(_)` stays for other uses), so each
+    holder's `visible_changes_since` sees the event. Source-incompatible
+    for exhaustive matches and for code that read `holder`.
+  - A proposal that publishes past the remaining budget fails the boundary
+    with `KnowledgeLimitExceeded`, as a directive past its per-directive
+    bounds does. `KnowledgeEncodingError` converts into `CanwuError`
+    (`InvalidKnowledgeRecord`); a staging misalignment inside the kernel is
+    `InvalidBoundary`. A restored run keeps the ledger it rebuilt from the
+    journal, its bodies shared with the journal and held once.
+  - `SNAPSHOT_FORMAT_VERSION` 9, `COMMITMENT_FORMAT_VERSION` 6,
+    `CHECKPOINT_JOURNAL_FORMAT_VERSION` 6, `PAGED_CHECKPOINT_FORMAT_VERSION`
+    6, `CONTINUATION_CHECKPOINT_FORMAT_VERSION` 2.
+  - `knowledge_heads`, `knowledge_records`,
+    `knowledge_holder_accepts_publication`,
+    `knowledge_changes_by_correlation*`, `KnowledgeQuery`, `KnowledgeCursor`,
+    `KnowledgeRecordView`, `KnowledgeWriteGrant`, and
+    `MAX_KNOWLEDGE_PAGE_SIZE` keep their signatures and meaning. E0 adds no
+    public type.
+- `canwu-api`:
+  - `CanwuViewer::query_knowledge`, `query_holder_knowledge`,
+    `CanwuRun::admin_query_knowledge`, and `audit_knowledge_record` keep
+    their signatures; the query results carry `retention`, and the audit
+    read resolves a stored holder-local ID, so a record keeps its local ID
+    after another entry of the holder is cleared.
+  - The Cargo feature `continuation-gate` (off by default) is a release
+    test, never enabled by CI or by an application: with it on, every
+    `Canwu` keeps a sealed shadow run restored from its own continuation
+    checkpoints, runs every mutation on both, and panics with `continuation
+    gate:` on any divergence of results, checkpoint hash, or state hash, or
+    when an exact replay differs. Its hooks are `#[doc(hidden)]`. A new
+    `&mut self` method on `Canwu` goes through `gated!` or drops the gate's
+    shadow (`AGENTS.md`). [Releasing](releasing.md) and the
+    `canwu-contributor-release` skill run it before a release is tagged.
+- `canwu-fiscal`:
+  - `FiscalObserverBinding` gains `granularity: FiscalReportGranularity`
+    (`Scope`, the default, or `Institution`) and `cadence:
+    FiscalReportCadence` (`OnChange`, the default, or `Interval { every,
+    offset }`, aligned to `SimTime::EPOCH`, both whole minutes with `offset
+    < every`), both serde-defaulted so a 0.16.0 scenario that names neither
+    behaves as before; neither changes with `RebindObserver`.
+    `FiscalReportCadence::staggered(every, index, stride)` spreads offsets,
+    `is_interval` reads the kind, and
+    `FiscalObserverBinding::scheduled_cadence` gives the cadence a binding
+    is served by (`OnChange` once removed). `FiscalState::add_observer`
+    queues the binding's first report at its first due time, the first
+    aligned time at or after the state's `historical_context.updated_at`.
+  - `FiscalReportQueueEntry { due_at, cycles, whole, republish, parked }`
+    keeps its fields; `due_at` is the one due time and, for an `Interval`
+    binding, the next aligned time. `FiscalReportSchedule { page_due,
+    parked_pages }` is the payload of the new record
+    `canwu.fiscal:report-schedule` (`FiscalReportScheduleRecord`,
+    `FiscalRecordKind::ReportSchedule`, `fiscal_report_schedule_reference`).
+    `FiscalRoot` gains `earliest_due`, `parked`, and `parked_cursor` and
+    loses `queue_pages`. `FiscalOffice` gains `mechanisms` and lists its
+    `observers` as `FiscalOfficeObserver { first_row, granularity, interval
+    }` with `row(rank, mechanism, mechanisms)`; `FiscalObserverRows::span`
+    takes the granularity; `FiscalState` gains the public field
+    `report_schedule`, which `into_records` derives. Source-incompatible,
+    struct literals of `FiscalState`, `FiscalReportSummary`,
+    `FiscalReportPart`, and `FiscalObserverRows` included.
+  - `FiscalReportSummary` gains `granularity` and `cadence`;
+    `FiscalReportPart` gains `books_summed: Option<u32>`; an institution row
+    of `FiscalReportRow` carries the institution and mechanism and an empty
+    `scope_binding_id`. `MAX_FISCAL_OBSERVER_ROWS` (16,384) also caps
+    institution rows; sums saturate at `u64::MAX`.
+  - `FISCAL_PARKED_CHECKS_PER_BOUNDARY` (16) is new.
+  - `FiscalPlugin::with_report_cadence(SystemCadence)` (the wake cadence,
+    distinct from a binding's report cadence) and
+    `report_cadence()` add the phase-13 system
+    `wake-fiscal-reports-on-cadence-v1`, which writes nothing;
+    `EventDriven` is refused at registration (`InvalidPluginRegistration`).
+  - `FiscalReportBudget { bodies, entries, payload_bytes }` is fiscal's
+    share of a boundary's publication budget: `FiscalReportBudget::DEFAULT`
+    is half of `KnowledgeLimitsV1::CURRENT` (16,384 bodies, 16,384 entries,
+    32 MiB) and `MINIMUM` two bodies, two entries, and 128 KiB (a summary
+    and one part of the largest payload); `FiscalPlugin::with_report_budget`
+    sets it and `report_budget()` reads it, and registration refuses a
+    share outside that range (`InvalidPluginRegistration`). A custom share
+    is carried in the report system's name
+    (`materialize-fiscal-reports-v1/share/{bodies}/{entries}/{bytes}`; the
+    default keeps the plain name), so it is in the plugin descriptor. The
+    report system publishes the least of its share and what the engine has
+    left at its cut; each holder's records are one `Explicit` group, the
+    groups are packed into directives up to the per-directive bounds (ten
+    directives at the world due instant), and parts are cut so that 64 KiB
+    always remains for the summary. `FiscalPlugin::with_report_retention`
+    (default `RetireWhenSuperseded`; `report_retention()` reads it) sets
+    the `fiscal_report` schema's `retention`.
+    `MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY` is deleted.
+  - `compute_projection`, `fiscal_reports`, `fiscal_reports_of_holder`,
+    `assemble_fiscal_reports`, the pending bitmap, `is_stale`, and the line
+    scheme (`1 + slot × 1,024 + part`) are unchanged.
+- `canwu-military`, `canwu-movement`, `canwu-information`,
+  `canwu-correspondence`, `canwu-resource`, `canwu-production`,
+  `canwu-technology`: no public type changes; each builds the new directive
+  (one `Explicit` group of one holder). Military, movement, information, and
+  technology read the budget: military publishes commanders in ID order
+  while the next commander's whole report fits; movement keeps
+  `MovementLimitsV1::report_holders_per_boundary` (64) and also stops at the
+  budget; information keeps its chunking and a chunk also stops at the
+  budget: a chunk whose first record does not fit is deferred whole, the
+  operation returns to awaiting publication, and the next boundary at the
+  same instant retries, so information never fails a boundary for the
+  budget; technology keeps `max_publications_per_boundary` (32) and records
+  a publication past the budget as a rejection with its existing event,
+  whose summary says when the engine's shared budget was the limit.
+
+The source-incompatible changes are the directive, the knowledge ledger
+types and their removed reads, `KnowledgeLimitsV1`,
+`PluginKnowledgeSchema::retention`, `BoundaryKnowledgeChange`,
+`KnowledgePublished`, the `EventAudience` variant, the fiscal binding,
+root, office, queue, state, summary, part, and observer-rows fields, and the
+removed fiscal cap. The release is therefore a minor version.
+
+Version 0.17.0 also changes these behaviours, which are visible to existing
+code and runs:
+
+- **One budget, read before publishing.** The budget is spent in dispatch
+  order: phase 4 before phase 13, and within a phase in the registry's
+  `(phase, plugin, system)` order. A system sees exactly what earlier
+  phases and earlier systems of its own phase have taken, so a publisher
+  that reads the budget and defers what does not fit never fails a
+  boundary. Overshooting it is the undeclared-write class, not an expected
+  refusal: the boundary fails with `KnowledgeLimitExceeded`, because a
+  publication the engine cut would leave the plugin's own state writes
+  believing the records were published. Fairness between plugins is the
+  host's composition problem.
+- **One copy per body.** A body is validated once, encoded once (streamed
+  into its digest), and wrapped in one `Arc` shared by the same-boundary
+  overlay, the ledger, and the journal; the proposal's duplicate check keeps
+  digests, not bytes. The same `(holder, body)` twice in one proposal is
+  still refused.
+- **Per-holder supersession.** A holder's current records are the entries
+  no entry of the same holder names in `supersedes`; `knowledge_heads` keeps
+  returning global IDs. A holder sees local IDs, its own entry's relations,
+  and the body; it cannot tell a shared body from a private one, and its
+  local IDs come from its own counter, so the 0.16.0 residual (global IDs
+  showing allocation gaps) ends.
+- **Retention at publication.** Under `RetireWhenSuperseded`, when a new
+  entry of holder *H* supersedes *H*'s entry *S*, *S* leaves *H* in the
+  commit of the publishing boundary: it leaves the entries, the local-ID
+  map, and the current-record index; every entry of *H* that named *S* in
+  `supersedes` or `contradicts` drops that ID, so "every relation of an
+  entry resolves within its holder" holds at all times; and when no holder
+  holds *S*'s body, the body leaves the ledger and its namespace count.
+  Retention follows the superseding entry's schema, runs in holder order
+  then ID order, never fails a boundary, and is not tied to a seal, so a
+  sealed run and its unsealed twin keep the same state hash and checkpoint
+  hash in lockstep (the plan's "after a seal" was changed for that reason,
+  recorded in the proposal). `FullHistory` of a retiring schema shows only
+  current entries, and the query result says so;
+  `knowledge_changes_by_correlation*` still return what the boundary
+  published, retired or not, from retained evidence; `visible_changes_since`
+  is events, unchanged; saves hold only current entries. An entry of a dead
+  person is never cleared (nothing can supersede it) and stays while the
+  holder does.
+- **Restore validation rebuilds the ledger.** A restore builds the ledger
+  boundary by boundary from the journal, recomputes every `CurrentOnSubjects`
+  list, applies retention, checks each directive's bounds and the
+  per-boundary budget, and compares the result with the saved ledger, so a
+  tampered relation list, a retained entry the policy says was cleared, a
+  `next_local` below an entry's local ID, or a chunk or holder root that
+  does not match is refused at load.
+- **One event per directive.** `KnowledgePublished` names the directive's
+  holders (sorted, at most `holder_entries_per_batch`) and its total body
+  and entry counts; a host that wants one holder's own count reads its
+  ledger (`fiscal_reports` for fiscal). 0.16.0's one event per holder would
+  have been 4,000 events at the fiscal gate, each admitted as ingress by the
+  next boundary.
+- **Initial-version evidence is indexed.** A publication citing a record at
+  its initial-scenario version resolves through an index of `(reference,
+  version)` built once per scenario and shared by the runtime, its forks,
+  and snapshot validation; the scan of every initial record (about 320 µs
+  per citation at 68,000 records) is gone. No format changes.
+- **Fiscal report cadence.** An `Interval` report is published by the first
+  boundary at or after each due time that runs the report system, with what
+  changed since its last publication and its summary, and never between due
+  times, so between due times it shows the records as of its `as_of`
+  boundary. An active `Interval` binding always has exactly one queue entry,
+  due at one of its due times: created when the binding is added, merged
+  into by settlement without moving `due_at` (settlement reads the office's
+  observer list, not the observer records), and queued again at the next due
+  time by the report system whether or not it published. At a due time at
+  which nothing changed, the summary alone is republished once the report
+  has been published at least once, so `as_of` advances and silence never
+  means "no report". A rebound `Interval` binding keeps its due time (the
+  new holder gets the whole report then; the old keeps its report until
+  then); a removed binding's report is withdrawn at once. `OnChange` is the
+  0.16.0 behaviour. The report schedule keeps each queue page's earliest
+  due time and the pages with parked entries; the root keeps the earliest
+  of all, so a boundary before it, with nothing parked, reads the root
+  alone, and one at or after it decodes only the pages whose earliest due
+  time has come. `audit_fiscal_records` checks the chain from the pages to
+  the root and that every active `Interval` binding has its one entry at
+  one of its due times; an entry of a removed binding that names no work is
+  refused. No future-dated packet is scheduled.
+- **Waking the report system.** The report system stays event-driven. A
+  host whose boundaries can pass without any event registers
+  `with_report_cadence(cadence)`: every boundary of that category with no
+  event reads the root and, when `earliest_due` has come and the run can
+  schedule ingress, schedules the drain packet due at once, so the next
+  boundary at the same instant runs the report system (the engine refuses
+  two phase-13 writers of the same records, so the report system itself
+  cannot also be registered on the cadence). Parked entries alone wake
+  nothing.
+- **Institution rows.** An `Institution` observer has one row per visible
+  institution and mechanism (the office lists its scopes' mechanisms), its
+  facts the sums of the institution's hot books of the cycle of that
+  mechanism per unit and payment form, rendered at the observer's
+  confidence; `compute_projection` sums the same way. A part of institution
+  rows cites the current version of each office its rows belong to and
+  counts the books it summed (`books_summed`, excluded from the digest), so
+  a change of the count alone does not republish it; that is weaker
+  provenance than a scope part's ledger citations.
+- **Parked rotation.** Each run of the report system checks the holders of
+  the next `FISCAL_PARKED_CHECKS_PER_BOUNDARY` (16) parked entries after the
+  root's cursor (the cursor's page after the cursor, later pages, earlier
+  pages, then the cursor's page up to the cursor), and publishes what a
+  revived holder is owed, so a revived holder is published to within
+  `ceil(parked / 16)` runs rather than by the reviving boundary; the cursor
+  is cleared when a run checked every parked entry or nothing is parked.
+- **Fiscal cost cuts.** Part and summary payloads are built directly (no
+  `to_value` round trip); part digests are over a compact binary encoding of
+  the rows (`canwu.fiscal.report-part.v2`); each index page is decoded once per page per
+  boundary; settlement reads each office's observer list once.
+- **Expected refusals, unchanged.** No fiscal packet fails a boundary; owed
+  work past the budget waits for the drain; an observer with an unreachable
+  holder is parked; a report with no hot cycle is not published.
+- **Drains only after progress.** The report system schedules the drain
+  packet only when its boundary did some of the owed work (published a part
+  or a withdrawal, or finished a queue entry). When earlier publishers left
+  no room, the owed work waits for the next boundary that runs the report
+  system (one with an event, or the wake cadence) instead of filling the
+  instant with drain boundaries that publish nothing.
+
+Upgrading from 0.16.0, for hosts and plugin authors:
+
+- **A plugin that published knowledge** wraps its 0.16.0 directive: where it
+  wrote `PublishKnowledge { holder, visibility, producer_correlation,
+  records, summary }`, it writes `supersession:
+  KnowledgeSupersession::Explicit` and `groups: vec![KnowledgePublicationGroup
+  { holders: vec![holder], records }]`. Nothing else about grants,
+  `visibility` (which applies to every group), schemas, or drafts changes.
+  A plugin that publishes the same bodies to several holders puts them in
+  one group, and uses `CurrentOnSubjects` when each holder should supersede
+  its own current record on the same line.
+- **A plugin that paced itself** by `batches_per_system_boundary` reads
+  `view.knowledge_publication_budget()` at the start of its system, sums
+  each directive's bodies, holder entries (holders × drafts per group), and
+  `draft.payload_bytes()?`, calls `budget.take(bodies, entries, bytes)`
+  before building each directive, and defers or records as a rejection what
+  does not fit, as the first-party publishers do. Never publish what the
+  read did not admit.
+- **Every registered knowledge schema names `retention`.** `Keep` keeps the
+  0.16.0 behaviour. Choose `RetireWhenSuperseded` for a schema whose
+  records are lines a newer record replaces, such as reports; the holder
+  then keeps one entry per line. The policy is plugin identity: changing it
+  needs a new run.
+- **A host that read the journal or events** matches
+  `KnowledgePublished { holders, record_count, entry_count }` and
+  `EventAudience::KnowledgeHolders`, and reads a boundary's publications
+  through `BoundaryKnowledgeChange::records_of(&holder)` or its `records`
+  and `holders` fields. Struct literals of `KnowledgeLimitsV1`,
+  `PluginKnowledgeSchema`, `KnowledgeQueryResult`, and
+  `BoundaryKnowledgeChange` name the new fields.
+- **A host that queries knowledge** sees `KnowledgeQueryResult::retention`;
+  under `RetireWhenSuperseded`, `FullHistory` is `CurrentHeads`. A host that
+  needs a superseded record's history keeps `Keep` on that schema or its own
+  archive of the records it received.
+- **A fiscal scenario** that sets no `granularity` or `cadence` is
+  unchanged. For many observers, give each `Interval` with
+  `FiscalReportCadence::staggered(every, index, stride)` and courts
+  `Institution`, set `historical_context.updated_at` to the run's start
+  before `add_observer`, and register `with_report_cadence` (the wake
+  cadence: the `SystemCadence` on which `wake-fiscal-reports-on-cadence-v1`
+  runs, distinct from a binding's report cadence) when the host's
+  boundaries can pass without events. The knobs `with_report_cadence`,
+  `with_report_budget`, and `with_report_retention` are recorded in the
+  plugin descriptor (the share in the report system's name, the retention
+  in the registered schema): they are chosen before a run's first boundary,
+  and a restore, an exact replay, or a fork with a plugin of another setting
+  is refused as a plugin-identity mismatch.
+- **A fiscal host that read closed cycles' figures from old report records**
+  sets `with_report_retention(KnowledgeRetention::Keep)`: under the default,
+  a closed cycle's parts leave the holder's ledger once the empty parts
+  supersede them, and a superseded record stays only in the boundary
+  evidence that published it, until a seal takes the evidence.
+- **Saves.** Write a fresh continuation checkpoint, snapshot, or checkpoint
+  journal with 0.17.0; nothing from 0.16.0 loads.
+
+Known limits carried by this release, each stated in its proposal:
+
+- The knowledge ledger still lives inside the 4 MiB envelope page of a paged
+  checkpoint, so a world-scale run cannot prepare one and the continuation
+  checkpoint is its save; paging the ledger (E4) is later work
+  ([paging](proposals/fiscal-observers-at-scale.md#persistence-hashing-replay-and-formats)).
+- A mid-boundary `ScheduleIngress` (the fiscal drain packet's
+  `append_ingress`) refreshes every dirty commitment root early, about
+  195 ms after a boundary of 56,891 record writes and 0.6 ms in a normal
+  drain; deferring the refresh to the boundary's own hashing phase is a
+  follow-up
+  ([engine findings](proposals/fiscal-observers-at-scale.md#engine-findings-outside-this-package)).
+- A publisher that does not read the budget, or reads it and overshoots,
+  fails its boundary with `KnowledgeLimitExceeded`; the engine does not cut
+  a publication to fit
+  ([what can still fail a boundary](proposals/fiscal-observers-at-scale.md#what-can-still-fail-a-boundary)).
+- The engine still accepts at load a plugin's declaration of an
+  initial-scenario record version as payload-required; only the seal refuses
+  it (E-27's remaining item, [releasing](releasing.md)).
+- At world scale the continuation checkpoint still grows about 3.8 MB a
+  simulated month (172 MB after month 1, 293 MB after month 24, restored in
+  58 s): not knowledge or fiscal state, which stay flat, but the engine's
+  request index (`RequestIndex`: commands, queued commands, ingress
+  provenance), which keeps every accepted command's outcome at about 440
+  bytes per command; and the wall time of a simulated month creeps about
+  1 s a month after month 5, not yet located (a guess is the seal rebuilding
+  the request maps). Both are engine follow-ups.
+- The due instant's heap peak, 472 MB for 15.7 MB of payload in the
+  allocation-counting build, is not investigated, and the fiscal side of
+  that boundary (1.8 s) is above the design's expectation of about 0.6 s.
+- A plugin that runs before `canwu-information` in dispatch order and spends
+  the whole budget at every same-instant boundary keeps information
+  deferring its chunk; no first-party plugin does.
+- A part of institution rows cites the office version and the number of
+  books it summed, not each ledger version; summing a 6,000-scope office
+  costs about 40 ms at its court's due time
+  ([coarser rows](proposals/fiscal-observers-at-scale.md#coarser-rows-for-upper-observers)).
+- Fiscal report retention clears a closed cycle's figures from the holder
+  by default, and the three fiscal knobs are run-bound; an `Interval`
+  report shows the state as of its last due boundary; calendar cadences are
+  not expressible (`every` is a fixed duration); an ex-holder's withdrawn
+  parts and a dead holder's entries never clear, bounded by rebindings and
+  deaths; domain-entity report holders stay deferred
+  ([risks](proposals/fiscal-observers-at-scale.md#risks-and-open-questions),
+  [parked holders](proposals/fiscal-observers-at-scale.md#parked-holders-domain-entity-holders-and-the-report-system-cadence)).
+- Several dirty cycles owed at once (about 5,600 parts a cycle on the world
+  preset) take more than one boundary by design, through the drain packet
+  ([the gate](proposals/fiscal-observers-at-scale.md#the-problem-and-the-gate)).
+- The continuation gate proves state equality of the live run and its sealed
+  shadow with the run's own plugin registry, not that the public restore and
+  replay paths accept the checkpoint or the journal
+  ([releasing](releasing.md)).
+- Every limit of the 0.16.0 entry that this release does not touch stands:
+  a paged restore allocates what the pages describe; a boundary still takes
+  a stable copy of plugin components and core maps for phases 1 to 9, and
+  `fork` copies every journal; a continuation runtime cannot produce a full
+  snapshot, replay journal, checkpoint journal, or paged checkpoint, and its
+  keyed-draw ledger and request index grow for the life of the run; what a
+  continuation restore verifies without history is covered only by the
+  stored `continuation_hash`; R4 is a plugin obligation; the resource,
+  production, reference-archive, law, society, and Ming-validator items; the
+  per-command transaction checkpoint; and the `Send` runtime's `Sync`
+  reliance. The 0.16.0 knowledge limit (superseded records stay in every
+  ledger and save; queries cost the holder's whole ledger) is replaced by
+  retention and the per-holder entry walk above.
+
+Headline measurements, from the design's profile, the engine package's
+probes, and the `fiscal-world-profile` baselines
+`benchmarks/baselines/2026-10-16-fiscal-world-world-institution-interval-{elapsed,allocations}.json`
+(release builds, one Windows x86-64 machine shared with other builds;
+elapsed times show the order of magnitude; the `world` preset is 200
+polities, 50,000 scopes, 4,200 institutions, and 4,000 observers, courts at
+`Institution` granularity, monthly `Interval` cadence staggered over 30
+days):
+
+| Measure | Workload | 0.16.0 | 0.17.0 |
+| --- | --- | ---: | ---: |
+| Publishing boundary, engine time | synthetic publisher, 64 holders × 16 records × 512 B | 13.7 ms | 9.7 ms |
+| Publishing boundary, engine time | 64 holders × 64 records × 512 B | 55.2 ms | 37.9 ms |
+| Publishing boundary, engine time | 64 holders × 16 records × 8 KiB | 39.2 ms | 15.0 ms |
+| Engine cost per KiB of payload | the same probe | 3.3 µs | 0.7 µs |
+| Engine cost per holder entry | 4,000 holders in one boundary | — | 7.8 to 15.4 µs |
+| Journal of 1,024 bodies | the same probe | 1.6 ms | 0.1 ms |
+| Hashing of 1,024 bodies | the same probe | 4.3 ms | 0.4 ms |
+| Initial-version evidence citation | 68,000 initial records (E0) | about 320 µs each | index lookup |
+| `knowledge_heads` boundary | `knowledge-ledger-profile`, 2,048 and 16,384 held records | 131 to 152 µs | 120 to 149 µs |
+| `publish_boundary` | the same profile | 56 and 58 µs | 49 and 54 µs |
+| Snapshot restore | the probe's snapshot | — | about equal (+2 to 9 %, within noise) |
+| **Gate: fiscal due instant** | every one of the 4,000 observers due at one instant, owing one dirty cycle: 9,603 bodies and 9,603 entries, 15.67 MB of payload, 10 directives | 62 same-instant drain boundaries, about 3.1 to 4.2 s | **one boundary, no drain**: 2,504 ms settlement (fiscal 1,821 ms, engine 676 ms); heap peak 472 MB and 6.52 M allocator calls in the allocation-counting build |
+| **Gate: held knowledge over simulated years** | 24 monthly cycles (open, assess, close, archive) with monthly `Interval` observers | +12,416 records and +65 MB per cycle | flat at 14,138 bodies and entries, 15.12 MB of payload, from month 2 to month 24 |
+| Fiscal spread due day | 134 observers due, 304 report records | 56 ms admission, 82 ms settlement, 3 drains (137 assessments) | 43.2 ms settlement, no drain; heap peak 33 MB |
+| Fiscal idle boundary | nothing due | — | 0.63 ms |
+| Fiscal assess 64 scopes | one batch | — | 8.97 ms |
+| Fiscal burst, assess every scope | 50,000 assessments in one boundary | 2,139 ms admission, 4,790 ms settlement, 62 drains | 1,510 ms admission, 4,568 ms settlement (fiscal 3,091 ms, engine 1,457 ms), no report due, no drain |
+| Fiscal receipts | 1,024 and 16,384 receipts in one boundary | — | 90.6 ms; 1,693 ms |
+| Fiscal close every book | 50,000 books | — | 1,626 ms admission, 5,052 ms settlement |
+| Fiscal archive | 256 and 4,096 books | — | 26.6 ms; 228 ms |
+| Continuation checkpoint at world scale | after month 1 and month 24 | — | 172 MB and 293 MB (the request index, not knowledge), restored in 58 s |
+
+The hash algorithms are unchanged. The engine version in every checkpoint
+hash changes, first-party plugins that take their plugin version from the
+crate version report a new one, and the exact engine-version check rejects
+0.16.0 saves; retain the 0.16.0 engine to read them.
 
 Version 0.16.0 is a pre-1.0 minor release. Each group of changes has a
 proposal that gives its design, invariants, and measurements:

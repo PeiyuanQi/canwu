@@ -181,10 +181,24 @@ assert_eq!(continued.checkpoint_hash(), canwu.checkpoint_hash());
 ## 版本与存档兼容
 
 :::note
-参伍 0.16.0 写出快照格式 8、承诺格式 5、检查点/证据日志格式 5、分页检查点封装格式 5 和接续检查点格式 1。参伍的 crate 只依赖彼此完全相同的版本，存档也记录了精确的 `engine_version`，所以 0.16.0 引擎只能加载 0.16.0 写出的存档。0.15.0 及更早版本的存档不能加载，改写其中记录的版本号也不行；需要读取时，请保留旧引擎，或用自己的工具导出数据。
+参伍 0.17.0 写出快照格式 9、承诺格式 6、检查点/证据日志格式 6、分页检查点封装格式 6 和接续检查点格式 2。参伍的 crate 只依赖彼此完全相同的版本，存档也记录了精确的 `engine_version`，所以 0.17.0 引擎只能加载 0.17.0 写出的存档。0.16.0 及更早版本的存档不能加载，改写其中记录的版本号也不行；需要读取时，请保留旧引擎，或用自己的工具导出数据。
 :::
 
-参伍 0.16.0 是次版本，改变了三种格式，新增一种。承诺格式 5 增量计算知识账本的哈希，并把边界的知识变化的每个字段都纳入边界哈希；检查点/证据日志格式 5 去掉了操作定址抽样的预留项，因为[操作定址抽样明细](/architecture/randomness/#抽样之后还有哪些开销)现在保存每个抽过的地址；分页检查点封装格式 5 把最大 512 MiB 的记录按 1 MiB 分块分页；[接续检查点](#接续检查点)是新增的。哈希算法没有变化，但每个检查点哈希、边界哈希和领域记录根都与 0.15.0 不同，`authoritative_state_hash` 现在是承诺格式的状态哈希，封存过、未封存和恢复后的运行得到相同的值。与存档和代码有关的变化如下：
+参伍 0.17.0 是次版本，每种持久化格式都变了（快照、承诺、检查点/证据日志、分页检查点封装、接续检查点；状态修订、准入游标和精确重放格式仍是 3），原因只有一个：[知识账本](/architecture/knowledge-information/#知识账本)现在每个记录本体只存一份、每个持有人各一个持有人条目，schema 还可以在发布时清退被取代的条目（[留存](/architecture/knowledge-information/#留存)）。快照格式 9 把账本编码为本体和持有人条目，每个持有人带它的下一个本地记录号；承诺格式 6 按块计算账本的哈希（每个条目一个叶哈希，每 256 个本地记录号一块，每个持有人一个根），所以条目可以离开；检查点/证据日志格式 6 把每次发布记为它的本体和每个持有人的条目，每条指令一个列出全部持有人的 `KnowledgePublished` 事件；分页检查点封装（格式 6）和接续检查点（格式 2）内嵌新的快照。哈希算法没有变化，但每个检查点哈希、边界哈希和状态承诺都与 0.16.0 不同。与存档和代码有关的变化如下：
+
+- **存档只保存当前的知识。** 在 `RetireWhenSuperseded` 下，持有人每条线只保留一个条目，所以有几千个报告持有人的世界，它的接续检查点在模拟的年月中保持平稳，不再随每次发布增长。分页检查点仍把整本知识账本放在一个 4 MiB 的封装页里，几千个报告持有人的世界放不下；这样的运行请用[接续检查点](#接续检查点)存档。
+- **需要修改的代码。**
+  - *发布方。* 发布知识的插件把原来的指令包一层：`PublishKnowledge { visibility, producer_correlation, supersession: KnowledgeSupersession::Explicit, groups: vec![KnowledgePublicationGroup { holders: vec![holder], records }], summary }`。原来按 `KnowledgeLimitsV1::batches_per_system_boundary`（已移除）控制节奏的插件，改读 `view.knowledge_publication_budget()`，只发布 `take` 允许的部分。每个 `PluginKnowledgeSchema` 都要写明 `retention`。
+  - *读事件和边界记录的代码。* `KnowledgePublished` 带 `holders`、`record_count` 和 `entry_count`，受众是 `EventAudience::KnowledgeHolders`；`BoundaryKnowledgeChange` 带 `records`（本体）和 `holders`（条目）。
+  - *读账本的代码。* `HolderLedgers::record`、`records`、`records_after`、`record_count`、`last_record_id` 和 `remove` 已移除，由 `insert_publication`、`remove_entry`、`body` 和 `HolderLedger::entry` 取代，`KnowledgeQueryResult` 新增 `retention`。
+  - *财政。* `FiscalObserverBinding` 新增 `granularity` 和 `cadence`（都有默认值），根记录去掉了 `queue_pages`，`FiscalState` 新增 `report_schedule`，报告日程记录是新增的记录。
+- **插件身份。** 财政插件升到 `0.4.0-experimental`，语义哈希改变，唤醒节奏（`with_report_cadence`）、报告份额和留存策略这几个选项都是它身份的一部分。每个注册了知识 schema 的插件都把 schema 的留存策略记入插件描述。
+- **进入时的检查。** 知识账本里有没人持有的本体、指向不存在本体的条目、乱序的本地记录号，或在持有人内解析不了的关联的快照会被拒绝；恢复时引擎从日志重建账本，和存档里的账本对不上也会被拒绝。
+- **接续闸门。** `canwu-api` 的 Cargo feature `continuation-gate` 是发布前的测试，应用绝不要开启：它让每次修改同时在运行本身和一个从接续检查点恢复的封存影子上执行，有任何分歧就 panic。
+
+和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.16.0 的存档；需要读取时，请保留 0.16.0 引擎。
+
+上一个次版本参伍 0.16.0 改变了三种格式，新增一种。承诺格式 5 增量计算知识账本的哈希，并把边界的知识变化的每个字段都纳入边界哈希；检查点/证据日志格式 5 去掉了操作定址抽样的预留项，因为[操作定址抽样明细](/architecture/randomness/#抽样之后还有哪些开销)现在保存每个抽过的地址；分页检查点封装格式 5 把最大 512 MiB 的记录按 1 MiB 分块分页；[接续检查点](#接续检查点)是新增的。哈希算法没有变化，但每个检查点哈希、边界哈希和领域记录根都与 0.15.0 不同，`authoritative_state_hash` 现在是承诺格式的状态哈希，封存过、未封存和恢复后的运行得到相同的值。与存档和代码有关的变化如下：
 
 - **存档不再随进行中的工作增长。** 有待处理输入时也能封存；接续检查点用几 MB 就能保存一场长战役。引用已封存证据的首次[操作定址随机抽样](/architecture/randomness/#封存证据之后的重试)在封存过和未封存的运行中都被接受，引用已被取代的记录版本的首次抽样在任何运行中都被拒绝。
 - **需要修改的代码。** `DomainRecordChange::previous` 和 `current` 的类型是 `Arc<DomainRecord>`。`KnowledgeSnapshot::records` 的类型是 `HolderLedgers`，它的迭代器只能正向遍历（`.rev()` 和 `next_back` 不能编译；用 `last_key_value` 读最新记录）。`ErrorCode` 标记为 non-exhaustive，并新增 `HistoryUnavailable`。`SocietyIngressQueue` 用 `queued` 和 `batches` 取代了 `entries`。`ProductionState::prepare_production_archive` 多了一个归档存储参数，`prepare_force_archive` 和 `prepare_economy_archive` 也是。财政 API 围绕记录、批次和按记录的修订号重建：`FiscalActionBatch` 取代 `FiscalActionRequest`，`enqueue_execution_receipts` 取代 `enqueue_execution_receipt`，`FiscalState::into_records` 取代 `into_record`，`FiscalAction` 新增六个变体。命令处理器不能再安排一条会排入插件输入的延时指令（`InvalidPayload`）；请直接给 `EnqueuePluginIngress` 设定延时。
@@ -196,29 +210,7 @@ assert_eq!(continued.checkpoint_hash(), canwu.checkpoint_hash());
 
 和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.15.0 的存档；需要读取时，请保留 0.15.0 引擎。
 
-上一个次版本参伍 0.15.0 保留了 0.14.0 的各种格式和哈希算法，引擎也没有往存档里多写任何东西：回答[操作定址随机抽样](/architecture/randomness/#抽样之后还有哪些开销)的索引在恢复时重建，[边界耗时明细](/architecture/settlement/#边界耗时明细)从不保存。与存档和代码有关的变化如下：
-
-- **修正了一种写出后无法加载的存档。** 知识记录可以[取代或标为矛盾](/architecture/knowledge-information/#取代先前的记录)哪些记录，加载存档时现在使用与结算相同的规则。在 0.14.0 中，如果插件在同一时刻的两个边界里先后取代某位持有人的记录，写出的存档就无法加载。
-- **封存过的模拟运行与重放的行为一致。** 完全相同的[操作定址随机抽样](/architecture/randomness/#封存证据之后的重试)重试，即使它引用的证据已被 `seal_evidence` 移走，也能拿回已记录的抽样；0.14.0 会以 `InvalidRandomOperationEvidence` 拒绝。封存之后发布的[财政报告](/architecture/fiscal/#报告如何发布)会取代封存之前发布的那一份；在 0.14.0 中，持有人会同时留着两份当前报告，封存过的模拟运行也无法通过精确重放。
-- **需要修改的代码。** `PersonDraft` 用可选的 `PersonPlacement` 取代了 `government` 和 `current_location` 两个字段，`BoundaryPersonCreation::person` 的类型变为 `BoundaryCreatedPerson`。`SocietyPlugin` 不再是单元结构体，请写 `SocietyPlugin::DAILY`。`ResourceState::prepare_resource_archive` 多了一个归档存储参数。`ResourceCompletionOperationV1` 和 `FiscalAction` 新增了变体。`SocietyCohortExchangeLedger`、`ResourceArchiveIndexDirectoryV1`、`PreparedResourceArchiveBatchV1`、`ResourceProtectedFloorRequestV1`、`FiscalAuthorityBinding`、`FiscalAuditFinding` 和 `FiscalState` 新增了公开字段，所以底线请求的结构体字面量要加上 `install: None`，权限绑定的字面量要加上 `rebound_by: None`。`MAX_RESOURCE_ARCHIVE_LOOKUP_DIRECTORIES` 已移除。读取财政报告请用 `fiscal_reports`；单独一条 `fiscal_report` 记录不再能解码成完整的 `FiscalProjection`。
-- **插件身份。** society 插件、资源插件和财政插件的语义哈希改变。使用 society 的模拟运行，只能用注册了相同[结算节奏](/tutorials/cases/local-community-diffusion/#换一种结算节奏)的插件恢复和重放。
-- **资源归档。** 请保留资源归档的查找页：恢复、精确重放或派生分支会读取沿途每个归档头的查找索引，见[归档终态记录](/architecture/resources-production/#归档终态记录)。0.14.0 写出的归档目录无法解码，不过 0.15.0 的模拟运行不可能读到它们。
-- **财政记录在进入时校验。** 无效的财政目录或状态，在创建或恢复模拟运行时就会被拒绝；在 0.14.0 中，要到第一个准入了内容的边界才失败。当时的财政状态记录引用每个观察者指向的人物，由 `FiscalState::into_record` 构造（0.16.0 改为 `into_records` 的多条记录）；写到了不存在的观察者的状态会被拒绝。`fiscal_report` 知识 schema 当时升到了版本 2（0.16.0 是版本 4），场景的知识里如果带有更早版本的报告记录，也会被拒绝。
-- **拒绝不再卡住模拟运行。** 被拒绝的 society 命令和有缺陷的 society 输入现在记录为拒绝；候选预算已满时，失效的资源归档提交也不再让之后的每个边界失败。带请求标识的资源命令如果用已有的操作键提交内容不同的请求，会被拒绝或不予结算。同一个边界可以结算多个财政行动，连结果都记不下的行动会被丢弃并留下一个事件。
-
-0.15.0 的精确引擎版本检查会拒绝 0.14.0 的存档；需要读取时，请保留 0.14.0 引擎。
-
-再往前的次版本参伍 0.14.0 把 0.13.3 按天读取边界的方式，换成了可以读取[任意一段模拟时间](/architecture/settlement/#统计一段时间内的边界)的方式：`SimulationView::boundaries_between(from, to)` 返回 `BoundaryWindow`，供上层应用调用的是 `Canwu::boundaries_between` 和 `CompactedCanwu::boundaries_between`。边界系统用新的契约字段 `BoundarySystemContract::boundary_schedule_horizon` 声明要往回读多远（最长 `MAX_BOUNDARY_SCHEDULE_HORIZON`，即 366 天）。`boundaries_on_day` 和 `DayBoundaries` 已移除，所以用到它们的代码，以及用结构体字面量构造 `BoundarySystemContract` 的代码，都需要修改。这个字段为零时不会写入保存的契约，所以其他插件的描述和语义哈希不变，各种格式和哈希算法也不变。和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.13.3 的存档；需要读取时，请保留 0.13.3 引擎。
-
-此前的补丁版本参伍 0.13.3 首次加入了这项读取，当时按天读取：边界系统声明新的 `StateKey::core_boundary_schedule` 读取后可调用的 `SimulationView::boundaries_on_day`，供上层应用调用的 `Canwu::boundaries_on_day` 和 `CompactedCanwu::boundaries_on_day`，类型 `DayBoundaries`、`BoundarySummary`、`BoundaryIngressCount`、`BoundaryIngressKind` 和 `BoundaryIngressOrigin`，以及 `SimTime::day` 和 `SimTime::MINUTES_PER_DAY`。恢复时，引擎根据日志重建当天已结算的边界，所以存档没有新增字段。所有改动都是新增，现有代码无需修改即可编译，各种格式、公开类型的结构和哈希算法都没有变化。和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.13.2 的存档；需要读取时，请保留 0.13.2 引擎。
-
-参伍 0.13.2 是补丁版本。引擎内部早已实现[分页检查点](#分页检查点)的写出和恢复，这个版本把相关调用加入对外 API：`Canwu::prepare_paged_checkpoint`、`Canwu::from_paged_checkpoint_and_journal` 和 `Canwu::from_paged_checkpoint_and_journal_with_plugins`，`CompactedCanwu` 上同样的三个调用，以及 `CompactedCanwu::journal_segment_since`。所有改动都是新增，现有代码无需修改即可编译。各种格式、公开类型的结构和哈希算法都没有变化。每个检查点哈希都包含引擎版本，所以和任何一次版本变化一样，每次运行的检查点哈希，以及记录这些哈希的分页根，都与 0.13.1 不同。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.13.1 的存档；需要读取时，请保留 0.13.1 引擎。
-
-上一个补丁版本参伍 0.13.1 的格式和现有公开类型与 0.13.0 相同，另新增三个公开项：`SimulationView::replay_stable_domain_record_version`、`canwu_military::MILITARY_REJECTION_EVENT` 和 `OperationState::validate`。它的检查点哈希都与 0.13.0 不同，0.13.0 的存档也不能加载。生产、历史研究、财政、军事和资源插件的语义哈希也发生了变化，`canwu-economy-reference` 插件及其类型化证据适配器、`canwu-force-supply-reference` 插件同样如此。
-
-它修复了一个问题：在一直运行、未经存档恢复的模拟中，[推迟的决策票据](/architecture/decisions/)过了截止时间也不会到期，之后针对它的请求却都以 `ClosedTicket` 被拒绝。现在这类票据会在截止时间之后的第一个结算边界到期，与从快照恢复的模拟一致。
-
-它还修复了证据检查的一个问题：同一条命令在用 `seal_evidence` 封存过的模拟运行中可能被拒绝，在该运行的精确重放中却被接受。现在[生产](/developer/production-economy/)执行、设施项目和实际产出、[动用授权](/developer/production-economy/#动用授权)、财政折纳报价和[财政执行凭证](/architecture/fiscal/)，以及历史研究评估列出的精确记录版本，都必须是封存无法改变的版本，通常就是每条记录的当前版本。历史研究评估中事件、边界等通用引用仍按保留的证据检查，所以封存过的模拟运行仍可能拒绝其精确重放会接受的评估。此外，有问题的[军事](/architecture/military/)和财政命令不再让之后的每个结算边界都失败，而是记为被拒绝。
+更早的版本（0.15.0、0.14.0、0.13.x）见仓库中的[版本与持久化契约](https://github.com/PeiyuanQi/canwu/blob/main/docs/versioning.md)；它们同样遵循存档只能由写出它的引擎版本加载这条规则。
 
 - 需要保存存档的应用，请固定到确切的发布版本或 Git 修订。
 - 插件语义哈希变化意味着行为变化。任何版本发布，即使是补丁版本（例如 0.13.0 → 0.13.1），都可能同时改变多个扩展的语义哈希，使用这些扩展的旧存档随之无法加载。

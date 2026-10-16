@@ -89,7 +89,7 @@ with a machine-validated payload and declared core/component access.
 - Treat `Issuer` as an assertion made by a trusted in-process host. Authenticate
   external callers in the adapter before constructing a command envelope.
 
-## Save, seal, and continue (0.16.0)
+## Save, seal, and continue (0.16.0 contract; 0.17.0 writes continuation format 2)
 
 - Save a run the player will continue with
   `canwu.continuation_checkpoint()`, which returns the checkpoint and its
@@ -165,6 +165,58 @@ with a machine-validated payload and declared core/component access.
   reports through `fiscal_reports(&viewer)` or, as a trusted host,
   `fiscal_reports_of_holder`. An observer may be a government holder with no
   actor. See `docs/ming-fiscal-case.md` and the website fiscal page.
+- Fiscal reports at scale (0.17.0): give each `FiscalObserverBinding` a
+  `cadence` (`FiscalReportCadence::OnChange`, the default, or
+  `Interval { every, offset }`; spread offsets with
+  `FiscalReportCadence::staggered(every, index, stride)`) and a
+  `granularity` (`FiscalReportGranularity::Scope`, the default, or
+  `Institution` for a court that wants one row per institution and
+  mechanism), before `FiscalState::add_observer`; set the state's
+  `historical_context.updated_at` to the run's start first, since an
+  interval binding's first due time is the first aligned time at or after
+  it. An interval report is published by the first boundary at or after each
+  due time that runs the report system and never between due times; once
+  the report has been published, its summary is republished at every due
+  time, so silence never means "no report". If your boundaries can pass
+  without any event, register `FiscalPlugin::with_report_cadence(cadence)`,
+  the wake cadence: the `SystemCadence` on which
+  `wake-fiscal-reports-on-cadence-v1` runs, distinct from a binding's report
+  cadence. The report system publishes within its share
+  of the engine's publication budget (`with_report_budget`, default half,
+  at least `FiscalReportBudget::MINIMUM`) and clears a superseded report
+  record at publication (`with_report_retention`, default
+  `KnowledgeRetention::RetireWhenSuperseded`; choose `Keep` to read a closed
+  cycle's figures from old records). These three knobs are plugin identity:
+  choose them before the first boundary.
+
+## Publish knowledge from a plugin (0.17.0)
+
+- A `BoundaryDirective::PublishKnowledge` carries `supersession` and
+  `groups`: `KnowledgePublicationGroup { holders, records }` publishes every
+  draft to every holder of the group (holders sorted and unique). One group
+  of one holder with `KnowledgeSupersession::Explicit` is the 0.16.0
+  directive; use `CurrentOnSubjects` with empty `supersedes` and
+  `contradicts` on the drafts when each holder of a group should supersede
+  its own current record on the same line, and the engine computes the
+  lists per holder. The same body is stored once for every holder.
+- Read the budget before you publish: `let mut budget =
+  view.knowledge_publication_budget();` then `budget.take(bodies, entries,
+  bytes)` per directive, with `bytes` the sum of `draft.payload_bytes()?`
+  and `entries` the holders × drafts of its groups. Publish only what `take`
+  admitted and defer the rest to a later boundary, or record a rejection,
+  as the plugin's own state can see; a proposal past the budget fails the
+  boundary with `KnowledgeLimitExceeded`. There is no per-system count any
+  more (`batches_per_system_boundary` is gone); the budget is 32,768 bodies,
+  32,768 entries, and 64 MiB per boundary, 1,000 bodies and 4,096 entries
+  per directive, spent in dispatch order.
+- Declare `retention` on every `PluginKnowledgeSchema`: `Keep` for records
+  whose history a holder may read, `RetireWhenSuperseded` for lines a newer
+  record replaces. It is part of the plugin descriptor.
+- Read a boundary's publications from `BoundaryKnowledgeChange::records_of(&holder)`
+  and notice new knowledge through `KnowledgePublished { holders,
+  record_count, entry_count }` (audience `EventAudience::KnowledgeHolders`).
+  `KnowledgeQueryResult::retention` tells a client when `FullHistory` shows
+  only current entries.
 
 Keep the external client replaceable. If the public API cannot express a
 needed read or command, improve `canwu-api` instead of bypassing it.

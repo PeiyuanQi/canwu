@@ -161,8 +161,12 @@ and an adoption record with the fixture's stage; each scope gets its own
 `observer.revenue-minister` lets the minister see those totals with
 `confidence_per_mille: 850`; it names the minister as `actor` and his person
 as `knowledge_holder`, and `controlled_by: None` means no fiscal action can
-re-point it. `FiscalState::into_records` then partitions the state into the
-records the scenario carries.
+re-point it. It leaves `granularity` and `cadence` at their defaults, one row
+per scope and a report on every change; a world with many observers would
+give each an `Interval` cadence and courts `Institution` granularity (see
+[how a report is published](/en/architecture/fiscal/#how-a-report-is-published)).
+`FiscalState::into_records` then partitions the state into the records the
+scenario carries.
 
 ### 3. Register the plugins
 

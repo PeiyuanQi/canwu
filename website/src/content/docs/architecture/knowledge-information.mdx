@@ -20,13 +20,13 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
   <a href="/en/architecture/knowledge-information/">English version</a>
 </nav>
 
-参伍把世界中的真值和每个角色知道的内容分开保存。`canwu-knowledge` 为每个持有人（即知识归属的人物或机构）维护一本只追加的知识账本；`canwu-information` 记录一条信息如何被写成、发出、阅读、读懂和发布；`canwu-correspondence` 根据承运人所知规划路线，投递写明收件人的信件。如果玩家、智能体或机构要随着报告和信件陆续送达而行动，并且各自只看到已经到达自己的内容，就需要用到这三个 crate。
+参伍把世界中的真值和每个角色知道的内容分开保存。`canwu-knowledge` 为每个持有人（即知识归属的人物或机构）维护一本知识账本；`canwu-information` 记录一条信息如何被写成、发出、阅读、读懂和发布；`canwu-correspondence` 根据承运人所知规划路线，投递写明收件人的信件。如果玩家、智能体或机构要随着报告和信件陆续送达而行动，并且各自只看到已经到达自己的内容，就需要用到这三个 crate。
 
 ## crate 与所有权
 
 | crate | 负责什么 | 发布情况 |
 | --- | --- | --- |
-| `canwu-knowledge` | 持有人账本（`KnowledgeRecord`）、持有人查询、读取切面（一次读取所看到的账本位置）和游标，以及为兼容保留的、每个角色对军队的旧式观测（`ActorKnowledge`） | 已发布到 crates.io |
+| `canwu-knowledge` | 持有人账本（记录本体只存一份，每个持有人各一个持有人条目，读出时拼成 `KnowledgeRecord`）、持有人查询、读取切面（一次读取所看到的账本位置）、游标和留存策略，以及为兼容保留的、每个角色对军队的旧式观测（`ActorKnowledge`） | 已发布到 crates.io |
 | `canwu-information` | `canwu.information` 命名空间下以领域记录表示的信息生命周期：渠道、内容、表现形式、实物载体、发送记录、投递尝试、访问、解读、受众、发布和操作；模拟插件 `InformationPlugin` | 已发布到 crates.io |
 | `canwu-correspondence` | `canwu.correspondence` 命名空间下的通信：通信操作、通信机会、知识种子和承运人委托；模拟插件 `CorrespondencePlugin`；持有人规划快照的构建函数 | 已发布到 crates.io |
 
@@ -68,13 +68,16 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | 类型 | 表示什么 |
 | --- | --- |
 | `KnowledgeHolderRef` | 谁知道：`Person(PersonId)` 或 `Entity(EntityRef)`。定义在 `canwu-core` 中，由 `canwu-api` 重新导出。 |
-| `KnowledgeRecord` | 某个持有人账本中的一条事实：`schema`、带类型的 `subjects`、JSON `payload`、`as_of`（事实成立的时间，可以为空）、`learned_at`（持有人得知的时间）、`confidence_per_mille`、`origin`（获取方式和证据），以及被它取代（`supersedes`）或与它矛盾（`contradicts`）的旧记录。`as_of` 和 `learned_at` 之差，就是这条消息传到持有人手中时已经过去的时间。 |
-| `KnowledgeRecordDraft` | 边界系统提出的记录草稿。内核分配记录 ID，并把 `learned_at` 设为边界时间。 |
-| `KnowledgeRecordView` | 面向持有人的记录副本：带持有人本地 ID（`HolderKnowledgeRecordId`），不含 `origin`。 |
-| `KnowledgeQuery`、`KnowledgeQueryResult`、`KnowledgeCursor` | 某个持有人账本中的一页记录，可以按 schema、主体和得知时间过滤，并带有翻到下一页的游标。 |
+| `KnowledgeRecord` | 读取方看到的、某个持有人账本中的一条事实：`schema`、带类型的 `subjects`、JSON `payload`、`as_of`（事实成立的时间，可以为空）、`learned_at`（持有人得知的时间）、`confidence_per_mille`、`origin`（获取方式和证据），以及同一持有人被它取代（`supersedes`）或与它矛盾（`contradicts`）的旧记录。`as_of` 和 `learned_at` 之差，就是这条消息传到持有人手中时已经过去的时间。 |
+| `KnowledgeRecordBody`、`HolderEntry` | 账本实际保存记录的方式：**知识记录本体**（除持有人和关联之外的全部内容）无论几个持有人持有都只存一份；每个持有人各有一个**持有人条目**，带有持有人自己的本地记录号和自己的 `supersedes`、`contradicts`。一条 `KnowledgeRecord` 就是一个本体配上一个条目；没有任何持有人持有的本体离开账本。 |
+| `KnowledgeRecordDraft` | 边界系统提出的记录草稿。内核分配记录 ID，并把 `learned_at` 设为边界时间。`payload_bytes()` 给出[发布预算](#发布预算)为它计费的字节数。 |
+| `KnowledgeRecordView` | 面向持有人的记录副本：带持有人本地记录号（`HolderKnowledgeRecordId`，来自持有人自己的计数器，随条目保存），不含 `origin`。 |
+| `KnowledgeQuery`、`KnowledgeQueryResult`、`KnowledgeCursor` | 某个持有人账本中的一页记录，可以按 schema、主体和得知时间过滤，带有翻到下一页的游标，以及查询涉及的每个 schema 的[留存策略](#留存)。 |
 | `KnowledgeReadCut` | 一次读取所看到的账本位置：边界，加上该持有人全部记录的哈希。 |
-| `KnowledgeSnapshot` | 所有持有人账本，保存在快照或场景中。它还带有为兼容保留的 `ActorKnowledge`，即每个角色对各支军队的旧式观测；每条观测都带有一个 `KnowledgeSource`（直接观察、指挥职责、报告或场景记录）。 |
-| `PluginKnowledgeSchema`、`KnowledgeWriteGrant` | 某个插件注册并拥有的带版本知识 schema，以及某个边界系统以指定可见性发布这个 schema 的许可。 |
+| `KnowledgeSnapshot` | 所有持有人账本，保存在快照或场景中：按 ID 排列的本体，以及每个持有人的下一个本地记录号和它的条目。它还带有为兼容保留的 `ActorKnowledge`，即每个角色对各支军队的旧式观测；每条观测都带有一个 `KnowledgeSource`（直接观察、指挥职责、报告或场景记录）。 |
+| `PluginKnowledgeSchema`、`KnowledgeWriteGrant` | 某个插件注册并拥有的带版本知识 schema，带有它的留存策略 `retention`（`KnowledgeRetention::Keep` 或 `RetireWhenSuperseded`），以及某个边界系统以指定可见性发布这个 schema 的许可。 |
+| `KnowledgePublicationGroup`、`KnowledgeSupersession` | `PublishKnowledge` 指令中的一个组：这组草稿要发给的持有人（已排序、不重复）；以及条目如何指明它取代的记录：`Explicit`（用草稿自己的列表，只允许单个持有人的组）或 `CurrentOnSubjects`（引擎为每个持有人找出该种类、带这些主体的当前记录）。 |
+| `KnowledgePublicationBudget` | 到某个系统运行时，边界还能发布多少：记录本体、持有人条目和载荷字节，以及每条指令的上限。用 `SimulationView::knowledge_publication_budget()` 读取。 |
 
 ### 信息与通信
 
@@ -109,11 +112,11 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
     Input["上层应用的命令和输入<br/>apply_information_operation_v1、<br/>initiate_correspondence_v1、知识种子"]
     Corr["第 7 阶段：correspondence-lifecycle-v1<br/>读取承运人账本、规划路线"]
     Info7["第 7 阶段：information_lifecycle_v1<br/>校验并写入领域记录"]
-    Info13["第 13 阶段：information_publication_v1<br/>按持有人 PublishKnowledge"]
+    Info13["第 13 阶段：information_publication_v1<br/>PublishKnowledge，每个持有人一组"]
     Seed["第 13 阶段：correspondence-knowledge-ingress-v1<br/>知识种子和尝试报告"]
-    Kernel["模拟内核<br/>检查 schema、授权和持有人<br/>边界结束时提交"]
-    Ledger["持有人知识账本<br/>KnowledgeRecord"]
-    Event["KnowledgePublished 事件<br/>受众：该持有人"]
+    Kernel["模拟内核<br/>检查 schema、授权、持有人和预算<br/>边界结束时提交"]
+    Ledger["持有人知识账本<br/>一个本体，每个持有人一个条目"]
+    Event["KnowledgePublished 事件<br/>受众：指令列出的持有人"]
     Viewer["CanwuViewer<br/>query_knowledge、visible_changes_since"]
     Input --> Corr
     Input --> Info7
@@ -134,16 +137,50 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 1. 输入到达。上层应用提交 `apply_information_operation_v1` 命令，每条命令带一个 `InformationOperationEnvelope`。命令处理器检查幂等性，然后排入 `information_operation_v1` [规范化输入](/reference/terminology/)；命令本身不写任何记录。信息提供方也可以直接排入这条输入。通信通过 `initiate_correspondence_v1`、`delegate_carrier_v1` 和 `resolve_correspondence_v1` 三条命令，以及 `install_correspondence_knowledge_v1`、`communication_opportunity_v1` 和 `correspondence_incident_v1` 三种输入进入。
 2. 第 7 阶段运行信息生命周期。事件驱动的系统 `information_lifecycle_v1` 让每个已准入的操作依次进入 `Accepted`、`ApplyingDomainChanges`，最后应用变更，每个边界前进一步。应用之前，它检查解读权限；如果带有真伪判定，还要检查判定引用的是某个带自称来源的表现形式的当前版本。检查失败时，操作保存为 `Rejected`，错误码为 `invalid_authority` 或 `invalid_lifecycle`。`InformationLifecycle::plan` 返回记录变更，以及这次变更引出的知识发布。操作按先后顺序规划，最早的在前；计划会改动同一轮中更早的操作已经改动的记录的操作，等到下一个边界再规划。无法解码的数据包，以及对另一个数据包或已持久化的操作已占用的操作 ID 带来不同输入的数据包，以 `canwu.information.ingress_rejected.v1` 事件被跳过，绝不会让边界失败。同一个系统还把命令授权所指的每条已准入命令中的委托声明记入只可创建的 `DelegatedAuthority` 记录，之后的 `InterpretationAuthority::Delegated` 按这条记录而不是按命令检查，所以命令封存之后判断不变。
 3. 第 7 阶段同时运行通信。`correspondence-lifecycle-v1` 结算启动、推进、意外事件、通信机会、恢复和委托。处理启动时，它读取承运人当前的规划知识，从中解析收件人地址，调用 `plan_route`，保存 `CorrespondenceOperation`，并为 `canwu-information` 安排信息操作。之后的 `progress_correspondence_v1` 输入等待这些操作结束，再开始和完成各段路程。
-4. 第 13 阶段发布知识。`information_publication_v1` 把一个操作要发布的知识转为 `PublishKnowledge` 指令，每个持有人一批，每个操作在一个边界内最多发布 64 条；每个持有人、种类和主体集合在一个边界内最多发布一次，引擎不接受的持有人（已死亡的人物、不存在的军队或政府、已退休的实体）留着不发布，操作带着其余部分完成。下一个边界，内部输入 `information_operation_finalize_v1` 记录已发布的 ID（通过 `knowledge_heads` 查到，而不是从保留的证据里找），并放出下一批。`correspondence-knowledge-ingress-v1` 发布知识种子和承运人的尝试报告。
+4. 第 13 阶段发布知识。`information_publication_v1` 把一个操作要发布的知识转为 `PublishKnowledge` 指令，每条指令一个单持有人的组，每个操作在一个边界内最多发布 64 条，并且绝不超过边界的[发布预算](#发布预算)（第一条记录就放不下的一批整批推迟，同一时刻的下一个边界重试）；每个持有人、种类和主体集合在一个边界内最多发布一次，引擎不接受的持有人（已死亡的人物、不存在的军队或政府、已退休的实体）留着不发布，操作带着其余部分完成。下一个边界，内部输入 `information_operation_finalize_v1` 记录已发布的 ID（通过 `knowledge_heads` 查到，而不是从保留的证据里找），并放出下一批。`correspondence-knowledge-ingress-v1` 发布知识种子和承运人的尝试报告。
 5. 模拟内核校验并提交。内核只接受满足以下全部条件的 `PublishKnowledge` 指令：
    - 来自第 4 或第 13 阶段的系统，且该系统在 `knowledge_writes` 中以相应的可见性声明了这个 schema；
    - schema 可写，并由同一个插件注册；
-   - 持有人符合资格，证据引用有效；
-   - 它取代或标为矛盾的每条记录，都是同一持有人、同一 schema 种类下可见的记录（见[取代先前的记录](#取代先前的记录)）。
+   - 每个组的每个持有人都符合资格，证据引用有效；
+   - 条目取代或标为矛盾的每条记录，都是同一持有人、同一 schema 种类下可见的记录（见[取代先前的记录](#取代先前的记录)）；若用 `CurrentOnSubjects`，草稿不带关联，由引擎为每个持有人算出；
+   - 指令不超过单条指令的上限，整个提案不超过预算留给这个系统的部分。
 
-   随后内核分配全局记录 ID，设定 `learned_at`，让同一边界中后续运行的系统读到 `SameBoundary` 记录，并在边界结束时把所有批次写入账本。
-6. 产出结果。每个批次成为 `BoundaryRecord::knowledge_changes` 中的一条 `BoundaryKnowledgeChange`，并产生一个以该持有人为受众的 `KnowledgePublished` 事件。此后该持有人读取账本时就能看到新记录。
+   随后内核为每个本体分配一个全局记录 ID，设定 `learned_at`，让同一边界中后续运行的系统读到 `SameBoundary` 记录，并在边界结束时把每个本体存一份、给组内每个持有人一个带该持有人下一个本地记录号的条目；在 `RetireWhenSuperseded` 下，这些条目取代的条目在同一次提交中离开各自的持有人（见[留存](#留存)）。
+6. 产出结果。每条指令成为 `BoundaryRecord::knowledge_changes` 中的一条 `BoundaryKnowledgeChange`（它的本体与账本共享而不是复制，加上每个持有人的条目；`records_of(&holder)` 拼出某个持有人收到的记录），并产生一个 `KnowledgePublished` 事件，列出它发给的全部持有人，每个持有人都在事件的受众之内。此后该持有人读取账本时就能看到新记录。
 </Steps>
+
+### 向多个持有人发布
+
+一个组里有多个持有人时，同一批本体发给所有人：账本、日志和每个哈希中各只有一份本体，每个持有人各一个条目。每个持有人只看到自己的本地记录号和自己的关联，没有任何字段告诉它别的持有人也持有同一个本体。取代关系按持有人各自判定：用 `KnowledgeSupersession::CurrentOnSubjects` 时，引擎为组内每个持有人执行 `knowledge_heads` 的规则，把该持有人在草稿种类下、带有草稿全部主体的当前记录写进它的条目，所以一条共享的记录线会取代每个持有人各自的旧记录。某个持有人的匹配结果超过 64 条当前记录时，边界失败：共享的记录线理应只有一个当前记录。`Explicit` 沿用草稿自己的列表，只允许单个持有人的组；单持有人的组配 `Explicit` 正是 0.16.0 的那条指令，第一方发布方都是这样迁移的。
+
+### 发布预算
+
+一个边界最多保存 32,768 个记录本体、新增 32,768 个持有人条目、接收 64 MiB 载荷（`KnowledgeLimitsV1::CURRENT`），一条指令最多 1,000 个本体和 4,096 个条目。本边界所有发布知识的系统共用这份预算，按调度顺序消耗：第 4 阶段先于第 13 阶段，同一阶段内按注册表运行系统的顺序。系统在发布之前先读剩余的预算：
+
+```rust
+let mut budget = view.knowledge_publication_budget();
+let bytes = draft.payload_bytes()?;
+if budget.take(1, holders.len(), bytes) {
+    // 把这份草稿发给这些持有人
+} else {
+    // 推迟它，或记为一次拒绝，让插件自己的状态能看到
+}
+```
+
+- `KnowledgePublicationBudget` 带有剩余的 `records`（本体）、`holder_entries` 和 `payload_bytes`，以及单条指令的上限 `records_per_batch` 和 `holder_entries_per_batch`。`admits` 判断再加一条给定大小的指令是否放得下；`take` 在放得下时扣减，并返回是否扣减了。
+- 这次读取不需要声明。答案是精确的：上限减去更早阶段和本阶段更早系统的提案已经用掉的部分，所以实时运行、封存过的运行、恢复后的运行和精确重放看到的余额相同。
+- `KnowledgeRecordDraft::payload_bytes()` 就是引擎为草稿载荷计费的字节数（它的紧凑 JSON 长度），发布方不必猜。
+- 先读预算、把放不下的推迟的发布方，永远不会让边界失败。超出预算发布的，边界以 `KnowledgeLimitExceeded` 失败：引擎不会把发布截断到刚好放下，因为同一提案中插件自己的记录写入会以为记录已经发出去了。第一方发布方（军事、移动、信息、技术和财政报告系统）都先读预算。
+- 没有按系统划分的份额。两个插件争用预算时，调度顺序靠前的先拿它需要的；谁靠前，取决于你的组合方式。
+
+### 留存
+
+每个注册的 schema 都声明一个 `KnowledgeRetention`：
+
+- `Keep`（默认）：每个条目在持有人账本中保留整个运行期。被取代的记录仍可用 `KnowledgeHistoryView::FullHistory` 读到。
+- `RetireWhenSuperseded`：持有人的新条目取代它的某个条目时，被取代的条目在发布它的那个边界提交时从该持有人那里**清退**。该持有人所有指向它的关联都被去掉，所以每个关联仍然能解析；没有持有人再持有它的本体时，本体离开账本。持有人每条记录线只保留一个条目，持有的知识不再随历史增长。
+
+清退是边界的一次状态变化，实时运行和精确重放完全一致，并且与封存无关，所以封存过和没封存过的运行得到相同的状态哈希。留存策略是插件描述的一部分，恢复和重放都要求插件声明相同的策略。读取方看到的是：`CurrentHeads` 查询不变；留存策略为清退的 schema，`FullHistory` 只显示当前条目，`KnowledgeQueryResult::retention` 说明每个 schema 的策略；`knowledge_changes_by_correlation` 仍从保留的证据返回边界当时发布的内容，不管之后是否清退；快照只保存当前条目；被清退到空的持有人保留它的本地记录号计数器，所以本地记录号不会重新开始。已死亡人物的条目永远不会被清退，因为不可能再向他发布任何记录去取代它。
 
 [结算系统](/architecture/settlement/)列出了全部十四个阶段。[从无锡发出、按路线投递的通信](/tutorials/cases/routed-correspondence/)逐步讲解了意外事件和恢复：灾害让同一次尝试改道，截取让截取者得到一条 `Access` 记录、投递照常继续，承运人扣押则结束这次尝试。
 
@@ -160,7 +197,7 @@ let heads = view.knowledge_heads(&holder, &schema.kind, &[subject])?;
 draft.supersedes = heads.records;
 ```
 
-- 它返回该持有人在这一 schema 种类下当前记录的全局 ID，也就是没有被该持有人其他记录取代的记录（当前知识记录）。只有带有所列全部主体的记录才算匹配，空列表则选中整个种类。如果你的插件为同一持有人维护多条记录线，要给每条线一个其他线没有的主体。
+- 它返回该持有人在这一 schema 种类下当前记录的全局 ID，也就是没有被该持有人任何条目在 `supersedes` 中指名的条目（当前知识记录）。只有带有所列全部主体的记录才算匹配，空列表则选中整个种类。如果你的插件为同一持有人维护多条记录线，要给每条线一个其他线没有的主体。指令用 `KnowledgeSupersession::CurrentOnSubjects` 时，引擎用草稿自己的主体为组内每个持有人做这次读取。
 - 返回的每个 ID，都可以作为该系统向同一持有人发布同种类记录时的有效目标，并且已经按草稿要求的升序排列。
 - 最多返回 64 个 ID，这也是一条记录最多能取代的数量。匹配的记录更多时，返回最新的那些，并设置 `truncated`。这不是错误：其余较旧的当前记录会在之后的发布中陆续被取代。
 - 结果来自已提交状态和正在结算的边界，所以实时运行、封存过证据的运行、恢复后的运行和精确重放得到的 ID 相同。
@@ -184,9 +221,9 @@ draft.supersedes = heads.records;
 
 用 `Canwu::viewer()` 打开查看器，它遵循本次运行的观察策略；角色席位也可以用 `viewer_for_actor`。[安全读取与呈现状态](/developer/reading-state/)演示了两种用法，并说明如何构建客户端载荷。
 
-查询结果按 `learned_at` 排序。默认的 `KnowledgeHistoryView::CurrentHeads` 会隐藏已被后续记录取代的记录，`FullHistory` 则返回全部记录。持有人本地 ID 从 1 开始为该持有人的记录编号，读取方无法据此推断其他持有人有多少条事实。游标绑定持有人、查询和读取切面。持有人得知新内容后，读取切面随之变化，旧游标会以 `KnowledgeReadCutUnavailable` 失败；其他持有人收到新消息，这个游标仍然有效。
+查询结果按 `learned_at` 排序。默认的 `KnowledgeHistoryView::CurrentHeads` 会隐藏已被后续记录取代的记录，`FullHistory` 则返回 schema 的[留存策略](#留存)保留下来的全部记录，结果中的 `retention` 说明各 schema 适用哪种策略。持有人本地记录号来自持有人自己的计数器并随条目保存，所以不会改变、不会重新开始，读取方也无法据此推断其他持有人有多少条事实。游标绑定持有人、查询和读取切面。持有人得知新内容后，读取切面随之变化，旧游标会以 `KnowledgeReadCutUnavailable` 失败；其他持有人收到新消息，这个游标仍然有效。
 
-`CanwuViewer::visible_changes_since(since)` 为之后每个受众包含该查看者的事件返回一个 `VisibleChange`（时间、摘要和来源事件）。每次知识发布都会产生以接收持有人为受众的 `KnowledgePublished` 事件，客户端可以借此发现新知识，再去查询账本。研究主体和开发者主体能看到所有事件。其他受众类型见[事件系统](/architecture/events/)。
+`CanwuViewer::visible_changes_since(since)` 为之后每个受众包含该查看者的事件返回一个 `VisibleChange`（时间、摘要和来源事件）。每次知识发布都产生一个 `KnowledgePublished` 事件，列出它发给的全部持有人（`holders`，连同这条指令的 `record_count` 和 `entry_count`），其中每个持有人都是它的受众，客户端可以借此发现新知识，再去查询账本。研究主体和开发者主体能看到所有事件。其他受众类型见[事件系统](/architecture/events/)。
 
 两个扩展发布以下 schema：
 
@@ -213,9 +250,9 @@ draft.supersedes = heads.records;
 
 0 到 999 的抽样结果以 `roll_per_mille` 保存在通信机会或意外事件记录上。持有人能否识破伪造的自称来源，由应用自己抽样决定；信息扩展只记录由此得出的 `AuthenticityFinding`。
 
-持有人账本保存在 `SimulationSnapshot::knowledge` 中，每个持有人一项，记录按 ID 排序。加载时，挂在错误持有人名下的记录和重复的全局 ID 都会被拒绝。持有人本地 ID、读取切面哈希和游标绑定都在读取时推导，从不保存。信息和通信的状态都是普通的领域记录。
+持有人账本保存在 `SimulationSnapshot::knowledge` 中：按 ID 排列的本体，以及每个持有人的下一个本地记录号和它按本地记录号排列的条目。加载时，没有持有人持有的本体、指向不存在本体的条目、乱序或不低于持有人计数器的本地记录号、在持有人内解析不了的关联，以及重复的本体或持有人都会被拒绝。持有人本地记录号随条目保存；读取切面哈希和游标绑定在读取时推导，从不保存。知识的承诺按块计算：每个条目一个叶哈希，每 256 个本地记录号一个块根，每个持有人一个根，整本账本一个根，所以一次发布只重算它触及的块，条目也可以离开。信息和通信的状态都是普通的领域记录。
 
-每条边界记录都保存本边界的 `knowledge_changes`，[精确重放](/developer/persistence/)会重新计算并与之比较。信息操作按 ID 和规范输入哈希保证幂等：完全相同的重试不改变任何状态，同一 ID 配上不同输入则以 `IdempotencyConflict` 失败。解码之类的判断在你的代码中完成，结果以已记录的内容和解读记录进入模拟，所以重放直接复用这些结果，不会再次运行你的解码器。
+每条边界记录都保存本边界的 `knowledge_changes`，[精确重放](/developer/persistence/)会重新计算并与之比较；恢复时引擎按边界从日志重建账本，套用取代规则、预算和留存策略，账本对不上的存档会被拒绝。信息操作按 ID 和规范输入哈希保证幂等：完全相同的重试不改变任何状态，同一 ID 配上不同输入则以 `IdempotencyConflict` 失败。解码之类的判断在你的代码中完成，结果以已记录的内容和解读记录进入模拟，所以重放直接复用这些结果，不会再次运行你的解码器。
 
 ## 上层应用需要提供什么
 
@@ -235,14 +272,16 @@ draft.supersedes = heads.records;
 | --- | ---: |
 | 查询的默认和最大分页大小 | 100 条和 1,000 条 |
 | 每个插件的知识 schema 数（`schemas_per_plugin`） | 256 |
-| 每个发布批次的记录数（`records_per_batch`） | 1,000 |
-| 一个边界内每个系统的发布批次数（`batches_per_system_boundary`） | 64 |
-| 每个边界的记录数（`records_per_boundary`） | 10,000 |
+| 一条指令的记录本体数，各组合计（`records_per_batch`） | 1,000 |
+| 一条指令的持有人条目数，各组的持有人数 × 草稿数合计（`holder_entries_per_batch`） | 4,096 |
+| 一个边界的记录本体数，所有发布方合计（`records_per_boundary`） | 32,768 |
+| 一个边界的持有人条目数（`holder_entries_per_boundary`） | 32,768 |
+| 一个边界新本体的载荷字节数（`payload_bytes_per_boundary`） | 64 MiB |
 | 每条记录的载荷字节数（`payload_bytes_per_record`） | 65,536 |
 | 每条记录的主体、证据引用、取代关联和矛盾关联数（`relations_per_record`） | 各 64 |
 | 摘要和获取方式文本（`text_bytes`） | 1,024 字节 |
 
-信息生命周期（`InformationLimitsV1::canonical()`）限定每次发送的指定收件人数和显式受众成员数各为 10,000、每位收件人的投递尝试数为 256、内联正文为 65,536 字节，其余上限见 rustdoc。
+按边界计的几行是所有发布方共用的一份预算，用 `knowledge_publication_budget()` 读取；没有按系统计数的上限。信息生命周期（`InformationLimitsV1::canonical()`）限定每次发送的指定收件人数和显式受众成员数各为 10,000、每位收件人的投递尝试数为 256、内联正文为 65,536 字节，其余上限见 rustdoc。
 
 一次通信机会列出 1 到 64 位候选收件人。
 

@@ -104,6 +104,17 @@ not imply belief, capability, or use.
 - Declare system reads, writes, resources, random streams, and emissions.
   Connect domains through validated records or bounded next-transaction signal
   batches; do not use synchronous recursive cross-plugin mutation.
+- A system that publishes knowledge reads `knowledge_publication_budget()`
+  before it proposes and never publishes past it; it defers or records as a
+  rejection what does not fit, so that its own state writes and its
+  publications agree. Store one body for many holders with a
+  `KnowledgePublicationGroup` rather than one directive per holder, and give
+  each knowledge schema the `retention` its records need (`Keep` for
+  history, `RetireWhenSuperseded` for lines a newer record replaces). A
+  plugin whose event-driven system must also run on quiet boundaries adds
+  a separate wake system on a host-chosen `SystemCadence`, as fiscal's wake
+  cadence (`with_report_cadence`, `wake-fiscal-reports-on-cadence-v1`)
+  does, rather than registering the writer twice in one phase.
 
 Decision and controller designs must keep this chain visible:
 

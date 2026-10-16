@@ -103,10 +103,16 @@ sidebar:
 | [核算周期账册](/architecture/fiscal/#核算周期与归档) | accounting cycle book | `FiscalCycleBook`、`FiscalAction::CloseAccountingCycle` | 一个范围在一个核算周期内的核算、减免、执行请求、凭证和审计结论，保存在它的范围明细里。打开的账册接受全部对象；关闭的账册只接受审计结论；已归档的账册已离开范围明细。账册中的每个对象都写明创建它的行动。 |
 | [财政机构记录](/architecture/fiscal/#记录与字节预算) | fiscal office | `FiscalOffice`、`FiscalRecordKind::Office`、`fiscal_office_key` | 一个机构的记录：它的权限绑定和审计绑定、任命政策和审计人提案、修订号与最近结果、能看到它的观察者，以及每个常驻周期的常驻账册数、分区键和已归档合计。它的标识是**机构键**（office key），即机构引用的摘要。 |
 | 辖区记录 | jurisdiction record | `FiscalJurisdiction`、`FiscalRecordKind::Jurisdiction` | 一个目录地区的记录：各机制的范围数、各法规的采纳数、转型候选，以及修订号与最近结果。`ApplyTransition` 以它为目标。 |
-| 观察者记录 | observer record | `FiscalObserver`、`FiscalRecordKind::Observer`、`FiscalAction::RebindObserver`、`FiscalAction::RemoveObserver` | 一个观察者绑定的记录：绑定本身、报告的行布局、周期槽位和每个已发布分段的摘要，以及修订号。报告行由这条记录上的角色命名，所以改指或移除一个绑定不会移动其他绑定的报告行。 |
+| 观察者记录 | observer record | `FiscalObserver`、`FiscalRecordKind::Observer`、`FiscalAction::RebindObserver`、`FiscalAction::RemoveObserver` | 一个观察者绑定的记录：绑定本身（含它的粒度和报告节律）、报告的行布局、周期槽位和每个已发布分段的摘要，以及修订号。报告行由这条记录上的角色命名，所以改指或移除一个绑定不会移动其他绑定的报告行。 |
 | 绑定目录 | binding directory | `FiscalRecordKind::Directory` | 4,096 条桶记录，把绑定、政策或提案 ID 映射到持有它的财政机构记录，准入只需一次局部读取就能从绑定 ID 找到机构。 |
 | 范围索引页 | scope index page | `FiscalRecordKind::Index`、`FISCAL_INDEX_PAGE_SCOPES` | 只可创建的记录，按名次顺序列出一个机构或一个地区的范围，每页 1,024 个；随场景写入一次。 |
-| 报告队列页 | report-queue page | `FiscalRecordKind::ReportQueue`、`FISCAL_REPORT_DRAIN_INGRESS` | 保存欠观察者的报告工作的 4,096 条记录之一：要发布的周期和分段，或整份报告。一个边界发不完的留在队列里，边界安排内部的排空数据包，同一时刻的下一个边界继续发布。 |
+| 报告队列页 | report-queue page | `FiscalRecordKind::ReportQueue`、`FiscalReportQueueEntry::due_at`、`FISCAL_REPORT_DRAIN_INGRESS` | 保存欠观察者的报告工作的 4,096 条记录之一，每个条目都带到期时间：要发布的周期和分段，或整份报告。按间隔发布的观察者在这里始终有一个条目，到期时间是它的下一个到期时刻。一个边界发不完的留在队列里，边界安排内部的排空数据包，同一时刻的下一个边界继续发布。 |
+| [报告节律](/architecture/fiscal/#报告如何发布) | report cadence | `FiscalReportCadence`、`FiscalObserverBinding::cadence` | 观察者的报告何时到期：**按变化**（`OnChange`，默认），即在改变了它所显示内容的那个边界到期；或者按**报告间隔**（report interval，`Interval { every, offset }`，可用 `FiscalReportCadence::staggered` 错开）在对齐的时刻到期，即自 `SimTime::EPOCH` 起的 `offset + k × every`，由每个到期时刻当时或之后第一个运行报告系统的边界发布。按间隔发布的报告在两个到期时刻之间不显示任何变化；报告发布过之后，每个到期时刻都会重新发布摘要，所以没有消息绝不等于没有报告。节律由场景决定，改指绑定不改变它。 |
+| [唤醒节奏](/architecture/fiscal/#报告如何发布) | wake cadence | `FiscalPlugin::with_report_cadence`、`wake-fiscal-reports-on-cadence-v1` | 财政插件的唤醒系统运行所用的 `SystemCadence` 类别：这一类别中没有事件的边界上，它读根记录，有报告到期时就安排排空数据包，让事件驱动的报告系统在同一时刻的下一个边界运行。它是记入插件描述的插件选项，不是绑定的报告节律，后者决定一份报告何时到期。 |
+| 报告日程记录 | report schedule | `FiscalReportSchedule`、`FiscalRecordKind::ReportSchedule`、`FiscalRoot::earliest_due` | 记录每个报告队列页最早的到期时间，以及含有被搁置条目的页；根记录保存所有页中最早的到期时间。在这个时间之前、又没有搁置条目的边界只读根记录；到了这个时间的边界只解码最早到期时间已到的页。 |
+| [机构粒度](/architecture/fiscal/#知识与可见性) | institution granularity | `FiscalReportGranularity::Institution`、`FiscalObserverBinding::granularity` | 报告的一种行布局：可见的每个机构和每种机制各一行，事实是该机构在该周期、该机制下的常驻账册按单位和支付形态求和，再按观察者的置信度呈现。默认是**范围粒度**（scope granularity，`Scope`），即每个范围一行。机构行的分段引用机构记录的当前版本并记下求和的账册数，比范围分段引用范围明细版本的出处要弱。 |
+| 报告份额 | report share | `FiscalReportBudget`、`FiscalPlugin::with_report_budget` | 财政报告系统在一个边界内可以使用的引擎发布预算（本体、条目、载荷字节），默认是 `KnowledgeLimitsV1::CURRENT` 的一半。财政实际发布的，是它的份额与它运行时剩余预算中较小的一方，其余等待排空。份额介于 `FiscalReportBudget::MINIMUM`（两个本体、两个条目、128 KiB）和引擎上限之间，自定义的份额写在报告系统的名称里，所以在插件描述中。文字中称“报告份额”，代码标识保留 budget。 |
+| 搁置轮询 | parked rotation | `FISCAL_PARKED_CHECKS_PER_BOUNDARY`、`FiscalRoot::parked_cursor` | 报告系统重新检查持有人已死亡的观察者的方式：每次运行检查根记录游标之后的 16 个被搁置条目，按队列页和绑定 ID 顺序循环，所以恢复存活的持有人最多在 `ceil(被搁置数 / 16)` 次运行内收到欠它的报告，每次运行的开销固定。 |
 | [行动目标](/architecture/fiscal/#行动批次与修订号) | action target | `FiscalActionTarget`、`FiscalActionEntry::expected_revision`、`fiscal_target_revision` | 一个行动写明修订号的那条记录：范围明细、财政机构记录、辖区记录或观察者记录。只有目标在签发者查看之后发生了变化，行动才算过期。 |
 | [行动批次](/architecture/fiscal/#行动批次与修订号) | fiscal action batch | `FiscalActionBatch`、`FiscalActionEntry` | `apply_fiscal_action_v1` 的载荷：一个权限绑定和最多 4,096 个条目，每个条目都是一个普通行动，有自己的 ID、预期修订号、结果和事件。某个条目不能准入时，准入拒绝整个批次并指出它的序号。 |
 | 结果环 | outcome ring | `FISCAL_RECENT_OUTCOMES`、`fiscal_recent_outcome` | 一个行动目标保留的最近八个结果，连同**结果下限**（outcome floor），即最近被挤出的结果的结算修订号。两者只凭常驻状态就能拒绝重发的行动；每个结果都留在它的结算事件里。 |
@@ -114,7 +120,7 @@ sidebar:
 | 分区键 | partition key | `MAX_FISCAL_PARTITION_KEYS` | 账册或报告行中一条事实的单位和支付形态。一个机构在一个周期、一种机制下的账册最多使用四个。 |
 | [财政归档](/architecture/fiscal/#核算周期与归档) | fiscal archive | `FiscalArchiveStore`、`FiscalState::prepare_fiscal_archive`、`enqueue_fiscal_archive`、`archived_fiscal_record`、`FiscalArchiveKeyV1` | 由上层应用保存、按内容寻址的归档，存放已关闭的账册、各周期的机构合计和维护凭证，带有资源归档格式的累积查找索引。没有任何边界读取它；一次模拟运行可以做任意多次提交。 |
 | [报告周期槽位](/architecture/fiscal/#报告如何发布) | cycle slot | `MAX_FISCAL_REPORT_CYCLE_SLOTS` | 观察者报告中一个常驻周期占用的 64 个位置之一；槽位 `s` 的分段 `p` 对应报告行 `1 + s * 1,024 + p`。离开报告的周期把它的分段发布为空并释放槽位；槽位用完时的周期计入摘要的 `omitted_cycles`。 |
-| [报告分段](/architecture/fiscal/#报告如何发布) | report part | `FiscalReportRecord`、`FISCAL_REPORT_ROWS_PER_PART` | 报告的一条知识记录：一个周期的 16 个相邻范围行，独占一条报告行，只在各行的摘要值变化时重新发布。第 0 行是摘要。 |
+| [报告分段](/architecture/fiscal/#报告如何发布) | report part | `FiscalReportRecord`、`FISCAL_REPORT_ROWS_PER_PART` | 报告的一条知识记录：一个周期的 16 个相邻行（范围行或机构行），独占一条报告行，只在各行的摘要值变化时重新发布。第 0 行是摘要。 |
 | [历史财政语境](/architecture/fiscal/) | fiscal historical context | `FiscalHistoricalContext` | 用于判断活动时期和改革候选的显式历史年份与模式；只通过规范化输入改变，不会自动实施改革。 |
 | [财政覆盖单元](/architecture/fiscal/) | fiscal coverage cell | `FiscalCoverageCell` | 一个“时期 × 地区 × 机制”单元，通过确定性优先级解析为有支持、原型回退、明确未知或不适用。 |
 | [财政执行凭证](/tutorials/cases/ming-fiscal/) | fiscal execution receipt | `FiscalExecutionReceiptPacket` | 引用精确类型化适配结果版本、并写明所结算请求所在范围的结算请求，通过 `enqueue_execution_receipts` 以每包最多 4,096 张提交；准入后的凭证从这些结果派生外部观察到的数量与处置。一个精确版本最多结算一张凭证，一个 `(evidence kind, external_operation_id)` 组合在一个范围的常驻账册内最多结算一张。结算不能接受的凭证会以事件被拒绝，绝不会让边界失败。凭证不拥有资源真值。 |
@@ -197,7 +203,14 @@ sidebar:
 | [角色知识](/developer/reading-state/) | actor knowledge | `ActorKnowledge` | 某一角色知道的内容及来源、可信度和时间，与真值分开保存。 |
 | [报告](/architecture/events/) | report | `EventKind` type `"report_dispatched"` | 在更新角色知识前，在角色之间签发或送达的信息。 |
 | [持有人相对知识](/tutorials/cases/routed-correspondence/) | holder-relative knowledge | `KnowledgeHolderRef`, `KnowledgeReadCut` | 在精确读取切面上从某个人、机构、官署或其他持有人账本读取的事实，不能改读全知状态。 |
-| [当前知识记录](/architecture/knowledge-information/#取代先前的记录) | current knowledge records | `SimulationView::knowledge_heads`, `KnowledgeHeads`, `HolderLedger::current_records` | 持有人在某一 schema 种类下的当前记录，即没有被该持有人其他记录取代的记录。发布知识的系统按类型化主体筛选，读取它们的全局 ID，用来指明下一条记录要取代哪些记录。读取来自已提交状态的索引和正在结算的边界，所以实时、封存、恢复和重放的运行结果一致，开销也不随持有人账本的大小增长。 |
+| [当前知识记录](/architecture/knowledge-information/#取代先前的记录) | current knowledge records | `SimulationView::knowledge_heads`, `KnowledgeHeads`, `HolderLedger::current_records` | 持有人在某一 schema 种类下的当前记录，即没有被该持有人任何条目在 `supersedes` 中指名的条目。发布知识的系统按类型化主体筛选，读取它们的全局 ID，用来指明下一条记录要取代哪些记录。读取来自已提交状态的索引和正在结算的边界，所以实时、封存、恢复和重放的运行结果一致，开销也不随持有人账本的大小增长。 |
+| [知识记录本体](/architecture/knowledge-information/#知识账本) | knowledge record body | `KnowledgeRecordBody` | 知识记录中与持有人无关的部分，无论几个持有人持有都只保存一份：schema、主体、载荷、时间、置信度和来源。没有任何持有人持有时，本体离开账本。 |
+| [持有人条目](/architecture/knowledge-information/#知识账本) | holder entry | `HolderEntry`、`HolderPublication` | 一个持有人对一个本体的持有：它的持有人本地记录号，以及它自己的取代和矛盾列表，列表只指向同一持有人、同一 schema 种类的条目。一条 `KnowledgeRecord` 就是一个本体配上一个条目。 |
+| 持有人本地记录号 | holder-local record ID | `HolderKnowledgeRecordId`、`HolderEntry::local`、`HolderLedger::local_of` | 持有人看到的自己某条记录的编号，来自持有人自己的计数器，随条目保存。它不会改变、不会重新开始，也不会指向别的持有人的记录，所以读取方无法据此推断其他持有人有多少记录。 |
+| [共享发布](/architecture/knowledge-information/#运行过程) | shared publication | `KnowledgePublicationGroup`、`KnowledgeSupersession` | 一条 `PublishKnowledge` 指令把同一批草稿发给一组中的每个持有人：每个本体只保存一份，每个持有人各得一个条目。`Explicit` 下，草稿的关联只作用于组内唯一的持有人；`CurrentOnSubjects` 下，引擎为每个持有人找出该持有人在草稿种类下、带有草稿全部主体的当前记录，并写进该持有人的条目。 |
+| [发布预算](/architecture/knowledge-information/#发布预算) | publication budget | `KnowledgePublicationBudget`、`SimulationView::knowledge_publication_budget`、`KnowledgeRecordDraft::payload_bytes` | 到某个系统运行时，边界还能为知识花多少：记录本体、持有人条目和载荷字节，扣去更早阶段和本阶段更早系统已经用掉的部分，并附带每条指令的上限。每个发布方都先读它，放不下的推迟；超出它的发布会让边界失败。 |
+| [知识留存策略](/architecture/knowledge-information/#留存) | knowledge retention | `KnowledgeRetention`、`PluginKnowledgeSchema::retention`、`KnowledgeQueryResult::retention` | schema 规定条目何时离开持有人：整个运行期间保留（`Keep`），或在同一持有人的新条目取代它时清退（`RetireWhenSuperseded`），清退发生在发布时的同一次提交中，实时运行和重放一致。它是插件描述的一部分。 |
+| [已清退条目](/architecture/knowledge-information/#留存) | cleared entry | — | 按 schema 的留存策略离开了持有人的条目：指向它的每个关联都被去掉，没有持有人再持有时它的本体离开账本，而边界证据仍保留当时发布的原样。不写作“退休”，术语表中“退休”指文化目标。 |
 | 委托权限记录 | delegated authority record | `DelegatedAuthority`、`delegated_authority_reference` | `canwu-information` 在准入委托命令时写入的只可创建记录：按授权的声明路径取出的委托声明。之后以委托权限进行的解读按这条记录检查，而不是按命令检查，所以封存归档了命令也没有影响。 |
 | 法律提供方索引 | legal provider index | `LegalRuntime::provider_packets`、`LawBudgets::max_provider_packets` | 法律协调分片中记录的、边界准入过的每个已编译提供方数据包：输入 ID、插件、数据包类型，以及到期时间与载荷的哈希。信号或公开引用只有指向已记录的数据包才算数，可以在当时或之后任何边界引用，所以封存过的运行与其精确重放判断一致。 |
 | [持有人规划快照](/developer/reading-state/) | holder planning snapshot | `planning_snapshot_from_holder_knowledge`, `KnowledgeReadCutDigest` | 只用某个持有人账本在读取切面上声明的端点和连接构建的路由 `PlanningSnapshot`，同时返回读取集摘要，证明规划读取了什么。 |
@@ -245,6 +258,8 @@ sidebar:
 | [当前知识记录](/architecture/knowledge-information/#取代先前的记录) / current knowledge records | 知识头记录 / knowledge heads | 已弃用（指文字写法）：统一使用 **当前知识记录** 与 **current knowledge records**；代码标识仍是 `knowledge_heads` 和 `KnowledgeHeads`。 |
 | [边界耗时明细](/architecture/settlement/#边界耗时明细) / boundary profile | 边界耗时剖面 | 已弃用：0.16.0 更改了中文写法；`BoundaryProfile` 不变。 |
 | [一步式完成租约](/developer/production-economy/#完成租约) / single-step completion lease | 单步完成租约 | 已弃用：0.16.0 更改了中文写法；`SingleStepLease` 不变。 |
+| [已清退条目](/architecture/knowledge-information/#留存) / cleared entry | 退役知识记录 / retired knowledge record；退休记录 | 已弃用：留存策略从持有人那里移除的条目统一使用 **已清退条目** 与 **cleared entry**；**退休目标 / retired target** 仍是文化术语，`RetireWhenSuperseded` 仍是代码标识。 |
+| 报告份额 / report share | 报告预算 / report budget | 受限：财政在发布预算中的份额，文字中统一使用 **报告份额** 与 **report share**；`FiscalReportBudget` 和 `with_report_budget` 保留 budget。 |
 
 ## 维护规则
 

@@ -8,7 +8,10 @@ is implemented on the partitioned records
 ([Phase 2 as implemented](#phase-2-as-implemented)). The owner
 decided on 2026-10-15 that Phases 0, 1, and 2 ship in 0.16.0 and that the
 release waits for them, so that 0.16.0 can run the county-level world; Phase 3
-stays later ([Phases](#phases)). It answers downstream gaps G-15
+shipped in 0.17.0 as [fiscal observers at scale](fiscal-observers-at-scale.md),
+except domain-entity holders, which stay deferred ([Phases](#phases)). The
+statements below that 0.17.0 changed are marked where they stand. It answers
+downstream gaps G-15
 (fiscal lifetime caps and no archive) and G-16 (fiscal observers) in
 `canwu-fiscal`, the fiscal simulation extension, after the owner raised G-15
 to High on 2026-10-14 with the target restated below.
@@ -207,8 +210,10 @@ This is the end state; [Phases](#phases) says which part arrives when.
   on the observer's own record, so re-pointing or removing a binding moves no
   other binding's lines; changed parts are found by digest and published
   within the engine's 64 holders per boundary, with same-instant drain
-  boundaries beyond that. Report cadence, per-institution reports, and
-  domain-entity holders are Phase 3.
+  boundaries beyond that. Report cadence and per-institution reports shipped
+  in 0.17.0 ([fiscal observers at scale](fiscal-observers-at-scale.md)),
+  which also replaced the 64-holder limit with the publication budget;
+  domain-entity holders stay deferred.
 - **Caps.** Every lifetime cap is removed; what remains bounds one record, one
   command, or one boundary, and each excess is refused, never a failed
   boundary.
@@ -322,12 +327,15 @@ Phase 2) measured, on 65,536 stored records: an idle boundary of 0.08 to
 per-boundary limits, and the cost of a day of the county-level world against
 these numbers, not Phase 0's, and states the ones it used.
 
-**Phase 3: observers at scale (later).** Report cadence (`Interval`) with
-future due times, institution granularity, thousands of observers publishing
-in one instant, rotation of many parked holders, and domain-entity holders.
-Its gates are the engine's knowledge publication limit (64 holders per system
-per boundary) and a knowledge retention design (held reports grow for the life
-of a run). Until then a 0.16.0 world can keep many observers, but each
+**Phase 3: observers at scale (0.17.0, as
+[fiscal observers at scale](fiscal-observers-at-scale.md)).** Report cadence
+(`Interval`) with due times kept in the queue entries, institution
+granularity, thousands of observers publishing in one instant, rotation of
+many parked holders; domain-entity holders stay deferred. Its gates were the
+engine's knowledge publication limit (64 holders per system per boundary,
+replaced in 0.17.0 by the publication budget) and a knowledge retention design
+(held reports grew for the life of a run; 0.17.0 clears superseded report
+records at publication). Before it, a 0.16.0 world can keep many observers, but each
 publishes whole scope-level rows on every change of its institutions' books;
 a world with thousands of observers whose institutions change daily drains
 for many boundaries at each instant. Institution granularity is the first item
@@ -602,9 +610,10 @@ places). Line 0 is the summary and part `p` of slot `s` is line
 - A part cites, as evidence, the ledger versions its rows were read from,
   sorted (a part over two offices reads them out of ID order).
 - Parked holders are checked again in every boundary that runs the report
-  system, not rotated (rotation is Phase 3).
+  system, not rotated (0.17.0 rotates them, 16 per run).
 - Observers are scope-granularity and `OnChange` only; institution
-  granularity, `Interval` cadence, and domain-entity holders stay in Phase 3.
+  granularity and `Interval` cadence shipped in 0.17.0, and domain-entity
+  holders stay deferred.
   The strategic aggregates and the transition-candidate and aggregate systems
   are removed: a report row is read from its scope's book, and settlement
   writes a jurisdiction's candidates with its counts.
@@ -747,7 +756,9 @@ What remains is mostly not fiscal, and is listed for the owner:
 
 - **Report drains.** 4,000 observers whose institutions all change need 63
   boundaries at one instant, because the engine publishes to at most 64
-  holders per system and boundary. That is the Phase 3 gate.
+  holders per system and boundary. That was the Phase 3 gate, met in 0.17.0
+  by the publication budget and one copy per body
+  ([fiscal observers at scale](fiscal-observers-at-scale.md)).
 - **Engine command admission.** The engine's share of admitting a command
   grows with the run: about 0.4 ms a command in the fresh world, and about
   2.2 ms after the burst and its drains (the close of every book, 4,200
@@ -1449,8 +1460,8 @@ and line slots allocated once per binding on the state record. Phase 2 adds
 observer records with lines named on them, the office observer index, the
 static part layout of scope rows and cycle slots with a digest per line, and
 publication on change with report-queue slots for what one boundary cannot
-publish. Phase 3 adds `Interval` cadence, institution granularity, the parked
-rotation, and domain-entity holders.
+publish. Phase 3, shipped in 0.17.0, adds `Interval` cadence, institution
+granularity, and the parked rotation; domain-entity holders stay deferred.
 
 ### Bindings
 
@@ -1473,8 +1484,8 @@ pub struct FiscalObserverBinding {
   (`Entity(Government)`), which the observer record references, so the engine
   refuses a state naming one that does not exist, and which can never become
   unable to hold knowledge. **Domain-entity holders** (`Entity(Domain)`, an
-  active entity record whose schema allows holding knowledge) are left to
-  Phase 3: such a holder cannot be referenced (a reference would make every
+  active entity record whose schema allows holding knowledge) stay deferred,
+  past 0.17.0 too: such a holder cannot be referenced (a reference would make every
   retirement of that record re-validate fiscal records, and fail the other
   plugin's boundary with `allow_retired: false`), so the report system would
   have to read it before publishing, its kind declared with
@@ -1485,7 +1496,7 @@ pub struct FiscalObserverBinding {
   in the parked slot, with the lines it owes. In Phases 1 and 2 every parked
   observer is re-checked in each boundary that runs the report system, one
   availability read each, so a revived holder is published to by the boundary
-  that revives him, as in the 0.16.0 package. Phase 3, for worlds with many
+  that revives him, as in the 0.16.0 package. 0.17.0, for worlds with many
   dead observers left parked, re-checks them in rotation instead,
   `FISCAL_PARKED_CHECKS_PER_BOUNDARY` (16) in each boundary that runs the
   report system, so they cost a fixed amount per boundary; a revived holder is
@@ -1548,7 +1559,9 @@ give it.
 - **Cycles.** Each hot cycle the observer sees takes a cycle slot (at most 255
   at once, reused after the cycle leaves). Line 0 is the summary; part `p` of
   slot `s` is line `1 + s * 4,096 + p`. Five hexadecimal places hold 1,048,576
-  lines per observer.
+  lines per observer. As implemented, in 0.16.0 and 0.17.0 alike: 64 slots
+  (`MAX_FISCAL_REPORT_CYCLE_SLOTS`) of 1,024 parts, so part `p` of slot `s`
+  is line `1 + s * 1,024 + p` ([Phase 2 as implemented](#phase-2-as-implemented)).
 - **What leaves.** When a cycle's books are archived, its facts leave the report:
   the report system publishes its parts empty (withdrawn) and frees the slot.
 
@@ -1718,9 +1731,9 @@ remains.
 | `MAX_FISCAL_EVIDENCE_PER_RECORD`, `MAX_FISCAL_EVIDENCE_KINDS` | 32, 32 | unchanged | |
 | Receipts per packet | 1 | 4,096 | batches |
 | `FISCAL_REPORT_FACTS_PER_PART` | 16 | 64 (16 rows of at most 4 facts) | |
-| `MAX_FISCAL_REPORT_PARTS` | 256 per observer | 255 cycle slots of 4,096 parts per observer | |
+| `MAX_FISCAL_REPORT_PARTS` | 256 per observer | 255 cycle slots of 4,096 parts per observer (as implemented: 64 slots of 1,024 parts) | |
 | Report line places | 4 hex digits over all observers | 5 hex digits per observer | lines on the observer record |
-| `MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY` | 1,024 | 1,024 | the fiscal share of the engine's 10,000 |
+| `MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY` | 1,024 | 1,024 (0.17.0: deleted; the report share of the publication budget, `FiscalReportBudget` and `with_report_budget`, by default 16,384 bodies, 16,384 entries, 32 MiB) | the fiscal share of the engine's 10,000 |
 | Observers published per boundary | 64 (engine) | the engine's limit, read from `KnowledgeLimitsV1` | |
 | Pending auditor proposals | 256 (package, global) | 256 per office | per office |
 | Kept auditor proposals | 4,096 lifetime (package) | removed; resolved proposals archive | |
@@ -2110,9 +2123,9 @@ reverting its fix in the working tree.
 | `fiscal_report_lines.rs` | Lines on observer records; publication of changed parts only (digests); more than the engine's per-boundary publications drain at the same instant with identical `as_of`; withdrawn parts when a cycle is archived. As implemented: the archived cycle's parts published empty and its slot reused; a cycle past the 64 slots omitted until one frees; a part over two offices. The drain with identical `as_of` is held by `fiscal_report_parts.rs`, with a cut cycle owed whole. |
 | `fiscal_record_partition.rs`, `fiscal_record_budgets.rs`, unit tests | Record shapes and identities, the partition as a fixed point, the office key, the bucket and page names, the part bitmap, and the activation refusals of a record under another owner, a derived field out of step, and a directory or index that does not match; a ledger at its byte budget rejects an action and refuses a receipt. (The report schema hash is a constant, changed with the schema version; no test pins it.) |
 
-**Phase 3** (later): `fiscal_report_cadence.rs` (interval observers publish only
-at their due times and only changed parts, queue pages, parked rotation) and
-institution granularity.
+**Phase 3** (0.17.0): `fiscal_report_cadence.rs` (interval observers publish
+only at their due times and only changed parts, the schedule record, parked
+rotation) and `fiscal_report_institutions.rs` (institution granularity).
 
 Existing fixtures (`gap_g41`, `gap_g44`, `gap_g48`, `gap_g57`, `gap_g58`,
 `fiscal_report_parts`, `fiscal_reports_after_seal`, the 0.16.0 package's
@@ -2132,7 +2145,7 @@ tests), M (one crate, days), L (a crate's storage or settlement redesign), XL
 | Area | Cap or behavior | Why it blocks | Rough fix |
 | --- | --- | --- | --- |
 | Engine knowledge | 64 publications per system per boundary; 10,000 records per boundary over all plugins | thousands of report holders need tens of same-instant boundaries | raise or redefine the per-system limit: S to M |
-| Engine knowledge | superseded records stay in every holder's ledger for good (the 0.16.0 knowledge package removes their per-boundary cost, not their memory and save size) | 4,000 observers × monthly reports × 100 years is gigabytes held in memory and in saves | knowledge retention and archive: L |
+| Engine knowledge | superseded records stay in every holder's ledger for good (the 0.16.0 knowledge package removes their per-boundary cost, not their memory and save size) | 4,000 observers × monthly reports × 100 years is gigabytes held in memory and in saves | knowledge retention and archive: L. Done in 0.17.0 as `KnowledgeRetention::RetireWhenSuperseded`, applied at publication in the same commit, not after a seal: seal-tied retirement would make a sealed run and its unsealed twin differ ([knowledge retention](fiscal-observers-at-scale.md#knowledge-retention)) |
 | Engine record writes | measured in Phase 0: about 200 µs per written record plus 134 to 153 µs per KiB of structured JSON (34 µs per KiB for flat text), rising at 50,000 writes in one boundary; the encodings and hashes of the write account for a sixth to a quarter | a monthly day of the county-level world costs 3.5 to 4.5 s and a burst 25 s in the engine alone | a cheaper write path; where the time goes is not yet located, and the handling of the payload tree is the first suspect: L |
 | Engine idle floor | measured in Phase 0: every boundary costs about 0.5 to 1.7 µs per stored domain record (35 to 113 ms at 65,536 records, 5 to 6 ms at 16,384), whichever kinds its systems declare | every boundary of a world with tens of thousands of records, of any plugin, pays tens of milliseconds before any work | per-boundary work proportional to what changed, not to the store: M to L (cause not yet located) |
 | Engine persistence | resolved in 0.16.0: Phase 0 confirmed that a record whose payload was larger than 1,151,023 bytes did not fit a 4 MiB paged-checkpoint page; the record-store package pages a record of up to 512 MiB in 1 MiB chunks | none at the target: a single root record of an extension can grow to 512 MiB before a paged checkpoint refuses it | done (record-store package) |
@@ -2154,12 +2167,15 @@ In the fiscal extension, after this design:
 
 - an invalid committed fiscal record (activation and every write exclude it);
 - counter overflow (64-bit);
-- from Phase 3 only, an engine refusal the plugin cannot foresee: a report
-  published to a domain-entity holder that a system of another plugin retires
-  in the same phase 13. The report system checks the holder when it runs, and
-  the engine orders systems within a phase, so the residual window is a system
-  of another plugin that both writes in phase 13 and retires knowledge holders.
-  Phases 1 and 2 have no domain-entity holders, so no such case.
+- an engine refusal the plugin cannot foresee: a report published to a
+  domain-entity holder that a system of another plugin retires in the same
+  phase 13. The report system checks the holder when it runs, and the engine
+  orders systems within a phase, so the residual window is a system of
+  another plugin that both writes in phase 13 and retires knowledge holders.
+  0.17.0 states this window for every publisher
+  ([what can still fail a boundary](fiscal-observers-at-scale.md#what-can-still-fail-a-boundary))
+  and, like Phases 1 and 2, adds no domain-entity report holder, so fiscal
+  has no such case.
 
 An action never fails a boundary: it is applied or rejected as its own
 outcome. As implemented, every record keeps a 4 KiB reserve of its byte
@@ -2203,7 +2219,7 @@ stays pending.
    write cost, not for the ceiling.
 5. **Engine knowledge limits.** Thousands of observers lean on same-instant drain
    boundaries until the engine's per-system publication limit changes; Phase 3
-   waits for that.
+   waited for that, and 0.17.0 replaced the limit with the publication budget.
 6. **Crate dependency.** `canwu-fiscal` gains `canwu-resource` as a dependency for
    the index functions (hidden behind the fiscal archive trait), and the
    implementation needs the production package's change to `canwu-resource` in
@@ -2221,7 +2237,8 @@ stays pending.
 - Observer bindings can be re-pointed and removed at runtime, not installed, and
   their visibility, granularity, and cadence are the scenario's.
 - Due reports are published by the next event-bearing boundary at or after
-  their due time; no configurable report-system cadence (Phase 3).
+  their due time; no configurable report-system cadence (0.17.0 adds
+  `FiscalPlugin::with_report_cadence`).
 - Audit findings are allowed on a closed book until it is archived.
 - Outcomes beyond the 8-entry ring live only in their settled events, one event
   per settled entry.
@@ -2229,7 +2246,7 @@ stays pending.
   not a boundary failure, and a refused receipt leaves no record in the state.
 - The evidence versions an archived book cites stop being payload-required for
   the live run; preparation refuses a book whose citations are not yet sealed.
-- Domain-entity report holders wait for Phase 3.
+- Domain-entity report holders stay deferred (not in 0.17.0 either).
 
 **Review record.** The independent review of the first version
 ("implement with changes, with phasing") raised three blocking findings,

@@ -129,7 +129,12 @@ state and excluded from authoritative commitments unless deliberately promoted
 through a separately versioned kernel contract.
 
 The supported query surface should remain bounded and cursor-safe at large
-holder histories. Performance evidence must distinguish publication cost,
+holder histories. A record body is stored once and each holder holds its own
+entry, so a boundary has one publication budget of bodies, entries, and
+payload bytes that every publisher reads before it publishes, and a schema
+declares whether a superseded entry is kept or cleared at publication;
+held knowledge therefore stays bounded by what is current, not by the length
+of the run. Performance evidence must distinguish publication cost,
 snapshot growth, query cost, load/index-rebuild cost, replay throughput, and
 compact-archive cost. Recorded baselines are engineering evidence, not a
 machine-independent service-level objective.
@@ -647,7 +652,12 @@ packets name; actions arrive in batches, each against its target's own
 revision; closed cycles leave the hot records through an archive with the
 resource archive's lookup index; an institution's appointment policy says who
 nominates, appoints, and petitions for the removal of its auditors; a
-government holds reports with no actor; and no fiscal packet fails a
+government holds reports with no actor; since 0.17.0 an observer's report
+has a cadence (on change, or at aligned interval times) and a granularity
+(scope rows, or one row per institution and mechanism), the report system
+publishes within its share of the engine's publication budget, superseded
+report records are cleared at publication unless the host keeps them, and
+parked holders are re-checked in rotation; and no fiscal packet fails a
 boundary. The lifetime caps of 0.15.0 are gone: a run is bounded by its hot
 cycles and record byte budgets, not by how long it has run.
 

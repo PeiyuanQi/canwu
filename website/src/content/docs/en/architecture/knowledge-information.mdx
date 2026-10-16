@@ -20,13 +20,13 @@ import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
   <a href="/architecture/knowledge-information/">中文版</a>
 </nav>
 
-Canwu keeps what is true in the world apart from what each actor knows. `canwu-knowledge` holds one append-only knowledge ledger per holder, the person or institution whose knowledge it records; `canwu-information` records how a piece of information is written, sent, read, understood, and released; and `canwu-correspondence` carries addressed letters along routes planned from what the carrier knows. Use them when players, agents, or institutions should act on reports and letters as they arrive, each seeing only what has reached it.
+Canwu keeps what is true in the world apart from what each actor knows. `canwu-knowledge` holds one knowledge ledger per holder, the person or institution whose knowledge it records; `canwu-information` records how a piece of information is written, sent, read, understood, and released; and `canwu-correspondence` carries addressed letters along routes planned from what the carrier knows. Use them when players, agents, or institutions should act on reports and letters as they arrive, each seeing only what has reached it.
 
 ## Crates and ownership
 
 | Crate | What it owns | Published |
 | --- | --- | --- |
-| `canwu-knowledge` | Holder ledgers (`KnowledgeRecord`), holder queries, read cuts (the ledger position a read saw), and cursors, plus each actor's legacy army observations, kept for compatibility (`ActorKnowledge`) | Published on crates.io |
+| `canwu-knowledge` | Holder ledgers (record bodies stored once, a holder entry per holder, assembled as `KnowledgeRecord`), holder queries, read cuts (the ledger position a read saw), cursors, and the retention policy, plus each actor's legacy army observations, kept for compatibility (`ActorKnowledge`) | Published on crates.io |
 | `canwu-information` | The information lifecycle as domain records in the `canwu.information` namespace: channels, content, representations, instances, dispatches, delivery attempts, access, interpretation, audiences, releases, and operations; the simulation plugin `InformationPlugin` | Published on crates.io |
 | `canwu-correspondence` | Addressed correspondence in the `canwu.correspondence` namespace: operations, communication opportunities, knowledge seeds, and carrier delegations; the simulation plugin `CorrespondencePlugin`; the holder planning snapshot builders | Published on crates.io |
 
@@ -68,13 +68,16 @@ Publishing knowledge is a separate capability from owning state. A plugin that o
 | Type | What it represents |
 | --- | --- |
 | `KnowledgeHolderRef` | Who knows: `Person(PersonId)` or `Entity(EntityRef)`. Defined in `canwu-core` and re-exported by `canwu-api`. |
-| `KnowledgeRecord` | One fact in one holder's ledger: its `schema`, typed `subjects`, a JSON `payload`, `as_of` (when the fact held, if known), `learned_at` (when the holder learned it), `confidence_per_mille`, `origin` (method and evidence), and the earlier records it `supersedes` or `contradicts`. The gap between `as_of` and `learned_at` is the age of the news. |
-| `KnowledgeRecordDraft` | What a boundary system proposes. The kernel assigns the record ID and sets `learned_at` to the boundary time. |
-| `KnowledgeRecordView` | The holder-facing copy of a record: it carries a holder-local ID (`HolderKnowledgeRecordId`) and omits `origin`. |
-| `KnowledgeQuery`, `KnowledgeQueryResult`, `KnowledgeCursor` | One page of one holder's ledger, filtered by schema, subject, and learned time, with a cursor for the next page. |
+| `KnowledgeRecord` | One fact in one holder's ledger, as a reader gets it: its `schema`, typed `subjects`, a JSON `payload`, `as_of` (when the fact held, if known), `learned_at` (when the holder learned it), `confidence_per_mille`, `origin` (method and evidence), and the earlier records of the same holder it `supersedes` or `contradicts`. The gap between `as_of` and `learned_at` is the age of the news. |
+| `KnowledgeRecordBody`, `HolderEntry` | How the ledger stores a record: the **record body** (everything but the holder and the relations), kept once however many holders hold it, and one **holder entry** per holder with the holder's own local ID and its own `supersedes` and `contradicts`. A `KnowledgeRecord` is a body assembled with one entry; a body leaves the ledger when no holder holds it. |
+| `KnowledgeRecordDraft` | What a boundary system proposes. The kernel assigns the record ID and sets `learned_at` to the boundary time. `payload_bytes()` is the number of bytes the [publication budget](#the-publication-budget) charges for it. |
+| `KnowledgeRecordView` | The holder-facing copy of a record: it carries a holder-local ID (`HolderKnowledgeRecordId`, from the holder's own counter and stored with the entry) and omits `origin`. |
+| `KnowledgeQuery`, `KnowledgeQueryResult`, `KnowledgeCursor` | One page of one holder's ledger, filtered by schema, subject, and learned time, with a cursor for the next page and the [retention](#retention) of each schema the query is about. |
 | `KnowledgeReadCut` | The ledger position a read saw: the boundary and a hash of that holder's records. |
-| `KnowledgeSnapshot` | Every holder ledger, as stored in a snapshot or a scenario. It also carries `ActorKnowledge`: each actor's legacy observations of each army, kept for compatibility. Each entry has a `KnowledgeSource` (direct observation, command responsibility, report, or scenario record). |
-| `PluginKnowledgeSchema`, `KnowledgeWriteGrant` | A versioned knowledge schema that one plugin registers and owns, and one boundary system's permission to publish that schema with a given visibility. |
+| `KnowledgeSnapshot` | Every holder ledger, as stored in a snapshot or a scenario: the bodies in ID order and, per holder, its next local ID and its entries. It also carries `ActorKnowledge`: each actor's legacy observations of each army, kept for compatibility. Each entry has a `KnowledgeSource` (direct observation, command responsibility, report, or scenario record). |
+| `PluginKnowledgeSchema`, `KnowledgeWriteGrant` | A versioned knowledge schema that one plugin registers and owns, with its `retention` policy (`KnowledgeRetention::Keep` or `RetireWhenSuperseded`), and one boundary system's permission to publish that schema with a given visibility. |
+| `KnowledgePublicationGroup`, `KnowledgeSupersession` | One group of a `PublishKnowledge` directive: the holders (sorted, unique) that every draft of the group goes to; and how the entries name what they supersede: `Explicit` (the drafts' own lists, for a group of one holder) or `CurrentOnSubjects` (the engine names each holder's current records of the draft's kind and subjects). |
+| `KnowledgePublicationBudget` | What the boundary may still publish at a system's cut: record bodies, holder entries, and payload bytes, with the per-directive bounds. Read with `SimulationView::knowledge_publication_budget()`. |
 
 ### Information and correspondence
 
@@ -109,11 +112,11 @@ Each information record type below has a matching payload type, such as `Content
     Input["Host commands and ingress<br/>apply_information_operation_v1,<br/>initiate_correspondence_v1, seeds"]
     Corr["Phase 7: correspondence-lifecycle-v1<br/>reads carrier ledger, plans route"]
     Info7["Phase 7: information_lifecycle_v1<br/>validates and writes records"]
-    Info13["Phase 13: information_publication_v1<br/>PublishKnowledge per holder"]
+    Info13["Phase 13: information_publication_v1<br/>PublishKnowledge, one group per holder"]
     Seed["Phase 13: correspondence-knowledge-ingress-v1<br/>seeds and attempt reports"]
-    Kernel["Simulation core<br/>checks schema, grant, holder<br/>commits at boundary end"]
-    Ledger["Holder knowledge ledger<br/>KnowledgeRecord"]
-    Event["KnowledgePublished event<br/>audience: that holder"]
+    Kernel["Simulation core<br/>checks schema, grant, holder, budget<br/>commits at boundary end"]
+    Ledger["Holder knowledge ledger<br/>one body, one entry per holder"]
+    Event["KnowledgePublished event<br/>audience: the holders named"]
     Viewer["CanwuViewer<br/>query_knowledge, visible_changes_since"]
     Input --> Corr
     Input --> Info7
@@ -134,16 +137,50 @@ Each information record type below has a matching payload type, such as `Content
 1. Input arrives. Your host submits `apply_information_operation_v1` commands, each carrying an `InformationOperationEnvelope`. The command handler checks idempotency and queues `information_operation_v1` [canonical ingress](/en/reference/terminology/); the command itself writes no records. An information provider may queue that ingress directly. Correspondence enters through the `initiate_correspondence_v1`, `delegate_carrier_v1`, and `resolve_correspondence_v1` commands and the `install_correspondence_knowledge_v1`, `communication_opportunity_v1`, and `correspondence_incident_v1` ingress.
 2. Phase 7 runs the information lifecycle. The event-driven system `information_lifecycle_v1` moves each admitted operation through `Accepted` and `ApplyingDomainChanges` and then applies it, one state per boundary. Before applying, it checks the interpretation authority and that any authenticity finding cites the current version of a representation that carries a claimed source. A failed check stores the operation as `Rejected` with the code `invalid_authority` or `invalid_lifecycle`. `InformationLifecycle::plan` returns the record mutations and the knowledge publications the change implies. Operations are planned oldest first; one whose plan touches a record an earlier operation of the same pass already changes waits for the next boundary. A packet that does not decode, or that carries different input for an operation ID another packet of the boundary or the persisted operation already has, is skipped with a `canwu.information.ingress_rejected.v1` event and never fails the boundary. The same system records, in a create-only `DelegatedAuthority` record, the delegation claim of every admitted command that a command grant names, so a later `InterpretationAuthority::Delegated` is checked against that record rather than the command and decides alike after the command is sealed.
 3. Phase 7 also runs correspondence. `correspondence-lifecycle-v1` settles starts, progress, incidents, opportunities, recoveries, and delegations. A start reads the carrier's current planning knowledge, resolves the recipient's address from it, calls `plan_route`, stores the `CorrespondenceOperation`, and schedules information operations for `canwu-information`. Later `progress_correspondence_v1` ingress waits for those operations and starts and completes legs.
-4. Phase 13 publishes. `information_publication_v1` turns an operation's publications into `PublishKnowledge` directives, one batch per holder and at most 64 publications per operation in a boundary; each holder, kind, and subject set is published at most once per boundary, and a holder the engine does not accept (a dead person, a missing army or government, a retired entity) is left unpublished while the operation completes with the rest. The internal `information_operation_finalize_v1` ingress records the published IDs at the next boundary, found through `knowledge_heads` rather than retained evidence, and releases the next chunk. `correspondence-knowledge-ingress-v1` publishes knowledge seeds and carrier attempt reports.
+4. Phase 13 publishes. `information_publication_v1` turns an operation's publications into `PublishKnowledge` directives, one group of one holder each, at most 64 per operation in a boundary and never past the boundary's [publication budget](#the-publication-budget) (a chunk whose first record does not fit is deferred whole, and the next boundary at the same instant retries); each holder, kind, and subject set is published at most once per boundary, and a holder the engine does not accept (a dead person, a missing army or government, a retired entity) is left unpublished while the operation completes with the rest. The internal `information_operation_finalize_v1` ingress records the published IDs at the next boundary, found through `knowledge_heads` rather than retained evidence, and releases the next chunk. `correspondence-knowledge-ingress-v1` publishes knowledge seeds and carrier attempt reports.
 5. The simulation core checks and commits. It accepts `PublishKnowledge` only when:
    - it comes from a phase-4 or phase-13 system that lists the schema in `knowledge_writes` with that visibility;
    - the schema is writable and registered by the same plugin;
-   - the holder is eligible and the evidence references are valid;
-   - every record it supersedes or contradicts is a visible record of the same holder and schema kind (see [superseding an earlier record](#superseding-an-earlier-record)).
+   - every holder of every group is eligible and the evidence references are valid;
+   - every record an entry supersedes or contradicts is a visible record of the same holder and schema kind (see [superseding an earlier record](#superseding-an-earlier-record)), or, under `CurrentOnSubjects`, the drafts carry no relations and the engine computes them per holder;
+   - the directive stays within its per-directive bounds and the proposal within what the budget left for this system.
 
-   It then assigns global record IDs, sets `learned_at`, lets later systems in the same boundary read `SameBoundary` records, and commits every batch to the ledger at the end of the boundary.
-6. Results come out. Each batch becomes a `BoundaryKnowledgeChange` in `BoundaryRecord::knowledge_changes` and one `KnowledgePublished` event whose audience is that holder. The holder can read the new records from the next read of its ledger.
+   It then assigns one global record ID per body, sets `learned_at`, lets later systems in the same boundary read `SameBoundary` records, and at the end of the boundary stores each body once and gives each holder of its group an entry with the holder's next local ID; under `RetireWhenSuperseded` the entries those entries supersede leave their holders in the same commit (see [retention](#retention)).
+6. Results come out. Each directive becomes a `BoundaryKnowledgeChange` in `BoundaryRecord::knowledge_changes` (its bodies, shared with the ledger rather than copied, and each holder's entries; `records_of(&holder)` assembles what one holder received) and one `KnowledgePublished` event naming every holder it published to, each of which is in its audience. The holder can read the new records from the next read of its ledger.
 </Steps>
+
+### Publishing to many holders
+
+A group with several holders publishes the same bodies to all of them: one copy of each body in the ledger, the journal, and every hash, and one entry per holder. Each holder sees its own local IDs and its own relations, and nothing tells it that another holder holds the same body. Supersession is per holder: with `KnowledgeSupersession::CurrentOnSubjects`, the engine runs the `knowledge_heads` rule for each holder of the group and names, in that holder's entry, its current records of the draft's kind that carry every subject of the draft, so a shared line supersedes each holder's own earlier record. A draft whose match for some holder has more than 64 current records fails the boundary: a shared line is meant to have one current record. `Explicit` keeps the drafts' own lists and is allowed only for a group of one holder; a group of one holder with `Explicit` is exactly the directive of 0.16.0, which is how every first-party publisher ports.
+
+### The publication budget
+
+A boundary may store at most 32,768 record bodies, add 32,768 holder entries, and take 64 MiB of payload (`KnowledgeLimitsV1::CURRENT`), and one directive at most 1,000 bodies and 4,096 entries. Every publishing system of the boundary shares that budget, in dispatch order: phase 4 before phase 13, and within a phase in the order the registry runs the systems. Before it publishes, a system reads what is left:
+
+```rust
+let mut budget = view.knowledge_publication_budget();
+let bytes = draft.payload_bytes()?;
+if budget.take(1, holders.len(), bytes) {
+    // publish this draft to these holders
+} else {
+    // defer it, or record a rejection, as the plugin's own state can see
+}
+```
+
+- `KnowledgePublicationBudget` holds the remaining `records` (bodies), `holder_entries`, and `payload_bytes`, and the per-directive bounds `records_per_batch` and `holder_entries_per_batch`. `admits` says whether one more directive of the given size fits; `take` subtracts it when it does and says whether it did.
+- The read needs no declaration. Its answer is exact: the limits less what every proposal of earlier phases and of earlier systems of this phase took, so a live run, a sealed run, a restore, and an exact replay see the same remainder.
+- `KnowledgeRecordDraft::payload_bytes()` is exactly what the engine charges for the draft's payload (its compact JSON length), so a publisher never has to guess.
+- A publisher that reads the budget and defers what does not fit never fails a boundary. One that publishes past it fails the boundary with `KnowledgeLimitExceeded`: the engine does not cut a publication to fit, because the plugin's own record writes in the same proposal would then believe the records were published. The first-party publishers (military, movement, information, technology, and the fiscal report system) all read it first.
+- There is no share per system. If two plugins compete for the budget, the earlier one in dispatch order takes what it needs; which plugin comes first depends on how you compose them.
+
+### Retention
+
+Each registered schema declares a `KnowledgeRetention`:
+
+- `Keep` (the default): every entry stays in its holder's ledger for the life of the run. Superseded records remain readable with `KnowledgeHistoryView::FullHistory`.
+- `RetireWhenSuperseded`: when a new entry of a holder supersedes one of the holder's entries, the superseded entry is **cleared** from that holder in the commit of the publishing boundary. Every relation of the holder that named it is dropped, so every relation still resolves; when no holder holds its body any more, the body leaves the ledger. The holder keeps one entry per line, and held knowledge stops growing with history.
+
+Retention is a state transition of the boundary, the same in the live run and in its exact replay, and never tied to a seal, so a run that seals and one that does not reach the same state hash. The policy is part of the plugin descriptor, so a run restores and replays only with a plugin that declares the same policy. What a reader sees: `CurrentHeads` queries are unchanged; `FullHistory` of a retiring schema shows only current entries, and `KnowledgeQueryResult::retention` says which policy each schema has; `knowledge_changes_by_correlation` still returns what a boundary published, from retained evidence, whether or not an entry was cleared since; a snapshot holds only current entries; a holder emptied by retention keeps its local-ID counter, so local IDs never restart. An entry of a dead person is never cleared, because nothing can be published to supersede it.
 
 The [settlement system](/en/architecture/settlement/) page lists all fourteen phases. The [routed correspondence case](/en/tutorials/cases/routed-correspondence/) walks through incidents and recovery: a disaster reroutes the same attempt, an interception gives the interceptor an `Access` record while delivery continues, and a carrier seizure ends the attempt.
 
@@ -160,7 +197,7 @@ let heads = view.knowledge_heads(&holder, &schema.kind, &[subject])?;
 draft.supersedes = heads.records;
 ```
 
-- It returns the global IDs of the holder's current records of that schema kind, that is, the records no record of the holder supersedes. A record matches when it carries every listed subject, and an empty list selects the whole kind. If your plugin keeps several lines of records for one holder, give each line a subject the others lack.
+- It returns the global IDs of the holder's current records of that schema kind, that is, the entries no entry of the holder names in `supersedes`. A record matches when it carries every listed subject, and an empty list selects the whole kind. If your plugin keeps several lines of records for one holder, give each line a subject the others lack. A directive with `KnowledgeSupersession::CurrentOnSubjects` makes the engine do this read for every holder of a group, with the draft's own subjects.
 - Every returned ID is a valid target for a record the system publishes to the same holder with the same kind, and the IDs are already in the ascending order a draft requires.
 - At most 64 IDs come back, the number one record may supersede. When more records match, the newest are returned and `truncated` is set. That is not an error: the older current records are superseded by later publications.
 - The answer comes from committed state and the boundary being settled. A live run, a run that sealed its evidence, a restored run, and an exact replay therefore return the same IDs.
@@ -184,9 +221,9 @@ A ledger belongs to one holder: a person who is not dead (`KnowledgeHolderRef::P
 
 Open a viewer with `Canwu::viewer()`, which follows the run's observation policy, or with `viewer_for_actor` for a character seat. The [reading state](/en/developer/reading-state/) page shows both and explains how to build a client payload.
 
-A query returns records in `learned_at` order. `KnowledgeHistoryView::CurrentHeads`, the default, hides records that a later record supersedes; `FullHistory` returns all of them. Holder-local IDs number a holder's records from 1, so a reader cannot infer how many facts other holders have. A cursor binds the holder, the query, and the read cut. When the holder learns something new, its read cut changes and an old cursor fails with `KnowledgeReadCutUnavailable`; another holder's news leaves the cursor valid.
+A query returns records in `learned_at` order. `KnowledgeHistoryView::CurrentHeads`, the default, hides records that a later record supersedes; `FullHistory` returns all of them that the schema's [retention](#retention) kept, and the result's `retention` map says which policy applies. Holder-local IDs come from the holder's own counter and are stored with the entry, so they never change, never restart, and tell a reader nothing about how many facts other holders have. A cursor binds the holder, the query, and the read cut. When the holder learns something new, its read cut changes and an old cursor fails with `KnowledgeReadCutUnavailable`; another holder's news leaves the cursor valid.
 
-`CanwuViewer::visible_changes_since(since)` returns a `VisibleChange` (time, summary, and source event) for each later event whose audience includes the viewer. Every knowledge publication emits `KnowledgePublished` with the receiving holder as its audience, so a client can use this call to notice new knowledge and then query the ledger. Research and developer principals see every event. The [event system](/en/architecture/events/) page describes the other audiences.
+`CanwuViewer::visible_changes_since(since)` returns a `VisibleChange` (time, summary, and source event) for each later event whose audience includes the viewer. Every knowledge publication emits one `KnowledgePublished` event naming every holder it published to (`holders`, with the directive's `record_count` and `entry_count`), and each of those holders is in its audience, so a client can use this call to notice new knowledge and then query the ledger. Research and developer principals see every event. The [event system](/en/architecture/events/) page describes the other audiences.
 
 The two extensions publish these schemas:
 
@@ -213,9 +250,9 @@ The information schemas carry only `record_version` in the payload; the subjects
 
 The 0–999 roll is stored on the opportunity or incident record as `roll_per_mille`. Whether a holder detects a forged claimed source is your application's own draw; the information extension records only the resulting `AuthenticityFinding`.
 
-Holder ledgers are saved in `SimulationSnapshot::knowledge`, one entry per holder in record-ID order. Loading rejects a record filed under the wrong holder or a duplicated global ID. Holder-local IDs, read-cut hashes, and cursor bindings are derived at read time and never stored. Information and correspondence state are ordinary domain records.
+Holder ledgers are saved in `SimulationSnapshot::knowledge` as the bodies in ID order and, per holder, its next local ID and its entries in local order. Loading rejects a body no holder holds, an entry that names a missing body, a local ID out of order or at or above the holder's counter, a relation that does not resolve within its holder, and a duplicated body or holder. Holder-local IDs are stored; read-cut hashes and cursor bindings are derived at read time and never stored. The knowledge commitment is chunked: a leaf hash per entry, chunk roots over 256 local IDs, a root per holder, and one ledger root, so a publication rehashes only the chunks it touched and an entry can leave. Information and correspondence state are ordinary domain records.
 
-Each boundary record keeps its `knowledge_changes`, and [exact replay](/en/developer/persistence/) recomputes and compares them. Information operations are idempotent by ID and canonical input hash: an exact retry changes nothing, and different input under the same ID fails with `IdempotencyConflict`. Decoding and other judgments happen in your code, and their results enter as recorded content and interpretation records, so replay reuses them without running your decoder again.
+Each boundary record keeps its `knowledge_changes`, and [exact replay](/en/developer/persistence/) recomputes and compares them; a restore rebuilds the ledger boundary by boundary from the journal, applying the supersession rule, the budget, and retention, and refuses a save whose ledger does not match. Information operations are idempotent by ID and canonical input hash: an exact retry changes nothing, and different input under the same ID fails with `IdempotencyConflict`. Decoding and other judgments happen in your code, and their results enter as recorded content and interpretation records, so replay reuses them without running your decoder again.
 
 ## What your application supplies
 
@@ -235,14 +272,16 @@ The knowledge ledger (`DEFAULT_KNOWLEDGE_PAGE_SIZE`, `MAX_KNOWLEDGE_PAGE_SIZE`, 
 | --- | ---: |
 | Default and maximum query page size | 100 and 1,000 records |
 | Knowledge schemas per plugin (`schemas_per_plugin`) | 256 |
-| Records per publication batch (`records_per_batch`) | 1,000 |
-| Publication batches per system in one boundary (`batches_per_system_boundary`) | 64 |
-| Records per boundary (`records_per_boundary`) | 10,000 |
+| Record bodies per directive, over all its groups (`records_per_batch`) | 1,000 |
+| Holder entries per directive: holders × drafts, summed over its groups (`holder_entries_per_batch`) | 4,096 |
+| Record bodies per boundary, over all publishers (`records_per_boundary`) | 32,768 |
+| Holder entries per boundary (`holder_entries_per_boundary`) | 32,768 |
+| Payload bytes of new bodies per boundary (`payload_bytes_per_boundary`) | 64 MiB |
 | Payload bytes per record (`payload_bytes_per_record`) | 65,536 |
 | Subjects, evidence references, supersedes links, and contradicts links per record (`relations_per_record`) | 64 each |
 | Summary and origin-method text (`text_bytes`) | 1,024 bytes |
 
-`InformationLimitsV1::canonical()` caps addressed recipients per dispatch and explicit audience members at 10,000 each, delivery attempts per recipient at 256, and an inline body at 65,536 bytes; the rustdoc lists the rest.
+The per-boundary rows are one budget shared by every publisher, read with `knowledge_publication_budget()`; there is no per-system count. `InformationLimitsV1::canonical()` caps addressed recipients per dispatch and explicit audience members at 10,000 each, delivery attempts per recipient at 256, and an inline body at 65,536 bytes; the rustdoc lists the rest.
 
 A communication opportunity lists 1 to 64 candidate recipients.
 

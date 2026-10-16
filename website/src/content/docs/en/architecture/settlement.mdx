@@ -264,6 +264,8 @@ Each boundary system registers a `BoundarySystemContract` that declares:
 
 Kernel-owned keys follow the same rule. Transition directives need `StateKey::core_transitions()`, and person directives need `StateKey::core_person_availability()` or `StateKey::core_people()`. Evaluation traces need no declaration because they write no state.
 
+Reading the [publication budget](/en/architecture/knowledge-information/#the-publication-budget) needs no declaration either. A boundary has one budget of knowledge bodies, holder entries, and payload bytes, spent by every publishing system in dispatch order (phase 4 before phase 13, then registry order within a phase). A system that publishes reads what is left with `SimulationView::knowledge_publication_budget()` before it proposes, because a proposal past the budget fails the boundary.
+
 The kernel rejects undeclared reads, writes, reservation reads, and random draws. Plugin registration, snapshot restore, and exact replay all require the same plugin name, version, and semantic hash.
 
 ## Continue reading

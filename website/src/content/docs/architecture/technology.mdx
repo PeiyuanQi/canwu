@@ -215,7 +215,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `max_total_records`、`max_records_per_kind` | 总计 5,000 条记录（含操作结果），每种 5,000 条 |
 | `max_knowledge_records` | 所有持有人合计 5,000 条技术知识 |
 | `max_mutations_per_boundary` | 64；每个新操作计 2 次，引用执行意图的提供方结果计 3 次 |
-| `max_publications_per_boundary` | 每个边界发布 32 条知识 |
+| `max_publications_per_boundary` | 每个边界发布 32 条知识；引擎共用的[发布预算](/architecture/knowledge-information/#发布预算)是第二道上限，超出它的发布记为一次拒绝 |
 
 经过校验的文本字段，例如名称、单位、方法和技术主张的内容，最多 256 字节，且不含控制字符。操作、记录和提供方的 ID 最多 128 个字符，只能使用 ASCII 字母、数字和 `-`、`_`、`.`、`:`。如果某个边界的新操作会超出记录上限或变更预算，这个边界的所有新操作都会被拒绝，各自产生一条 `technology_operation_rejected_capacity_v1` 事件，不写入任何记录，之后可以重新提交。知识超出预算时发出 `technology_knowledge_rejected_capacity_v1`。已经有结果的重发操作不占用预算。
 

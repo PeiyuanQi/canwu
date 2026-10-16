@@ -57,10 +57,18 @@ person-by-place-by-domain matrices.
 7. Choose each extension's settlement knobs before the run starts: the society
    transfer settlement mode (`Batch` by default; `OneByOne` only when each
    transfer must see the previous one's result), the fiscal appointment policy
-   of every audited institution, and the budgets a plugin declares. Treat a
-   recorded rejection, a skipped packet, or a deferral as the normal answer to
-   an inadmissible input, never a failed boundary, and never declare an
-   initial-scenario record version as payload-required.
+   of every audited institution, the fiscal report knobs (each observer's
+   `cadence` and `granularity`; the wake cadence `with_report_cadence`, the
+   `SystemCadence` on which `wake-fiscal-reports-on-cadence-v1` runs, when
+   boundaries can pass without events;
+   `with_report_budget` and `with_report_retention`; the last three are
+   plugin identity), the `retention` of every knowledge schema your
+   plugins register, and the budgets a plugin declares. A plugin that
+   publishes knowledge reads `knowledge_publication_budget()` first and never
+   publishes past it. Treat a recorded rejection, a skipped packet, or a
+   deferral as the normal answer to an inadmissible input, never a failed
+   boundary, and never declare an initial-scenario record version as
+   payload-required.
 
 For technology or culture progression, avoid one global unlock flag when the
 game needs local variation. Separate knowledge, material access, capability,

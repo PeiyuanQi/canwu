@@ -1,9 +1,12 @@
 # Fiscal Observers at Scale
 
-Status: proposed for 0.17.0; reviewed once (engine and host-side reviews,
-"implement with changes"), with every finding resolved in
-[Review record](#review-record) and the 0.16.0 drain profile folded in
-([Profile results](#profile-results)). Phase 3 of
+Status: implemented in 0.17.0 (engine package E0 to E3 and E5; fiscal package
+F1 to F6; E4 deferred); the gate is met ([As implemented](#as-implemented),
+which is authoritative where the code differs from the text below).
+Reviewed once
+(engine and host-side reviews, "implement with changes"), with every finding
+resolved in [Review record](#review-record) and the 0.16.0 drain profile
+folded in ([Profile results](#profile-results)). Phase 3 of
 [world-scale fiscal state](world-scale-fiscal.md), which shipped Phases 0 to
 2 in 0.16.0. It answers the rest of downstream gap G-15/G-16: report
 publication to thousands of holders at one instant, report cadence, coarser
@@ -31,6 +34,7 @@ is player lag, judged by a human at each speed.
 
 ## Contents
 
+0. [As implemented](#as-implemented)
 1. [The problem and the gate](#the-problem-and-the-gate)
 2. [Decisions on one page](#decisions-on-one-page)
 3. [Today's publication path, as read in the code](#todays-publication-path-as-read-in-the-code)
@@ -54,6 +58,161 @@ is player lag, judged by a human at each speed.
 21. [Engine findings outside this package](#engine-findings-outside-this-package)
 22. [Risks and open questions](#risks-and-open-questions)
 23. [Review record](#review-record)
+
+## As implemented
+
+The 0.17.0 code follows this design with these differences, recorded from
+the two packages' reports and reviews. The [0.17.0 entry](../versioning.md)
+is the public statement of the result.
+
+**Engine (E0 to E3, E5).**
+
+- `KnowledgeRecordDraft::payload_bytes()` and
+  `KnowledgeRecordBody::payload_bytes()` return `Result<usize,
+  KnowledgeEncodingError>` (not `CanwuError`); the error converts into
+  `CanwuError` (`InvalidKnowledgeRecord`). The charge is counted without
+  building the encoding and equals `serde_json::to_vec(&payload).len()`.
+- The ledger keeps `insert(KnowledgeRecord)` as the authoring path beside
+  `insert_body` and `insert_publication`; `remove_entry`, `remove_body`, and
+  `retire_superseded_by` are the removal and retention operations;
+  `body_holder_count`, `body_digest`, `body_count`, `bodies`,
+  `last_body_id`, `commitment_root`, and `refresh_commitment` are the new
+  reads. Removed, as designed: `record`, `records`, `records_after`,
+  `record_count`, `last_record_id`, `remove`, indexing by record ID, and
+  `RecordsById` (now `BodiesById`). `HolderLedger::values()` yields owned
+  `KnowledgeRecord`s. The private `StoredBody` of the design is `SharedBody`
+  plus a per-ledger slot; `HolderLedger::next_local` is not public.
+- A body's digest excludes its ID; the ID is bound in each entry's leaf hash,
+  so two publications of identical content get distinct leaves while the
+  body digest can be computed before the ID is allocated.
+- The current-record index is keyed by SipHash keys (not 16-byte blake3
+  digests) that store the exact kind or subject beside the key and fall
+  back to exact comparison after any collision, so results never depend on
+  key values; the commitment and a restore do not use them. `naming` is
+  kept as designed and a retired entry's name is dropped from the holder's
+  other entries; a holder stays listed after its last entry leaves and
+  keeps `next_local`. `StagedKnowledgeEntries` is not re-exported by
+  `canwu-api`.
+- `BoundaryKnowledgeChange` carries `supersession` beside the designed
+  fields, and offers `entry_count()`, `body(id)`, and `records_of(&holder)`.
+- `KnowledgeQueryResult::retention` is filled by `with_retention`; a
+  standalone ledger leaves it empty. `Simulation::knowledge_retention` and
+  `CompactedSimulation::knowledge_retention` read a schema's policy.
+- Retention is applied in the commit of the publishing boundary, live and in
+  replay alike, never at a seal, as decided. Every version of a knowledge
+  kind must declare the same retention, since a kind's entries supersede
+  across its versions: checked at plugin registration and on a snapshot's
+  descriptors. `KnowledgePublicationBudget::take` is `#[must_use]`; a
+  staging misalignment is an `InvalidBoundary` kernel error; a restored run
+  keeps the ledger rebuilt from the journal, bodies shared and held once;
+  restore validation also checks the per-directive bounds and the
+  per-boundary budget.
+- `KnowledgePublished { holders, record_count, entry_count }` and
+  `EventAudience::KnowledgeHolders` as designed; `BoundaryReceipt` gains
+  `knowledge_entry_count`.
+- Formats: commitment 6 (`canwu.commitment.knowledge.v3`), snapshot 9,
+  checkpoint/journal 6, paged envelope 6, continuation 2 (hash domain
+  unchanged). Restore validation rebuilds the ledger boundary by boundary
+  from the journal, as designed.
+- E0: the index is `InitialRecordIndex`, built once per scenario and shared
+  by the runtime, its forks, and snapshot validation; no public type.
+- E5: military, movement, information, and technology read the budget;
+  technology records a publication past the budget as a rejection with its
+  existing event, whose summary says when the engine's shared budget was
+  the limit; information's chunk stops at the budget, and a chunk whose
+  first record does not fit is deferred whole (the operation returns to
+  awaiting publication and the next same-instant boundary retries), so a
+  publisher that reads the budget never fails a boundary. Correspondence,
+  resource, and production changed shape only.
+- E4 (paging the ledger) is not in 0.17.0, as decided. The mid-boundary
+  `refresh_checkpoint_hash` in `append_ingress` is not fixed.
+- Measured (release, probe against 0.16.0): engine time of a publishing
+  boundary down 28 % to 61 %; 0.7 µs per KiB of payload (was 3.3); journal
+  of 1,024 bodies 0.1 ms (was 1.6), hashing 0.4 ms (was 4.3); after the
+  review fixes the `knowledge_heads` boundary of `knowledge-ledger-profile`
+  is 120 to 149 µs at 2,048 and 16,384 held records (0.16.0: 131 to 152),
+  `publish_boundary` 49 and 54 µs (was 56 and 58), and snapshot restore
+  about equal (+2 to 9 %, within noise).
+
+**Fiscal (F1 to F6).**
+
+- Cadence: `FiscalReportQueueEntry` keeps `{ due_at, cycles, whole,
+  republish, parked }` with `due_at` the one due field, as the delta review
+  asked. The schedule record `canwu.fiscal:report-schedule`
+  (`FiscalReportSchedule`) holds `page_due` and `parked_pages`; the parked
+  cursor lives in the root (`FiscalRoot::parked_cursor`), which also keeps
+  `earliest_due` and `parked`, and `queue_pages` is gone. The first due time
+  of an `Interval` binding is the first aligned time at or after the state's
+  `historical_context.updated_at`, so a host sets that to the run's start
+  before adding interval bindings. A rebound `Interval` binding keeps its
+  due time; a removed binding is withdrawn at once
+  (`FiscalObserverBinding::scheduled_cadence`). The audit refuses an entry
+  of a removed binding that names no work.
+- The office lists `mechanisms` and its `observers` as `FiscalOfficeObserver
+  { first_row, granularity, interval }`, so settlement queues work without
+  reading observer records.
+- `with_report_cadence` registers a second phase-13 system,
+  `wake-fiscal-reports-on-cadence-v1`, which reads the root alone and
+  schedules the drain packet due at once when `earliest_due` has come,
+  because the engine refuses two phase-13 writers of the same records; the
+  report system itself stays `EventDriven`. `EventDriven` as the knob is
+  refused at registration. A parked holder alone wakes nothing.
+- Institution rows: sums saturate at `u64::MAX` (`sum_report_totals`, also
+  used by `compute_projection`); a part cites each covered office's current
+  version and carries `books_summed`, excluded from the digest;
+  `MAX_FISCAL_OBSERVER_ROWS` (16,384) caps institution rows; an institution
+  row's `scope_binding_id` is empty and omitted from the payload.
+- Parked rotation: `FISCAL_PARKED_CHECKS_PER_BOUNDARY` (16) per run of the
+  report system, in the order the cursor's page after the cursor, later
+  pages, earlier pages, then the cursor's page up to the cursor; the cursor
+  is cleared when a run checks every parked entry or nothing is parked.
+- Cost cuts: payloads built directly; digests over a compact binary encoding
+  (`canwu.fiscal.report-part.v2`); one index-page decode per page per boundary; one read
+  of each office's observer list per settlement.
+- Formats: `FISCAL_RUNTIME_SCHEMA_VERSION` 6, `fiscal_report` schema 5,
+  plugin `0.4.0-experimental` with a new semantic hash.
+- Office-aligned shared parts were designed and withdrawn on the profile's
+  evidence, as the design says; per-observer parts are kept.
+- F5: `FiscalReportBudget { bodies, entries, payload_bytes }` with
+  `DEFAULT` (half of the engine limits: 16,384, 16,384, 32 MiB) and
+  `MINIMUM` (2 bodies, 2 entries, 128 KiB: a summary and one part of the
+  largest payload; a smaller or over-limit share is refused at
+  registration); `FiscalPlugin::with_report_budget` and `report_budget()`;
+  a custom share is carried in the report system's name
+  (`materialize-fiscal-reports-v1/share/{bodies}/{entries}/{bytes}`, the
+  default keeping the plain name), so it is in the plugin descriptor.
+  The report system publishes the least of its share and the engine's
+  remaining budget; each holder's records are one `Explicit` group, packed
+  into directives up to the per-directive bounds (ten directives at the
+  world due instant); parts are cut so that 64 KiB always remains for the
+  summary. `with_report_retention(KnowledgeRetention)` (default
+  `RetireWhenSuperseded`) and `report_retention()` set and read the single
+  report schema version's retention. `MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY`
+  is deleted. `fiscal_reports_after_seal` runs with `Keep`, since
+  closed-cycle reports are retired under the default.
+- F6 (release, world preset, courts `Institution`, monthly `Interval`
+  staggered over 30 days; baselines
+  `benchmarks/baselines/2026-10-16-fiscal-world-world-institution-interval-{elapsed,allocations}.json`):
+  the due instant with all 4,000 observers due is **one boundary with no
+  drain**: 2,504 ms settlement (fiscal 1,821 ms, engine 676 ms), 9,603
+  bodies and 9,603 entries, 15.67 MB of payload, 10 directives, heap peak
+  472 MB and 6.52 M allocator calls in the allocation-counting build
+  (0.16.0: 62 drain boundaries, about 3.1 to 4.2 s); a spread due day of
+  134 observers 43.2 ms, 304 records, no drain, heap peak 33 MB; idle
+  0.63 ms; assess 64 scopes 8.97 ms; assess every scope 1,510 ms admission
+  and 4,568 ms settlement (fiscal 3,091 ms, engine 1,457 ms), nothing due;
+  receipts 1,024 in 90.6 ms and 16,384 in 1,693 ms; close every book
+  1,626 ms admission and 5,052 ms settlement; archive 256 and 4,096 books
+  26.6 and 228 ms. Held knowledge over 24 simulated months is flat at
+  14,138 bodies and entries (15.12 MB of payload) from month 2 to month 24.
+  **The gate is met.** Outside the gate: the continuation checkpoint still
+  grows about 3.8 MB a month (172 MB after month 1, 293 MB after month 24,
+  restored in 58 s) through the engine's request index, about 440 bytes
+  per accepted command; simulated-month wall time creeps about 1 s a month
+  after month 5 (not located); the due instant's heap peak and the fiscal
+  side of that boundary (1.8 s against the design's about 0.6 s) are not
+  investigated. These, the mid-boundary `refresh_checkpoint_hash`, E4, and
+  the E-27 remainder are the 0.17.0 known limits.
 
 ## The problem and the gate
 
@@ -726,10 +885,10 @@ calendar shifts.
 | --- | --- |
 | due times | `offset + k * every`; the first due time of a binding is the first aligned time at or after its creation |
 | what is published at a due time | the parts its queue entry names whose digest changed, withdrawn parts, and the summary (always, see above); `as_of` is the due boundary's time |
-| where due times live | only in the queue pages. `FiscalReportQueueEntry { due_at, cycles, whole, republish, parked }` keeps the 0.16.0 fields and one due time: `due_at` is when the entry is served (for `OnChange`, the boundary that queued it; for `Interval`, the next aligned time). No second due field exists; the fiscal worker reports the final field names, and this row is adjusted to them |
+| where due times live | only in the queue pages. `FiscalReportQueueEntry { due_at, cycles, whole, republish, parked }` keeps the 0.16.0 fields and one due time: `due_at` is when the entry is served (for `OnChange`, the boundary that queued it; for `Interval`, the next aligned time). No second due field exists; these are the final field names |
 | the `Interval` rule | an `Interval` observer's queue entry **always exists**: created with `due_at` at the binding's first aligned time when the binding is added (`add_observer`, or at activation for an authored state), and re-created with the next aligned due time whenever the report system handles it, whether or not it published anything. `merge_queue_entry` keeps the existing `due_at` of an `Interval` entry and unions the queued cycles and parts (`whole` and `republish` or-ed), so settlement reads no observer record to queue a change. The audit checks exactly one entry per active `Interval` binding, and none past removal |
-| the schedule record | `canwu.fiscal:report-schedule`, identity `primary`: `page_due: BTreeMap<page, SimTime>` (each page's earliest due entry; at most 4,096 entries), `parked_cursor: Option<String>`; written when a page's earliest due changes |
-| the root | `FiscalRoot::earliest_due: Option<SimTime>`, the least of `page_due`; derived, so an idle boundary reads the root alone |
+| the schedule record | `canwu.fiscal:report-schedule`, identity `primary`: `page_due: BTreeMap<page, SimTime>` (each page's earliest due entry; at most 4,096 entries) and, as implemented, `parked_pages: BTreeMap<page, u32>`; written when a page's earliest due or parked count changes |
+| the root | `FiscalRoot::earliest_due: Option<SimTime>`, the least of `page_due`; derived, so an idle boundary reads the root alone. As implemented the root also keeps `parked: bool` and the rotation's `parked_cursor`, since every run reads it anyway |
 | the audit | `audit_fiscal_records` checks that `page_due` equals the pages' entries and `earliest_due` equals the least of `page_due` |
 | what runs the report system | the fiscal report system itself, in every boundary of its cadence; a report due at `t` is published by the first such boundary at or after `t` |
 | staleness | an `Interval` report never shows a change between two due times; `pending` is the exact bitmap of 0.16.0; `is_stale` keeps its meaning |

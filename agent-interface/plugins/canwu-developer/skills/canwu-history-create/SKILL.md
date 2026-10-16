@@ -59,9 +59,17 @@ resources, names, and source data outside Canwu core.
 7. Fix each extension's settlement knobs with the experiment identity: the
    society transfer settlement mode (`Batch` by default; `OneByOne` only when
    each transfer must see the previous one's result), the fiscal appointment
-   policy of every audited institution, and declared budgets. A recorded
-   rejection, a skipped packet, or a deferral is the normal answer to an
-   inadmissible input, never a failed boundary; never declare an
+   policy of every audited institution, the fiscal report knobs (each
+   observer's `cadence` and `granularity`, the wake cadence
+   `with_report_cadence` on which `wake-fiscal-reports-on-cadence-v1` runs,
+   `with_report_budget`, and
+   `with_report_retention`; keep
+   `KnowledgeRetention::Keep` when a finding reads a closed cycle's figures
+   from old report records), the `retention` of every knowledge schema your
+   plugins register, and declared budgets. A plugin that publishes knowledge
+   reads `knowledge_publication_budget()` first and never publishes past it.
+   A recorded rejection, a skipped packet, or a deferral is the normal answer
+   to an inadmissible input, never a failed boundary; never declare an
    initial-scenario record version as payload-required.
 
 Avoid presentism and single-variable historical determinism. Model the causal

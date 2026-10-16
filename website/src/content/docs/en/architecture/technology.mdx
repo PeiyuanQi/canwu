@@ -215,7 +215,7 @@ Exact replay reads provider results from the recorded ingress, so your provider 
 | `max_total_records`, `max_records_per_kind` | 5,000 records in total, operation outcomes included, and 5,000 per kind |
 | `max_knowledge_records` | 5,000 technology knowledge records across all holders |
 | `max_mutations_per_boundary` | 64; a new operation counts 2, or 3 when it is a provider result that cites an intent |
-| `max_publications_per_boundary` | 32 knowledge publications |
+| `max_publications_per_boundary` | 32 knowledge publications; the engine's shared [publication budget](/en/architecture/knowledge-information/#the-publication-budget) is a second cap, and a publication past it is recorded as a rejection |
 
 Checked text fields, such as labels, units, methods, and claim propositions, hold at most 256 bytes without control characters. Operation, record, and provider IDs hold at most 128 ASCII letters, digits, `-`, `_`, `.`, or `:`. If a boundary's new operations would exceed the record cap or the mutation budget, every new operation in it is rejected with a `technology_operation_rejected_capacity_v1` event and writes nothing, so it can be resubmitted later. Knowledge over budget emits `technology_knowledge_rejected_capacity_v1`. Resent operations that already have an outcome do not count against the budget.
 

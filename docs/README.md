@@ -54,6 +54,7 @@ current published **social diffusion simulation module**
 - [Fiscal throughput and authority](proposals/fiscal-throughput-and-authority.md)
 - [Fiscal and society limits](proposals/fiscal-and-society-limits.md)
 - [World-scale fiscal state](proposals/world-scale-fiscal.md)
+- [Fiscal observers at scale](proposals/fiscal-observers-at-scale.md)
 - [Resource refusals without stalls](proposals/resource-refusals-without-stalls.md)
 - [Production archive volume](proposals/production-archive-volume.md)
 - [Law, information, and military correctness](proposals/law-information-military-correctness.md)

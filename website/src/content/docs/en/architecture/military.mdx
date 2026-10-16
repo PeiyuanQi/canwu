@@ -215,7 +215,7 @@ A phase-7 rejection uses up the operation key. Sending the same input again does
 
 ## Knowledge and visibility
 
-The phase-13 system publishes one `military_report` knowledge record (schema `canwu.military` / `military_report`, version 1) for each force whose commander is not dead. Each commander receives one batch holding the reports for all of their forces, and at most 64 commanders, in ID order, receive a batch in one boundary, because the kernel accepts at most 64 publish batches per system and boundary. The holder is the commander, and the subject is the force record. The payload gives the force ID, location, strength as a range of plus or minus one tenth, supply as a range of plus or minus 100 per mille, and the observation time. Confidence is 900 per mille, and the origin cites the exact force record version.
+The phase-13 system publishes one `military_report` knowledge record (schema `canwu.military` / `military_report`, version 1) for each force whose commander is not dead. Each commander receives one publication holding the reports for all of their forces. The system goes through commanders in ID order and publishes to each one whose whole report still fits the boundary's remaining [publication budget](/en/architecture/knowledge-information/#the-publication-budget), which every publishing plugin of the boundary shares; from the first commander that does not fit onward, no commander gets a report that boundary. The holder is the commander, and the subject is the force record. The payload gives the force ID, location, strength as a range of plus or minus one tenth, supply as a range of plus or minus 100 per mille, and the observation time. Confidence is 900 per mille, and the origin cites the exact force record version.
 
 A player-facing client reads these reports through `viewer_for_actor(person)` and `CanwuViewer::query_knowledge`. Other actors, including an opposing commander, receive nothing from the military plugin: `Recon` records a draw and an event but publishes no knowledge. `Canwu::typed_domain_record`, used by the starter to read combat and occupation records, returns ground truth and belongs in trusted host code.
 
@@ -255,7 +255,7 @@ All military state lives in domain records, so snapshots save it with the knowle
 | Military IDs | 1 to 192 bytes, with a `:` | ASCII letters, digits, and `. _ - : /` |
 | Per-mille values | At most 1,000 | Force metrics, occupation metrics, and occupation policy |
 | Report scan | 256 force records per boundary | The phase-13 system reads the first 256 force records in canonical order |
-| Report batches | 64 commanders per boundary | One batch per commander; commanders past the 64th in ID order get no report that boundary |
+| Report publications | the boundary's remaining [publication budget](/en/architecture/knowledge-information/#the-publication-budget) | One publication per commander, in ID order, while the next commander's whole report fits; the commanders after the first that does not fit get no report that boundary |
 
 `ForceState::validate` also requires the subunit strengths to add up to the actual strength, and losses to stay within the authorized strength.
 

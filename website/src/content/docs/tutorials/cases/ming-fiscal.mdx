@@ -105,7 +105,7 @@ FiscalAuthorityBinding {
 
 `rebound_by` 一直是 `None`，直到运行中有 `RebindAuthority` 行动更换这个绑定的角色；这几个起点都不会这样做。
 
-fixture 中的每条采纳记录变成一个 `FiscalScopeBinding`（把一个辖区和一种机制交给某个机构，粒度为 `SimulationGranularity::Aggregate`）和一条带 fixture 阶段的采纳状态；每个范围各有一条[范围明细](/reference/terminology/)记录。观察者绑定 `observer.revenue-minister` 让户部尚书以 `confidence_per_mille: 850` 看到这些机构的总数；它把尚书写在 `actor`、把他本人写在 `knowledge_holder`，`controlled_by: None` 表示没有财政行动能改指它。随后 `FiscalState::into_records` 把状态拆分成场景携带的各条记录。
+fixture 中的每条采纳记录变成一个 `FiscalScopeBinding`（把一个辖区和一种机制交给某个机构，粒度为 `SimulationGranularity::Aggregate`）和一条带 fixture 阶段的采纳状态；每个范围各有一条[范围明细](/reference/terminology/)记录。观察者绑定 `observer.revenue-minister` 让户部尚书以 `confidence_per_mille: 850` 看到这些机构的总数；它把尚书写在 `actor`、把他本人写在 `knowledge_holder`，`controlled_by: None` 表示没有财政行动能改指它。`granularity` 和 `cadence` 都用默认值：每个范围一行，账册一变就发报告；观察者很多的世界会给每个观察者 `Interval` 节律、为朝廷选机构粒度（见[报告如何发布](/architecture/fiscal/#报告如何发布)）。随后 `FiscalState::into_records` 把状态拆分成场景携带的各条记录。
 
 ### 3. 注册插件
 

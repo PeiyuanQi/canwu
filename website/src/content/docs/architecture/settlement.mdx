@@ -264,6 +264,8 @@ society 默认在带 `Daily` 节奏的边界结算；上层应用也可以用 `S
 
 内核拥有的键遵循同样的规则：转移指令需要 `StateKey::core_transitions()`，人物指令需要 `StateKey::core_person_availability()` 或 `StateKey::core_people()`。评估轨迹不写入状态，所以无需声明。
 
+读取[发布预算](/architecture/knowledge-information/#发布预算)同样不需要声明。一个边界只有一份知识本体、持有人条目和载荷字节的预算，由所有发布知识的系统按调度顺序消耗（第 4 阶段先于第 13 阶段，同一阶段内按注册表顺序）。发布知识的系统在提案之前先用 `SimulationView::knowledge_publication_budget()` 读剩余的预算，因为超出预算的提案会让边界失败。
+
 模拟内核拒绝未声明的读取、写入、分配读取和随机抽样。插件注册、快照恢复和精确重放都要求插件名称、版本和语义哈希一致。
 
 ## 继续阅读
