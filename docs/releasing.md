@@ -24,20 +24,36 @@ separate contracts as described in [versioning.md](versioning.md).
 
 ## Prepare and verify
 
-Work from a clean release commit and run:
+Work from a clean release commit and run, in a POSIX shell (Git Bash on
+Windows):
 
 ```text
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
 cargo check --locked -p canwu-debug
-cargo doc --locked --workspace --no-deps
+RUSTDOCFLAGS=-Dwarnings cargo doc --locked --workspace --no-deps
 cargo +1.88.0 check --locked --workspace --all-targets
 ```
 
 The workspace declares Rust 1.88 as its minimum supported version. A release
 must verify that claim explicitly rather than treating a successful build on
 the development toolchain pinned in `rust-toolchain.toml` as MSRV proof.
+
+CI runs only the first four commands. Once, on the release commit before it is
+tagged, also run the pre-release tests that the `canwu-contributor-release`
+skill lists in
+[`.agents/skills/canwu-contributor-release/SKILL.md`](../.agents/skills/canwu-contributor-release/SKILL.md):
+the public examples, the performance-harness checks, the release-only
+`#[ignore]` scale tests in a release build, and the continuation gate. The
+gate is the `continuation-gate` feature of `canwu-api`, a release test that CI
+and applications never enable, so lint it with the feature on as well:
+
+```text
+cargo test --release --locked --workspace -- --ignored
+cargo clippy --locked --workspace --all-targets --features canwu-api/continuation-gate -- -D warnings
+cargo test --locked --workspace --features canwu-api/continuation-gate
+```
 
 Inspect every source package with `cargo package --locked --list -p <crate>`.
 Each package must contain `LICENSE`, `NOTICE`, and `README.md`. Regenerate and

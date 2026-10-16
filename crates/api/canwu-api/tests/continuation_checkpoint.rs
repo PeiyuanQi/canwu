@@ -1225,8 +1225,16 @@ impl SimulationPlugin for LateDeclaration {
 /// held, leaves the sealed run without its provenance: the continuation
 /// checkpoint and the next seal report that the archive is not ready, as
 /// they do for any evidence declared after its seal, rather than writing a
-/// checkpoint that differs from the unsealed run's.
+/// checkpoint that differs from the unsealed run's. Under the continuation
+/// gate, the gate's own sealed shadow of `unsealed` meets the same refusal,
+/// so the gate must panic.
 #[test]
+#[cfg_attr(
+    feature = "continuation-gate",
+    should_panic(
+        expected = "continuation gate: the sealed run writes no continuation checkpoint after settle_boundary at revision 2: CanwuError { code: ArchiveNotReady"
+    )
+)]
 fn a_packet_first_declared_after_its_seal_is_not_ready() {
     let plugins: [&dyn SimulationPlugin; 1] = [&LateDeclaration];
     let note = |at: SimTime, declare: Value| {

@@ -51,6 +51,52 @@ source package. Every first-party source package must contain `LICENSE` and
 `NOTICE`. A compiled binary also contains dependency code and assets and needs
 the complete third-party notice bundle.
 
+## Run the pre-release tests
+
+CI runs only the four checks of the full list. Once, on the release commit
+before it is tagged, also run the release tests that CI does not run. Run them
+in a POSIX shell (Git Bash on Windows, or the default shell on macOS and
+Linux):
+
+```text
+RUSTDOCFLAGS=-Dwarnings cargo doc --locked --workspace --no-deps
+cargo run --locked -p canwu-reference-world --example starter
+cargo run --locked -p canwu-api --example phased_boundary
+cargo run --locked -p canwu-api --example plugin
+cargo run --locked -p canwu-api --example decision_ticket
+cargo +1.88.0 check --locked --workspace --all-targets
+cargo fmt --manifest-path benchmarks/performance-harness/Cargo.toml -- --check
+cargo clippy --locked --manifest-path benchmarks/performance-harness/Cargo.toml --all-targets --all-features -- -D warnings
+cargo test --locked --manifest-path benchmarks/performance-harness/Cargo.toml
+cargo test --locked --manifest-path benchmarks/performance-harness/Cargo.toml --features allocation-counting
+cargo test --release --locked --workspace -- --ignored
+cargo clippy --locked --workspace --all-targets --features canwu-api/continuation-gate -- -D warnings
+cargo test --locked --workspace --features canwu-api/continuation-gate
+```
+
+- `RUSTDOCFLAGS=-Dwarnings` makes any rustdoc warning fail the doc build.
+- `+1.88.0` proves the `rust-version` that the workspace declares; install it
+  with `rustup toolchain install 1.88.0 --profile minimal`, and move it
+  whenever `rust-version` moves.
+- `--ignored` runs the `#[ignore]` release-only scale tests, which take minutes
+  in a debug build: the 65,537-action fiscal boundary and the two law scale
+  probes. With the release build it takes about 15 minutes, most of it the
+  million-candidate law probe.
+- The continuation gate, the `continuation-gate` feature of `canwu-api`, is a
+  release test that CI and applications never enable. It shadows every
+  `Canwu` in every workspace test with a sealed run, restores the shadow from
+  continuation checkpoints, replays the run exactly, and panics on any
+  divergence. It proves state equality (checkpoint hashes and the
+  continuation round trip) with the run's own plugin registry, not that the
+  public restore and replay paths accept the checkpoint or the journal. Lint
+  it with the feature on as well, since CI never builds it. A passing run is
+  fully green: the one test that declares evidence after its seal,
+  `a_packet_first_declared_after_its_seal_is_not_ready`, expects the gate's
+  panic. It takes about 40 minutes.
+
+Any failure blocks the release. Fix it in the release change set, then rerun
+the failing command and every check above that the fix affects.
+
 ## Verify license integrity
 
 - Keep the root license text identical to the standard Apache License 2.0.

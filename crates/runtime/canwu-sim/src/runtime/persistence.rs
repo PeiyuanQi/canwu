@@ -1836,6 +1836,14 @@ pub struct CompactedSimulation {
 }
 
 impl CompactedSimulation {
+    /// The wrapped runtime (continuation gate only).
+    #[cfg(feature = "continuation-gate")]
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn gate_runtime(&self) -> &Simulation {
+        &self.simulation
+    }
+
     /// The wrapped runtime, for in-crate tests of derived runtime state.
     #[cfg(test)]
     pub(super) const fn runtime(&self) -> &Simulation {

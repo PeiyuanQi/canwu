@@ -11,6 +11,16 @@ use super::{
 use super::{RunConfiguration, RunManifest, Scenario};
 use std::{collections::BTreeSet, sync::Arc};
 
+/// How a replay activates its plugins.
+#[derive(Clone, Copy)]
+pub(super) enum Activation<'a> {
+    Plugins(&'a [&'a dyn SimulationPlugin]),
+    /// The registry of a live run, adopted without the record and activation
+    /// checks of registration (continuation gate only).
+    #[cfg(feature = "continuation-gate")]
+    Registry(&'a Simulation),
+}
+
 impl Simulation {
     /// Reconstructs caller-supplied core commands without proving a recorded
     /// package environment. Use [`Self::replay_from_journal`] for exact replay.
@@ -139,7 +149,12 @@ impl Simulation {
         journal: &ReplayJournal,
         archive_provider: Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
     ) -> Result<Self, CanwuError> {
-        Self::replay_exact_journal(plugins, journal, archive_provider, None)
+        Self::replay_exact_journal(
+            Activation::Plugins(plugins),
+            journal,
+            archive_provider,
+            None,
+        )
     }
 
     /// Replays like [`Self::replay_from_journal_with_archive_provider`] with
@@ -163,11 +178,26 @@ impl Simulation {
         archive_provider: Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
         on_profile: &mut dyn FnMut(BoundaryProfile),
     ) -> Result<Self, CanwuError> {
-        Self::replay_exact_journal(plugins, journal, archive_provider, Some(on_profile))
+        Self::replay_exact_journal(
+            Activation::Plugins(plugins),
+            journal,
+            archive_provider,
+            Some(on_profile),
+        )
+    }
+
+    /// Replays with the plugins `activation` names and no boundary profile.
+    #[cfg(feature = "continuation-gate")]
+    pub(super) fn replay_from_journal_activated(
+        activation: Activation<'_>,
+        journal: &ReplayJournal,
+        archive_provider: Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
+    ) -> Result<Self, CanwuError> {
+        Self::replay_exact_journal(activation, journal, archive_provider, None)
     }
 
     fn replay_exact_journal(
-        plugins: &[&dyn SimulationPlugin],
+        activation: Activation<'_>,
         journal: &ReplayJournal,
         archive_provider: Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
         on_profile: Option<&mut dyn FnMut(BoundaryProfile)>,
@@ -262,7 +292,16 @@ impl Simulation {
         )?;
         simulation.set_plugin_archive_object_provider(archive_provider);
         simulation.state.current.authority_root_seed = normalized.authority_root_seed;
-        let mut simulation = Self::activate_initial_plugins(simulation, plugins)?;
+        let mut simulation = match activation {
+            Activation::Plugins(plugins) => Self::activate_initial_plugins(simulation, plugins)?,
+            #[cfg(feature = "continuation-gate")]
+            Activation::Registry(source) => {
+                let mut simulation = simulation;
+                simulation.adopt_registry_of(source)?;
+                simulation.ensure_runtime_ready()?;
+                simulation
+            }
+        };
         let actual_descriptors: Vec<_> = simulation.plugin_descriptors().cloned().collect();
         if actual_descriptors != normalized.plugin_descriptors {
             return Err(CanwuError::new(

@@ -106,7 +106,7 @@
 | Runtime plugin, component, or record contracts | registrar/descriptors/semantic hashes; ownership checks; snapshot rehydration; `canwu-api`; plugin fixtures and examples |
 | Snapshot fields, journals, hashes, or format versions | persistence, hashing, validation, migration, replay, and checkpoint code together; `docs/versioning.md`; old-format and per-domain tamper tests |
 | Performance or scaling behavior | `benchmarks`; affected runtime paths; deterministic workload counts; allocation, elapsed-time, snapshot-size, and growth evidence before and after |
-| Public API behavior or types | `canwu-api`; crate re-exports; public examples; rustdoc; debug client; compatibility notes |
+| Public API behavior or types | `canwu-api`; crate re-exports; public examples; rustdoc; debug client; compatibility notes; a new `&mut self` method on `Canwu` goes through `gated!` or drops the gate's shadow, or the release continuation gate desyncs |
 | Repository contributor skills | `.agents/skills`; matching `.claude/skills` loader; affected `SKILL.md` and `agents/openai.yaml`; skill validation |
 | Engine-user or downstream-developer skill packaging | `agent-interface/AGENTS.md`; affected `SKILL.md`; `.codex-plugin/plugin.json`; any `agents/openai.yaml`; optional `.claude/skills` loader; plugin validation |
 | Dependencies, licensing, or release metadata | workspace and crate manifests; `Cargo.lock`; `docs/legal`; `tools/licenses`; contribution/release docs; packaged plugin notices |

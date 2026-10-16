@@ -24,5 +24,12 @@ canwu-transport.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[features]
+# Release test, run once before each release and never in CI; not part of the
+# supported API, and applications must never enable it. Shadows every `Canwu`
+# with a sealed run restored from continuation checkpoints and panics on any
+# divergence.
+continuation-gate = ["canwu-sim/continuation-gate"]
+
 [lints]
 workspace = true

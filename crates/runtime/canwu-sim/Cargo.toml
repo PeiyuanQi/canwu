@@ -23,5 +23,10 @@ canwu-time.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[features]
+# Release-test hooks for `canwu-api/continuation-gate`, never enabled by
+# applications: restore and replay with a live run's plugin registry.
+continuation-gate = []
+
 [lints]
 workspace = true

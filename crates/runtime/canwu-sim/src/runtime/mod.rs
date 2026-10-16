@@ -5,6 +5,8 @@ mod decision;
 mod error;
 mod evaluation;
 mod event_payloads;
+#[cfg(feature = "continuation-gate")]
+mod gate;
 mod hashing;
 mod ingress;
 mod knowledge;

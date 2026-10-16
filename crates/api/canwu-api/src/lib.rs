@@ -1,4 +1,8 @@
 //! Public programmatic, query, semantic-agent, explanation, and debug interfaces.
+//!
+//! The `continuation-gate` feature is a release test, not part of the
+//! supported API: applications must never enable it. It shadows every
+//! [`Canwu`] with a sealed run and panics on any divergence.
 
 #![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
 
@@ -165,6 +169,38 @@ use serde::{Deserialize, Serialize};
 /// be `Sync`.
 pub struct Canwu {
     simulation: Simulation,
+    #[cfg(feature = "continuation-gate")]
+    gate: continuation_gate::Gate,
+}
+
+#[cfg(feature = "continuation-gate")]
+mod continuation_gate;
+
+/// Runs a mutation on the run, and with the continuation gate also on its
+/// sealed shadow with clones of the bracketed arguments, comparing the two.
+macro_rules! gated {
+    ($self:ident, $name:literal, [$($arg:ident),*], |$sim:ident| $call:expr) => {{
+        #[cfg(feature = "continuation-gate")]
+        {
+            let _ = $self.gate.prepare(&$self.simulation);
+            let shadow_call = {
+                $(let $arg = $arg.clone();)*
+                move |$sim: &mut CompactedSimulation| $call
+            };
+            let result = {
+                let $sim = &mut $self.simulation;
+                $call
+            };
+            let sealed = $self.gate.shadow().map(shadow_call);
+            $self.gate.check($name, &$self.simulation, &result, sealed);
+            result
+        }
+        #[cfg(not(feature = "continuation-gate"))]
+        {
+            let $sim = &mut $self.simulation;
+            $call
+        }
+    }};
 }
 
 /// Public API for a live runtime whose sealed evidence segments are stored by the caller.
@@ -358,15 +394,21 @@ pub fn typed_domain_record<'a, T: DomainRecordType, R: CanwuRun + ?Sized>(
 }
 
 impl Canwu {
+    fn wrap(simulation: Simulation) -> Self {
+        Self {
+            simulation,
+            #[cfg(feature = "continuation-gate")]
+            gate: continuation_gate::Gate::default(),
+        }
+    }
+
     #[must_use]
     pub const fn version() -> &'static str {
         ENGINE_VERSION
     }
 
     pub fn new(seed: u64, scenario: Scenario) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::new(seed, scenario)?,
-        })
+        Ok(Self::wrap(Simulation::new(seed, scenario)?))
     }
 
     /// Enters the explicit compact-journal interface without discarding evidence.
@@ -381,9 +423,9 @@ impl Canwu {
         scenario: Scenario,
         plugins: &[&dyn SimulationPlugin],
     ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::new_with_plugins(seed, scenario, plugins)?,
-        })
+        Ok(Self::wrap(Simulation::new_with_plugins(
+            seed, scenario, plugins,
+        )?))
     }
 
     pub fn new_with_manifest(
@@ -391,9 +433,11 @@ impl Canwu {
         scenario: Scenario,
         run_manifest: RunManifest,
     ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::new_with_manifest(seed, scenario, run_manifest)?,
-        })
+        Ok(Self::wrap(Simulation::new_with_manifest(
+            seed,
+            scenario,
+            run_manifest,
+        )?))
     }
 
     pub fn new_with_manifest_and_plugins(
@@ -402,14 +446,12 @@ impl Canwu {
         run_manifest: RunManifest,
         plugins: &[&dyn SimulationPlugin],
     ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::new_with_manifest_and_plugins(
-                seed,
-                scenario,
-                run_manifest,
-                plugins,
-            )?,
-        })
+        Ok(Self::wrap(Simulation::new_with_manifest_and_plugins(
+            seed,
+            scenario,
+            run_manifest,
+            plugins,
+        )?))
     }
 
     pub fn new_with_run_configuration(
@@ -418,14 +460,12 @@ impl Canwu {
         run_manifest: RunManifest,
         run_configuration: RunConfiguration,
     ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::new_with_run_configuration(
-                seed,
-                scenario,
-                run_manifest,
-                run_configuration,
-            )?,
-        })
+        Ok(Self::wrap(Simulation::new_with_run_configuration(
+            seed,
+            scenario,
+            run_manifest,
+            run_configuration,
+        )?))
     }
 
     pub fn new_with_run_configuration_and_plugins(
@@ -435,21 +475,21 @@ impl Canwu {
         run_configuration: RunConfiguration,
         plugins: &[&dyn SimulationPlugin],
     ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::new_with_run_configuration_and_plugins(
+        Ok(Self::wrap(
+            Simulation::new_with_run_configuration_and_plugins(
                 seed,
                 scenario,
                 run_manifest,
                 run_configuration,
                 plugins,
             )?,
-        })
+        ))
     }
 
     /// Deprecated compatibility scenario. New hosts should use an integration-owned scenario.
     pub fn demo(seed: u64) -> Result<Self, CanwuError> {
         let (simulation, _) = Simulation::demo(seed)?;
-        Ok(Self { simulation })
+        Ok(Self::wrap(simulation))
     }
 
     /// IDs for the deprecated compatibility scenario.
@@ -837,6 +877,8 @@ impl Canwu {
         &mut self,
         plugin: &P,
     ) -> Result<(), CanwuError> {
+        #[cfg(feature = "continuation-gate")]
+        self.gate.drop_shadow();
         self.simulation.register_plugin(plugin)
     }
 
@@ -850,6 +892,8 @@ impl Canwu {
         &mut self,
         provider: std::sync::Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
     ) {
+        #[cfg(feature = "continuation-gate")]
+        let provider = self.gate.wrap_provider(provider);
         self.simulation.set_plugin_archive_object_provider(provider);
     }
 
@@ -865,14 +909,15 @@ impl Canwu {
     }
 
     pub fn submit(&mut self, command: CommandEnvelope) -> Result<CommandReceipt, CanwuError> {
-        self.simulation.submit(command)
+        gated!(self, "submit", [command], |sim| sim.submit(command))
     }
 
     pub fn process_command(
         &mut self,
         request: CommandRequest,
     ) -> Result<CommandOutcome, CanwuError> {
-        self.simulation.process_command(request)
+        gated!(self, "process_command", [request], |sim| sim
+            .process_command(request))
     }
 
     pub fn enqueue_command(
@@ -881,14 +926,16 @@ impl Canwu {
         priority: i32,
         request: CommandRequest,
     ) -> Result<IngressReceipt, CanwuError> {
-        self.simulation.enqueue_command(due_at, priority, request)
+        gated!(self, "enqueue_command", [request], |sim| sim
+            .enqueue_command(due_at, priority, request))
     }
 
     pub fn enqueue_plugin_ingress(
         &mut self,
         request: PluginIngressRequest,
     ) -> Result<IngressReceipt, CanwuError> {
-        self.simulation.enqueue_plugin_ingress(request)
+        gated!(self, "enqueue_plugin_ingress", [request], |sim| sim
+            .enqueue_plugin_ingress(request))
     }
 
     pub fn enqueue_permitted_plugin_ingress(
@@ -896,8 +943,9 @@ impl Canwu {
         request: PluginIngressRequest,
         permit: &PluginIngressPermit,
     ) -> Result<IngressReceipt, CanwuError> {
-        self.simulation
-            .enqueue_permitted_plugin_ingress(request, permit)
+        gated!(self, "enqueue_permitted_plugin_ingress", [request], |sim| {
+            sim.enqueue_permitted_plugin_ingress(request, permit)
+        })
     }
 
     /// Withdraws a still-pending plugin ingress item that the host enqueued
@@ -921,7 +969,9 @@ impl Canwu {
         ingress_id: IngressId,
         reason: impl Into<String>,
     ) -> Result<IngressReceipt, CanwuError> {
-        self.simulation.cancel_plugin_ingress(ingress_id, reason)
+        let reason: String = reason.into();
+        gated!(self, "cancel_plugin_ingress", [reason], |sim| sim
+            .cancel_plugin_ingress(ingress_id, reason))
     }
 
     /// Withdraws a still-pending item of an internal packet type through the
@@ -935,8 +985,9 @@ impl Canwu {
         permit: &PluginIngressPermit,
         reason: impl Into<String>,
     ) -> Result<IngressReceipt, CanwuError> {
-        self.simulation
-            .cancel_permitted_plugin_ingress(ingress_id, permit, reason)
+        let reason: String = reason.into();
+        gated!(self, "cancel_permitted_plugin_ingress", [reason], |sim| sim
+            .cancel_permitted_plugin_ingress(ingress_id, permit, reason))
     }
 
     pub fn prepare_decision(
@@ -973,7 +1024,8 @@ impl Canwu {
         priority: i32,
         request: DecisionIngressRequest,
     ) -> Result<IngressReceipt, CanwuError> {
-        self.simulation.enqueue_decision(due_at, priority, request)
+        gated!(self, "enqueue_decision", [request], |sim| sim
+            .enqueue_decision(due_at, priority, request))
     }
 
     pub fn drive_decision(
@@ -985,14 +1037,14 @@ impl Canwu {
         ticket_id: DecisionTicketId,
         policy: &dyn DecisionPolicy,
     ) -> Result<DecisionEvaluation, CanwuError> {
-        self.simulation.drive_decision(
+        gated!(self, "drive_decision", [], |sim| sim.drive_decision(
             due_at,
             priority,
             decision_request_id,
             command_request_id,
             ticket_id,
             policy,
-        )
+        ))
     }
 
     pub fn schedule_calendar_boundary(
@@ -1000,29 +1052,32 @@ impl Canwu {
         due_at: SimTime,
         cadences: Vec<SystemCadence>,
     ) -> Result<IngressReceipt, CanwuError> {
-        self.simulation.schedule_calendar_boundary(due_at, cadences)
+        gated!(self, "schedule_calendar_boundary", [cadences], |sim| sim
+            .schedule_calendar_boundary(due_at, cadences))
     }
 
     pub fn advance_canonical(
         &mut self,
         duration: SimDuration,
     ) -> Result<Vec<BoundaryReceipt>, CanwuError> {
-        self.simulation.advance_canonical(duration)
+        gated!(self, "advance_canonical", [], |sim| sim
+            .advance_canonical(duration))
     }
 
     pub fn step_canonical(&mut self) -> Result<Option<BoundaryReceipt>, CanwuError> {
-        self.simulation.step_canonical()
+        gated!(self, "step_canonical", [], |sim| sim.step_canonical())
     }
 
     pub fn advance(&mut self, duration: SimDuration) -> Result<Vec<SimEvent>, CanwuError> {
-        self.simulation.advance(duration)
+        gated!(self, "advance", [], |sim| sim.advance(duration))
     }
 
     pub fn settle_boundary(
         &mut self,
         request: BoundaryRequest,
     ) -> Result<BoundaryReceipt, CanwuError> {
-        self.simulation.settle_boundary(request)
+        gated!(self, "settle_boundary", [request], |sim| sim
+            .settle_boundary(request))
     }
 
     /// Turns the wall-time profile of settled boundaries on or off. It is off
@@ -1071,6 +1126,8 @@ impl Canwu {
     }
 
     pub fn step(&mut self) -> Result<Vec<SimEvent>, CanwuError> {
+        #[cfg(feature = "continuation-gate")]
+        self.gate.drop_shadow();
         self.simulation.step()
     }
 
@@ -1085,55 +1142,51 @@ impl Canwu {
 
     pub fn from_snapshot_json(json: &str) -> Result<Self, CanwuError> {
         let simulation = Simulation::from_snapshot_json(json)?;
-        Ok(Self { simulation })
+        Ok(Self::wrap(simulation))
     }
 
     pub fn from_snapshot_json_with_plugins(
         json: &str,
         plugins: &[&dyn SimulationPlugin],
     ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::from_snapshot_json_with_plugins(json, plugins)?,
-        })
+        Ok(Self::wrap(Simulation::from_snapshot_json_with_plugins(
+            json, plugins,
+        )?))
     }
 
     pub fn from_checkpoint_and_journal(
         checkpoint: SimulationCheckpoint,
         segments: Vec<EvidenceJournalSegment>,
     ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::from_checkpoint_and_journal(checkpoint, segments)?,
-        })
+        Ok(Self::wrap(Simulation::from_checkpoint_and_journal(
+            checkpoint, segments,
+        )?))
     }
 
     pub fn from_checkpoint_journal(bundle: CheckpointJournal) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::from_checkpoint_journal(bundle)?,
-        })
+        Ok(Self::wrap(Simulation::from_checkpoint_journal(bundle)?))
     }
 
     pub fn from_checkpoint_journal_with_plugins(
         bundle: CheckpointJournal,
         plugins: &[&dyn SimulationPlugin],
     ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::from_checkpoint_journal_with_plugins(bundle, plugins)?,
-        })
+        Ok(Self::wrap(
+            Simulation::from_checkpoint_journal_with_plugins(bundle, plugins)?,
+        ))
     }
 
     pub fn from_checkpoint_journal_json(json: &str) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::from_checkpoint_journal_json(json)?,
-        })
+        Ok(Self::wrap(Simulation::from_checkpoint_journal_json(json)?))
     }
 
     pub fn from_checkpoint_journal_json_with_plugins(
         json: &str,
         plugins: &[&dyn SimulationPlugin],
     ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::from_checkpoint_journal_json_with_plugins(json, plugins)?,
-        })
+        Ok(Self::wrap(
+            Simulation::from_checkpoint_journal_json_with_plugins(json, plugins)?,
+        ))
     }
 
     /// Restores a paged checkpoint after proving the contiguous evidence
@@ -1158,11 +1211,9 @@ impl Canwu {
         provider: &dyn StatePageProvider,
         segments: Vec<EvidenceJournalSegment>,
     ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::from_paged_checkpoint_and_journal(
-                checkpoint, provider, segments,
-            )?,
-        })
+        Ok(Self::wrap(Simulation::from_paged_checkpoint_and_journal(
+            checkpoint, provider, segments,
+        )?))
     }
 
     /// Restores a paged checkpoint and its evidence prefix, then rehydrates
@@ -1173,11 +1224,11 @@ impl Canwu {
         segments: Vec<EvidenceJournalSegment>,
         plugins: &[&dyn SimulationPlugin],
     ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::from_paged_checkpoint_and_journal_with_plugins(
+        Ok(Self::wrap(
+            Simulation::from_paged_checkpoint_and_journal_with_plugins(
                 checkpoint, provider, segments, plugins,
             )?,
-        })
+        ))
     }
 
     pub fn replay_from_journal(
@@ -1185,7 +1236,7 @@ impl Canwu {
         journal: &ReplayJournal,
     ) -> Result<Self, CanwuError> {
         let simulation = Simulation::replay_from_journal(plugins, journal)?;
-        Ok(Self { simulation })
+        Ok(Self::wrap(simulation))
     }
 
     /// Replays with package archive storage attached before the first
@@ -1202,7 +1253,7 @@ impl Canwu {
             journal,
             archive_provider,
         )?;
-        Ok(Self { simulation })
+        Ok(Self::wrap(simulation))
     }
 
     /// Replays exactly, as [`Self::replay_from_journal_with_archive_provider`]
@@ -1232,16 +1283,16 @@ impl Canwu {
             archive_provider,
             on_profile,
         )?;
-        Ok(Self { simulation })
+        Ok(Self::wrap(simulation))
     }
 
     pub fn replay_from_journal_json(
         plugins: &[&dyn SimulationPlugin],
         json: &str,
     ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::replay_from_journal_json(plugins, json)?,
-        })
+        Ok(Self::wrap(Simulation::replay_from_journal_json(
+            plugins, json,
+        )?))
     }
 
     /// An independent copy of the run for a look-ahead, an alternative
@@ -1250,9 +1301,7 @@ impl Canwu {
     /// checkpoint, or save it on another thread.
     #[must_use]
     pub fn fork(&self) -> Self {
-        Self {
-            simulation: self.simulation.fork(),
-        }
+        Self::wrap(self.simulation.fork())
     }
 
     /// Trusted host/admin holder query. Player-facing callers must use a
