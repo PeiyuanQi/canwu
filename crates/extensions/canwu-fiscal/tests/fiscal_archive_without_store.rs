@@ -14,7 +14,7 @@ use canwu_api::{
     BoundaryReceipt, Canwu, CanwuError, ErrorCode, PersonId, PluginArchiveObjectProvider,
 };
 use canwu_fiscal::{FiscalArchiveStore, enqueue_execution_receipts};
-use std::rc::Rc;
+use std::sync::Arc;
 use support::{
     Draft, Fixture, MemoryArchiveStore, PRINCIPAL, TREASURY_AUTHORITY, archive, assessment, close,
     collection, execution_claim, fiscal_report, fiscal_state, receipt_packet, record_results,
@@ -23,7 +23,7 @@ use support::{
 
 /// The package archive store a run consults, if it ever does: one that
 /// serves the host's fiscal store, or one that fails every read.
-struct Provider(Option<Rc<MemoryArchiveStore>>);
+struct Provider(Option<Arc<MemoryArchiveStore>>);
 
 impl PluginArchiveObjectProvider for Provider {
     fn load_plugin_archive_object(
@@ -107,14 +107,14 @@ fn run(canwu: &mut Canwu, store: &MemoryArchiveStore) -> Vec<BoundaryReceipt> {
 #[test]
 fn every_boundary_settles_alike_whether_or_not_the_archive_store_can_be_read() {
     let fixture = Fixture::new();
-    let working_store = Rc::new(MemoryArchiveStore::default());
+    let working_store = Arc::new(MemoryArchiveStore::default());
     let mut working = fixture.runtime(scenario(|_| {}));
-    working.set_plugin_archive_object_provider(Rc::new(Provider(Some(working_store.clone()))));
+    working.set_plugin_archive_object_provider(Arc::new(Provider(Some(working_store.clone()))));
     let working_receipts = run(&mut working, &working_store);
 
     let failing_store = MemoryArchiveStore::default();
     let mut failing = fixture.runtime(scenario(|_| {}));
-    failing.set_plugin_archive_object_provider(Rc::new(Provider(None)));
+    failing.set_plugin_archive_object_provider(Arc::new(Provider(None)));
     let failing_receipts = run(&mut failing, &failing_store);
 
     assert_eq!(failing_receipts, working_receipts);
@@ -143,7 +143,7 @@ fn every_boundary_settles_alike_whether_or_not_the_archive_store_can_be_read() {
         &fixture.plugins(),
     )
     .expect("restored without a store");
-    restored.set_plugin_archive_object_provider(Rc::new(Provider(None)));
+    restored.set_plugin_archive_object_provider(Arc::new(Provider(None)));
     assert_eq!(restored.checkpoint_hash(), failing.checkpoint_hash());
     let replayed = Canwu::replay_from_journal(&fixture.plugins(), &failing.replay_journal())
         .expect("replayed without a store");

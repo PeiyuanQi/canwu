@@ -33,18 +33,17 @@ use canwu_resource::{
     enqueue_resource_completion_operation,
 };
 use std::{
-    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
-    rc::Rc,
+    sync::{Arc, RwLock},
 };
 
 type ArchiveObjectMap = BTreeMap<(String, String), Vec<u8>>;
 
 #[derive(Clone, Default)]
 struct TestProductionArchiveStore {
-    objects: Rc<RefCell<ArchiveObjectMap>>,
-    retentions: Rc<RefCell<BTreeMap<String, ProductionArchiveRetentionHandleV1>>>,
-    resource_retentions: Rc<RefCell<BTreeMap<String, ResourceArchiveRetentionHandleV1>>>,
+    objects: Arc<RwLock<ArchiveObjectMap>>,
+    retentions: Arc<RwLock<BTreeMap<String, ProductionArchiveRetentionHandleV1>>>,
+    resource_retentions: Arc<RwLock<BTreeMap<String, ResourceArchiveRetentionHandleV1>>>,
 }
 
 impl TestProductionArchiveStore {
@@ -54,7 +53,7 @@ impl TestProductionArchiveStore {
             directory_root.to_owned(),
         );
         let blob_id = {
-            let objects = self.objects.borrow();
+            let objects = self.objects.read().unwrap();
             let directory: ProductionArchiveIndexDirectoryV1 = serde_json::from_slice(
                 objects
                     .get(&directory_key)
@@ -68,7 +67,7 @@ impl TestProductionArchiveStore {
                 .expect("production blob")
         };
         let blob_key = (PRODUCTION_ARCHIVE_BLOB_NAMESPACE.to_owned(), blob_id);
-        let mut objects = self.objects.borrow_mut();
+        let mut objects = self.objects.write().unwrap();
         let bytes = objects
             .get_mut(&blob_key)
             .expect("production archive blob bytes");
@@ -81,12 +80,13 @@ impl TestProductionArchiveStore {
     fn tamper_first_resource_blob(&self) {
         let key = self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .keys()
             .find(|(namespace, _)| namespace == canwu_resource::RESOURCE_ARCHIVE_BLOB_NAMESPACE)
             .cloned()
             .expect("resource archive blob");
-        let mut objects = self.objects.borrow_mut();
+        let mut objects = self.objects.write().unwrap();
         let bytes = objects.get_mut(&key).expect("resource archive blob bytes");
         let mut blob: serde_json::Value =
             serde_json::from_slice(bytes).expect("resource blob JSON");
@@ -100,7 +100,7 @@ impl TestProductionArchiveStore {
             directory_root.to_owned(),
         );
         let blob_id = {
-            let objects = self.objects.borrow();
+            let objects = self.objects.read().unwrap();
             let directory: canwu_resource::ResourceArchiveIndexDirectoryV1 =
                 serde_json::from_slice(
                     objects
@@ -118,7 +118,7 @@ impl TestProductionArchiveStore {
             canwu_resource::RESOURCE_ARCHIVE_BLOB_NAMESPACE.to_owned(),
             blob_id,
         );
-        let mut objects = self.objects.borrow_mut();
+        let mut objects = self.objects.write().unwrap();
         let bytes = objects
             .get_mut(&blob_key)
             .expect("resource archive blob bytes");
@@ -133,7 +133,7 @@ impl TestProductionArchiveStore {
             PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE.to_owned(),
             directory_root.to_owned(),
         );
-        let mut objects = self.objects.borrow_mut();
+        let mut objects = self.objects.write().unwrap();
         let bytes = objects.get_mut(&key).expect("production directory bytes");
         let mut directory: serde_json::Value =
             serde_json::from_slice(bytes).expect("production directory JSON");
@@ -150,7 +150,8 @@ impl ProductionArchiveStore for TestProductionArchiveStore {
         bytes: &[u8],
     ) -> Result<(), canwu_api::CanwuError> {
         self.objects
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
         Ok(())
     }
@@ -162,7 +163,8 @@ impl ProductionArchiveStore for TestProductionArchiveStore {
     ) -> Result<Option<Vec<u8>>, canwu_api::CanwuError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -172,7 +174,8 @@ impl ProductionArchiveStore for TestProductionArchiveStore {
         handle: &ProductionArchiveRetentionHandleV1,
     ) -> Result<(), canwu_api::CanwuError> {
         self.retentions
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert(handle.handle_id.clone(), handle.clone());
         Ok(())
     }
@@ -182,7 +185,7 @@ impl ProductionArchiveStore for TestProductionArchiveStore {
         handle_id: &str,
         phase: ProductionArchiveRetentionPhaseV1,
     ) -> Result<(), canwu_api::CanwuError> {
-        let mut retentions = self.retentions.borrow_mut();
+        let mut retentions = self.retentions.write().unwrap();
         let handle = retentions
             .get_mut(handle_id)
             .expect("retention handle should exist");
@@ -209,7 +212,8 @@ impl ResourceArchiveStore for TestProductionArchiveStore {
         bytes: &[u8],
     ) -> Result<(), canwu_resource::ResourceError> {
         self.objects
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
         Ok(())
     }
@@ -221,7 +225,8 @@ impl ResourceArchiveStore for TestProductionArchiveStore {
     ) -> Result<Option<Vec<u8>>, canwu_resource::ResourceError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -231,7 +236,8 @@ impl ResourceArchiveStore for TestProductionArchiveStore {
         handle: &ResourceArchiveRetentionHandleV1,
     ) -> Result<(), canwu_resource::ResourceError> {
         self.resource_retentions
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert(handle.id.clone(), handle.clone());
         Ok(())
     }
@@ -241,7 +247,7 @@ impl ResourceArchiveStore for TestProductionArchiveStore {
         handle_id: &str,
         phase: ResourceArchiveRetentionPhaseV1,
     ) -> Result<(), canwu_resource::ResourceError> {
-        let mut retentions = self.resource_retentions.borrow_mut();
+        let mut retentions = self.resource_retentions.write().unwrap();
         let handle = retentions.get_mut(handle_id).ok_or_else(|| {
             canwu_resource::ResourceError::NotFound(
                 "resource retention handle is unavailable".to_owned(),
@@ -4412,8 +4418,8 @@ fn restored_active_project_advances_through_canonical_ingress_with_resource_arch
     let mut restored = from_production_snapshot_json_with_archives(
         &snapshot,
         &[&production_plugin, &resource_plugin, &technology_plugin],
-        Rc::new(store.clone()),
-        Rc::new(store.clone()),
+        Arc::new(store.clone()),
+        Arc::new(store.clone()),
     )
     .expect("archive-backed project restore");
     enqueue_tracked_production_operation(
@@ -4479,8 +4485,8 @@ fn restored_active_project_advances_through_canonical_ingress_with_resource_arch
     restored = from_production_snapshot_json_with_archives(
         &later_archive_snapshot,
         &[&production_plugin, &resource_plugin, &technology_plugin],
-        Rc::new(store.clone()),
-        Rc::new(store.clone()),
+        Arc::new(store.clone()),
+        Arc::new(store.clone()),
     )
     .expect("historical continuation witness restores under a later resource archive head");
 
@@ -4555,8 +4561,8 @@ fn restored_active_project_advances_through_canonical_ingress_with_resource_arch
     let restored_completed = from_production_snapshot_json_with_archives(
         &completed_snapshot,
         &[&production_plugin, &resource_plugin, &technology_plugin],
-        Rc::new(store.clone()),
-        Rc::new(store.clone()),
+        Arc::new(store.clone()),
+        Arc::new(store.clone()),
     )
     .expect("completed hot project restores before archive");
     assert_eq!(
@@ -4629,8 +4635,8 @@ fn restored_active_project_advances_through_canonical_ingress_with_resource_arch
     let restored_archived_participant = from_production_snapshot_json_with_archives(
         &archived_participant_snapshot,
         &[&production_plugin, &resource_plugin, &technology_plugin],
-        Rc::new(store.clone()),
-        Rc::new(store.clone()),
+        Arc::new(store.clone()),
+        Arc::new(store.clone()),
     )
     .expect("completed project restores from the authenticated resource participant archive");
     assert_eq!(
@@ -4643,8 +4649,8 @@ fn restored_active_project_advances_through_canonical_ingress_with_resource_arch
         from_production_snapshot_json_with_archives(
             &snapshot,
             &[&production_plugin, &resource_plugin, &technology_plugin],
-            Rc::new(store.clone()),
-            Rc::new(store.clone()),
+            Arc::new(store.clone()),
+            Arc::new(store.clone()),
         )
         .is_err(),
         "restored continuation must reject a tampered resource archive provider"
@@ -4855,8 +4861,8 @@ fn archive_commit_survives_restart_and_authenticates_damage_waste_and_output_evi
     let mut restarted = from_production_snapshot_json_with_archives(
         &restart_snapshot,
         &[&plugin],
-        Rc::new(store.clone()),
-        Rc::new(store.clone()),
+        Arc::new(store.clone()),
+        Arc::new(store.clone()),
     )
     .expect("archive phase restart");
     assert_eq!(production_state(&restarted), committed);
@@ -4911,15 +4917,15 @@ fn archive_commit_survives_restart_and_authenticates_damage_waste_and_output_evi
     let checkpoint_restored = from_production_checkpoint_journal_with_archives(
         checkpoint,
         &[&plugin],
-        Rc::new(store.clone()),
-        Rc::new(store.clone()),
+        Arc::new(store.clone()),
+        Arc::new(store.clone()),
     )
     .expect("archive checkpoint restore");
     let replayed = replay_production_from_journal_with_archives(
         &[&plugin],
         &restarted.replay_journal(),
-        Rc::new(store.clone()),
-        Rc::new(store.clone()),
+        Arc::new(store.clone()),
+        Arc::new(store.clone()),
     )
     .expect("archive journal replay");
     assert_eq!(production_state(&checkpoint_restored), acknowledged);
@@ -5729,7 +5735,7 @@ fn deferred_output_batch_settles_and_its_execution_archives() {
     let store = TestProductionArchiveStore::default();
     let mut canwu =
         Canwu::new_with_plugins(217, scenario, &plugins).expect("deferred-output runtime");
-    canwu.set_plugin_archive_object_provider(Rc::new(store.clone()));
+    canwu.set_plugin_archive_object_provider(Arc::new(store.clone()));
     let completed_at = SimTime::from_minutes(30);
     complete_live_execution(&mut canwu, &holder, &execution, completed_at);
 
@@ -5911,8 +5917,8 @@ fn deferred_output_batch_settles_and_its_execution_archives() {
     let restored = from_production_snapshot_json_with_archives(
         &snapshot,
         &plugins,
-        Rc::new(store.clone()),
-        Rc::new(store.clone()),
+        Arc::new(store.clone()),
+        Arc::new(store.clone()),
     )
     .expect("restored run");
     assert_eq!(production_state(&restored), archived);
@@ -5923,8 +5929,8 @@ fn deferred_output_batch_settles_and_its_execution_archives() {
     let replayed = replay_production_from_journal_with_archives(
         &plugins,
         &canwu.replay_journal(),
-        Rc::new(store.clone()),
-        Rc::new(store),
+        Arc::new(store.clone()),
+        Arc::new(store),
     )
     .expect("exact replay");
     assert_eq!(production_state(&replayed), archived);
@@ -6178,7 +6184,7 @@ fn superseded_record_version(
 
 #[derive(Default)]
 struct SealedEvidenceArchive {
-    segments: RefCell<BTreeMap<String, canwu_api::EvidenceJournalSegment>>,
+    segments: RwLock<BTreeMap<String, canwu_api::EvidenceJournalSegment>>,
 }
 
 impl canwu_api::ArchiveProvider for SealedEvidenceArchive {
@@ -6186,7 +6192,7 @@ impl canwu_api::ArchiveProvider for SealedEvidenceArchive {
         &self,
         segment_id: &str,
     ) -> Result<Option<canwu_api::EvidenceJournalSegment>, canwu_api::CanwuError> {
-        Ok(self.segments.borrow().get(segment_id).cloned())
+        Ok(self.segments.read().unwrap().get(segment_id).cloned())
     }
 }
 
@@ -6203,7 +6209,8 @@ impl canwu_api::ArchiveStore for SealedEvidenceArchive {
             .segment_id
             .clone();
         self.segments
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert(segment_id, segment.clone());
         Ok(canwu_api::ArchiveStoreOutcome::Stored)
     }

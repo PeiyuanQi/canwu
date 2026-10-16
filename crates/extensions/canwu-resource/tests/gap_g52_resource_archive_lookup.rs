@@ -27,9 +27,9 @@ use canwu_api::{
     SimTime, StatePageRetentionLedger,
 };
 use canwu_resource::*;
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 /// Archive commits after the first. The 0.14.0 lookup read five objects per
 /// commit; the assertions below would see more than 200.
@@ -44,19 +44,20 @@ type ArchiveObjects = BTreeMap<(String, String), Vec<u8>>;
 /// boundary.
 #[derive(Clone, Default)]
 struct CountingArchive {
-    objects: Rc<RefCell<ArchiveObjects>>,
-    retention: Rc<RefCell<BTreeMap<String, ResourceArchiveRetentionHandleV1>>>,
-    provider_loads: Rc<RefCell<BTreeMap<String, usize>>>,
+    objects: Arc<RwLock<ArchiveObjects>>,
+    retention: Arc<RwLock<BTreeMap<String, ResourceArchiveRetentionHandleV1>>>,
+    provider_loads: Arc<RwLock<BTreeMap<String, usize>>>,
 }
 
 impl CountingArchive {
     fn take_loads(&self) -> BTreeMap<String, usize> {
-        std::mem::take(&mut *self.provider_loads.borrow_mut())
+        std::mem::take(&mut *self.provider_loads.write().unwrap())
     }
 
     fn stored_lookup_pages(&self) -> BTreeSet<String> {
         self.objects
-            .borrow()
+            .read()
+            .unwrap()
             .keys()
             .filter(|(namespace, _)| namespace == RESOURCE_ARCHIVE_LOOKUP_PAGE_NAMESPACE)
             .map(|(_, id)| id.clone())
@@ -76,7 +77,7 @@ impl CountingArchive {
     /// Replaces one stored object, or removes it, and returns what it held.
     fn swap(&self, namespace: &str, id: &str, bytes: Option<Vec<u8>>) -> Option<Vec<u8>> {
         let key = (namespace.to_owned(), id.to_owned());
-        let mut objects = self.objects.borrow_mut();
+        let mut objects = self.objects.write().unwrap();
         match bytes {
             Some(bytes) => objects.insert(key, bytes),
             None => objects.remove(&key),
@@ -92,7 +93,8 @@ impl ResourceArchiveStore for CountingArchive {
         bytes: &[u8],
     ) -> Result<(), ResourceError> {
         self.objects
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
         Ok(())
     }
@@ -104,7 +106,8 @@ impl ResourceArchiveStore for CountingArchive {
     ) -> Result<Option<Vec<u8>>, ResourceError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -114,7 +117,8 @@ impl ResourceArchiveStore for CountingArchive {
         handle: &ResourceArchiveRetentionHandleV1,
     ) -> Result<(), ResourceError> {
         self.retention
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert(handle.id.clone(), handle.clone());
         Ok(())
     }
@@ -125,7 +129,8 @@ impl ResourceArchiveStore for CountingArchive {
         phase: ResourceArchiveRetentionPhaseV1,
     ) -> Result<(), ResourceError> {
         self.retention
-            .borrow_mut()
+            .write()
+            .unwrap()
             .get_mut(handle_id)
             .ok_or_else(|| ResourceError::NotFound("retention handle unavailable".to_owned()))?
             .phase = phase;
@@ -150,12 +155,14 @@ impl PluginArchiveObjectProvider for CountingArchive {
     ) -> Result<Option<Vec<u8>>, CanwuError> {
         *self
             .provider_loads
-            .borrow_mut()
+            .write()
+            .unwrap()
             .entry(namespace.to_owned())
             .or_default() += 1;
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -248,7 +255,7 @@ fn cold_lookup_reads_only_authenticated_index_pages_whatever_the_commit_count() 
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
         .with_domain_records(resource.into_records().expect("resource record"));
     let mut canwu = Canwu::new_with_plugins(52, scenario, &[&plugin]).expect("runtime");
-    canwu.set_plugin_archive_object_provider(Rc::new(archive.clone()));
+    canwu.set_plugin_archive_object_provider(Arc::new(archive.clone()));
 
     // The first commit holds the operation that is re-sent at the end.
     let first = allocation(&canwu, "fixture:allocate:first");
@@ -347,12 +354,16 @@ fn cold_lookup_reads_only_authenticated_index_pages_whatever_the_commit_count() 
 
     // Restore audits the chain and its index; exact replay settles the same.
     let snapshot = canwu.snapshot_json().expect("snapshot");
-    from_resource_snapshot_json_with_archive_store(&snapshot, &[&plugin], Rc::new(archive.clone()))
-        .expect("restore authenticates the archive and its lookup index");
+    from_resource_snapshot_json_with_archive_store(
+        &snapshot,
+        &[&plugin],
+        Arc::new(archive.clone()),
+    )
+    .expect("restore authenticates the archive and its lookup index");
     let replayed = replay_resource_from_journal_with_archive_store(
         &[&plugin],
         &canwu.replay_journal(),
-        Rc::new(archive.clone()),
+        Arc::new(archive.clone()),
     )
     .expect("exact replay with the archive store");
     assert_eq!(replayed.snapshot_json().expect("replay snapshot"), snapshot);
@@ -394,7 +405,7 @@ fn cold_lookup_reads_only_authenticated_index_pages_whatever_the_commit_count() 
     from_resource_snapshot_json_with_archive_store(
         &canwu.snapshot_json().expect("snapshot after pruning"),
         &[&plugin],
-        Rc::new(archive.clone()),
+        Arc::new(archive.clone()),
     )
     .expect("the head index is whole after pruning");
     // It gives up exact replay across the pruned commits: an earlier boundary
@@ -403,7 +414,7 @@ fn cold_lookup_reads_only_authenticated_index_pages_whatever_the_commit_count() 
         replay_resource_from_journal_with_archive_store(
             &[&plugin],
             &canwu.replay_journal(),
-            Rc::new(archive.clone()),
+            Arc::new(archive.clone()),
         )
         .is_err()
     );

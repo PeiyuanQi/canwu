@@ -9,7 +9,7 @@ use canwu_api::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 const MAX_ARCHIVED_REPORT_RECORDS: usize = 16_384;
 
@@ -556,10 +556,13 @@ pub fn validate_force_supply_runtime_with_archive_store(
 /// archive the runtime's plugins read archived records from, and validates
 /// the force runtime, every resource outcome it cites included, hot or
 /// archived.
+///
+/// The runtime and its forks share `archive_provider`, and a fork may move to
+/// another thread, so the provider must be `Send + Sync`.
 pub fn from_force_supply_snapshot_json(
     json: &str,
     plugins: &[&dyn canwu_api::SimulationPlugin],
-    archive_provider: Rc<dyn canwu_api::PluginArchiveObjectProvider>,
+    archive_provider: Arc<dyn canwu_api::PluginArchiveObjectProvider + Send + Sync>,
 ) -> Result<Canwu, CanwuError> {
     let mut canwu = Canwu::from_snapshot_json_with_plugins(json, plugins)?;
     canwu.set_plugin_archive_object_provider(archive_provider);
@@ -573,7 +576,7 @@ pub fn from_force_supply_snapshot_json(
 pub fn from_force_supply_checkpoint_journal(
     bundle: canwu_api::CheckpointJournal,
     plugins: &[&dyn canwu_api::SimulationPlugin],
-    archive_provider: Rc<dyn canwu_api::PluginArchiveObjectProvider>,
+    archive_provider: Arc<dyn canwu_api::PluginArchiveObjectProvider + Send + Sync>,
 ) -> Result<Canwu, CanwuError> {
     let mut canwu = Canwu::from_checkpoint_journal_with_plugins(bundle, plugins)?;
     canwu.set_plugin_archive_object_provider(archive_provider);
@@ -586,7 +589,7 @@ pub fn from_force_supply_checkpoint_journal(
 pub fn replay_force_supply_from_journal(
     plugins: &[&dyn canwu_api::SimulationPlugin],
     journal: &canwu_api::ReplayJournal,
-    archive_provider: Rc<dyn canwu_api::PluginArchiveObjectProvider>,
+    archive_provider: Arc<dyn canwu_api::PluginArchiveObjectProvider + Send + Sync>,
 ) -> Result<Canwu, CanwuError> {
     let canwu =
         Canwu::replay_from_journal_with_archive_provider(plugins, journal, archive_provider)?;
@@ -604,16 +607,16 @@ mod tests {
         ResourceOperationKey, ResourceOperationOutcomeVersionV1, ResourceOperationRequestV1,
         ResourcePlugin, ResourceRevision, ResourceState, enqueue_resource_archive, resource_state,
     };
-    use std::cell::RefCell;
     use std::collections::BTreeMap;
-    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::RwLock;
 
     /// Stored archive objects by namespace and object id.
     type ArchiveObjects = BTreeMap<(String, String), Vec<u8>>;
 
     #[derive(Clone, Default)]
     struct MemoryArchive {
-        objects: Rc<RefCell<ArchiveObjects>>,
+        objects: Arc<RwLock<ArchiveObjects>>,
     }
 
     impl ResourceArchiveStore for MemoryArchive {
@@ -624,7 +627,8 @@ mod tests {
             bytes: &[u8],
         ) -> Result<(), ResourceError> {
             self.objects
-                .borrow_mut()
+                .write()
+                .unwrap()
                 .insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
             Ok(())
         }
@@ -636,7 +640,8 @@ mod tests {
         ) -> Result<Option<Vec<u8>>, ResourceError> {
             Ok(self
                 .objects
-                .borrow()
+                .read()
+                .unwrap()
                 .get(&(namespace.to_owned(), object_id.to_owned()))
                 .cloned())
         }
@@ -665,7 +670,8 @@ mod tests {
         ) -> Result<Option<Vec<u8>>, CanwuError> {
             Ok(self
                 .objects
-                .borrow()
+                .read()
+                .unwrap()
                 .get(&(namespace.to_owned(), object_id.to_owned()))
                 .cloned())
         }
@@ -692,7 +698,7 @@ mod tests {
         let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
             .with_domain_records(state.into_records().expect("the root persists"));
         let mut canwu = Canwu::new_with_plugins(1, scenario, &[&plugin]).expect("runtime");
-        canwu.set_plugin_archive_object_provider(Rc::new(archive.clone()));
+        canwu.set_plugin_archive_object_provider(Arc::new(archive.clone()));
         let (_, root) = resource_state(&canwu)
             .expect("resource root")
             .expect("resource runtime");

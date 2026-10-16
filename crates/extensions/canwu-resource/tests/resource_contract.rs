@@ -8,9 +8,9 @@ use canwu_api::{
     KnowledgeHolderRef, PersonId, Scenario, SimDuration, SimTime,
 };
 use canwu_resource::*;
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 /// The provider of the external `test.provider.execution` records a
 /// scenario holds, under the owner name those records carry. It registers
@@ -2088,8 +2088,8 @@ type ArchiveObjectMap = BTreeMap<(String, String), Vec<u8>>;
 
 #[derive(Clone, Default)]
 struct MemoryArchiveStore {
-    objects: Rc<RefCell<ArchiveObjectMap>>,
-    retention: Rc<RefCell<BTreeMap<String, ResourceArchiveRetentionHandleV1>>>,
+    objects: Arc<RwLock<ArchiveObjectMap>>,
+    retention: Arc<RwLock<BTreeMap<String, ResourceArchiveRetentionHandleV1>>>,
 }
 
 impl ResourceArchiveStore for MemoryArchiveStore {
@@ -2100,7 +2100,8 @@ impl ResourceArchiveStore for MemoryArchiveStore {
         bytes: &[u8],
     ) -> Result<(), ResourceError> {
         self.objects
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
         Ok(())
     }
@@ -2112,7 +2113,8 @@ impl ResourceArchiveStore for MemoryArchiveStore {
     ) -> Result<Option<Vec<u8>>, ResourceError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -2122,7 +2124,8 @@ impl ResourceArchiveStore for MemoryArchiveStore {
         handle: &ResourceArchiveRetentionHandleV1,
     ) -> Result<(), ResourceError> {
         self.retention
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert(handle.id.clone(), handle.clone());
         Ok(())
     }
@@ -2132,7 +2135,7 @@ impl ResourceArchiveStore for MemoryArchiveStore {
         handle_id: &str,
         phase: ResourceArchiveRetentionPhaseV1,
     ) -> Result<(), ResourceError> {
-        let mut retention = self.retention.borrow_mut();
+        let mut retention = self.retention.write().unwrap();
         let handle = retention
             .get_mut(handle_id)
             .ok_or_else(|| ResourceError::NotFound("retention handle unavailable".to_owned()))?;
@@ -2149,7 +2152,8 @@ impl canwu_api::PluginArchiveObjectProvider for MemoryArchiveStore {
     ) -> Result<Option<Vec<u8>>, canwu_api::CanwuError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -2329,15 +2333,15 @@ fn bounded_archive_backpressure_restart_and_forgery_are_explicit() {
     from_resource_checkpoint_journal_with_archive_store(
         checkpoint.clone(),
         &[&plugin],
-        Rc::new(store.clone()),
+        Arc::new(store.clone()),
     )
     .expect("checkpoint restore authenticates archive provider");
-    replay_resource_from_journal_with_archive_store(&[&plugin], &journal, Rc::new(store.clone()))
+    replay_resource_from_journal_with_archive_store(&[&plugin], &journal, Arc::new(store.clone()))
         .expect("journal replay authenticates archive provider");
     let mut restarted = from_resource_snapshot_json_with_archive_store(
         &snapshot,
         &[&plugin],
-        Rc::new(store.clone()),
+        Arc::new(store.clone()),
     )
     .expect("provider-verified restart");
     finalize_resource_archive_retention(&mut restarted, &store, &receipt)
@@ -2375,7 +2379,7 @@ fn bounded_archive_backpressure_restart_and_forgery_are_explicit() {
         )
     }));
 
-    store.objects.borrow_mut().insert(
+    store.objects.write().unwrap().insert(
         (
             RESOURCE_ARCHIVE_BLOB_NAMESPACE.to_owned(),
             prepared.blob.content_id.clone(),
@@ -2386,7 +2390,7 @@ fn bounded_archive_backpressure_restart_and_forgery_are_explicit() {
         from_resource_snapshot_json_with_archive_store(
             &snapshot,
             &[&plugin],
-            Rc::new(store.clone()),
+            Arc::new(store.clone()),
         )
         .is_err(),
         "restore must reject a provider object that no longer authenticates"
@@ -2395,7 +2399,7 @@ fn bounded_archive_backpressure_restart_and_forgery_are_explicit() {
         from_resource_checkpoint_journal_with_archive_store(
             checkpoint,
             &[&plugin],
-            Rc::new(store.clone()),
+            Arc::new(store.clone()),
         )
         .is_err()
     );
@@ -2403,7 +2407,7 @@ fn bounded_archive_backpressure_restart_and_forgery_are_explicit() {
         replay_resource_from_journal_with_archive_store(
             &[&plugin],
             &journal,
-            Rc::new(store.clone()),
+            Arc::new(store.clone()),
         )
         .is_err()
     );
@@ -2509,7 +2513,7 @@ fn archived_operation_identity_controls_exact_retry_after_target_retirement() {
         .state
         .prepare_resource_archive(value.state.terminal_archive_candidates.len(), &())
         .expect("prepare cold identity archive");
-    let store = Rc::new(MemoryArchiveStore::default());
+    let store = Arc::new(MemoryArchiveStore::default());
     let plugin = ResourcePlugin::default();
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
         .with_domain_records(value.state.into_records().expect("resource record"));
@@ -3451,7 +3455,7 @@ fn completed_external_participant_archives_and_restores_authoritatively() {
     let restored = from_resource_snapshot_json_with_archive_store(
         &snapshot,
         &[&plugin],
-        Rc::new(store.clone()),
+        Arc::new(store.clone()),
     )
     .expect("participant archive restore");
     let (_, restored_state) = resource_state(&restored)

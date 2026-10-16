@@ -9,7 +9,7 @@ use super::{
 };
 #[cfg(test)]
 use super::{RunConfiguration, RunManifest, Scenario};
-use std::{collections::BTreeSet, rc::Rc};
+use std::{collections::BTreeSet, sync::Arc};
 
 impl Simulation {
     /// Reconstructs caller-supplied core commands without proving a recorded
@@ -126,17 +126,18 @@ impl Simulation {
         plugins: &[&dyn SimulationPlugin],
         journal: &ReplayJournal,
     ) -> Result<Self, CanwuError> {
-        Self::replay_from_journal_with_archive_provider(plugins, journal, Rc::new(()))
+        Self::replay_from_journal_with_archive_provider(plugins, journal, Arc::new(()))
     }
 
     /// Replays with caller-owned package archive storage attached before any
     /// recorded boundary is evaluated. Cold idempotency and continuation
     /// checks therefore use the same authenticated provider during replay as
-    /// they do during a live run.
+    /// they do during a live run. The provider must be `Send + Sync`, as for
+    /// [`Simulation::set_plugin_archive_object_provider`].
     pub fn replay_from_journal_with_archive_provider(
         plugins: &[&dyn SimulationPlugin],
         journal: &ReplayJournal,
-        archive_provider: Rc<dyn PluginArchiveObjectProvider>,
+        archive_provider: Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
     ) -> Result<Self, CanwuError> {
         Self::replay_exact_journal(plugins, journal, archive_provider, None)
     }
@@ -144,7 +145,9 @@ impl Simulation {
     /// Replays like [`Self::replay_from_journal_with_archive_provider`] with
     /// the boundary profile on from before the first recorded boundary, and
     /// hands the [`BoundaryProfile`] of each replayed boundary to
-    /// `on_profile` as soon as the boundary settles, in journal order.
+    /// `on_profile` as soon as the boundary settles, in journal order. The
+    /// provider must be `Send + Sync`, as for
+    /// [`Simulation::set_plugin_archive_object_provider`].
     ///
     /// Profiling changes nothing in the replay: every regenerated boundary
     /// and the final checkpoint are checked against the journal exactly as in
@@ -157,7 +160,7 @@ impl Simulation {
     pub fn replay_from_journal_with_boundary_profiles(
         plugins: &[&dyn SimulationPlugin],
         journal: &ReplayJournal,
-        archive_provider: Rc<dyn PluginArchiveObjectProvider>,
+        archive_provider: Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
         on_profile: &mut dyn FnMut(BoundaryProfile),
     ) -> Result<Self, CanwuError> {
         Self::replay_exact_journal(plugins, journal, archive_provider, Some(on_profile))
@@ -166,7 +169,7 @@ impl Simulation {
     fn replay_exact_journal(
         plugins: &[&dyn SimulationPlugin],
         journal: &ReplayJournal,
-        archive_provider: Rc<dyn PluginArchiveObjectProvider>,
+        archive_provider: Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
         on_profile: Option<&mut dyn FnMut(BoundaryProfile)>,
     ) -> Result<Self, CanwuError> {
         if journal.commitment_format_version != COMMITMENT_FORMAT_VERSION {

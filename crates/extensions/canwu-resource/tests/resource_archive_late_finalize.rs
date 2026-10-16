@@ -13,17 +13,17 @@
 
 use canwu_api::{Canwu, EntityRef, PersonId, Scenario, SimTime};
 use canwu_resource::*;
-use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 /// Stored archive objects by namespace and object id.
 type ArchiveObjects = BTreeMap<(String, String), Vec<u8>>;
 
 #[derive(Clone, Default)]
 struct MemoryArchive {
-    objects: Rc<RefCell<ArchiveObjects>>,
-    retention: Rc<RefCell<BTreeMap<String, ResourceArchiveRetentionPhaseV1>>>,
+    objects: Arc<RwLock<ArchiveObjects>>,
+    retention: Arc<RwLock<BTreeMap<String, ResourceArchiveRetentionPhaseV1>>>,
 }
 
 impl ResourceArchiveStore for MemoryArchive {
@@ -34,7 +34,8 @@ impl ResourceArchiveStore for MemoryArchive {
         bytes: &[u8],
     ) -> Result<(), ResourceError> {
         self.objects
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
         Ok(())
     }
@@ -46,7 +47,8 @@ impl ResourceArchiveStore for MemoryArchive {
     ) -> Result<Option<Vec<u8>>, ResourceError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -56,7 +58,8 @@ impl ResourceArchiveStore for MemoryArchive {
         handle: &ResourceArchiveRetentionHandleV1,
     ) -> Result<(), ResourceError> {
         self.retention
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert(handle.id.clone(), handle.phase);
         Ok(())
     }
@@ -68,7 +71,8 @@ impl ResourceArchiveStore for MemoryArchive {
     ) -> Result<(), ResourceError> {
         *self
             .retention
-            .borrow_mut()
+            .write()
+            .unwrap()
             .get_mut(handle_id)
             .ok_or_else(|| ResourceError::NotFound("retention handle unavailable".to_owned()))? =
             phase;
@@ -84,7 +88,8 @@ impl canwu_api::PluginArchiveObjectProvider for MemoryArchive {
     ) -> Result<Option<Vec<u8>>, canwu_api::CanwuError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -136,7 +141,7 @@ fn a_commit_is_finalized_after_a_later_commit_archived_its_receipt() {
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
         .with_domain_records(resource.into_records().expect("resource record"));
     let mut canwu = Canwu::new_with_plugins(4, scenario, &[&plugin]).expect("runtime");
-    canwu.set_plugin_archive_object_provider(Rc::new(archive.clone()));
+    canwu.set_plugin_archive_object_provider(Arc::new(archive.clone()));
 
     // The first commit applies; the second archives its receipt before the
     // first is finalized.
@@ -160,7 +165,7 @@ fn a_commit_is_finalized_after_a_later_commit_archived_its_receipt() {
     finalize_resource_archive_retention(&mut canwu, &archive, &first)
         .expect("finalize a commit whose receipt a later commit archived");
     assert_eq!(
-        archive.retention.borrow()[&first.retention_handle_id],
+        archive.retention.read().unwrap()[&first.retention_handle_id],
         ResourceArchiveRetentionPhaseV1::Committed
     );
     settle(&mut canwu);
@@ -188,12 +193,16 @@ fn a_commit_is_finalized_after_a_later_commit_archived_its_receipt() {
     assert!(state(&canwu).archive_retention_handles.is_empty());
 
     let snapshot = canwu.snapshot_json().expect("snapshot");
-    from_resource_snapshot_json_with_archive_store(&snapshot, &[&plugin], Rc::new(archive.clone()))
-        .expect("restore after a late finalization");
+    from_resource_snapshot_json_with_archive_store(
+        &snapshot,
+        &[&plugin],
+        Arc::new(archive.clone()),
+    )
+    .expect("restore after a late finalization");
     let replayed = replay_resource_from_journal_with_archive_store(
         &[&plugin],
         &canwu.replay_journal(),
-        Rc::new(archive.clone()),
+        Arc::new(archive.clone()),
     )
     .expect("exact replay settles the late acknowledgement the same way");
     assert_eq!(replayed.snapshot_json().expect("replay snapshot"), snapshot);

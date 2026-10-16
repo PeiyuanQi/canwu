@@ -26,7 +26,7 @@
 mod support;
 
 use canwu_production::*;
-use std::rc::Rc;
+use std::sync::Arc;
 use support::*;
 
 /// Settled executions of the multi-page fixture: one full page and a part.
@@ -69,8 +69,8 @@ fn restore_and_replay(plugin: &ProductionPlugin, canwu: &canwu_api::Canwu, archi
     let restored = from_production_snapshot_json_with_archives(
         &snapshot,
         &[plugin],
-        Rc::new(archive.clone()),
-        Rc::new(archive.clone()),
+        Arc::new(archive.clone()),
+        Arc::new(archive.clone()),
     )
     .expect("restore audits the archive chain and its lookup index");
     assert_eq!(
@@ -80,8 +80,8 @@ fn restore_and_replay(plugin: &ProductionPlugin, canwu: &canwu_api::Canwu, archi
     let replayed = replay_production_from_journal_with_archives(
         &[plugin],
         &canwu.replay_journal(),
-        Rc::new(archive.clone()),
-        Rc::new(archive.clone()),
+        Arc::new(archive.clone()),
+        Arc::new(archive.clone()),
     )
     .expect("exact replay");
     assert_eq!(
@@ -297,7 +297,7 @@ fn a_stale_archive_commit_terminates_when_the_applied_handles_are_full() {
     assert_eq!(stale_receipts(&acknowledged), 0);
     assert_eq!(acknowledged.archive.pending_handles.len(), limit);
     assert_eq!(
-        archive.retention.borrow()[&stale_queued.retention_handle_id],
+        archive.retention.read().unwrap()[&stale_queued.retention_handle_id],
         ProductionArchiveRetentionPhaseV1::RejectedStale
     );
 
@@ -362,7 +362,7 @@ fn the_same_archive_batch_queued_twice_leaves_no_stale_receipt() {
     );
     assert!(retired.archive.pending_handles.is_empty());
     assert_eq!(
-        archive.retention.borrow()[handle],
+        archive.retention.read().unwrap()[handle],
         ProductionArchiveRetentionPhaseV1::Committed
     );
     restore_and_replay(&plugin, &canwu, &archive);

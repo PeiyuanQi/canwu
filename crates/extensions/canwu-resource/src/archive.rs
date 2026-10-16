@@ -405,6 +405,15 @@ impl VerifiedResourceArchiveCommitV1 {
     }
 }
 
+/// The host application's store of resource archive objects and retention
+/// handles.
+///
+/// A store a run holds, through
+/// [`from_resource_snapshot_json_with_archive_store`](crate::from_resource_snapshot_json_with_archive_store)
+/// and the other `_with_archive_store` restores, is passed as
+/// `Arc<dyn ResourceArchiveStore + Send + Sync>`, because forks share it and
+/// may run on other threads. A store lent for one call as
+/// `&dyn ResourceArchiveStore` needs neither bound.
 pub trait ResourceArchiveStore {
     fn store_resource_archive_object(
         &self,

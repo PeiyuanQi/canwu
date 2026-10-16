@@ -158,11 +158,18 @@ pub use canwu_transport::{
 use serde::{Deserialize, Serialize};
 
 /// Main in-process API. All returned world values are detached snapshots.
+///
+/// `Canwu` is `Send`: a host may move a run, or a [`fork`](Canwu::fork) of
+/// it, to another thread, for example to save or checkpoint it on a
+/// persistence worker while the original keeps running. It is not promised to
+/// be `Sync`.
 pub struct Canwu {
     simulation: Simulation,
 }
 
 /// Public API for a live runtime whose sealed evidence segments are stored by the caller.
+///
+/// Like [`Canwu`], it is `Send` and not promised to be `Sync`.
 pub struct CompactedCanwu {
     simulation: CompactedSimulation,
 }
@@ -835,9 +842,13 @@ impl Canwu {
 
     /// Attaches caller-owned package archive storage for authenticated cold
     /// history resolution during normal admissions, settlement, and queries.
+    ///
+    /// The provider must be `Send + Sync`: [`Canwu::fork`] shares it, and a
+    /// fork may move to another thread and load from it there while the
+    /// original keeps loading on its own thread.
     pub fn set_plugin_archive_object_provider(
         &mut self,
-        provider: std::rc::Rc<dyn PluginArchiveObjectProvider>,
+        provider: std::sync::Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
     ) {
         self.simulation.set_plugin_archive_object_provider(provider);
     }
@@ -1179,11 +1190,12 @@ impl Canwu {
 
     /// Replays with package archive storage attached before the first
     /// recorded boundary, so package-owned cold history participates in
-    /// ordinary admission and settlement throughout replay.
+    /// ordinary admission and settlement throughout replay. The provider must
+    /// be `Send + Sync`, as for [`Canwu::set_plugin_archive_object_provider`].
     pub fn replay_from_journal_with_archive_provider(
         plugins: &[&dyn SimulationPlugin],
         journal: &ReplayJournal,
-        archive_provider: std::rc::Rc<dyn PluginArchiveObjectProvider>,
+        archive_provider: std::sync::Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
     ) -> Result<Self, CanwuError> {
         let simulation = Simulation::replay_from_journal_with_archive_provider(
             plugins,
@@ -1197,8 +1209,9 @@ impl Canwu {
     /// does, with the boundary profile on from before the first recorded
     /// boundary: `on_profile` receives the [`BoundaryProfile`] of each
     /// replayed boundary as soon as it settles, in journal order. Pass
-    /// `Rc::new(())` as `archive_provider` for a run without package
-    /// archives.
+    /// `Arc::new(())` as `archive_provider` for a run without package
+    /// archives; the provider must be `Send + Sync`, as for
+    /// [`Canwu::set_plugin_archive_object_provider`].
     ///
     /// Profiling changes nothing the replay checks: every regenerated
     /// boundary and the final checkpoint must match the journal exactly as in
@@ -1210,7 +1223,7 @@ impl Canwu {
     pub fn replay_from_journal_with_boundary_profiles(
         plugins: &[&dyn SimulationPlugin],
         journal: &ReplayJournal,
-        archive_provider: std::rc::Rc<dyn PluginArchiveObjectProvider>,
+        archive_provider: std::sync::Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
         on_profile: &mut dyn FnMut(BoundaryProfile),
     ) -> Result<Self, CanwuError> {
         let simulation = Simulation::replay_from_journal_with_boundary_profiles(
@@ -1231,6 +1244,10 @@ impl Canwu {
         })
     }
 
+    /// An independent copy of the run for a look-ahead, an alternative
+    /// reality, or a save. It shares the attached plugin archive provider and
+    /// starts with profiling off. The copy is `Send`, so a host may advance,
+    /// checkpoint, or save it on another thread.
     #[must_use]
     pub fn fork(&self) -> Self {
         Self {
@@ -1681,7 +1698,8 @@ impl CompactedCanwu {
 
     /// Copies the compact runtime for a look-ahead or an alternative
     /// reality, as [`Canwu::fork`] does. The copy keeps the seal tokens
-    /// already committed and starts with profiling off.
+    /// already committed, shares the attached plugin archive provider, starts
+    /// with profiling off, and may move to another thread.
     #[must_use]
     pub fn fork(&self) -> Self {
         Self {
@@ -1691,10 +1709,11 @@ impl CompactedCanwu {
 
     /// Attaches caller-owned package archive storage for authenticated cold
     /// history resolution during admission, settlement, and queries, as
-    /// [`Canwu::set_plugin_archive_object_provider`] does.
+    /// [`Canwu::set_plugin_archive_object_provider`] does. The provider must
+    /// be `Send + Sync`.
     pub fn set_plugin_archive_object_provider(
         &mut self,
-        provider: std::rc::Rc<dyn PluginArchiveObjectProvider>,
+        provider: std::sync::Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
     ) {
         self.simulation.set_plugin_archive_object_provider(provider);
     }

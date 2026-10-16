@@ -188,7 +188,6 @@ use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::rc::Rc;
 use std::sync::Arc;
 
 use event_payloads::{
@@ -1370,11 +1369,16 @@ fn boundary_state_hash_format(value: Option<&str>) -> Result<BoundaryStateHashFo
     }
 }
 
+/// The authoritative runtime.
+///
+/// It is `Send`: everything it owns is plain data, persistent structures of
+/// `Arc` entries, or the `Send + Sync` plugin archive provider, so a host may
+/// move a run or a fork to another thread. It is not promised to be `Sync`.
 pub struct Simulation {
     state: RuntimeState,
     schema: SchemaRegistry,
     plugins: PluginRegistry,
-    plugin_archive_provider: Rc<dyn PluginArchiveObjectProvider>,
+    plugin_archive_provider: Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
     sync_reaction_depth: usize,
     /// Host diagnostics outside the runtime state; see [`profile`].
     boundary_profiler: profile::BoundaryProfiler,
@@ -1676,7 +1680,7 @@ impl Simulation {
             },
             schema,
             plugins,
-            plugin_archive_provider: Rc::new(()),
+            plugin_archive_provider: Arc::new(()),
             sync_reaction_depth: 0,
             boundary_profiler: profile::BoundaryProfiler::default(),
         };
@@ -2827,7 +2831,7 @@ impl Simulation {
             },
             schema: snapshot.schema,
             plugins,
-            plugin_archive_provider: Rc::new(()),
+            plugin_archive_provider: Arc::new(()),
             sync_reaction_depth: 0,
             boundary_profiler: profile::BoundaryProfiler::default(),
         })
@@ -2858,13 +2862,16 @@ impl Simulation {
         Self::from_snapshot_with_plugins(snapshot, plugins)
     }
 
+    /// An independent copy of the run that shares the attached plugin archive
+    /// provider. The copy is `Send`, so a host may advance, checkpoint, or
+    /// save it on another thread.
     #[must_use]
     pub fn fork(&self) -> Self {
         Self {
             state: self.state.clone(),
             schema: self.schema.clone(),
             plugins: self.plugins.clone(),
-            plugin_archive_provider: Rc::clone(&self.plugin_archive_provider),
+            plugin_archive_provider: Arc::clone(&self.plugin_archive_provider),
             sync_reaction_depth: 0,
             boundary_profiler: profile::BoundaryProfiler::default(),
         }
@@ -2874,9 +2881,13 @@ impl Simulation {
     /// archives during normal command admission, boundary settlement, and
     /// detached queries. The provider is executable host context and is never
     /// serialized into a snapshot.
+    ///
+    /// The provider must be `Send + Sync`: [`Simulation::fork`] shares it,
+    /// and a fork may move to another thread and read it there while the
+    /// original keeps reading it on its own thread.
     pub fn set_plugin_archive_object_provider(
         &mut self,
-        provider: Rc<dyn PluginArchiveObjectProvider>,
+        provider: Arc<dyn PluginArchiveObjectProvider + Send + Sync>,
     ) {
         self.plugin_archive_provider = provider;
     }

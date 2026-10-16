@@ -1827,6 +1827,9 @@ pub struct CheckpointJournal {
 /// caller. A restored runtime retains its whole supplied prefix, so its first
 /// seal starts at the zero cut and replaces every earlier segment for later
 /// checkpoints.
+///
+/// Like [`Simulation`], it is `Send`, so a host may advance, checkpoint, or
+/// seal it, or a fork of it, on another thread.
 pub struct CompactedSimulation {
     simulation: Simulation,
     committed_seal_tokens: im::OrdSet<String>,
@@ -1846,7 +1849,9 @@ impl CompactedSimulation {
 
     /// Copies the compact runtime, sharing persistent structures, with
     /// profiling off. The copy keeps the seal tokens already committed, so it
-    /// treats a repeated commit of one of them as the original does.
+    /// treats a repeated commit of one of them as the original does. It
+    /// shares the attached plugin archive provider and may move to another
+    /// thread.
     #[must_use]
     pub fn fork(&self) -> Self {
         Self {
@@ -1856,10 +1861,12 @@ impl CompactedSimulation {
     }
 
     /// Attaches the caller-owned provider used to resolve package cold
-    /// archives during admission, settlement, and detached queries.
+    /// archives during admission, settlement, and detached queries. The
+    /// provider must be `Send + Sync`, as for
+    /// [`Simulation::set_plugin_archive_object_provider`].
     pub fn set_plugin_archive_object_provider(
         &mut self,
-        provider: std::rc::Rc<dyn super::PluginArchiveObjectProvider>,
+        provider: std::sync::Arc<dyn super::PluginArchiveObjectProvider + Send + Sync>,
     ) {
         self.simulation.set_plugin_archive_object_provider(provider);
     }

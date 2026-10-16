@@ -30,7 +30,7 @@ use canwu_resource::{
     ResourceLimitsV1, ResourceOperationKey, ResourceOperationRequestV1, ResourcePlugin,
     ResourceRevision, ResourceState, ResourceTerminalRecordKeyV1, canonical_digest,
 };
-use std::rc::Rc;
+use std::sync::Arc;
 use support::*;
 
 fn reserved_key() -> ResourceOperationKey {
@@ -341,7 +341,7 @@ fn an_output_key_a_resource_outcome_holds_is_refused_when_the_execution_starts()
     let resource_plugin = ResourcePlugin::default();
     let plugins: [&dyn canwu_api::SimulationPlugin; 2] = [&production_plugin, &resource_plugin];
     let mut canwu = Canwu::new_with_plugins(58, scenario, &plugins).expect("runtime");
-    canwu.set_plugin_archive_object_provider(Rc::new(archive.clone()));
+    canwu.set_plugin_archive_object_provider(Arc::new(archive.clone()));
 
     // A key a hot resource outcome holds, and one its archive holds, are each
     // the start's recorded rejection. A free key passes them and is then
@@ -420,7 +420,7 @@ fn an_output_set_no_resource_batch_can_settle_is_refused_when_the_execution_star
     let resource_plugin = ResourcePlugin::default();
     let plugins: [&dyn canwu_api::SimulationPlugin; 2] = [&production_plugin, &resource_plugin];
     let mut canwu = Canwu::new_with_plugins(59, scenario, &plugins).expect("runtime");
-    canwu.set_plugin_archive_object_provider(Rc::new(TestArchive::default()));
+    canwu.set_plugin_archive_object_provider(Arc::new(TestArchive::default()));
 
     // Through the plugin each is the start's recorded rejection, and its
     // boundary settles.

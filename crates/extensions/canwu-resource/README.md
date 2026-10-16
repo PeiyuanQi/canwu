@@ -616,7 +616,9 @@ Use `validate_resource_runtime` after activation and the checked wrappers
 `from_resource_snapshot_json`, `from_resource_checkpoint_journal`, and
 `replay_resource_from_journal` for restore/replay. They reject forged semantic
 digests, conservation failures, revision mismatches, and unavailable exact
-evidence.
+evidence. Their `_with_archive_store` forms take the store as
+`Arc<dyn ResourceArchiveStore + Send + Sync>` and attach it to the run: the
+run and its forks share it, and a fork may move to another thread.
 
 See `examples/resource_lifecycle.rs` and `examples/completion_lease.rs`.
 

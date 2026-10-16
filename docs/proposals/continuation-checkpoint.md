@@ -918,8 +918,9 @@ from the boundary counter, so they do not depend on whether that boundary is
 retained, and `explain` finds events in a retained tail that starts after a
 seal. Methods that promise full history (`snapshot`, `snapshot_json`,
 `replay_journal`, `checkpoint_journal*`) stay on `Canwu`. The provider attach
-mirrors the existing `Canwu` signature (`Rc<dyn PluginArchiveObjectProvider>`),
-so the package that makes `Canwu: Send` changes both together.
+mirrors the `Canwu` signature, which since the [send runtime](send-runtime.md)
+package takes `Arc<dyn PluginArchiveObjectProvider + Send + Sync>` on both
+handles.
 
 **Trait.** `canwu-api` adds `pub trait CanwuRun`, implemented by `Canwu` and
 `CompactedCanwu`. Its method set is what the inventoried helpers use, plus the
@@ -1081,7 +1082,9 @@ The tests below check the claim directly rather than the argument.
   segments it chose to keep; a continuation checkpoint does not carry them.
 - **`Send`.** No `Rc` or `RefCell` is added. New state is ordered maps, `im`
   structures of `Arc` entries, and plain data. The one new public use of the
-  existing `Rc` provider type is the mirrored attach on `CompactedCanwu`.
+  provider type is the mirrored attach on `CompactedCanwu`, which takes
+  `Arc<dyn PluginArchiveObjectProvider + Send + Sync>` since the
+  [send runtime](send-runtime.md) package made both handles `Send`.
 
 ## Formats and compatibility
 

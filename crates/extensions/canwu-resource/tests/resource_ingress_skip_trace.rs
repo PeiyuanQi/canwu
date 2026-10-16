@@ -28,16 +28,16 @@ use canwu_api::{
     PluginIngressRequest, Scenario, SimTime,
 };
 use canwu_resource::*;
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 /// Stored archive objects by namespace and object id.
 type ArchiveObjects = BTreeMap<(String, String), Vec<u8>>;
 
 #[derive(Clone, Default)]
 struct MemoryArchive {
-    objects: Rc<RefCell<ArchiveObjects>>,
+    objects: Arc<RwLock<ArchiveObjects>>,
 }
 
 impl ResourceArchiveStore for MemoryArchive {
@@ -48,7 +48,8 @@ impl ResourceArchiveStore for MemoryArchive {
         bytes: &[u8],
     ) -> Result<(), ResourceError> {
         self.objects
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
         Ok(())
     }
@@ -60,7 +61,8 @@ impl ResourceArchiveStore for MemoryArchive {
     ) -> Result<Option<Vec<u8>>, ResourceError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -89,7 +91,8 @@ impl canwu_api::PluginArchiveObjectProvider for MemoryArchive {
     ) -> Result<Option<Vec<u8>>, canwu_api::CanwuError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -194,7 +197,7 @@ fn runtime(archive: &MemoryArchive) -> Canwu {
         .with_domain_records(state.into_records().expect("resource record"));
     let mut canwu =
         Canwu::new_with_plugins(17, scenario, &[&ResourcePlugin::default()]).expect("runtime");
-    canwu.set_plugin_archive_object_provider(Rc::new(archive.clone()));
+    canwu.set_plugin_archive_object_provider(Arc::new(archive.clone()));
     canwu
 }
 

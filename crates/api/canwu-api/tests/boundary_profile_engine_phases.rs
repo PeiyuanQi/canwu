@@ -15,7 +15,7 @@ use canwu_api::{
     SystemDirective,
 };
 use serde_json::{Value, json};
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const PLUGIN: &str = "fixture-engine-profile";
@@ -173,7 +173,7 @@ fn profiled_replay(
     let replayed = Canwu::replay_from_journal_with_boundary_profiles(
         plugins,
         journal,
-        Rc::new(()),
+        Arc::new(()),
         &mut |profile| profiles.push(profile),
     )
     .expect("the profiled replay matches its journal");
@@ -264,7 +264,7 @@ fn engine_phases_partition_each_boundary_and_a_replay_is_profiled_boundary_by_bo
     let error = Canwu::replay_from_journal_with_boundary_profiles(
         &plugins,
         &forged,
-        Rc::new(()),
+        Arc::new(()),
         &mut |profile| before_failure.push(profile.boundary_id),
     )
     .err()

@@ -26,9 +26,9 @@ use canwu_resource::{
     ResourceRevision, ResourceRuntimeRecord, ResourceUnitRevisionId, RunBudgetRevisionV1,
     canonical_digest,
 };
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 type Objects = BTreeMap<(String, String), Vec<u8>>;
 
@@ -36,15 +36,16 @@ type Objects = BTreeMap<(String, String), Vec<u8>>;
 /// each retention handle was persisted or finalized in.
 #[derive(Clone, Default)]
 pub struct TestArchive {
-    pub objects: Rc<RefCell<Objects>>,
-    pub retention: Rc<RefCell<BTreeMap<String, ProductionArchiveRetentionPhaseV1>>>,
+    pub objects: Arc<RwLock<Objects>>,
+    pub retention: Arc<RwLock<BTreeMap<String, ProductionArchiveRetentionPhaseV1>>>,
 }
 
 impl TestArchive {
     /// Every object id the store holds under `namespace`.
     pub fn ids(&self, namespace: &str) -> BTreeSet<String> {
         self.objects
-            .borrow()
+            .read()
+            .unwrap()
             .keys()
             .filter(|(stored, _)| stored == namespace)
             .map(|(_, id)| id.clone())
@@ -53,13 +54,15 @@ impl TestArchive {
 
     pub fn remove(&self, namespace: &str, id: &str) -> Option<Vec<u8>> {
         self.objects
-            .borrow_mut()
+            .write()
+            .unwrap()
             .remove(&(namespace.to_owned(), id.to_owned()))
     }
 
     pub fn put(&self, namespace: &str, id: &str, bytes: Vec<u8>) {
         self.objects
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert((namespace.to_owned(), id.to_owned()), bytes);
     }
 }
@@ -82,7 +85,8 @@ impl ProductionArchiveStore for TestArchive {
     ) -> Result<Option<Vec<u8>>, CanwuError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -92,7 +96,8 @@ impl ProductionArchiveStore for TestArchive {
         handle: &ProductionArchiveRetentionHandleV1,
     ) -> Result<(), CanwuError> {
         self.retention
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert(handle.handle_id.clone(), handle.phase);
         Ok(())
     }
@@ -103,7 +108,8 @@ impl ProductionArchiveStore for TestArchive {
         phase: ProductionArchiveRetentionPhaseV1,
     ) -> Result<(), CanwuError> {
         self.retention
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert(handle_id.to_owned(), phase);
         Ok(())
     }
@@ -127,7 +133,8 @@ impl ResourceArchiveStore for TestArchive {
     ) -> Result<Option<Vec<u8>>, ResourceError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -960,7 +967,7 @@ pub fn scenario(state: ProductionState) -> Scenario {
 /// provider.
 pub fn runtime(plugin: &ProductionPlugin, state: ProductionState, archive: &TestArchive) -> Canwu {
     let mut canwu = Canwu::new_with_plugins(57, scenario(state), &[plugin]).expect("runtime");
-    canwu.set_plugin_archive_object_provider(Rc::new(archive.clone()));
+    canwu.set_plugin_archive_object_provider(Arc::new(archive.clone()));
     canwu
 }
 

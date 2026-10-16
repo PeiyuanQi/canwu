@@ -37,51 +37,54 @@ use canwu_resource::{
     RunBudgetRevisionV1, canonical_digest,
 };
 use serde_json::{Value, json};
-use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 type Objects = BTreeMap<(String, String), Vec<u8>>;
 
 /// An in-memory archive store for both plugins that copies the bytes of
-/// every object it serves and counts loads and load bytes.
+/// every object it serves and counts loads and load bytes. Clones share it,
+/// and it is `Send + Sync`, as a store a run holds must be.
 #[derive(Clone, Default)]
 struct ProfileStore {
-    objects: Rc<RefCell<Objects>>,
-    loads: Rc<Cell<u64>>,
-    loaded_bytes: Rc<Cell<u64>>,
+    objects: Arc<RwLock<Objects>>,
+    loads: Arc<AtomicU64>,
+    loaded_bytes: Arc<AtomicU64>,
 }
 
 impl ProfileStore {
     fn put(&self, namespace: &str, object_id: &str, bytes: &[u8]) {
         self.objects
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
     }
 
     fn get(&self, namespace: &str, object_id: &str) -> Option<Vec<u8>> {
-        self.loads.set(self.loads.get() + 1);
+        self.loads.fetch_add(1, Ordering::Relaxed);
         let value = self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned();
         if let Some(value) = &value {
             self.loaded_bytes
-                .set(self.loaded_bytes.get() + value.len() as u64);
+                .fetch_add(value.len() as u64, Ordering::Relaxed);
         }
         value
     }
 
     fn reset_counts(&self) {
-        self.loads.set(0);
-        self.loaded_bytes.set(0);
+        self.loads.store(0, Ordering::Relaxed);
+        self.loaded_bytes.store(0, Ordering::Relaxed);
     }
 }
 
@@ -1028,8 +1031,8 @@ fn archived_input_case(
         let sample = Instant::now();
         validate_production_resource_continuation(&resource, &store, &input)?;
         samples.push(sample.elapsed().as_secs_f64() * 1_000_000.0);
-        loads = store.loads.get();
-        bytes = store.loaded_bytes.get();
+        loads = store.loads.load(Ordering::Relaxed);
+        bytes = store.loaded_bytes.load(Ordering::Relaxed);
     }
     samples.sort_by(f64::total_cmp);
     Ok(json!({
@@ -1057,7 +1060,8 @@ fn live_lookup_index(
         pages += 1;
         bytes += store
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(PRODUCTION_ARCHIVE_LOOKUP_PAGE_NAMESPACE.to_owned(), page))
             .map_or(0, Vec::len) as u64;
     }
@@ -1067,7 +1071,8 @@ fn live_lookup_index(
 fn stored_bytes(store: &ProfileStore, lookup: bool) -> u64 {
     store
         .objects
-        .borrow()
+        .read()
+        .unwrap()
         .iter()
         .filter(|((namespace, _), _)| {
             namespace.starts_with("canwu.production.")
@@ -1098,8 +1103,8 @@ fn time_lookups(
     let count = lookups as f64;
     Ok((
         started.elapsed().as_secs_f64() * 1_000_000.0 / count,
-        store.loads.get() as f64 / count,
-        store.loaded_bytes.get() as f64 / count,
+        store.loads.load(Ordering::Relaxed) as f64 / count,
+        store.loaded_bytes.load(Ordering::Relaxed) as f64 / count,
     ))
 }
 
@@ -1124,7 +1129,7 @@ fn lifetime_case(commits: usize, executions: usize) -> Result<Value, Box<dyn Err
     let plugin = ProductionPlugin;
     let store = ProfileStore::default();
     let mut canwu = Canwu::new_with_plugins(0x00CA_4E55, scenario(state), &[&plugin])?;
-    canwu.set_plugin_archive_object_provider(Rc::new(store.clone()));
+    canwu.set_plugin_archive_object_provider(Arc::new(store.clone()));
     let mut samples = Vec::new();
     let mut unacknowledged = None;
     let (mut lookup_pages_written, mut lookup_pages_superseded) = (0_usize, 0_usize);
@@ -1223,7 +1228,7 @@ fn multi_page_case(executions: usize, prior_commits: usize) -> Result<Value, Box
     let plugin = ProductionPlugin;
     let store = ProfileStore::default();
     let mut canwu = Canwu::new_with_plugins(0x00CA_4E55, scenario(state), &[&plugin])?;
-    canwu.set_plugin_archive_object_provider(Rc::new(store.clone()));
+    canwu.set_plugin_archive_object_provider(Arc::new(store.clone()));
     // Prior commits archive one execution, then one receipt each.
     let mut unacknowledged = None;
     for _ in 0..prior_commits {

@@ -23,16 +23,16 @@ use canwu_api::{
     PluginRegistrar, Scenario, SimDuration, SimTime, SimulationPlugin,
 };
 use canwu_resource::*;
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 /// Stored archive objects by namespace and object id.
 type ArchiveObjects = BTreeMap<(String, String), Vec<u8>>;
 
 #[derive(Clone, Default)]
 struct MemoryArchive {
-    objects: Rc<RefCell<ArchiveObjects>>,
+    objects: Arc<RwLock<ArchiveObjects>>,
 }
 
 impl ResourceArchiveStore for MemoryArchive {
@@ -43,7 +43,8 @@ impl ResourceArchiveStore for MemoryArchive {
         bytes: &[u8],
     ) -> Result<(), ResourceError> {
         self.objects
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
         Ok(())
     }
@@ -55,7 +56,8 @@ impl ResourceArchiveStore for MemoryArchive {
     ) -> Result<Option<Vec<u8>>, ResourceError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -84,7 +86,8 @@ impl canwu_api::PluginArchiveObjectProvider for MemoryArchive {
     ) -> Result<Option<Vec<u8>>, canwu_api::CanwuError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -411,7 +414,7 @@ fn the_split_root_agrees_across_a_seal_a_fork_a_restore_and_an_exact_replay() {
     let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
         .with_domain_records(state.into_records().expect("the root persists"));
     let mut base = Canwu::new_with_plugins(9, scenario, &plugins).expect("runtime");
-    base.set_plugin_archive_object_provider(Rc::new(archive.clone()));
+    base.set_plugin_archive_object_provider(Arc::new(archive.clone()));
     seals(&base);
     for index in 0..2 {
         enqueue_pass(&mut base, &format!("fixture:pass:before:{index}"));
@@ -481,7 +484,7 @@ fn the_split_root_agrees_across_a_seal_a_fork_a_restore_and_an_exact_replay() {
         .replay_journal_with_segments(vec![segment.clone()])
         .expect("the sealed run produces an exact replay journal");
     let replayed =
-        Canwu::replay_from_journal_with_archive_provider(&plugins, &journal, Rc::new(archive))
+        Canwu::replay_from_journal_with_archive_provider(&plugins, &journal, Arc::new(archive))
             .expect("exact replay");
     let reconstructed = sealed
         .snapshot_with_segments(vec![segment])

@@ -40,14 +40,14 @@ use serde_json::{Value, json};
 use std::alloc::{GlobalAlloc, Layout, System};
 #[cfg(feature = "allocation-counting")]
 use std::cell::Cell;
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -91,7 +91,7 @@ type ArchiveObjects = BTreeMap<(String, String), Vec<u8>>;
 /// object provider.
 #[derive(Clone, Default)]
 struct MemoryArchive {
-    objects: Rc<RefCell<ArchiveObjects>>,
+    objects: Arc<RwLock<ArchiveObjects>>,
 }
 
 impl ResourceArchiveStore for MemoryArchive {
@@ -102,7 +102,8 @@ impl ResourceArchiveStore for MemoryArchive {
         bytes: &[u8],
     ) -> Result<(), ResourceError> {
         self.objects
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
         Ok(())
     }
@@ -114,7 +115,8 @@ impl ResourceArchiveStore for MemoryArchive {
     ) -> Result<Option<Vec<u8>>, ResourceError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -143,7 +145,8 @@ impl canwu_api::PluginArchiveObjectProvider for MemoryArchive {
     ) -> Result<Option<Vec<u8>>, CanwuError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -437,7 +440,7 @@ fn case(
         .with_domain_records(root_records(state)?);
     let mut canwu = Canwu::new_with_plugins(PROFILE_SEED, scenario, &plugins)?;
     let archive = MemoryArchive::default();
-    canwu.set_plugin_archive_object_provider(Rc::new(archive.clone()));
+    canwu.set_plugin_archive_object_provider(Arc::new(archive.clone()));
     let installed_bytes = resource_record_bytes(&canwu)?;
 
     let (mut operation, mut batch, mut idle) = (Series::new(), Series::new(), Series::new());

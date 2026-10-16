@@ -35,6 +35,15 @@ const PRODUCTION_ARCHIVE_LOOKUP_KEY_DOMAIN: &str = "canwu.production.archive-loo
 /// maintenance receipts; a blob of any other version is refused.
 pub const PRODUCTION_ARCHIVE_BLOB_FORMAT_VERSION: u32 = 2;
 
+/// The host application's store of production archive objects and retention
+/// handles.
+///
+/// A store a run holds, through
+/// [`from_production_snapshot_json_with_archives`](crate::from_production_snapshot_json_with_archives)
+/// and the other `_with_archives` restores, is passed as
+/// `Arc<dyn ProductionArchiveStore + Send + Sync>`, because forks share it and
+/// may run on other threads. A store lent for one call as
+/// `&dyn ProductionArchiveStore` needs neither bound.
 pub trait ProductionArchiveStore {
     fn store_production_archive_object(
         &self,

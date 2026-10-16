@@ -12,10 +12,10 @@ use canwu_api::{
     KnowledgeHolderRef, PluginArchiveObjectProvider, ReplayJournal, SimTime, SimulationPlugin,
 };
 use serde::{Deserialize, Serialize};
-use std::rc::Rc;
+use std::sync::Arc;
 
 struct ResourceRuntimeArchiveProvider {
-    store: Rc<dyn crate::ResourceArchiveStore>,
+    store: Arc<dyn crate::ResourceArchiveStore + Send + Sync>,
 }
 
 impl PluginArchiveObjectProvider for ResourceRuntimeArchiveProvider {
@@ -31,9 +31,9 @@ impl PluginArchiveObjectProvider for ResourceRuntimeArchiveProvider {
 }
 
 fn runtime_archive_provider(
-    store: Rc<dyn crate::ResourceArchiveStore>,
-) -> Rc<dyn PluginArchiveObjectProvider> {
-    Rc::new(ResourceRuntimeArchiveProvider { store })
+    store: Arc<dyn crate::ResourceArchiveStore + Send + Sync>,
+) -> Arc<dyn PluginArchiveObjectProvider + Send + Sync> {
+    Arc::new(ResourceRuntimeArchiveProvider { store })
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -793,10 +793,15 @@ pub fn from_resource_snapshot_json(
     Ok(canwu)
 }
 
+/// Restores a run from snapshot JSON, checks its resource state against
+/// `store`, and attaches `store` as the run's plugin archive provider.
+///
+/// The run and its forks share `store`, and a fork may move to another
+/// thread, so the store must be `Send + Sync`.
 pub fn from_resource_snapshot_json_with_archive_store(
     json: &str,
     plugins: &[&dyn SimulationPlugin],
-    store: Rc<dyn crate::ResourceArchiveStore>,
+    store: Arc<dyn crate::ResourceArchiveStore + Send + Sync>,
 ) -> Result<Canwu, CanwuError> {
     let mut canwu = Canwu::from_snapshot_json_with_plugins(json, plugins)?;
     validate_resource_runtime_with_archive_store(&canwu, store.as_ref())?;
@@ -814,10 +819,14 @@ pub fn from_resource_checkpoint_journal(
     Ok(canwu)
 }
 
+/// Restores a run from a checkpoint journal, checks its resource state
+/// against `store`, and attaches `store` as the run's plugin archive provider.
+/// The store must be `Send + Sync`, as for
+/// [`from_resource_snapshot_json_with_archive_store`].
 pub fn from_resource_checkpoint_journal_with_archive_store(
     bundle: canwu_api::CheckpointJournal,
     plugins: &[&dyn SimulationPlugin],
-    store: Rc<dyn crate::ResourceArchiveStore>,
+    store: Arc<dyn crate::ResourceArchiveStore + Send + Sync>,
 ) -> Result<Canwu, CanwuError> {
     let mut canwu = Canwu::from_checkpoint_journal_with_plugins(bundle, plugins)?;
     validate_resource_runtime_with_archive_store(&canwu, store.as_ref())?;
@@ -835,12 +844,16 @@ pub fn replay_resource_from_journal(
     Ok(canwu)
 }
 
+/// Replays a run with `store` attached as its plugin archive provider from
+/// the first boundary, then checks its resource state against `store`. The
+/// store must be `Send + Sync`, as for
+/// [`from_resource_snapshot_json_with_archive_store`].
 pub fn replay_resource_from_journal_with_archive_store(
     plugins: &[&dyn SimulationPlugin],
     journal: &ReplayJournal,
-    store: Rc<dyn crate::ResourceArchiveStore>,
+    store: Arc<dyn crate::ResourceArchiveStore + Send + Sync>,
 ) -> Result<Canwu, CanwuError> {
-    let validation_store = Rc::clone(&store);
+    let validation_store = Arc::clone(&store);
     let canwu = Canwu::replay_from_journal_with_archive_provider(
         plugins,
         journal,

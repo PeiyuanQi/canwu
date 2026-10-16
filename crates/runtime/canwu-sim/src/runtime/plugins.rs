@@ -300,6 +300,12 @@ pub type OwnerAuthorizedMaintenanceParticipant =
 /// Namespace-aware host access used only by offline archive mark/sweep. Plugin
 /// callbacks decode and authenticate their own object formats; the kernel never
 /// needs to depend on downstream archive crates.
+///
+/// A provider a run holds is attached as
+/// `Arc<dyn PluginArchiveObjectProvider + Send + Sync>`: forks share it and
+/// may run on other threads, so its loads can be concurrent. The trait itself
+/// does not require `Send` or `Sync`, so a borrowed provider, such as a
+/// [`SimulationView`] lent to a package helper for one call, needs neither.
 pub trait PluginArchiveObjectProvider {
     fn load_plugin_archive_object(
         &self,

@@ -40,9 +40,9 @@ use canwu_api::{
     Scenario, SimDuration, SimTime, SimulationPlugin,
 };
 use canwu_resource::*;
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 const NAMESPACE: &str = "fixture.resource";
 const EVIDENCE_NAMESPACE: &str = "fixture.provider";
@@ -752,14 +752,14 @@ type ArchiveObjects = BTreeMap<(String, String), Vec<u8>>;
 /// operation key loads the head directory exactly once.
 #[derive(Clone, Default)]
 struct CountingArchive {
-    objects: Rc<RefCell<ArchiveObjects>>,
-    retention: Rc<RefCell<BTreeMap<String, ResourceArchiveRetentionHandleV1>>>,
-    lookups: Rc<RefCell<usize>>,
+    objects: Arc<RwLock<ArchiveObjects>>,
+    retention: Arc<RwLock<BTreeMap<String, ResourceArchiveRetentionHandleV1>>>,
+    lookups: Arc<RwLock<usize>>,
 }
 
 impl CountingArchive {
     fn lookups(&self) -> usize {
-        *self.lookups.borrow()
+        *self.lookups.read().unwrap()
     }
 }
 
@@ -771,7 +771,8 @@ impl ResourceArchiveStore for CountingArchive {
         bytes: &[u8],
     ) -> Result<(), ResourceError> {
         self.objects
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
         Ok(())
     }
@@ -783,7 +784,8 @@ impl ResourceArchiveStore for CountingArchive {
     ) -> Result<Option<Vec<u8>>, ResourceError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -793,7 +795,8 @@ impl ResourceArchiveStore for CountingArchive {
         handle: &ResourceArchiveRetentionHandleV1,
     ) -> Result<(), ResourceError> {
         self.retention
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert(handle.id.clone(), handle.clone());
         Ok(())
     }
@@ -804,7 +807,8 @@ impl ResourceArchiveStore for CountingArchive {
         phase: ResourceArchiveRetentionPhaseV1,
     ) -> Result<(), ResourceError> {
         self.retention
-            .borrow_mut()
+            .write()
+            .unwrap()
             .get_mut(handle_id)
             .ok_or_else(|| ResourceError::NotFound("retention handle unavailable".to_owned()))?
             .phase = phase;
@@ -819,11 +823,12 @@ impl PluginArchiveObjectProvider for CountingArchive {
         object_id: &str,
     ) -> Result<Option<Vec<u8>>, CanwuError> {
         if namespace == RESOURCE_ARCHIVE_INDEX_DIRECTORY_NAMESPACE {
-            *self.lookups.borrow_mut() += 1;
+            *self.lookups.write().unwrap() += 1;
         }
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -1207,7 +1212,7 @@ fn same_place_transfer_leaves_fifteen_records_and_nine_lookups() {
     );
     let archive = CountingArchive::default();
     let mut canwu = Canwu::new_with_plugins(53, scenario, &plugins).expect("runtime");
-    canwu.set_plugin_archive_object_provider(Rc::new(archive.clone()));
+    canwu.set_plugin_archive_object_provider(Arc::new(archive.clone()));
     let mut run = Run {
         canwu,
         archive,
@@ -1677,13 +1682,13 @@ fn same_place_transfer_leaves_fifteen_records_and_nine_lookups() {
     from_resource_snapshot_json_with_archive_store(
         &snapshot,
         &plugins,
-        Rc::new(run.archive.clone()),
+        Arc::new(run.archive.clone()),
     )
     .expect("restore");
     let replayed = replay_resource_from_journal_with_archive_store(
         &plugins,
         &run.canwu.replay_journal(),
-        Rc::new(run.archive.clone()),
+        Arc::new(run.archive.clone()),
     )
     .expect("exact replay");
     assert_eq!(replayed.snapshot_json().expect("replay snapshot"), snapshot);

@@ -73,10 +73,9 @@ use canwu_resource::{
     resource_operation_outcome, resource_state,
 };
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 const MONTH: SimDuration = SimDuration::days(30);
 const DAY: SimDuration = SimDuration::days(1);
@@ -166,22 +165,30 @@ struct GrainArchiveBundleV1 {
     available: bool,
 }
 
-#[derive(Clone)]
+/// The harness's archive store. It is shared by the run, its forks, and the
+/// harness, and a fork may move to another thread, so it locks its maps.
 struct GrainArchiveStore {
-    objects: RefCell<BTreeMap<(String, String), Vec<u8>>>,
-    retention: RefCell<BTreeMap<String, ResourceArchiveRetentionHandleV1>>,
+    objects: Mutex<BTreeMap<(String, String), Vec<u8>>>,
+    retention: Mutex<BTreeMap<String, ResourceArchiveRetentionHandleV1>>,
     package_retention:
-        RefCell<BTreeMap<String, canwu_force_supply_reference::PackageArchiveRetentionHandleV1>>,
-    available: RefCell<bool>,
+        Mutex<BTreeMap<String, canwu_force_supply_reference::PackageArchiveRetentionHandleV1>>,
+    available: Mutex<bool>,
+}
+
+/// Locks one map of the store. A panic while a lock was held leaves the map
+/// whole (each write is one insert or one assignment), so a poisoned lock is
+/// still read.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Default for GrainArchiveStore {
     fn default() -> Self {
         Self {
-            objects: RefCell::new(BTreeMap::new()),
-            retention: RefCell::new(BTreeMap::new()),
-            package_retention: RefCell::new(BTreeMap::new()),
-            available: RefCell::new(true),
+            objects: Mutex::new(BTreeMap::new()),
+            retention: Mutex::new(BTreeMap::new()),
+            package_retention: Mutex::new(BTreeMap::new()),
+            available: Mutex::new(true),
         }
     }
 }
@@ -189,9 +196,7 @@ impl Default for GrainArchiveStore {
 impl GrainArchiveStore {
     fn bundle(&self) -> GrainArchiveBundleV1 {
         GrainArchiveBundleV1 {
-            objects: self
-                .objects
-                .borrow()
+            objects: lock(&self.objects)
                 .iter()
                 .map(|((namespace, object_id), bytes)| GrainArchiveObjectV1 {
                     namespace: namespace.clone(),
@@ -199,29 +204,29 @@ impl GrainArchiveStore {
                     bytes: bytes.clone(),
                 })
                 .collect(),
-            retention: self.retention.borrow().clone(),
-            package_retention: self.package_retention.borrow().clone(),
-            available: *self.available.borrow(),
+            retention: lock(&self.retention).clone(),
+            package_retention: lock(&self.package_retention).clone(),
+            available: *lock(&self.available),
         }
     }
 
     fn from_bundle(bundle: GrainArchiveBundleV1) -> Self {
         Self {
-            objects: RefCell::new(
+            objects: Mutex::new(
                 bundle
                     .objects
                     .into_iter()
                     .map(|object| ((object.namespace, object.object_id), object.bytes))
                     .collect(),
             ),
-            retention: RefCell::new(bundle.retention),
-            package_retention: RefCell::new(bundle.package_retention),
-            available: RefCell::new(bundle.available),
+            retention: Mutex::new(bundle.retention),
+            package_retention: Mutex::new(bundle.package_retention),
+            available: Mutex::new(bundle.available),
         }
     }
 
     fn require_available(&self) -> Result<(), ResourceError> {
-        if *self.available.borrow() {
+        if *lock(&self.available) {
             Ok(())
         } else {
             Err(ResourceError::Capacity(
@@ -241,9 +246,7 @@ impl canwu_force_supply_reference::PackageArchiveStore for GrainArchiveStore {
         self.require_available().map_err(|error| {
             CanwuError::new(canwu_api::ErrorCode::InvalidArchive, error.to_string())
         })?;
-        self.objects
-            .borrow_mut()
-            .insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
+        lock(&self.objects).insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
         Ok(())
     }
 
@@ -255,9 +258,7 @@ impl canwu_force_supply_reference::PackageArchiveStore for GrainArchiveStore {
         self.require_available().map_err(|error| {
             CanwuError::new(canwu_api::ErrorCode::InvalidArchive, error.to_string())
         })?;
-        Ok(self
-            .objects
-            .borrow()
+        Ok(lock(&self.objects)
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -266,9 +267,7 @@ impl canwu_force_supply_reference::PackageArchiveStore for GrainArchiveStore {
         &self,
         handle: &canwu_force_supply_reference::PackageArchiveRetentionHandleV1,
     ) -> Result<(), CanwuError> {
-        self.package_retention
-            .borrow_mut()
-            .insert(handle.id.clone(), handle.clone());
+        lock(&self.package_retention).insert(handle.id.clone(), handle.clone());
         Ok(())
     }
 
@@ -277,14 +276,14 @@ impl canwu_force_supply_reference::PackageArchiveStore for GrainArchiveStore {
         handle_id: &str,
     ) -> Result<Option<canwu_force_supply_reference::PackageArchiveRetentionHandleV1>, CanwuError>
     {
-        Ok(self.package_retention.borrow().get(handle_id).cloned())
+        Ok(lock(&self.package_retention).get(handle_id).cloned())
     }
 
     fn finalize_package_archive_retention(
         &self,
         finalized: &canwu_force_supply_reference::PackageArchiveRetentionHandleV1,
     ) -> Result<(), CanwuError> {
-        let mut handles = self.package_retention.borrow_mut();
+        let mut handles = lock(&self.package_retention);
         let handle = handles.get_mut(&finalized.id).ok_or_else(|| {
             CanwuError::new(
                 canwu_api::ErrorCode::InvalidArchive,
@@ -325,9 +324,7 @@ impl ResourceArchiveStore for GrainArchiveStore {
         bytes: &[u8],
     ) -> Result<(), ResourceError> {
         self.require_available()?;
-        self.objects
-            .borrow_mut()
-            .insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
+        lock(&self.objects).insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
         Ok(())
     }
 
@@ -337,9 +334,7 @@ impl ResourceArchiveStore for GrainArchiveStore {
         object_id: &str,
     ) -> Result<Option<Vec<u8>>, ResourceError> {
         self.require_available()?;
-        Ok(self
-            .objects
-            .borrow()
+        Ok(lock(&self.objects)
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -349,9 +344,7 @@ impl ResourceArchiveStore for GrainArchiveStore {
         handle: &ResourceArchiveRetentionHandleV1,
     ) -> Result<(), ResourceError> {
         self.require_available()?;
-        self.retention
-            .borrow_mut()
-            .insert(handle.id.clone(), handle.clone());
+        lock(&self.retention).insert(handle.id.clone(), handle.clone());
         Ok(())
     }
 
@@ -361,7 +354,7 @@ impl ResourceArchiveStore for GrainArchiveStore {
         phase: ResourceArchiveRetentionPhaseV1,
     ) -> Result<(), ResourceError> {
         self.require_available()?;
-        let mut retention = self.retention.borrow_mut();
+        let mut retention = lock(&self.retention);
         let handle = retention.get_mut(handle_id).ok_or_else(|| {
             ResourceError::NotFound("grain archive retention handle is unavailable".to_owned())
         })?;
@@ -371,9 +364,12 @@ impl ResourceArchiveStore for GrainArchiveStore {
 }
 
 /// Real Canwu-backed grain integration harness.
+///
+/// It is `Send`. A [`fork`](Self::fork) shares the harness's archive store,
+/// including its availability flag.
 pub struct GrainHarness {
     canwu: Canwu,
-    archive_store: Rc<GrainArchiveStore>,
+    archive_store: Arc<GrainArchiveStore>,
     economy: LocalEconomyId,
     force: ReferenceForceId,
     grain_revision: canwu_resource::ResourceDefinitionRevisionId,
@@ -710,7 +706,7 @@ impl GrainHarness {
             force_state.into_initial_record()?,
         ]);
         let mut canwu = new_canwu(0x0047_5241_494e, scenario)?;
-        let archive_store = Rc::new(GrainArchiveStore::default());
+        let archive_store = Arc::new(GrainArchiveStore::default());
         canwu.set_plugin_archive_object_provider(archive_store.clone());
         register_grain_decision_controller(&mut canwu)?;
         Ok(Self {
@@ -741,7 +737,9 @@ impl GrainHarness {
     /// drive archive commits themselves.
     #[doc(hidden)]
     #[must_use]
-    pub fn archive_store(&self) -> Rc<dyn canwu_force_supply_reference::PackageArchiveStore> {
+    pub fn archive_store(
+        &self,
+    ) -> Arc<dyn canwu_force_supply_reference::PackageArchiveStore + Send + Sync> {
         self.archive_store.clone()
     }
 
@@ -769,7 +767,7 @@ impl GrainHarness {
     pub fn from_snapshot_json(json: &str) -> Result<Self, GrainLoopError> {
         let saved: GrainHarnessSnapshotV1 =
             serde_json::from_str(json).map_err(|error| GrainLoopError::Canwu(error.to_string()))?;
-        let archive_store = Rc::new(GrainArchiveStore::from_bundle(saved.archive));
+        let archive_store = Arc::new(GrainArchiveStore::from_bundle(saved.archive));
         let mut canwu = load_snapshot(&saved.canwu_snapshot_json)?;
         canwu.set_plugin_archive_object_provider(archive_store.clone());
         canwu_resource::validate_resource_runtime_with_archive_store(
@@ -788,7 +786,7 @@ impl GrainHarness {
     pub fn replay_from_journal_json(json: &str) -> Result<Self, GrainLoopError> {
         let saved: GrainHarnessJournalV1 =
             serde_json::from_str(json).map_err(|error| GrainLoopError::Canwu(error.to_string()))?;
-        let archive_store = Rc::new(GrainArchiveStore::from_bundle(saved.archive));
+        let archive_store = Arc::new(GrainArchiveStore::from_bundle(saved.archive));
         let canwu = replay_journal(&saved.canwu_replay_journal_json, archive_store.clone())?;
         canwu_resource::validate_resource_runtime_with_archive_store(
             &canwu,
@@ -805,11 +803,17 @@ impl GrainHarness {
 
     #[must_use]
     pub fn archive_object_count(&self) -> usize {
-        self.archive_store.objects.borrow().len()
+        lock(&self.archive_store.objects).len()
     }
 
+    /// Makes the harness's archive store available or unavailable to every
+    /// load and store.
+    ///
+    /// The store and this flag are shared with every fork of the harness, so
+    /// toggling it while a fork runs on another thread changes that fork's
+    /// loads too, at a point that depends on thread timing.
     pub fn set_archive_storage_available(&mut self, available: bool) {
-        *self.archive_store.available.borrow_mut() = available;
+        *lock(&self.archive_store.available) = available;
     }
 
     /// Test hook: once a requisition lease is active, resolve one more grain
@@ -907,7 +911,7 @@ impl GrainHarness {
             .map(|account| account.resource_revision.clone())
             .ok_or_else(|| GrainLoopError::Missing("army account".to_owned()))?;
         let definition = &resources.definitions[&grain_revision];
-        let archive_store = Rc::new(GrainArchiveStore::default());
+        let archive_store = Arc::new(GrainArchiveStore::default());
         canwu.set_plugin_archive_object_provider(archive_store.clone());
         Ok(Self {
             canwu,
@@ -3795,7 +3799,7 @@ fn load_snapshot(json: &str) -> Result<Canwu, CanwuError> {
     Canwu::from_snapshot_json_with_plugins(json, &[&resource, &economy, &force])
 }
 
-fn replay_journal(json: &str, archive_store: Rc<GrainArchiveStore>) -> Result<Canwu, CanwuError> {
+fn replay_journal(json: &str, archive_store: Arc<GrainArchiveStore>) -> Result<Canwu, CanwuError> {
     let economy_kind = economy_reference_runtime_reference().into_untyped().kind;
     let force_kind = force_supply_runtime_reference().into_untyped().kind;
     let resource = ResourcePlugin::new([economy_kind, force_kind]);

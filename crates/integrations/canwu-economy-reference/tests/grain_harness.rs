@@ -18,7 +18,7 @@ use canwu_resource::{
     ResourceTerminalArchivePayloadV1, ResourceTerminalRecordKeyV1, ResourceTransferId,
     archived_resource_operation_outcome, archived_resource_terminal_record, resource_state,
 };
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// Reads the resource archive through the archive provider the runtime holds.
 struct RuntimeArchive<'a>(&'a canwu_api::Canwu);
@@ -482,7 +482,14 @@ fn snapshot_checkpoint_journal_and_fork_continue_identically() {
         replayed
             .advance_month(decision)
             .expect("replayed continuation");
-        forked.advance_month(decision).expect("forked continuation");
+        // The fork, with the archive store it shares, runs each month on
+        // another thread.
+        forked = std::thread::spawn(move || {
+            forked.advance_month(decision).expect("forked continuation");
+            forked
+        })
+        .join()
+        .expect("the forked month runs on another thread");
     }
     for harness in [&original, &loaded, &replayed, &forked] {
         let ticket = harness
@@ -832,13 +839,13 @@ fn a_force_runtime_citing_archived_resource_outcomes_restores_with_its_archive_o
     canwu_force_supply_reference::from_force_supply_snapshot_json(
         &snapshot,
         &plugins,
-        Rc::new(ArchiveObjectsOf(canwu.fork())),
+        Arc::new(ArchiveObjectsOf(canwu.fork())),
     )
     .expect("the force runtime restores with its archive");
     let Err(error) = canwu_force_supply_reference::from_force_supply_snapshot_json(
         &snapshot,
         &plugins,
-        Rc::new(()),
+        Arc::new(()),
     ) else {
         panic!("an archived citation is not taken on trust");
     };
@@ -850,14 +857,14 @@ fn a_force_runtime_citing_archived_resource_outcomes_restores_with_its_archive_o
     canwu_force_supply_reference::from_force_supply_checkpoint_journal(
         checkpoint.clone(),
         &plugins,
-        Rc::new(ArchiveObjectsOf(canwu.fork())),
+        Arc::new(ArchiveObjectsOf(canwu.fork())),
     )
     .expect("the checkpoint restores with its archive");
     assert!(
         canwu_force_supply_reference::from_force_supply_checkpoint_journal(
             checkpoint,
             &plugins,
-            Rc::new(()),
+            Arc::new(()),
         )
         .is_err()
     );

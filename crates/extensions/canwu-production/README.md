@@ -130,7 +130,9 @@ technology bodies, and verifies output acknowledgement identity and digest
 before replacing live authority. Each compacted resource record costs one
 index path and one blob, however long the resource archive chain is. The
 provider-free helpers reject archive-bearing candidates rather than silently
-accepting an unauthenticated root. Terminal production records retain exact
+accepting an unauthenticated root. The `_with_archives` restores take each
+store as `Arc<dyn ... + Send + Sync>` and attach both to the run: the run and
+its forks share them, and a fork may move to another thread. Terminal production records retain exact
 identity/digest receipts; this crate does not reconstruct missing material
 evidence or invent a migration.
 

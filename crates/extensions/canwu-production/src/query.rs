@@ -10,11 +10,11 @@ use canwu_api::{
     KnowledgeHolderRef, KnowledgeSubjectTarget, PluginArchiveObjectProvider, SimDuration, SimTime,
     canonical_hash,
 };
-use std::rc::Rc;
+use std::sync::Arc;
 
 struct ProductionRuntimeArchiveProvider {
-    production: Rc<dyn crate::ProductionArchiveStore>,
-    resource: Rc<dyn canwu_resource::ResourceArchiveStore>,
+    production: Arc<dyn crate::ProductionArchiveStore + Send + Sync>,
+    resource: Arc<dyn canwu_resource::ResourceArchiveStore + Send + Sync>,
 }
 
 impl PluginArchiveObjectProvider for ProductionRuntimeArchiveProvider {
@@ -36,10 +36,10 @@ impl PluginArchiveObjectProvider for ProductionRuntimeArchiveProvider {
 }
 
 fn runtime_archive_provider(
-    production: Rc<dyn crate::ProductionArchiveStore>,
-    resource: Rc<dyn canwu_resource::ResourceArchiveStore>,
-) -> Rc<dyn PluginArchiveObjectProvider> {
-    Rc::new(ProductionRuntimeArchiveProvider {
+    production: Arc<dyn crate::ProductionArchiveStore + Send + Sync>,
+    resource: Arc<dyn canwu_resource::ResourceArchiveStore + Send + Sync>,
+) -> Arc<dyn PluginArchiveObjectProvider + Send + Sync> {
+    Arc::new(ProductionRuntimeArchiveProvider {
         production,
         resource,
     })
@@ -1159,11 +1159,16 @@ pub fn from_production_snapshot_json(
     Ok(canwu)
 }
 
+/// Restores a run from snapshot JSON, checks its production state against
+/// both archives, and attaches them as the run's plugin archive provider.
+///
+/// The run and its forks share both stores, and a fork may move to another
+/// thread, so each store must be `Send + Sync`.
 pub fn from_production_snapshot_json_with_archives(
     json: &str,
     plugins: &[&dyn canwu_api::SimulationPlugin],
-    production_archive: Rc<dyn crate::ProductionArchiveStore>,
-    resource_archive: Rc<dyn canwu_resource::ResourceArchiveStore>,
+    production_archive: Arc<dyn crate::ProductionArchiveStore + Send + Sync>,
+    resource_archive: Arc<dyn canwu_resource::ResourceArchiveStore + Send + Sync>,
 ) -> Result<Canwu, CanwuError> {
     let mut canwu = Canwu::from_snapshot_json_with_plugins(json, plugins)?;
     validate_production_runtime_with_archives(
@@ -1187,11 +1192,15 @@ pub fn from_production_checkpoint_journal(
     Ok(canwu)
 }
 
+/// Restores a run from a checkpoint journal, checks its production state
+/// against both archives, and attaches them as the run's plugin archive
+/// provider. Each store must be `Send + Sync`, as for
+/// [`from_production_snapshot_json_with_archives`].
 pub fn from_production_checkpoint_journal_with_archives(
     bundle: canwu_api::CheckpointJournal,
     plugins: &[&dyn canwu_api::SimulationPlugin],
-    production_archive: Rc<dyn crate::ProductionArchiveStore>,
-    resource_archive: Rc<dyn canwu_resource::ResourceArchiveStore>,
+    production_archive: Arc<dyn crate::ProductionArchiveStore + Send + Sync>,
+    resource_archive: Arc<dyn canwu_resource::ResourceArchiveStore + Send + Sync>,
 ) -> Result<Canwu, CanwuError> {
     let mut canwu = Canwu::from_checkpoint_journal_with_plugins(bundle, plugins)?;
     validate_production_runtime_with_archives(
@@ -1215,14 +1224,18 @@ pub fn replay_production_from_journal(
     Ok(canwu)
 }
 
+/// Replays a run with both archives attached as its plugin archive provider
+/// from the first boundary, then checks its production state against them.
+/// Each store must be `Send + Sync`, as for
+/// [`from_production_snapshot_json_with_archives`].
 pub fn replay_production_from_journal_with_archives(
     plugins: &[&dyn canwu_api::SimulationPlugin],
     journal: &canwu_api::ReplayJournal,
-    production_archive: Rc<dyn crate::ProductionArchiveStore>,
-    resource_archive: Rc<dyn canwu_resource::ResourceArchiveStore>,
+    production_archive: Arc<dyn crate::ProductionArchiveStore + Send + Sync>,
+    resource_archive: Arc<dyn canwu_resource::ResourceArchiveStore + Send + Sync>,
 ) -> Result<Canwu, CanwuError> {
-    let production_for_validation = Rc::clone(&production_archive);
-    let resource_for_validation = Rc::clone(&resource_archive);
+    let production_for_validation = Arc::clone(&production_archive);
+    let resource_for_validation = Arc::clone(&resource_archive);
     let archive_provider = runtime_archive_provider(production_archive, resource_archive);
     let canwu =
         Canwu::replay_from_journal_with_archive_provider(plugins, journal, archive_provider)?;

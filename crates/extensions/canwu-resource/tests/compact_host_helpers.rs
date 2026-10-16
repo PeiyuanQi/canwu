@@ -13,9 +13,9 @@ use canwu_api::{
     KnowledgeHolderRef, PersonId, PluginArchiveObjectProvider, Scenario, SimDuration, SimTime,
 };
 use canwu_resource::*;
-use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 /// Stored archive objects by namespace and object id.
 type ArchiveObjects = BTreeMap<(String, String), Vec<u8>>;
@@ -23,8 +23,8 @@ type ArchiveObjects = BTreeMap<(String, String), Vec<u8>>;
 /// A content-addressed archive store shared by the host and the runtime.
 #[derive(Clone, Default)]
 struct MemoryArchive {
-    objects: Rc<RefCell<ArchiveObjects>>,
-    retention: Rc<RefCell<BTreeMap<String, ResourceArchiveRetentionHandleV1>>>,
+    objects: Arc<RwLock<ArchiveObjects>>,
+    retention: Arc<RwLock<BTreeMap<String, ResourceArchiveRetentionHandleV1>>>,
 }
 
 impl ResourceArchiveStore for MemoryArchive {
@@ -35,7 +35,8 @@ impl ResourceArchiveStore for MemoryArchive {
         bytes: &[u8],
     ) -> Result<(), ResourceError> {
         self.objects
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
         Ok(())
     }
@@ -47,7 +48,8 @@ impl ResourceArchiveStore for MemoryArchive {
     ) -> Result<Option<Vec<u8>>, ResourceError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -57,7 +59,8 @@ impl ResourceArchiveStore for MemoryArchive {
         handle: &ResourceArchiveRetentionHandleV1,
     ) -> Result<(), ResourceError> {
         self.retention
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert(handle.id.clone(), handle.clone());
         Ok(())
     }
@@ -68,7 +71,8 @@ impl ResourceArchiveStore for MemoryArchive {
         phase: ResourceArchiveRetentionPhaseV1,
     ) -> Result<(), ResourceError> {
         self.retention
-            .borrow_mut()
+            .write()
+            .unwrap()
             .get_mut(handle_id)
             .ok_or_else(|| ResourceError::NotFound("retention handle unavailable".to_owned()))?
             .phase = phase;
@@ -84,7 +88,8 @@ impl PluginArchiveObjectProvider for MemoryArchive {
     ) -> Result<Option<Vec<u8>>, CanwuError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -207,10 +212,10 @@ fn runtime() -> Canwu {
 fn resource_helpers_drive_a_sealed_compact_run_as_a_full_one() {
     let full_archive = MemoryArchive::default();
     let mut full = runtime();
-    full.set_plugin_archive_object_provider(Rc::new(full_archive.clone()));
+    full.set_plugin_archive_object_provider(Arc::new(full_archive.clone()));
     let compact_archive = MemoryArchive::default();
     let mut compact = runtime().into_compacted().expect("compact runtime");
-    compact.set_plugin_archive_object_provider(Rc::new(compact_archive.clone()));
+    compact.set_plugin_archive_object_provider(Arc::new(compact_archive.clone()));
 
     let full_receipts = drive(&mut full, &full_archive);
     let compact_receipts = drive(&mut compact, &compact_archive);
@@ -218,8 +223,8 @@ fn resource_helpers_drive_a_sealed_compact_run_as_a_full_one() {
     assert_eq!(compact.checkpoint_hash(), full.checkpoint_hash());
     assert_eq!(state(&compact), state(&full));
     assert_eq!(
-        *compact_archive.objects.borrow(),
-        *full_archive.objects.borrow()
+        *compact_archive.objects.read().unwrap(),
+        *full_archive.objects.read().unwrap()
     );
     assert!(compact.boundaries().len() < full.boundaries().len());
     validate_resource_runtime_with_archive_store(&compact, &compact_archive)
@@ -230,7 +235,7 @@ fn resource_helpers_drive_a_sealed_compact_run_as_a_full_one() {
 fn a_continuation_restored_resource_run_continues_in_lockstep() {
     let archive = MemoryArchive::default();
     let mut full = runtime();
-    full.set_plugin_archive_object_provider(Rc::new(archive.clone()));
+    full.set_plugin_archive_object_provider(Arc::new(archive.clone()));
     let mut full_receipts = Vec::new();
     let first = allocate(&mut full, "continuation:allocate:a", &mut full_receipts);
     allocate(&mut full, "continuation:allocate:b", &mut full_receipts);
@@ -266,7 +271,7 @@ fn a_continuation_restored_resource_run_continues_in_lockstep() {
         &[&ResourcePlugin::default()],
     )
     .expect("the resource run restores");
-    restored.set_plugin_archive_object_provider(Rc::new(archive.clone()));
+    restored.set_plugin_archive_object_provider(Arc::new(archive.clone()));
     assert_eq!(restored.checkpoint_hash(), full.checkpoint_hash());
 
     full_receipts.extend(full.settle_at(at));

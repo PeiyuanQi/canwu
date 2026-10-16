@@ -260,6 +260,23 @@ and [`after`](baselines/2026-10-15-journal-stream-hash-after-elapsed.json).
 The figures are interpreted in
 [`docs/proposals/continuation-checkpoint.md`](../docs/proposals/continuation-checkpoint.md).
 
+The 2026-10-15 send-runtime baselines compare the `release/0.16.0` base at
+`9e5519c` (plugin archive provider held as `Rc`) with the change that holds it
+as `Arc<dyn PluginArchiveObjectProvider + Send + Sync>`, at 8 due systems and
+0, 1,000, and 10,000 retained keyed draws. The before build is a `git archive`
+export of the base built in its own `CARGO_TARGET_DIR`; both
+builds use the same harness source. The allocation files come from one run of
+each build:
+[`before`](baselines/2026-10-15-send-runtime-before-allocations.json) and
+[`after`](baselines/2026-10-15-send-runtime-after-allocations.json). The
+elapsed builds were run alternately five times each, with other builds on the
+machine; each file merges the samples of its five runs, and its
+`method.variant` names the build:
+[`before`](baselines/2026-10-15-send-runtime-before-elapsed.json) and
+[`after`](baselines/2026-10-15-send-runtime-after-elapsed.json). The figures
+are interpreted in
+[`docs/proposals/send-runtime.md`](../docs/proposals/send-runtime.md).
+
 ## Continuation profile
 
 The standalone `continuation-profile` binary compares what a save costs as a

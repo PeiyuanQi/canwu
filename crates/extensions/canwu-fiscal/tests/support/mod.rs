@@ -42,8 +42,8 @@ use canwu_fiscal::{
     fiscal_action_command, fiscal_action_target, fiscal_reports, fiscal_target_revision,
 };
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::RwLock;
 
 pub const PRINCIPAL: PersonId = PersonId::new(1);
 pub const DEPUTY: PersonId = PersonId::new(2);
@@ -1188,8 +1188,8 @@ pub fn refusals(canwu: &Canwu) -> Vec<String> {
 /// the latest phase of every retention handle.
 #[derive(Default)]
 pub struct MemoryArchiveStore {
-    objects: RefCell<BTreeMap<(String, String), Vec<u8>>>,
-    handles: RefCell<BTreeMap<String, FiscalArchiveRetentionPhaseV1>>,
+    objects: RwLock<BTreeMap<(String, String), Vec<u8>>>,
+    handles: RwLock<BTreeMap<String, FiscalArchiveRetentionPhaseV1>>,
 }
 
 impl MemoryArchiveStore {
@@ -1197,7 +1197,8 @@ impl MemoryArchiveStore {
     #[must_use]
     pub fn count(&self, namespace: &str) -> usize {
         self.objects
-            .borrow()
+            .read()
+            .unwrap()
             .keys()
             .filter(|(stored, _)| stored == namespace)
             .count()
@@ -1206,7 +1207,7 @@ impl MemoryArchiveStore {
     /// The phase the store last recorded for one retention handle.
     #[must_use]
     pub fn handle_phase(&self, handle_id: &str) -> Option<FiscalArchiveRetentionPhaseV1> {
-        self.handles.borrow().get(handle_id).copied()
+        self.handles.read().unwrap().get(handle_id).copied()
     }
 }
 
@@ -1218,7 +1219,8 @@ impl FiscalArchiveStore for MemoryArchiveStore {
         bytes: &[u8],
     ) -> Result<(), FiscalArchiveError> {
         self.objects
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert((namespace.to_owned(), object_id.to_owned()), bytes.to_vec());
         Ok(())
     }
@@ -1230,7 +1232,8 @@ impl FiscalArchiveStore for MemoryArchiveStore {
     ) -> Result<Option<Vec<u8>>, FiscalArchiveError> {
         Ok(self
             .objects
-            .borrow()
+            .read()
+            .unwrap()
             .get(&(namespace.to_owned(), object_id.to_owned()))
             .cloned())
     }
@@ -1240,7 +1243,8 @@ impl FiscalArchiveStore for MemoryArchiveStore {
         handle: &FiscalArchiveRetentionHandleV1,
     ) -> Result<(), FiscalArchiveError> {
         self.handles
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert(handle.handle_id.clone(), handle.phase);
         Ok(())
     }
@@ -1251,7 +1255,8 @@ impl FiscalArchiveStore for MemoryArchiveStore {
         phase: FiscalArchiveRetentionPhaseV1,
     ) -> Result<(), FiscalArchiveError> {
         self.handles
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert(handle_id.to_owned(), phase);
         Ok(())
     }
@@ -1290,7 +1295,7 @@ pub fn archive(
 /// and commit.
 #[derive(Default)]
 pub struct MemoryEvidenceArchive {
-    segments: RefCell<BTreeMap<String, EvidenceJournalSegment>>,
+    segments: RwLock<BTreeMap<String, EvidenceJournalSegment>>,
 }
 
 impl ArchiveProvider for MemoryEvidenceArchive {
@@ -1298,7 +1303,7 @@ impl ArchiveProvider for MemoryEvidenceArchive {
         &self,
         segment_id: &str,
     ) -> Result<Option<EvidenceJournalSegment>, CanwuError> {
-        Ok(self.segments.borrow().get(segment_id).cloned())
+        Ok(self.segments.read().unwrap().get(segment_id).cloned())
     }
 }
 
@@ -1314,7 +1319,7 @@ impl ArchiveStore for MemoryEvidenceArchive {
             .header
             .segment_id
             .clone();
-        self.segments.borrow_mut().insert(id, segment.clone());
+        self.segments.write().unwrap().insert(id, segment.clone());
         Ok(ArchiveStoreOutcome::Stored)
     }
 }
