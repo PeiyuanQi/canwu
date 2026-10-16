@@ -3,12 +3,13 @@
 
 use crate::model::{
     CompiledFiscalCatalog, EMPTY_PART_ENTRY, FISCAL_REPORT_ROWS_PER_PART, FiscalAmountEstimate,
-    FiscalCycleBook, FiscalHistoricalContext, FiscalHistoricalMode, FiscalJurisdiction,
-    FiscalObserver, FiscalProjection, FiscalReport, FiscalReportFact, FiscalReportPart,
-    FiscalReportRecord, FiscalReportRow, FiscalReportRowFact, FiscalReportSummary,
-    FiscalScopeBinding, FiscalState, FiscalTransitionCandidate, invalid,
+    FiscalCycleBook, FiscalCycleTotal, FiscalHistoricalContext, FiscalHistoricalMode,
+    FiscalJurisdiction, FiscalMechanism, FiscalObserver, FiscalProjection, FiscalReport,
+    FiscalReportFact, FiscalReportGranularity, FiscalReportPart, FiscalReportRecord,
+    FiscalReportRow, FiscalReportRowFact, FiscalReportSummary, FiscalScopeBinding, FiscalState,
+    FiscalTransitionCandidate, invalid, sum_report_totals,
 };
-use canwu_api::{CanwuError, SimTime, canonical_hash};
+use canwu_api::{CanwuError, EntityRef, SimTime, canonical_byte_hash};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -145,7 +146,44 @@ pub(crate) fn report_row(
 pub(crate) fn report_row_of_totals(
     row: u32,
     scope: &FiscalScopeBinding,
-    totals: &[crate::model::FiscalCycleTotal],
+    totals: &[FiscalCycleTotal],
+    confidence_per_mille: u16,
+) -> Option<FiscalReportRow> {
+    rendered_row(
+        row,
+        &scope.institution,
+        scope.mechanism,
+        &scope.id,
+        totals,
+        confidence_per_mille,
+    )
+}
+
+/// The row of an institution and mechanism whose books of the cycle sum to
+/// these totals: an institution row, with no scope.
+pub(crate) fn institution_row_of_totals(
+    row: u32,
+    institution: &EntityRef,
+    mechanism: FiscalMechanism,
+    totals: &[FiscalCycleTotal],
+    confidence_per_mille: u16,
+) -> Option<FiscalReportRow> {
+    rendered_row(
+        row,
+        institution,
+        mechanism,
+        "",
+        totals,
+        confidence_per_mille,
+    )
+}
+
+fn rendered_row(
+    row: u32,
+    institution: &EntityRef,
+    mechanism: FiscalMechanism,
+    scope_binding_id: &str,
+    totals: &[FiscalCycleTotal],
     confidence_per_mille: u16,
 ) -> Option<FiscalReportRow> {
     let facts: Vec<_> = totals
@@ -160,9 +198,9 @@ pub(crate) fn report_row_of_totals(
         .collect();
     (!facts.is_empty()).then(|| FiscalReportRow {
         row,
-        institution: scope.institution.clone(),
-        mechanism: scope.mechanism,
-        scope_binding_id: scope.id.clone(),
+        institution: institution.clone(),
+        mechanism,
+        scope_binding_id: scope_binding_id.to_owned(),
         facts,
     })
 }
@@ -170,17 +208,47 @@ pub(crate) fn report_row_of_totals(
 /// The entry an observer record keeps for a part with these rows: sixteen
 /// hexadecimal digits of the digest of the rows and two of their fact count,
 /// or [`EMPTY_PART_ENTRY`] for no rows.
-pub(crate) fn part_entry(rows: &[FiscalReportRow]) -> Result<String, CanwuError> {
+///
+/// The digest is over a compact binary encoding of the rendered rows, every
+/// field in order with each text length-delimited, built into `buffer`: the
+/// rows are encoded once, not as JSON, so that comparing a part costs a
+/// fraction of publishing it. It only decides whether to republish, so it is
+/// never stored outside the observer record.
+pub(crate) fn part_entry(rows: &[FiscalReportRow], buffer: &mut Vec<u8>) -> String {
     if rows.is_empty() {
-        return Ok(EMPTY_PART_ENTRY.to_owned());
+        return EMPTY_PART_ENTRY.to_owned();
     }
-    let digest = canonical_hash("canwu.fiscal.report-part.v1", &rows)?;
+    buffer.clear();
+    let text = |buffer: &mut Vec<u8>, value: &[u8]| {
+        buffer.extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
+        buffer.extend_from_slice(value);
+    };
+    for row in rows {
+        buffer.extend_from_slice(&row.row.to_le_bytes());
+        text(buffer, row.institution.to_string().as_bytes());
+        buffer.push(row.mechanism as u8);
+        text(buffer, row.scope_binding_id.as_bytes());
+        buffer.extend_from_slice(
+            &u32::try_from(row.facts.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        for fact in &row.facts {
+            text(buffer, fact.unit.as_bytes());
+            buffer.push(fact.payment_form as u8);
+            for amount in [&fact.assessed, &fact.collected, &fact.outstanding] {
+                buffer.extend_from_slice(&amount.minimum.to_le_bytes());
+                buffer.extend_from_slice(&amount.maximum.to_le_bytes());
+            }
+        }
+    }
+    let digest = canonical_byte_hash("canwu.fiscal.report-part.v2", buffer);
     let mut digest = digest[..16].to_owned();
     if digest == EMPTY_PART_ENTRY[..16] {
         digest.replace_range(15..16, "1");
     }
     let facts: usize = rows.iter().map(|row| row.facts.len()).sum();
-    Ok(format!("{digest}{:02x}", facts.min(0xff)))
+    format!("{digest}{:02x}", facts.min(0xff))
 }
 
 /// The part that holds row `row`.
@@ -197,9 +265,16 @@ pub(crate) fn parts_of(rows: u32) -> u32 {
 
 /// What one observer of a whole `state` is told as of `at`: the facts of
 /// every hot book of a visible institution's scope in each cycle the
-/// observer's report shows, labelled as [`FiscalReportFact::label`] says.
-/// This is what a complete report published from `state` assembles to (see
-/// [`assemble_fiscal_reports`]). `None` for an unknown or removed binding.
+/// observer's report shows, or, at
+/// [`crate::FiscalReportGranularity::Institution`], those facts summed per
+/// institution and mechanism, labelled as [`FiscalReportFact::label`] says.
+///
+/// This is what a complete report assembles to at the end of a boundary
+/// that published it, with `state` the fiscal records at the end of that
+/// boundary (see [`assemble_fiscal_reports`]). An `OnChange` report is
+/// published in every boundary that changes what it shows; an `Interval`
+/// report only at its due times, so between them it shows the records as of
+/// its `as_of` boundary. `None` for an unknown or removed binding.
 pub fn compute_projection(
     state: &FiscalState,
     observer_binding_id: &str,
@@ -232,23 +307,55 @@ fn observer_rows(
     observer: &FiscalObserver,
     cycle: &str,
 ) -> Result<Vec<FiscalReportRow>, CanwuError> {
+    let confidence = observer.binding.confidence_per_mille;
     let mut rows = Vec::new();
     for block in &observer.rows {
-        for ledger in state
+        let ledgers = state
             .ledgers
             .values()
-            .filter(|ledger| ledger.office == block.office)
-        {
-            let Some(book) = ledger.books.get(cycle) else {
-                continue;
-            };
-            if let Some(row) = report_row(
-                block.first_row.saturating_add(ledger.rank),
-                &ledger.scope,
-                book,
-                observer.binding.confidence_per_mille,
-            )? {
-                rows.push(row);
+            .filter(|ledger| ledger.office == block.office);
+        match observer.binding.granularity {
+            FiscalReportGranularity::Scope => {
+                for ledger in ledgers {
+                    let Some(book) = ledger.books.get(cycle) else {
+                        continue;
+                    };
+                    if let Some(row) = report_row(
+                        block.first_row.saturating_add(ledger.rank),
+                        &ledger.scope,
+                        book,
+                        confidence,
+                    )? {
+                        rows.push(row);
+                    }
+                }
+            }
+            FiscalReportGranularity::Institution => {
+                let mut sums = BTreeMap::<FiscalMechanism, Vec<FiscalCycleTotal>>::new();
+                for ledger in ledgers {
+                    if let Some(book) = ledger.books.get(cycle) {
+                        sum_report_totals(
+                            sums.entry(ledger.scope.mechanism).or_default(),
+                            &book.totals(ledger.scope.mechanism)?,
+                        );
+                    }
+                }
+                for (index, mechanism) in block.mechanisms.iter().enumerate() {
+                    let row = block
+                        .first_row
+                        .saturating_add(u32::try_from(index).unwrap_or(u32::MAX));
+                    if let Some(row) = sums.get(mechanism).and_then(|totals| {
+                        institution_row_of_totals(
+                            row,
+                            &block.institution,
+                            *mechanism,
+                            totals,
+                            confidence,
+                        )
+                    }) {
+                        rows.push(row);
+                    }
+                }
             }
         }
     }

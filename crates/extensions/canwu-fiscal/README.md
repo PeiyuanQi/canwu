@@ -273,35 +273,38 @@ makes the engine re-validate no other:
 | Kind | Identity | Holds |
 | --- | --- | --- |
 | `catalog` | `primary` | the compiled catalog, create-only |
-| `root` | `primary` | the historical context and its revision, the approved evidence kinds, the report-queue pages in use, the parked observers |
+| `root` | `primary` | the historical context and its revision, the approved evidence kinds, the earliest due time of the report queue, whether a queued entry is parked, and the parked rotation's cursor |
 | `archive` | `primary` | the fiscal archive head (`FiscalArchiveHeadV1`) |
-| `office` | `fiscal_office_key` of the institution | revision and outcome ring, authority and audit bindings, appointment policy and proposals, per hot cycle its hot-book count, partition keys, and archived totals, the cycle watermark, the scope count, the observers that see it |
+| `office` | `fiscal_office_key` of the institution | revision and outcome ring, authority and audit bindings, appointment policy and proposals, per hot cycle its hot-book count, partition keys, and archived totals, the cycle watermark, the scope count, the mechanisms of its scopes, the observers that see it with each one's first row, granularity, and cadence |
 | `ledger` | scope binding ID | the scope binding, its office key and rank, revision and outcome ring, adoptions, one `FiscalCycleBook` per hot accounting cycle, the cycle watermark |
 | `jurisdiction` | catalog region ID | revision and outcome ring, scope counts per mechanism, adoption counts per rule, transition candidates |
 | `observer` | observer binding ID | the binding, revision and outcome ring, its row layout, and its report bookkeeping (cycle slots and a digest per part) |
 | `directory` | `dir.` and 3 hex digits | the office of every binding, policy, and proposal ID whose digest names the bucket |
 | `index` | `index.`, the owner's digest, and a page number | the scopes of one office in rank order, or of one region, 1,024 to a page; create-only |
 | `report-queue` | `queue.` and 3 hex digits | the report work owed to every observer whose binding ID's digest names the page |
+| `report-schedule` | `primary` | each report-queue page's earliest due time and the pages that hold parked entries |
 
 `FiscalState` is the logical model and the authoring model: the root, the
-archive head, and the offices, ledgers, jurisdictions, observers, and report
-queue by key. Build one with `FiscalState::new` and the `add_*` helpers, and
-call `FiscalState::into_records(&catalog)`, which brings every derived field
-up to date (ranks, counts, candidates, office cycle bookkeeping, observer
-layouts), validates the state, and partitions it, the directory buckets, index
-pages, and queue pages included. `FiscalState::from_records` assembles the
-state from a set of records, and `audit_fiscal_records` (or
-`audit_fiscal_record_set`) checks that a run's records are exactly the
-partition of a valid state, every cross-record invariant included. Activation
-runs that audit on every new scenario and restored snapshot, so a record set
-that is not exactly a valid partition, a derived field out of step included,
-is refused when the run is created. A directory bucket or report-queue page
-left empty by an earlier partition is accepted. `load_fiscal_state` assembles
+archive head, the offices, ledgers, jurisdictions, observers, and report
+queue by key, and the report schedule. Build one with `FiscalState::new` and
+the `add_*` helpers, and call `FiscalState::into_records(&catalog)`, which
+brings every derived field up to date (ranks, counts, candidates, office
+cycle bookkeeping, observer layouts, the report schedule's page due times
+and the root's earliest due time), validates the state, and partitions it,
+the directory buckets, index pages, and queue pages included.
+`FiscalState::from_records` assembles the state from a set of records, and
+`audit_fiscal_records` (or `audit_fiscal_record_set`) checks that a run's
+records are exactly the partition of a valid state, every cross-record
+invariant included. Activation runs that audit on every new scenario and
+restored snapshot, so a record set that is not exactly a valid partition, a
+derived field out of step included, is refused when the run is created. A
+directory bucket or report-queue page left empty by an earlier partition is
+accepted. `load_fiscal_state` assembles
 a run's committed state for a host, at a cost proportional to the fiscal
 records. Read single records with `fiscal_root_reference`,
 `fiscal_office_reference`, `fiscal_ledger_reference`,
-`fiscal_jurisdiction_reference`, `fiscal_observer_reference`, and
-`fiscal_archive_reference`.
+`fiscal_jurisdiction_reference`, `fiscal_observer_reference`,
+`fiscal_archive_reference`, and `fiscal_report_schedule_reference`.
 
 Every host helper takes either run handle, `Canwu` or a sealed
 `CompactedCanwu`, through `canwu_api::CanwuRun`: `fiscal_action_target`,
@@ -316,7 +319,8 @@ A boundary decodes only the records its packets touch: a ledger or office read
 when an entry names it, a directory bucket to find the office of a binding, an
 index page to find a scope by rank. Every record it writes is validated on its
 own before it is proposed, at a cost proportional to the record. A boundary
-that admits no fiscal ingress, and owes no report, reads only the root.
+that admits no fiscal ingress, before the root's earliest due time and with
+no queued entry parked, reads only the root.
 
 Every record has a byte budget, held at settlement less
 `FISCAL_RECORD_RING_RESERVE_BYTES` (4 KiB), which keeps room for the record's
@@ -431,23 +435,58 @@ institution deciding as a body, never by an acting actor; a binding with no
 controlling institution cannot change, and a removed one takes no further
 action (`FISCAL_OBSERVER_REMOVED`). A state holds at most
 `MAX_FISCAL_OBSERVERS` (65,536) bindings, each seeing at most 4,096
-institutions and 16,384 scope rows, and an institution is seen by at most
-4,096.
+institutions and 16,384 rows, and an institution is seen by at most 4,096.
 
-An observer's report is laid out by scope rows: one row for each scope of the
-institutions it sees, in the order of its binding's institutions and each
-institution's scopes in rank (ID) order. Each hot cycle the report shows takes
-one of `MAX_FISCAL_REPORT_CYCLE_SLOTS` (64) slots, and a cycle's rows are cut
-into parts of `FISCAL_REPORT_ROWS_PER_PART` (16) rows. A row lists the facts
-of one scope's book of the cycle (one per unit and payment form); a scope
-with no book of the cycle has no row. Read reports with
-`fiscal_reports(&viewer)`, which returns one `FiscalReport` for each observer
-binding whose report the viewer's holder holds, keyed by binding ID, or, as a
-trusted host and for any holder, a government included, with
-`fiscal_reports_of_holder`; its `projection` is what `compute_projection`
-derives from the fiscal state at its `as_of`. A report record on its own
-(`FiscalReportRecord`, version 4 of the `fiscal_report` knowledge schema) is
-the summary or one part, not a report.
+A binding's `granularity` says what a row of its report is, and its
+`cadence` when the report is due; both default (`Scope`, `OnChange`), so a
+scenario that names neither behaves as before, and neither changes with
+`RebindObserver`. Set them before `FiscalState::add_observer`, which queues
+the binding's first report at its first due time.
+
+- **`FiscalReportGranularity::Scope`**: one row for each scope of the
+  institutions the binding sees, in the order of its institutions and each
+  institution's scopes in rank (ID) order; a row lists the facts of one
+  scope's book of the cycle (one per unit and payment form).
+- **`FiscalReportGranularity::Institution`**: one row for each institution
+  it sees and each mechanism of the institution's scopes (the office lists
+  them), whose facts are the institution's hot books of the cycle of that
+  mechanism summed per unit and payment form (each amount saturating at
+  `u64::MAX`, so a sum never fails a boundary), rendered at the binding's
+  confidence. A court of 21 institutions of one mechanism has 21 rows, two
+  parts a cycle, whatever the number of scopes. Summing reads each book of
+  the institution's scopes once per boundary that publishes such a part. A
+  part of institution rows, summed over up to thousands of books, cannot cite
+  each ledger version within the relations a knowledge record may carry: it
+  cites the current version of each office its rows belong to and counts the
+  books it summed in `books_summed`, which is weaker provenance than a scope
+  part's ledger citations.
+- **`FiscalReportCadence::OnChange`**: the report is published in the
+  boundary that changes something it shows.
+- **`FiscalReportCadence::Interval { every, offset }`**: the report is due
+  at `offset + k * every` minutes after `SimTime::EPOCH` (`k >= 0`), and is
+  published by the first boundary at or after each due time that runs the
+  report system, with what changed since its last publication; it is never
+  published on change, so between due times it shows the records as of its
+  `as_of` boundary. At a due time at which nothing changed, its summary alone
+  is published once the report has been published at least once, so its
+  `as_of` advances and silence never means "no report". Use
+  `FiscalReportCadence::staggered(every, index, stride)` to spread offsets:
+  thirty-day intervals with a stride of 30 put observer `i` on day
+  `i % 30`. `every` is a fixed duration, so a calendar host uses `OnChange`,
+  an interval close to its calendar, or rebinds.
+
+Each hot cycle the report shows takes one of `MAX_FISCAL_REPORT_CYCLE_SLOTS`
+(64) slots, and a cycle's rows are cut into parts of
+`FISCAL_REPORT_ROWS_PER_PART` (16) rows; a row with no book of the cycle is
+left out. Read reports with `fiscal_reports(&viewer)`, which returns one
+`FiscalReport` for each observer binding whose report the viewer's holder
+holds, keyed by binding ID, or, as a trusted host and for any holder, a
+government included, with `fiscal_reports_of_holder`. A complete report's
+`projection` is what `compute_projection` derives from the fiscal state of
+the boundary that published it, at its `as_of`. A report record on its own
+(`FiscalReportRecord`, version 5 of the `fiscal_report` knowledge schema) is
+the summary or one part, not a report; the summary names the binding's
+granularity and cadence.
 
 - Every report record is about the binding's own observer record, and its
   report line is named by roles on that record: the summary on line 0, and
@@ -456,15 +495,32 @@ the summary or one part, not a report.
   in the committed knowledge ledger (`SimulationView::knowledge_heads`), so a
   run that sealed its evidence supersedes exactly what its replay does.
   Rebinding or removing one binding leaves every other binding's lines where
-  they were. A part cites, as evidence, the ledger versions its rows were
-  read from.
+  they were. A part of scope rows cites, as evidence, the ledger versions its
+  rows were read from.
 - The observer record keeps, for each part of each slot, a digest of the
-  rows it published and their fact count. A change of a book queues, on the
-  report-queue page of each observer that sees its institution, the part of
-  the book's row; the report system then publishes, with the summary, only
-  the queued parts whose digest changed. A boundary that changes nothing an
-  observer can see publishes nothing to it, and `as_of` is the time the
-  report last changed. A report with no hot cycle is not published.
+  rows it published, at the binding's confidence, and their fact count. A
+  change of a book queues, on the report-queue page of each observer that
+  sees its institution, the part of the book's row, read from the office's
+  list of its observers without reading the observers; the report system
+  then publishes, with the summary, only the queued parts whose digest
+  changed, so nothing below an observer's precision reaches it. An
+  `OnChange` observer's work is due at the time of the change; an `Interval`
+  observer always has one queue entry, due at its next due time, which
+  settlement adds work to without moving it, and which the report system
+  queues again at the next due time once it has published what it owed,
+  whether or not anything was published. No future-dated packet is
+  scheduled. A boundary that changes nothing an observer can see publishes
+  nothing to an `OnChange` observer, whose `as_of` is the time its report
+  last changed. A report with no hot cycle is not published.
+- The report schedule (`FiscalReportSchedule`, record
+  `canwu.fiscal:report-schedule`) keeps each report-queue page's earliest
+  due time and the pages that hold parked entries, and the root keeps the
+  earliest due time of all (`FiscalRoot::earliest_due`) and whether any entry
+  is parked. A boundary before that time, with nothing parked, reads only the
+  root; one at or after it decodes only the pages whose earliest due time has
+  come. `audit_fiscal_records` checks the chain from the pages to the root,
+  and that each active `Interval` binding has its one entry at one of its due
+  times.
 - A cycle whose last book an observer sees is archived leaves the report: its
   parts are published empty on their lines, the summary no longer lists it,
   and its slot is free for the next cycle. A report shows at most 64 cycles;
@@ -473,15 +529,39 @@ the summary or one part, not a report.
 - When a binding is re-pointed to another holder, the new holder gets the
   whole report at the next publication, and the old holder's report is
   withdrawn: its summary is superseded by one marked `withdrawn`, and the
-  reading functions leave the report out. A removed binding's report is
-  withdrawn the same way. A withdrawn holder keeps the records it was given;
-  they are history, not a current report.
-- One boundary publishes at most `MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY`
-  (1,024) report records, to at most 64 holders (the engine's per-system
-  limit). What does not fit stays queued, and the boundary schedules an
-  internal `fiscal_report_drain_v1` packet due at once
+  reading functions leave the report out. For an `Interval` binding both
+  happen at its next due time, so the new holder waits up to `every` for its
+  first report and the old holder keeps its report until then. A removed
+  binding's report is withdrawn the same way, at once, since a removed
+  binding has no due times. A withdrawn holder keeps the records it was
+  given; they are history, not a current report.
+- The report system publishes against the engine's knowledge publication
+  budget: each report record is one record body and one holder entry,
+  charged the compact JSON bytes of its payload, and the system publishes at
+  most fiscal's share of a boundary's budget (`FiscalReportBudget`: by
+  default half of the engine's, 16,384 bodies, 16,384 entries, and 32 MiB),
+  and never more than the engine has left at its cut after the systems
+  before it (`SimulationView::knowledge_publication_budget`). Each holder's
+  records are one `Explicit` group, superseding the line's current record,
+  and the groups are packed into directives up to the engine's per-directive
+  bounds, so a boundary that publishes to thousands of holders makes a few
+  directives and a few `KnowledgePublished` events. With the default share
+  one dirty cycle owed to every observer of a world of 4,000 observers (9,603
+  records and 15.7 MB, 15,671,758 bytes, of payload in
+  `benchmarks/baselines/2026-10-16-fiscal-world-world-institution-interval-elapsed.json`)
+  is published in one boundary.
+  `FiscalPlugin::with_report_budget` raises or lowers the share, between
+  `FiscalReportBudget::MINIMUM` and the engine's per-boundary limits;
+  registration refuses any other. The parts of a report are cut by count
+  and by bytes, keeping room for its summary. What does not fit stays
+  queued, and a boundary that did some of the work owed (published a part or
+  a withdrawal, or finished an entry) schedules an internal
+  `fiscal_report_drain_v1` packet due at once
   (`FISCAL_REPORT_DRAIN_INGRESS`), so the next boundary, at the same instant,
-  publishes it. Nothing in the fiscal records changes for that but the report
+  publishes more of it. A boundary that could do none of it, because the
+  systems before the report system spent the budget, schedules no drain, so
+  the drains at one instant always end; its work waits for the next boundary
+  that runs the report system. Nothing in the fiscal records changes for that but the report
   bookkeeping, so no revision advances. `advance_canonical` and
   `step_canonical` settle that boundary before they move on; `settle_boundary`
   refuses a later time until a boundary at that instant has admitted the
@@ -494,16 +574,35 @@ the summary or one part, not a report.
   from a current one. Deferral shows an observer a little that its binding
   does not: which parts are pending depends on the reports queued before it.
 - The engine publishes no knowledge to a dead person. While an observer's
-  holder is a dead person, its queued work is parked and nothing is published
-  to it; every boundary that runs the report system checks the parked holders
-  again, and the first after the person is alive again publishes what is
-  owed. A government holder is always reachable.
+  holder is a dead person, its queued work is parked, is not due, and
+  nothing is published to it. Each run of the report system checks the
+  holders of the next `FISCAL_PARKED_CHECKS_PER_BOUNDARY` (16) parked
+  entries after the root's cursor, in order of queue page and binding
+  ID, wrapping round, and publishes what a revived holder is owed, so a
+  revived holder is published to within `ceil(parked / 16)` runs of the
+  report system, at a fixed cost per run. With 16 or fewer parked entries
+  every run checks them all and keeps no cursor; with more, every run moves
+  the cursor, so it writes the root. A government holder is
+  always reachable. Re-pointing or removing a parked binding unparks it.
 - A scenario's report queue is part of its records: `add_observer` queues the
-  binding's whole report, which the first boundary that runs the report system
-  publishes once a book it sees is hot.
+  binding's whole report at its first due time, which the first boundary
+  that runs the report system at or after it publishes once a book it sees is
+  hot.
+- The report system (`materialize-fiscal-reports-v1`, phase 13) is
+  event-driven: it runs in every boundary that admits an event or ingress,
+  every same-instant drain boundary among them. A host whose boundaries can
+  pass without any event sets `FiscalPlugin::with_report_cadence(cadence)`:
+  every boundary of that cadence category with no event then reads the root
+  and, when report work is due, schedules the drain packet, due at once, so
+  the report system runs in the next boundary at the same instant. Parked
+  entries alone wake nothing: their rotation advances in the runs of the
+  report system that happen anyway, a revival being itself an event. `SystemCadence::EventDriven` is refused at registration. The
+  plugin's configuration, this cadence included, is recorded in the plugin
+  descriptor, so a run restores and replays only with the same configuration
+  and changing it takes a new run.
 
-A scenario whose knowledge carries a report record of schema version 1, 2, or
-3 is refused when the run is created, because those versions are no longer
+A scenario whose knowledge carries a report record of schema version 1 to 4
+is refused when the run is created, because those versions are no longer
 registered. A state is refused at activation when it could not be reported:
 when an observer binding names a person or government holder that does not
 exist (the observer record references its holder, and the engine checks
@@ -513,6 +612,24 @@ accounting cycle, or the namespace, name, and ID of a scope's domain-record
 institution together, is longer than `MAX_FISCAL_IDENTIFIER_BYTES` (160),
 which bounds a row so that a part always fits one knowledge record.
 
-The engine carries all held knowledge, superseded records included, through a
-run, so a world of many observers whose institutions change often grows its
-knowledge ledger with every publication.
+Report records are retired when superseded: under the default retention,
+`KnowledgeRetention::RetireWhenSuperseded`, a record leaves its holder in the
+boundary that publishes the record superseding it on its line, and its body
+leaves the run when no holder holds it, so a holder holds one current record
+per report line and held reports stay flat however long a run is, its saves
+included. What that loses: a full-history query of a holder's reports
+returns only the current records, and once a cycle is archived its parts are
+published empty and its figures leave the holder; a superseded record stays
+in the boundary evidence that published it until a seal takes the evidence.
+A host that reads earlier reports, or a closed cycle's figures after they
+leave the reports, sets `FiscalPlugin::with_report_retention` to
+`KnowledgeRetention::Keep`, under which every report record a holder was
+given stays for the run and held knowledge grows with every publication, or
+keeps its own archive of the figures.
+
+The plugin's configuration is bound to the run: the evidence and
+authority-basis kinds, the report cadence, the report budget share (in the
+report system's name), and the report retention (in the registered report
+schema) are recorded in the plugin descriptor every snapshot persists, so a
+run restores and replays only with the same configuration, and changing any
+of them takes a new run.

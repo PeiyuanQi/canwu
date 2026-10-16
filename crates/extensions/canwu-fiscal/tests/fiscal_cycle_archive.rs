@@ -967,10 +967,8 @@ fn a_sealed_run_archives_as_its_fork_restore_and_replay_do() {
         government.clone(),
     ] {
         let ledger = |knowledge: &canwu_api::KnowledgeSnapshot| {
-            knowledge
-                .for_holder(&holder)
+            support::held_records(knowledge, &holder)
                 .unwrap_or_else(|| panic!("{holder:?} holds reports"))
-                .clone()
         };
         assert_eq!(ledger(sealed.knowledge()), ledger(unsealed.knowledge()));
         assert_eq!(

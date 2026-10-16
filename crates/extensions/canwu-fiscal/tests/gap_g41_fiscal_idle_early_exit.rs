@@ -107,8 +107,9 @@ fn gap_g41_fiscal_idle_early_exit() {
     // The first report of an authored observer does not wait for fiscal
     // ingress: the first event-bearing boundary publishes the work the queue
     // holds, its summary and its one part, and writes the observer record,
-    // the emptied queue page, and the root's queue index.
-    assert_eq!(changes(&idle_boundary(&mut canwu)), (3, 2));
+    // the emptied queue page, the report schedule, and the root's earliest
+    // due time.
+    assert_eq!(changes(&idle_boundary(&mut canwu)), (4, 2));
     let published = fiscal_state(&canwu);
     assert!(published.report_queue.is_empty());
     assert_eq!(fiscal_report(&canwu, PRINCIPAL).projection.facts.len(), 1);

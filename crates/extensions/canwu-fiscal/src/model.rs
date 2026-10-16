@@ -3,7 +3,8 @@ use canwu_api::{
     CanwuError, DomainRecord, DomainRecordClass, DomainRecordDraft, DomainRecordKind,
     DomainRecordLifecycle, DomainRecordType, DomainRecordVersionRef, DomainRecordVersionSource,
     DomainValueKindClass, EntityRef, ErrorCode, EvidenceRef, IngressId, KnowledgeHolderRef,
-    PersonId, ResourceId, SimTime, SimulationGranularity, TypedDomainRecordRef,
+    KnowledgeLimitsV1, PersonId, ResourceId, SimDuration, SimTime, SimulationGranularity,
+    TypedDomainRecordRef,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,8 +15,12 @@ pub const FISCAL_CONTENT_SCHEMA_VERSION: u32 = 1;
 /// binding, one jurisdiction per catalog region in use, one observer per
 /// observer binding, binding-directory buckets, static index pages, and
 /// report-queue pages (see [`crate::FiscalRecordKind`]). Each ledger, office,
-/// jurisdiction, and observer has a revision of its own.
-pub const FISCAL_RUNTIME_SCHEMA_VERSION: u32 = 5;
+/// jurisdiction, and observer has a revision of its own. Version 6 adds an
+/// observer binding's granularity and cadence, an office's mechanisms and its
+/// observers' granularity and cadence, the report schedule record, and the
+/// root's earliest due time and parked flag in place of its list of queue
+/// pages.
+pub const FISCAL_RUNTIME_SCHEMA_VERSION: u32 = 6;
 /// Scope bindings a run may have, one ledger each.
 pub const MAX_FISCAL_SCOPE_BINDINGS: usize = 1_048_576;
 /// Authority bindings one institution's office holds.
@@ -106,12 +111,77 @@ pub const MAX_FISCAL_REPORT_PARTS_PER_CYCLE: usize =
 /// [`FiscalReportSummary::omitted_cycles`]. It also bounds the summary, which
 /// names every cycle the report shows, within one knowledge record.
 pub const MAX_FISCAL_REPORT_CYCLE_SLOTS: usize = 64;
-/// Fiscal report records one boundary publishes, over all observers: about a
-/// tenth of the engine's per-boundary knowledge record limit, which every
-/// plugin shares. What does not fit stays queued, and the boundary schedules
-/// an internal `fiscal_report_drain_v1` packet, due at once, so the next
-/// boundary at the same instant publishes it.
-pub const MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY: usize = 1_024;
+/// Fiscal's share of a boundary's knowledge publication budget: the most
+/// record bodies, holder entries, and payload bytes the report system
+/// publishes in one boundary.
+///
+/// The report system publishes the least of this share and what the
+/// engine's budget has left at its cut
+/// (`SimulationView::knowledge_publication_budget`), which every publishing
+/// plugin spends in dispatch order; each report record is one body and one
+/// entry, charged its payload's compact JSON bytes. What does not fit stays
+/// queued, and the boundary schedules an internal `fiscal_report_drain_v1`
+/// packet, due at once, so the next boundary at the same instant publishes
+/// it. Set it with `FiscalPlugin::with_report_budget`; the default is half
+/// of `KnowledgeLimitsV1::CURRENT`. It is recorded in the plugin descriptor,
+/// so a run restores and replays only with the same share.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalReportBudget {
+    /// Record bodies one boundary publishes.
+    pub bodies: usize,
+    /// Holder entries one boundary adds.
+    pub entries: usize,
+    /// Payload bytes of the bodies one boundary publishes.
+    pub payload_bytes: usize,
+}
+
+impl FiscalReportBudget {
+    /// Half of the engine's per-boundary budget: 16,384 bodies, 16,384
+    /// entries, and 32 MiB of payload.
+    pub const DEFAULT: Self = Self {
+        bodies: KnowledgeLimitsV1::CURRENT.records_per_boundary / 2,
+        entries: KnowledgeLimitsV1::CURRENT.holder_entries_per_boundary / 2,
+        payload_bytes: KnowledgeLimitsV1::CURRENT.payload_bytes_per_boundary / 2,
+    };
+
+    /// The smallest share: two records of the largest payload, a summary and
+    /// a part, so that every boundary with its whole share left publishes at
+    /// least one part of what is owed.
+    pub const MINIMUM: Self = Self {
+        bodies: 2,
+        entries: 2,
+        payload_bytes: 2 * KnowledgeLimitsV1::CURRENT.payload_bytes_per_record,
+    };
+
+    /// Checks that the share lies between [`Self::MINIMUM`] and the engine's
+    /// per-boundary limits.
+    pub(crate) fn validate(&self) -> Result<(), CanwuError> {
+        let limits = KnowledgeLimitsV1::CURRENT;
+        if (Self::MINIMUM.bodies..=limits.records_per_boundary).contains(&self.bodies)
+            && (Self::MINIMUM.entries..=limits.holder_entries_per_boundary).contains(&self.entries)
+            && (Self::MINIMUM.payload_bytes..=limits.payload_bytes_per_boundary)
+                .contains(&self.payload_bytes)
+        {
+            Ok(())
+        } else {
+            Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                "a fiscal report budget lies between FiscalReportBudget::MINIMUM and the engine's per-boundary knowledge limits",
+            ))
+        }
+    }
+}
+
+impl Default for FiscalReportBudget {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+/// Parked report-queue entries one run of the report system checks again:
+/// it re-reads the holder of each of the next parked entries after the
+/// root's `parked_cursor`, wrapping round, so a revived holder is
+/// published to within `ceil(parked / 16)` runs, at a fixed cost per run.
+pub const FISCAL_PARKED_CHECKS_PER_BOUNDARY: usize = 16;
 /// Report-queue pages: the report work owed to an observer is kept on the
 /// page its binding ID's digest names, so a boundary writes only the pages
 /// of the observers it queues or publishes.
@@ -1626,16 +1696,27 @@ pub struct FiscalScopeBinding {
 /// re-pointing or removing one binding never moves another's lines. A binding
 /// with `controlled_by` can be re-pointed ([`FiscalAction::RebindObserver`])
 /// and removed ([`FiscalAction::RemoveObserver`]) by that institution; what it
-/// may see is the scenario's and does not change.
+/// may see, its granularity, and its cadence are the scenario's and do not
+/// change. Set the granularity and cadence before
+/// [`FiscalState::add_observer`], which queues the binding's first report at
+/// its first due time.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalObserverBinding {
     pub id: String,
     pub actor: Option<PersonId>,
     pub knowledge_holder: KnowledgeHolderRef,
     /// At most [`MAX_FISCAL_VISIBLE_INSTITUTIONS`], each with an office, and
-    /// at most [`MAX_FISCAL_OBSERVER_ROWS`] scopes among them.
+    /// at most [`MAX_FISCAL_OBSERVER_ROWS`] rows among them.
     pub visible_institutions: BTreeSet<EntityRef>,
     pub confidence_per_mille: u16,
+    /// What one row of the report is: a scope (the default) or an
+    /// institution and mechanism.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub granularity: FiscalReportGranularity,
+    /// When the report is due: in the boundary that changes what the
+    /// observer sees (the default), or at aligned interval times.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub cadence: FiscalReportCadence,
     /// The institution whose authority bindings may re-point or remove this
     /// binding; `None` when only the scenario changes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1654,6 +1735,147 @@ impl FiscalObserverBinding {
     #[must_use]
     pub fn is_active(&self) -> bool {
         self.removed.is_none()
+    }
+
+    /// The cadence the binding is scheduled by: its own while it is active;
+    /// a removed binding has no due times, so the withdrawal of its report
+    /// is owed at once.
+    #[must_use]
+    pub fn scheduled_cadence(&self) -> FiscalReportCadence {
+        if self.is_active() {
+            self.cadence
+        } else {
+            FiscalReportCadence::OnChange
+        }
+    }
+}
+
+/// Whether a value is its type's default, for fields left out when default.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+pub(crate) fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
+/// What one row of an observer's report is.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FiscalReportGranularity {
+    /// One row per scope of the visible institutions, the facts of its book.
+    #[default]
+    Scope,
+    /// One row per visible institution and mechanism of its scopes, the
+    /// facts summed over the institution's hot books of the cycle of that
+    /// mechanism, per unit and payment form, each amount saturating at
+    /// `u64::MAX`.
+    Institution,
+}
+
+/// When an observer's report is due.
+///
+/// Due times are simulated times. An `Interval` report is published by the
+/// first boundary at or after each due time that runs the report system,
+/// with what changed since its last publication and its summary (at a due
+/// time at which nothing changed, its summary alone, once the report has
+/// been published at least once), and never between due times: its `as_of`
+/// is the boundary that published it, and the report shows the fiscal
+/// records as they were then. Calendar cadences
+/// (lunar months, fiscal years) are not expressible, since `every` is a fixed
+/// duration: a calendar host uses `OnChange`, an interval that approximates
+/// its calendar, or rebinds.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FiscalReportCadence {
+    /// Due in the boundary that changes something the observer sees.
+    #[default]
+    OnChange,
+    /// Due at `offset + k * every` for every `k >= 0`, aligned to
+    /// `SimTime::EPOCH`; `every` is positive and `offset` below it, both in
+    /// whole minutes ([`SimDuration`] counts minutes).
+    Interval {
+        every: SimDuration,
+        offset: SimDuration,
+    },
+}
+
+impl FiscalReportCadence {
+    /// `Interval { every, offset }`, with `offset` the `index`-th of `stride`
+    /// offsets spread evenly over `every`:
+    /// `offset = (index * every / stride) % every`, in whole minutes. With
+    /// `every` thirty days and `stride` thirty, observers `0, 1, 2, ...` are
+    /// due one day apart, and every thirtieth observer on the same day.
+    #[must_use]
+    pub fn staggered(every: SimDuration, index: u64, stride: u64) -> Self {
+        let minutes = every.as_minutes();
+        let offset = if minutes > 0 {
+            let spread = i128::from(index) * i128::from(minutes) / i128::from(stride.max(1));
+            i64::try_from(spread % i128::from(minutes)).unwrap_or(0)
+        } else {
+            0
+        };
+        Self::Interval {
+            every,
+            offset: SimDuration::minutes(offset),
+        }
+    }
+
+    /// Whether the cadence is an interval.
+    #[must_use]
+    pub const fn is_interval(self) -> bool {
+        matches!(self, Self::Interval { .. })
+    }
+
+    /// The first due time at or after `at`: `at` itself for `OnChange`, the
+    /// first aligned time for `Interval`; `None` past the range of
+    /// simulated time or for an invalid interval.
+    #[must_use]
+    pub fn due_at_or_after(self, at: SimTime) -> Option<SimTime> {
+        match self {
+            Self::OnChange => Some(at),
+            Self::Interval { every, offset } => {
+                let (every, offset) = (every.as_minutes(), offset.as_minutes());
+                if every <= 0 || !(0..every).contains(&offset) {
+                    return None;
+                }
+                let at = at.as_minutes();
+                if at <= offset {
+                    return Some(SimTime::from_minutes(offset));
+                }
+                let steps = at.checked_sub(offset)?.checked_add(every - 1)? / every;
+                offset
+                    .checked_add(steps.checked_mul(every)?)
+                    .map(SimTime::from_minutes)
+            }
+        }
+    }
+
+    /// The first due time strictly after `at`.
+    #[must_use]
+    pub fn due_after(self, at: SimTime) -> Option<SimTime> {
+        self.due_at_or_after(SimTime::from_minutes(at.as_minutes().checked_add(1)?))
+    }
+
+    /// Whether `at` is one of the cadence's due times; every time is one for
+    /// `OnChange`.
+    #[must_use]
+    pub fn is_due_time(self, at: SimTime) -> bool {
+        self.due_at_or_after(at) == Some(at)
+    }
+
+    /// Checks an interval: `every` positive, `0 <= offset < every`.
+    pub(crate) fn validate(self) -> Result<(), CanwuError> {
+        match self {
+            Self::OnChange => Ok(()),
+            Self::Interval { every, offset } => {
+                if every.as_minutes() > 0 && (0..every.as_minutes()).contains(&offset.as_minutes())
+                {
+                    Ok(())
+                } else {
+                    Err(invalid(
+                        "a fiscal report interval requires a positive period and an offset below it",
+                    ))
+                }
+            }
+        }
     }
 }
 
@@ -2078,6 +2300,19 @@ impl FiscalCycleTotal {
         self.outstanding = sum(self.outstanding, other.outstanding)?;
         Ok(())
     }
+
+    fn add_saturating(&mut self, other: &Self) {
+        self.assessed = self.assessed.saturating_add(other.assessed);
+        self.remission_granted = self
+            .remission_granted
+            .saturating_add(other.remission_granted);
+        self.collected = self.collected.saturating_add(other.collected);
+        self.remitted = self.remitted.saturating_add(other.remitted);
+        self.disbursed = self.disbursed.saturating_add(other.disbursed);
+        self.reserved = self.reserved.saturating_add(other.reserved);
+        self.returned = self.returned.saturating_add(other.returned);
+        self.outstanding = self.outstanding.saturating_add(other.outstanding);
+    }
 }
 
 /// Adds `totals` into `into`, partition by partition, keeping `into` in
@@ -2093,6 +2328,20 @@ pub(crate) fn merge_cycle_totals(
         }
     }
     Ok(())
+}
+
+/// Adds `totals` into `into` as [`merge_cycle_totals`] does, each amount
+/// saturating at `u64::MAX`: a report's sum over many books, which no
+/// settlement holds to a bound, so it must never fail a boundary. The report
+/// system and [`crate::compute_projection`] both sum this way, so a report
+/// still equals its projection.
+pub(crate) fn sum_report_totals(into: &mut Vec<FiscalCycleTotal>, totals: &[FiscalCycleTotal]) {
+    for total in totals {
+        match into.binary_search_by(|existing| existing.key().cmp(&total.key())) {
+            Ok(index) => into[index].add_saturating(total),
+            Err(index) => into.insert(index, total.clone()),
+        }
+    }
 }
 
 fn sum(left: u64, right: u64) -> Result<u64, CanwuError> {
@@ -2234,12 +2483,60 @@ pub struct FiscalOffice {
     /// How many scope bindings the institution has; derived.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub scope_count: u32,
-    /// The observer bindings that see the institution, each with the row of
-    /// the institution's first scope in its report; derived. Settlement finds
-    /// the report parts a change of a scope's book touches from this alone:
-    /// the scope's row is that first row plus the scope's rank.
+    /// The mechanisms of the institution's scope bindings; derived. An
+    /// observer at [`FiscalReportGranularity::Institution`] has one row for
+    /// each, in this order.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub mechanisms: BTreeSet<FiscalMechanism>,
+    /// The observer bindings that see the institution, each with the first
+    /// row of the institution in its report, its granularity, and whether its
+    /// cadence is an interval; derived. Settlement queues the report work a
+    /// change of a scope's book owes from this alone, without reading an
+    /// observer: the scope's row is that first row plus the scope's rank, or,
+    /// at institution granularity, plus the place of the scope's mechanism
+    /// among `mechanisms`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub observers: BTreeMap<String, u32>,
+    pub observers: BTreeMap<String, FiscalOfficeObserver>,
+}
+
+/// One observer of an institution, as the institution's office lists it:
+/// the first row of the institution in the observer's report, the binding's
+/// granularity, and whether its cadence is an interval, the least settlement
+/// needs to queue its work; derived from the binding, which keeps the full
+/// cadence. An office can list 4,096 observers, so each entry stays small.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalOfficeObserver {
+    pub first_row: u32,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub granularity: FiscalReportGranularity,
+    /// Whether the binding's cadence is [`FiscalReportCadence::Interval`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interval: bool,
+}
+
+impl FiscalOfficeObserver {
+    /// The row of the observer's report that a book of the office's scope of
+    /// rank `rank` and mechanism `mechanism` is summed into, given the
+    /// office's `mechanisms`.
+    #[must_use]
+    pub fn row(
+        &self,
+        rank: u32,
+        mechanism: FiscalMechanism,
+        mechanisms: &BTreeSet<FiscalMechanism>,
+    ) -> u32 {
+        let offset = match self.granularity {
+            FiscalReportGranularity::Scope => rank,
+            FiscalReportGranularity::Institution => u32::try_from(
+                mechanisms
+                    .iter()
+                    .take_while(|held| **held != mechanism)
+                    .count(),
+            )
+            .unwrap_or(u32::MAX),
+        };
+        self.first_row.saturating_add(offset)
+    }
 }
 
 impl FiscalOffice {
@@ -2256,6 +2553,7 @@ impl FiscalOffice {
             cycles: BTreeMap::new(),
             watermark: None,
             scope_count: 0,
+            mechanisms: BTreeSet::new(),
             observers: BTreeMap::new(),
         }
     }
@@ -2371,9 +2669,12 @@ impl FiscalObserver {
     }
 
     /// The row of `rank`-th scope of the office `office`, when the observer
-    /// sees that office.
+    /// sees that office at [`FiscalReportGranularity::Scope`].
     #[must_use]
     pub fn row_of(&self, office: &str, rank: u32) -> Option<u32> {
+        if self.binding.granularity != FiscalReportGranularity::Scope {
+            return None;
+        }
         self.rows
             .iter()
             .find(|rows| rows.office == office && rank < rows.scopes)
@@ -2383,9 +2684,10 @@ impl FiscalObserver {
     /// How many rows the report has.
     #[must_use]
     pub fn row_count(&self) -> u32 {
-        self.rows
-            .last()
-            .map_or(0, |rows| rows.first_row.saturating_add(rows.scopes))
+        self.rows.last().map_or(0, |rows| {
+            rows.first_row
+                .saturating_add(rows.span(self.binding.granularity))
+        })
     }
 }
 
@@ -2395,10 +2697,28 @@ pub struct FiscalObserverRows {
     pub institution: EntityRef,
     /// The institution's office key.
     pub office: String,
-    /// The row of the institution's first scope.
+    /// The institution's first row.
     pub first_row: u32,
-    /// How many scopes, and so rows, the institution has.
+    /// How many scopes the institution has: its rows at
+    /// [`FiscalReportGranularity::Scope`].
     pub scopes: u32,
+    /// At [`FiscalReportGranularity::Institution`], the mechanisms of the
+    /// institution's scopes, one row each, in this order; empty at `Scope`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mechanisms: Vec<FiscalMechanism>,
+}
+
+impl FiscalObserverRows {
+    /// How many rows the institution takes at `granularity`.
+    #[must_use]
+    pub fn span(&self, granularity: FiscalReportGranularity) -> u32 {
+        match granularity {
+            FiscalReportGranularity::Scope => self.scopes,
+            FiscalReportGranularity::Institution => {
+                u32::try_from(self.mechanisms.len()).unwrap_or(u32::MAX)
+            }
+        }
+    }
 }
 
 /// What one observer's report has published: the time it last changed, the
@@ -2407,7 +2727,7 @@ pub struct FiscalObserverRows {
 /// withdrawn summary.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalObserverReport {
-    /// When the report last changed; `None` while nothing was published.
+    /// When the report was last published; `None` while nothing was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub as_of: Option<SimTime>,
     /// Each cycle the report shows, by accounting cycle.
@@ -2542,12 +2862,25 @@ impl FiscalReportCycleSlot {
 }
 
 /// The report work one observer is owed: which parts of which cycles
-/// changed, whether its whole report or its summary is owed, and since when.
-/// A boundary that changes what an observer sees queues it; the report
-/// system publishes it in the first boundary at or after `due_at` that runs
-/// the fiscal systems, within the boundary's publication limits.
+/// changed, whether its whole report is owed, and when it is due.
+///
+/// The report system publishes an entry in the first boundary at or after
+/// `due_at` that runs it, within the boundary's publication limits. For an
+/// [`FiscalReportCadence::OnChange`] observer, a boundary that changes what
+/// the observer sees queues an entry due at its own time, and the entry
+/// leaves the queue once published. An active
+/// [`FiscalReportCadence::Interval`] observer always has exactly one entry,
+/// due at one of its due times: [`FiscalState::add_observer`] queues it at
+/// the first, settlement merges what it owes into it without moving
+/// `due_at`, and the report system, once it has published what the entry
+/// owed, queues it again at the next due time after its boundary, whether or
+/// not anything was published. No future-dated packet is scheduled for it.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalReportQueueEntry {
+    /// The time the entry is due: the boundary time of the change that
+    /// queued it for an `OnChange` observer, a due time of an `Interval`
+    /// observer's cadence. Work merged into an entry keeps the earlier time,
+    /// and an `Interval` entry's time does not move.
     pub due_at: SimTime,
     /// The parts whose rows changed, by accounting cycle; an empty set
     /// stands for every part of the cycle. At most
@@ -2567,16 +2900,21 @@ pub struct FiscalReportQueueEntry {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub republish: bool,
     /// Whether the holder could not receive knowledge when the entry was
-    /// last due: the observer is parked, and the report system checks its
-    /// holder again in every boundary that runs it.
+    /// last due: the observer is parked. A parked entry is not due; the
+    /// report system checks the holders of parked entries in rotation,
+    /// [`FISCAL_PARKED_CHECKS_PER_BOUNDARY`] in each run, and unparks an
+    /// entry whose holder can receive knowledge again, which it then
+    /// publishes as owed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub parked: bool,
 }
 
 /// The state-wide part of the fiscal state: the historical context, the
-/// approved execution-evidence kinds, and the index of the report queue. The
-/// payload of the `canwu.fiscal:root` record. The archive head is a record
-/// of its own (`canwu.fiscal:archive`), so that the root stays small.
+/// approved execution-evidence kinds, and when report work is next due. The
+/// payload of the `canwu.fiscal:root` record. The archive head and the report
+/// schedule are records of their own (`canwu.fiscal:archive`,
+/// `canwu.fiscal:report-schedule`), so that the root stays small: a boundary
+/// that owes no report reads the root alone.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalRoot {
     pub schema_version: u32,
@@ -2586,9 +2924,92 @@ pub struct FiscalRoot {
     pub context_revision: u64,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub execution_evidence_kinds: BTreeSet<DomainRecordKind>,
-    /// The report-queue pages that hold an entry; derived.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub queue_pages: BTreeSet<String>,
+    /// The earliest `due_at` of a queued entry that is not parked: the least
+    /// of the report schedule's `page_due`; derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest_due: Option<SimTime>,
+    /// Whether some queued entry is parked, so that the report system checks
+    /// parked holders in rotation; derived.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parked: bool,
+    /// The observer binding of the parked entry the rotation checked last;
+    /// the next run continues after it, in order of (report-queue page,
+    /// observer binding ID), wrapping round. `None` while no entry is parked,
+    /// and after a run that checked every parked entry. It is in the root,
+    /// which every run reads anyway, so that moving it rewrites a few
+    /// hundred bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked_cursor: Option<String>,
+}
+
+/// Where the report queue's work is: each report-queue page's earliest due
+/// time and the pages that hold parked entries. The payload of the
+/// `canwu.fiscal:report-schedule` record, identity `primary`.
+///
+/// A boundary reads the root's `earliest_due` first, then this record, and
+/// decodes only the pages whose earliest due time has come, so the cost of
+/// a boundary that publishes is the pages it publishes from, not every page
+/// in use. `page_due` and `parked_pages` are derived from the pages and
+/// checked by [`crate::audit_fiscal_records`], with the root's
+/// `earliest_due` and `parked`.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalReportSchedule {
+    /// Each report-queue page with an entry that is not parked, and the
+    /// earliest `due_at` among those entries; derived. At most
+    /// [`FISCAL_REPORT_QUEUE_PAGES`] entries.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub page_due: BTreeMap<String, SimTime>,
+    /// Each report-queue page with a parked entry, and how many it holds;
+    /// derived.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parked_pages: BTreeMap<String, u32>,
+}
+
+impl FiscalReportSchedule {
+    /// Whether the schedule names nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Sets what the schedule keeps for one page from the page's entries.
+    pub(crate) fn update_page<'a>(
+        &mut self,
+        page: &str,
+        entries: impl IntoIterator<Item = &'a FiscalReportQueueEntry>,
+    ) {
+        let mut due: Option<SimTime> = None;
+        let mut parked = 0_u32;
+        for entry in entries {
+            if entry.parked {
+                parked = parked.saturating_add(1);
+            } else {
+                due = Some(due.map_or(entry.due_at, |due| due.min(entry.due_at)));
+            }
+        }
+        match due {
+            Some(due) => {
+                self.page_due.insert(page.to_owned(), due);
+            }
+            None => {
+                self.page_due.remove(page);
+            }
+        }
+        if parked == 0 {
+            self.parked_pages.remove(page);
+        } else {
+            self.parked_pages.insert(page.to_owned(), parked);
+        }
+    }
+
+    /// The root's `earliest_due` and `parked` this schedule derives.
+    #[must_use]
+    pub(crate) fn root_fields(&self) -> (Option<SimTime>, bool) {
+        (
+            self.page_due.values().min().copied(),
+            !self.parked_pages.is_empty(),
+        )
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2616,6 +3037,7 @@ pub struct FiscalReportFact {
     pub id: String,
     pub institution: EntityRef,
     pub mechanism: FiscalMechanism,
+    /// The scope of a fact of a scope row; empty for an institution row.
     pub scope_binding_id: String,
     pub accounting_cycle_id: String,
     pub unit: String,
@@ -2660,7 +3082,7 @@ pub struct FiscalProjection {
     pub facts: BTreeMap<String, FiscalReportFact>,
 }
 
-/// The payload of one fiscal report knowledge record (schema version 4).
+/// The payload of one fiscal report knowledge record (schema version 5).
 ///
 /// An observer's report is one summary and, for each hot cycle it shows,
 /// parts of [`FISCAL_REPORT_ROWS_PER_PART`] rows each, every one its own line
@@ -2676,8 +3098,12 @@ pub enum FiscalReportRecord {
 }
 
 /// The head of one observer's report. It is republished whenever one of the
-/// report's parts is, and never otherwise, so `as_of` is the time the report
-/// last changed.
+/// report's parts is, and, for an [`FiscalReportCadence::Interval`] report,
+/// alone at every due time at which nothing changed, once the report has
+/// been published at least once, so that `as_of` advances and silence never
+/// means "no report". For an `OnChange` report `as_of` is the time the
+/// report last changed; for an `Interval` report, the boundary of its last
+/// due time.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalReportSummary {
     /// The observer binding the report belongs to.
@@ -2685,6 +3111,12 @@ pub struct FiscalReportSummary {
     pub actor: Option<PersonId>,
     pub as_of: SimTime,
     pub confidence_per_mille: u16,
+    /// The binding's granularity: what a row of the report is.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub granularity: FiscalReportGranularity,
+    /// The binding's cadence: when the report is published.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub cadence: FiscalReportCadence,
     /// Each hot cycle the report shows, and the slot its parts are in. A part
     /// of another slot, or of a cycle not listed, is not part of the report.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -2713,6 +3145,13 @@ pub struct FiscalReportSummary {
     pub withdrawn: bool,
 }
 
+/// Each cycle's parts as the hexadecimal bitmap a summary's `pending` holds.
+pub(crate) fn part_bitmap_entries(
+    parts: &BTreeMap<String, BTreeSet<u32>>,
+) -> BTreeMap<String, String> {
+    part_bitmaps::entries(parts)
+}
+
 /// The parts of each cycle as a hexadecimal bitmap.
 mod part_bitmaps {
     use super::MAX_FISCAL_REPORT_PARTS_PER_CYCLE;
@@ -2724,6 +3163,11 @@ mod part_bitmaps {
         parts: &BTreeMap<String, BTreeSet<u32>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
+        entries(parts).serialize(serializer)
+    }
+
+    /// Each cycle's parts as its hexadecimal bitmap.
+    pub(crate) fn entries(parts: &BTreeMap<String, BTreeSet<u32>>) -> BTreeMap<String, String> {
         parts
             .iter()
             .map(|(cycle, parts)| {
@@ -2740,10 +3184,9 @@ mod part_bitmaps {
                     let _ = write!(hex, "{byte:02x}");
                     hex
                 });
-                (cycle, hex)
+                (cycle.clone(), hex)
             })
-            .collect::<BTreeMap<_, _>>()
-            .serialize(serializer)
+            .collect()
     }
 
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
@@ -2777,8 +3220,16 @@ mod part_bitmaps {
 
 /// [`FISCAL_REPORT_ROWS_PER_PART`] consecutive rows of one cycle of one
 /// observer's report. A row lists the facts of one scope's book of the
-/// cycle; a row whose scope has no book of the cycle is left out, and a part
-/// with no row withdraws what its line held.
+/// cycle, or, at [`FiscalReportGranularity::Institution`], of one
+/// institution's books of one mechanism summed; a row with no book of the
+/// cycle is left out, and a part with no row withdraws what its line held.
+///
+/// A part of scope rows cites, as evidence, the ledger versions its rows
+/// were read from. A part of institution rows, summed over up to thousands
+/// of books, cannot cite them all within the relations a knowledge record
+/// may carry: it cites the current version of each office its rows belong
+/// to and counts in `books_summed` the books it summed, which is weaker
+/// provenance than a scope part's.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalReportPart {
     pub observer_id: String,
@@ -2789,15 +3240,24 @@ pub struct FiscalReportPart {
     pub part: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rows: Vec<FiscalReportRow>,
+    /// For a part of institution rows, the hot books with an assessment its
+    /// rows were summed from when it was published; `None` for scope rows.
+    /// A change of the count alone, below the observer's precision, does
+    /// not republish the part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub books_summed: Option<u32>,
 }
 
-/// One scope's facts of one cycle.
+/// One scope's facts of one cycle, or one institution's of one mechanism.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalReportRow {
-    /// The scope's row among the observer's rows.
+    /// The row among the observer's rows.
     pub row: u32,
     pub institution: EntityRef,
     pub mechanism: FiscalMechanism,
+    /// The scope of a scope row; empty, and left out, for an institution
+    /// row.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub scope_binding_id: String,
     /// One per partition of the scope's book, in partition order; at most
     /// [`MAX_FISCAL_PARTITION_KEYS`].
@@ -2890,6 +3350,10 @@ pub struct FiscalState {
     /// The report work each observer is owed, keyed by observer binding ID.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub report_queue: BTreeMap<String, FiscalReportQueueEntry>,
+    /// Where the report queue's work is, and the parked rotation. The
+    /// payload of the `canwu.fiscal:report-schedule` record.
+    #[serde(default, skip_serializing_if = "FiscalReportSchedule::is_empty")]
+    pub report_schedule: FiscalReportSchedule,
 }
 
 impl FiscalState {
@@ -2906,7 +3370,9 @@ impl FiscalState {
                 },
                 context_revision: 1,
                 execution_evidence_kinds: BTreeSet::new(),
-                queue_pages: BTreeSet::new(),
+                earliest_due: None,
+                parked: false,
+                parked_cursor: None,
             },
             archive: crate::FiscalArchiveHeadV1::default(),
             offices: BTreeMap::new(),
@@ -2914,6 +3380,7 @@ impl FiscalState {
             jurisdictions: BTreeMap::new(),
             observers: BTreeMap::new(),
             report_queue: BTreeMap::new(),
+            report_schedule: FiscalReportSchedule::default(),
         }
     }
 
@@ -3060,7 +3527,14 @@ impl FiscalState {
     }
 
     /// Adds an observer binding, or replaces one, with nothing published yet:
-    /// its whole report is owed from the start of the run.
+    /// its whole report is owed from its first due time, the start of the
+    /// run for an `OnChange` binding and, for an `Interval` binding, the
+    /// first aligned time at or after the time the state was authored for
+    /// (its historical context's `updated_at`). Set `updated_at` to the
+    /// run's start before adding interval bindings: with an earlier time,
+    /// every first due time that falls before the start is past due, so all
+    /// of those bindings are published by the first boundary, and their
+    /// stagger takes effect only from their second due time.
     pub fn add_observer(&mut self, binding: FiscalObserverBinding) {
         for institution in binding
             .visible_institutions
@@ -3071,10 +3545,16 @@ impl FiscalState {
         {
             self.office_mut(&institution);
         }
+        let due_at = match binding.cadence {
+            FiscalReportCadence::OnChange => SimTime::EPOCH,
+            cadence @ FiscalReportCadence::Interval { .. } => cadence
+                .due_at_or_after(self.root.historical_context.updated_at)
+                .unwrap_or(SimTime::EPOCH),
+        };
         self.report_queue.insert(
             binding.id.clone(),
             FiscalReportQueueEntry {
-                due_at: SimTime::EPOCH,
+                due_at,
                 whole: true,
                 ..FiscalReportQueueEntry::default()
             },
@@ -3574,6 +4054,32 @@ impl FiscalState {
             }
             validate_queue_entry(entry)?;
         }
+        // An active interval binding always has its one entry, due at one of
+        // its due times: the report system finds its next due time there,
+        // and nowhere else.
+        for (observer_id, observer) in &self.observers {
+            let cadence = observer.binding.scheduled_cadence();
+            let entry = self.report_queue.get(observer_id);
+            if cadence.is_interval()
+                && !entry.is_some_and(|entry| cadence.is_due_time(entry.due_at))
+            {
+                return Err(invalid(format!(
+                    "interval observer binding {observer_id} has no report-queue entry at one of its due times"
+                )));
+            }
+            // A removed binding is owed its withdrawal and nothing past it:
+            // an entry of one that owes no withdrawal and names no work was
+            // queued again after its removal.
+            if !observer.binding.is_active()
+                && observer.report.withdraw.is_empty()
+                && entry.is_some_and(|entry| !entry.whole && entry.cycles.is_empty())
+            {
+                return Err(invalid(format!(
+                    "removed observer binding {observer_id} is queued with nothing owed past its removal"
+                )));
+            }
+        }
+        validate_report_schedule(&self.report_schedule)?;
         self.validate_derived(catalog)?;
         if self
             .authority_bindings()
@@ -3613,6 +4119,7 @@ impl FiscalState {
         for (key, office) in &self.offices {
             let expected = derived.offices.get(key).ok_or_else(|| unequal("offices"))?;
             if office.scope_count != expected.scope_count
+                || office.mechanisms != expected.mechanisms
                 || office.observers != expected.observers
                 || office.cycles.keys().collect::<Vec<_>>()
                     != expected.cycles.keys().collect::<Vec<_>>()
@@ -3670,19 +4177,28 @@ impl FiscalState {
                 return Err(unequal("observer rows"));
             }
         }
-        if self.root.queue_pages != derived.root.queue_pages {
-            return Err(unequal("report queue pages"));
+        // The chain from the queue pages to the root: each page's earliest
+        // due time and parked count in the schedule, and the least due time
+        // and whether any entry is parked in the root.
+        if self.report_schedule != derived.report_schedule {
+            return Err(unequal("report schedule page due times or parked pages"));
+        }
+        if self.root.earliest_due != derived.root.earliest_due
+            || self.root.parked != derived.root.parked
+        {
+            return Err(unequal("root earliest due time or parked flag"));
         }
         Ok(())
     }
 
     /// Brings every derived field up to date: offices for every institution
-    /// a scope or observer binding names, their scope counts, observer
-    /// lists, and cycle bookkeeping; the ledgers' offices and ranks; a
-    /// jurisdiction for every region a scope names, with its counts and its
-    /// transition candidates as of `at`; the observers' rows; and the root's
-    /// queue pages. [`Self::into_records`] runs it. The first report of each
-    /// observer is queued by [`Self::add_observer`].
+    /// a scope or observer binding names, their scope counts, mechanisms,
+    /// observer lists, and cycle bookkeeping; the ledgers' offices and ranks;
+    /// a jurisdiction for every region a scope names, with its counts and
+    /// its transition candidates as of `at`; the observers' rows; the report
+    /// schedule's page due times and parked pages; and the root's earliest
+    /// due time and parked flag. [`Self::into_records`] runs it. The first
+    /// report of each observer is queued by [`Self::add_observer`].
     pub fn recompute_derived(&mut self, catalog: &CompiledFiscalCatalog, at: SimTime) {
         self.recompute_derived_fields(catalog, Some(at));
     }
@@ -3715,7 +4231,13 @@ impl FiscalState {
         }
         for (key, office) in &mut self.offices {
             office.scope_count = ranks.get(key).copied().unwrap_or_default();
+            office.mechanisms.clear();
             office.observers.clear();
+        }
+        for ledger in self.ledgers.values() {
+            if let Some(office) = self.offices.get_mut(&ledger.office) {
+                office.mechanisms.insert(ledger.scope.mechanism);
+            }
         }
         self.recompute_offices();
         // Jurisdictions.
@@ -3757,6 +4279,7 @@ impl FiscalState {
         }
         // Observer rows.
         for observer in self.observers.values_mut() {
+            let granularity = observer.binding.granularity;
             let mut first_row = 0_u32;
             observer.rows = observer
                 .binding
@@ -3764,33 +4287,59 @@ impl FiscalState {
                 .iter()
                 .map(|institution| {
                     let office = fiscal_office_key(institution);
-                    let scopes = self
-                        .offices
-                        .get(&office)
-                        .map_or(0, |office| office.scope_count);
+                    let (scopes, mechanisms) =
+                        self.offices.get(&office).map_or((0, Vec::new()), |office| {
+                            (
+                                office.scope_count,
+                                match granularity {
+                                    FiscalReportGranularity::Scope => Vec::new(),
+                                    FiscalReportGranularity::Institution => {
+                                        office.mechanisms.iter().copied().collect()
+                                    }
+                                },
+                            )
+                        });
                     let rows = FiscalObserverRows {
                         institution: institution.clone(),
                         office,
                         first_row,
                         scopes,
+                        mechanisms,
                     };
-                    first_row = first_row.saturating_add(scopes);
+                    first_row = first_row.saturating_add(rows.span(granularity));
                     rows
                 })
                 .collect();
             for rows in &observer.rows {
                 if let Some(office) = self.offices.get_mut(&rows.office) {
-                    office
-                        .observers
-                        .insert(observer.binding.id.clone(), rows.first_row);
+                    office.observers.insert(
+                        observer.binding.id.clone(),
+                        FiscalOfficeObserver {
+                            first_row: rows.first_row,
+                            granularity,
+                            interval: observer.binding.cadence.is_interval(),
+                        },
+                    );
                 }
             }
         }
-        self.root.queue_pages = self
-            .report_queue
-            .keys()
-            .map(|observer| crate::records::report_queue_page(observer))
-            .collect();
+        // The report schedule and the root's summary of it.
+        let mut pages = BTreeMap::<String, Vec<&FiscalReportQueueEntry>>::new();
+        for (observer, entry) in &self.report_queue {
+            pages
+                .entry(crate::records::report_queue_page(observer))
+                .or_default()
+                .push(entry);
+        }
+        let mut schedule = FiscalReportSchedule::default();
+        for (page, entries) in pages {
+            schedule.update_page(&page, entries);
+        }
+        (self.root.earliest_due, self.root.parked) = schedule.root_fields();
+        if !self.root.parked {
+            self.root.parked_cursor = None;
+        }
+        self.report_schedule = schedule;
     }
 }
 
@@ -3895,7 +4444,29 @@ pub(crate) fn validate_root(
             "fiscal historical context lies outside the catalog scope",
         ));
     }
-    for page in &root.queue_pages {
+    if root.parked_cursor.is_some() && !root.parked {
+        return Err(invalid(
+            "the fiscal root names a parked cursor with nothing parked",
+        ));
+    }
+    if let Some(cursor) = &root.parked_cursor {
+        validate_identifier(cursor, "observer binding")?;
+    }
+    Ok(())
+}
+
+/// Checks the report schedule record on its own: bounded, well-named pages,
+/// each listed as parked with at least one parked entry.
+pub(crate) fn validate_report_schedule(schedule: &FiscalReportSchedule) -> Result<(), CanwuError> {
+    if schedule.page_due.len() > FISCAL_REPORT_QUEUE_PAGES
+        || schedule.parked_pages.len() > FISCAL_REPORT_QUEUE_PAGES
+        || schedule.parked_pages.values().any(|parked| *parked == 0)
+    {
+        return Err(invalid(
+            "the fiscal report schedule names too many pages, or an empty parked page",
+        ));
+    }
+    for page in schedule.page_due.keys().chain(schedule.parked_pages.keys()) {
         validate_identifier(page, "fiscal report queue page")?;
     }
     Ok(())
@@ -4110,6 +4681,7 @@ pub(crate) fn validate_observer(observer: &FiscalObserver) -> Result<(), CanwuEr
         ));
     }
     observer.outcomes.validate(observer.revision)?;
+    binding.cadence.validate()?;
     let report = &observer.report;
     let mut slots = BTreeSet::new();
     for (cycle, slot) in &report.cycles {
@@ -4478,6 +5050,8 @@ mod tests {
             actor: None,
             as_of: SimTime::EPOCH,
             confidence_per_mille: 1_000,
+            granularity: FiscalReportGranularity::Scope,
+            cadence: FiscalReportCadence::OnChange,
             cycles: BTreeMap::new(),
             fact_count: 0,
             pending,
@@ -4514,6 +5088,71 @@ mod tests {
         ] {
             value["pending"] = serde_json::json!({ "a": bitmap });
             assert!(serde_json::from_value::<FiscalReportSummary>(value.clone()).is_err());
+        }
+    }
+
+    /// Interval due times are `offset + k * every` from the epoch, never
+    /// before `offset`; `staggered` spreads offsets evenly and wraps; and an
+    /// interval without a positive period, or with an offset outside it, is
+    /// refused.
+    #[test]
+    fn interval_due_times_are_aligned_to_the_epoch_and_staggered() {
+        let day = SimDuration::days(1);
+        let every = SimDuration::days(30);
+        let cadence = FiscalReportCadence::staggered(every, 7, 30);
+        assert_eq!(
+            cadence,
+            FiscalReportCadence::Interval {
+                every,
+                offset: SimDuration::days(7),
+            }
+        );
+        let at = |days: i64, minutes: i64| SimTime::from_minutes(days * 1_440 + minutes);
+        assert_eq!(cadence.due_at_or_after(at(-40, 0)), Some(at(7, 0)));
+        assert_eq!(cadence.due_at_or_after(at(7, 0)), Some(at(7, 0)));
+        assert_eq!(cadence.due_at_or_after(at(7, 1)), Some(at(37, 0)));
+        assert_eq!(cadence.due_after(at(7, 0)), Some(at(37, 0)));
+        assert_eq!(cadence.due_after(at(36, 1_439)), Some(at(37, 0)));
+        assert!(cadence.is_due_time(at(67, 0)));
+        assert!(!cadence.is_due_time(at(67, 1)) && !cadence.is_due_time(at(-23, 0)));
+        assert_eq!(
+            FiscalReportCadence::OnChange.due_at_or_after(at(3, 5)),
+            Some(at(3, 5))
+        );
+        // Thirty observers a day apart; the thirty-first shares the first's
+        // day, and a stride that does not divide the period rounds down.
+        for index in 0..60_u64 {
+            assert_eq!(
+                FiscalReportCadence::staggered(every, index, 30),
+                FiscalReportCadence::Interval {
+                    every,
+                    offset: SimDuration::days(i64::try_from(index % 30).expect("day")),
+                }
+            );
+        }
+        assert_eq!(
+            FiscalReportCadence::staggered(day, 1, 7),
+            FiscalReportCadence::Interval {
+                every: day,
+                offset: SimDuration::minutes(1_440 / 7),
+            }
+        );
+        for invalid in [
+            FiscalReportCadence::Interval {
+                every: SimDuration::ZERO,
+                offset: SimDuration::ZERO,
+            },
+            FiscalReportCadence::Interval {
+                every: day,
+                offset: day,
+            },
+            FiscalReportCadence::Interval {
+                every: day,
+                offset: SimDuration::minutes(-1),
+            },
+        ] {
+            assert!(invalid.validate().is_err(), "{invalid:?}");
+            assert_eq!(invalid.due_at_or_after(SimTime::EPOCH), None);
         }
     }
 

@@ -16,8 +16,8 @@ use crate::PLUGIN_NAME;
 use crate::model::{
     CompiledFiscalCatalog, FISCAL_DIRECTORY_BUCKETS, FISCAL_INDEX_PAGE_SCOPES,
     FISCAL_REPORT_QUEUE_PAGES, FiscalCatalogRecord, FiscalJurisdiction, FiscalObserver,
-    FiscalOffice, FiscalReportQueueEntry, FiscalRoot, FiscalScopeLedger, FiscalState, ROOT_ID,
-    fiscal_catalog_reference, fiscal_office_key, invalid, office_binding_ids,
+    FiscalOffice, FiscalReportQueueEntry, FiscalReportSchedule, FiscalRoot, FiscalScopeLedger,
+    FiscalState, ROOT_ID, fiscal_catalog_reference, fiscal_office_key, invalid, office_binding_ids,
 };
 use canwu_api::{
     CanwuError, CanwuRun, DomainRecord, DomainRecordClass, DomainRecordDraft, DomainRecordKind,
@@ -51,7 +51,8 @@ macro_rules! fiscal_record_type {
 
 fiscal_record_type!(
     /// `canwu.fiscal:root`, identity `primary`: the historical context, the
-    /// approved execution-evidence kinds, and the report queue's index.
+    /// approved execution-evidence kinds, and the report queue's earliest due
+    /// time.
     FiscalRootRecord,
     FiscalRoot,
     "root"
@@ -112,6 +113,13 @@ fiscal_record_type!(
     FiscalReportQueuePage,
     "report-queue"
 );
+fiscal_record_type!(
+    /// `canwu.fiscal:report-schedule`, identity `primary`: each report-queue
+    /// page's earliest due time and the pages that hold parked entries.
+    FiscalReportScheduleRecord,
+    FiscalReportSchedule,
+    "report-schedule"
+);
 
 /// The kinds of the fiscal records, besides the create-only catalog.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -125,11 +133,12 @@ pub enum FiscalRecordKind {
     Directory,
     Index,
     ReportQueue,
+    ReportSchedule,
 }
 
 impl FiscalRecordKind {
     /// Every kind, in this order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Root,
         Self::Archive,
         Self::Office,
@@ -139,6 +148,7 @@ impl FiscalRecordKind {
         Self::Directory,
         Self::Index,
         Self::ReportQueue,
+        Self::ReportSchedule,
     ];
 
     /// The record kind.
@@ -154,6 +164,7 @@ impl FiscalRecordKind {
             Self::Directory => DomainRecordKind::for_type::<FiscalDirectoryRecord>(),
             Self::Index => DomainRecordKind::for_type::<FiscalIndexRecord>(),
             Self::ReportQueue => DomainRecordKind::for_type::<FiscalReportQueueRecord>(),
+            Self::ReportSchedule => DomainRecordKind::for_type::<FiscalReportScheduleRecord>(),
         }
     }
 
@@ -173,6 +184,11 @@ pub fn fiscal_root_reference() -> TypedDomainRecordRef<FiscalRootRecord> {
 
 #[must_use]
 pub fn fiscal_archive_reference() -> TypedDomainRecordRef<FiscalArchiveRecord> {
+    TypedDomainRecordRef::new(ROOT_ID)
+}
+
+#[must_use]
+pub fn fiscal_report_schedule_reference() -> TypedDomainRecordRef<FiscalReportScheduleRecord> {
     TypedDomainRecordRef::new(ROOT_ID)
 }
 
@@ -466,6 +482,12 @@ pub(crate) fn queue_draft(
     DomainRecordDraft::from_typed(queue_reference(page), entries)
 }
 
+pub(crate) fn schedule_draft(
+    schedule: &FiscalReportSchedule,
+) -> Result<DomainRecordDraft, CanwuError> {
+    DomainRecordDraft::from_typed(fiscal_report_schedule_reference(), schedule)
+}
+
 /// The directory buckets a state derives, without empty ones.
 pub(crate) fn directory_buckets(state: &FiscalState) -> BTreeMap<String, FiscalDirectoryBucket> {
     let mut buckets = BTreeMap::<String, FiscalDirectoryBucket>::new();
@@ -566,7 +588,11 @@ impl FiscalState {
 
     /// The drafts of every record of the partition, without validating.
     pub(crate) fn record_drafts(&self) -> Result<Vec<DomainRecordDraft>, CanwuError> {
-        let mut drafts = vec![root_draft(&self.root)?, archive_draft(&self.archive)?];
+        let mut drafts = vec![
+            root_draft(&self.root)?,
+            archive_draft(&self.archive)?,
+            schedule_draft(&self.report_schedule)?,
+        ];
         for office in self.offices.values() {
             drafts.push(office_draft(office)?);
         }
@@ -600,6 +626,7 @@ impl FiscalState {
     ) -> Result<Self, CanwuError> {
         let mut root = None;
         let mut archive = None;
+        let mut schedule = None;
         let mut state_offices = BTreeMap::new();
         let mut ledgers = BTreeMap::new();
         let mut jurisdictions = BTreeMap::new();
@@ -615,6 +642,9 @@ impl FiscalState {
                 }
                 Some(FiscalRecordKind::Archive) => {
                     archive = Some(record.decode_payload::<FiscalArchiveRecord>()?);
+                }
+                Some(FiscalRecordKind::ReportSchedule) => {
+                    schedule = Some(record.decode_payload::<FiscalReportScheduleRecord>()?);
                 }
                 Some(FiscalRecordKind::Office) => {
                     state_offices.insert(
@@ -659,6 +689,8 @@ impl FiscalState {
             jurisdictions,
             observers,
             report_queue,
+            report_schedule: schedule
+                .ok_or_else(|| invalid("the fiscal report schedule record is missing"))?,
         })
     }
 }

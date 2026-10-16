@@ -4,6 +4,8 @@
 //! boundary. The run continues, and a save taken after it restores and
 //! replays exactly.
 
+mod support;
+
 use canwu_api::{
     Canwu, CommandEnvelope, CommandRequest, CommandRequestId, EntityRef, Government, GovernmentId,
     Issuer, KnowledgeHolderRef, KnowledgeRecord, KnowledgeSnapshot, MapPoint, Person, PersonId,
@@ -16,9 +18,9 @@ use canwu_fiscal::{
     FiscalCoverageDeclaration, FiscalCoverageSelector, FiscalCoverageStatus, FiscalHistoricalMode,
     FiscalMechanism, FiscalObserverBinding, FiscalPackManifest, FiscalPaymentForm,
     FiscalPeriodDefinition, FiscalPlugin, FiscalProvenance, FiscalRegionDefinition,
-    FiscalRuleDefinition, FiscalScopeBinding, FiscalState, HistoricalConfidence,
-    HistoricalYearWindow, audit_fiscal_records, compile_fiscal_content, fiscal_action_command,
-    fiscal_target_revision,
+    FiscalReportCadence, FiscalReportGranularity, FiscalRuleDefinition, FiscalScopeBinding,
+    FiscalState, HistoricalConfidence, HistoricalYearWindow, audit_fiscal_records,
+    compile_fiscal_content, fiscal_action_command, fiscal_target_revision,
 };
 use std::collections::BTreeSet;
 
@@ -153,6 +155,8 @@ fn scenario() -> Scenario {
         knowledge_holder: KnowledgeHolderRef::Person(AUDITOR),
         visible_institutions: BTreeSet::from([institution]),
         confidence_per_mille: 900,
+        granularity: FiscalReportGranularity::Scope,
+        cadence: FiscalReportCadence::OnChange,
         controlled_by: None,
         rebound_by: None,
         removed: None,
@@ -241,13 +245,7 @@ fn assess_now(canwu: &mut Canwu, action_id: &str) {
 /// The auditor's report records, in the order the run published them. Each
 /// report here is a summary followed by its one part.
 fn reports(canwu: &Canwu) -> Vec<KnowledgeRecord> {
-    let auditor = KnowledgeHolderRef::Person(AUDITOR);
-    canwu
-        .boundaries()
-        .iter()
-        .flat_map(|boundary| &boundary.knowledge_changes)
-        .flat_map(|change| change.records_of(&auditor).collect::<Vec<_>>())
-        .collect()
+    support::published_to(canwu, &KnowledgeHolderRef::Person(AUDITOR))
 }
 
 #[test]

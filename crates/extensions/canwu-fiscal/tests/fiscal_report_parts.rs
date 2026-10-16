@@ -11,11 +11,13 @@
 //! owes more than a boundary publishes: the rest stays queued, and the next
 //! boundary, which the publishing boundary schedules at once, publishes it
 //! without any change of the fiscal records; until then the summary names
-//! the parts that are pending. The last runs cover what cannot be published
-//! at once or at all: a report for an observer who has died, completed by
-//! the boundary that revives him, in a run that sealed its evidence as in
-//! one that did not; an observer who does not exist; a queue that names one;
-//! and a run with direct command history, which cannot schedule a drain.
+//! the parts that are pending. A third run owes more payload bytes than a
+//! boundary publishes, and the bytes, not the count, cut each publication.
+//! The last runs cover what cannot be published at once or at all: a report
+//! for an observer who has died, completed by the boundary that revives him,
+//! in a run that sealed its evidence as in one that did not; an observer who
+//! does not exist; a queue that names one; and a run with direct command
+//! history, which cannot schedule a drain.
 
 mod support;
 
@@ -29,8 +31,8 @@ use canwu_fiscal::{
     FISCAL_REPORT_DRAIN_INGRESS, FISCAL_REPORT_ROWS_PER_PART, FiscalAction, FiscalActionBatch,
     FiscalActionDisposition, FiscalAdoptionStage, FiscalAdoptionState, FiscalAssessment,
     FiscalAuditSeverity, FiscalMechanism, FiscalObserverBinding, FiscalPaymentForm, FiscalReport,
-    FiscalReportQueueEntry, FiscalReportRecord, FiscalScopeBinding, FiscalSettledAction,
-    FiscalState, MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY, compute_projection,
+    FiscalReportBudget, FiscalReportFact, FiscalReportQueueEntry, FiscalReportRecord,
+    FiscalScopeBinding, FiscalSettledAction, FiscalState, compute_projection,
     fiscal_observer_reference, fiscal_report_knowledge_schema_id, fiscal_reports,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -429,6 +431,20 @@ fn crowded_state() -> FiscalState {
     state
 }
 
+/// The report bodies one boundary publishes in the tests of the share: a
+/// share well below what a crowd of reports owes, set with
+/// `FiscalPlugin::with_report_budget`.
+const SHARE: usize = 1_024;
+
+/// The fixture with fiscal's share cut to [`SHARE`] bodies and entries.
+fn shared() -> Fixture {
+    Fixture::with_report_budget(FiscalReportBudget {
+        bodies: SHARE,
+        entries: SHARE,
+        ..FiscalReportBudget::DEFAULT
+    })
+}
+
 const CROWD: usize = 70;
 const RECORDS_PER_OBSERVER: usize = 1 + 16;
 
@@ -450,8 +466,9 @@ fn drains(canwu: &Canwu) -> usize {
         .count()
 }
 
-/// When more is owed than a boundary publishes, the boundary still commits,
-/// and the report it could publish only in part says which parts are
+/// When more is owed than fiscal's share of a boundary's publication budget
+/// (here cut to [`SHARE`] bodies) lets it publish, the boundary still
+/// commits, and the report it could publish only in part says which parts are
 /// pending. The boundary schedules a drain packet due at once, so the next
 /// boundary, at the same instant, publishes the rest. Nothing in the fiscal
 /// records changes for that but the report bookkeeping: no revision, no
@@ -459,13 +476,13 @@ fn drains(canwu: &Canwu) -> usize {
 /// a boundary without fiscal ingress writes and publishes nothing.
 #[test]
 #[allow(clippy::too_many_lines)]
-fn parts_past_the_boundary_limit_follow_in_the_next_boundary() {
-    let fixture = Fixture::new();
+fn parts_past_the_report_share_follow_in_the_next_boundary() {
+    let fixture = shared();
     let mut canwu = fixture.runtime(scenario_from_state(crowded_state()));
     let wanted = CROWD * RECORDS_PER_OBSERVER;
-    assert!(wanted > MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY);
-    let full = MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY / RECORDS_PER_OBSERVER;
-    let split_published = MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY - full * RECORDS_PER_OBSERVER - 1;
+    assert!(wanted > SHARE);
+    let full = SHARE / RECORDS_PER_OBSERVER;
+    let split_published = SHARE - full * RECORDS_PER_OBSERVER - 1;
     let split_pending = RECORDS_PER_OBSERVER - 1 - split_published;
 
     // The first event-bearing boundary owes every report whole. It publishes
@@ -490,10 +507,7 @@ fn parts_past_the_boundary_limit_follow_in_the_next_boundary() {
         .step_canonical()
         .expect("the first boundary")
         .expect("the tick opens a boundary");
-    assert_eq!(
-        first.knowledge_record_count,
-        MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY
-    );
+    assert_eq!(first.knowledge_record_count, SHARE);
     assert_eq!(drains(&canwu), 1, "the boundary schedules a drain");
     let unchanged: Vec<_> = queue_pages(&canwu)
         .into_iter()
@@ -552,10 +566,7 @@ fn parts_past_the_boundary_limit_follow_in_the_next_boundary() {
         .step_canonical()
         .expect("the drain boundary")
         .expect("the drain packet opens a boundary");
-    assert_eq!(
-        drain.knowledge_record_count,
-        wanted - MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY + 1
-    );
+    assert_eq!(drain.knowledge_record_count, wanted - SHARE + 1);
     assert_eq!(canwu.time(), at);
     assert_eq!(
         restored.snapshot_json().expect("restored snapshot"),
@@ -568,7 +579,8 @@ fn parts_past_the_boundary_limit_follow_in_the_next_boundary() {
     assert!(reports.values().all(|report| report.projection.as_of == at));
     let drained = fiscal_state(&canwu);
     assert!(drained.report_queue.is_empty());
-    assert!(drained.root.queue_pages.is_empty());
+    assert!(drained.report_schedule.page_due.is_empty());
+    assert_eq!(drained.root.earliest_due, None);
     assert_eq!(ledger_revision(&canwu, &treasury_scope(0)), revision);
     assert_eq!(
         FiscalSettledAction::from_events(canwu.events()).len(),
@@ -590,6 +602,117 @@ fn parts_past_the_boundary_limit_follow_in_the_next_boundary() {
     assert_eq!(published(&settle(&mut canwu)), 0);
     assert_eq!(fiscal_record_versions(&canwu), versions);
 
+    fixture.assert_restore_and_replay(&canwu);
+}
+
+/// Observers of the byte-share test: six, all of the treasury and held by
+/// the principal.
+const WIDE_OBSERVERS: usize = 6;
+/// Extra treasury scopes of the byte-share test: with the four base scopes
+/// and the pending one, 600 rows, thirty-eight parts to a report.
+const WIDE_EXTRA_SCOPES: usize = 595;
+
+fn wide_observer(index: usize) -> String {
+    format!("observer.wide.{index}")
+}
+
+/// Every treasury scope with a book of one authored cycle, and the six
+/// observers, each owed its whole report of thirty-eight parts.
+fn wide_state() -> FiscalState {
+    let mut state = base_state();
+    add_treasury_scopes(&mut state, WIDE_EXTRA_SCOPES);
+    author_assessments(&mut state, &assessed_scopes(WIDE_EXTRA_SCOPES), 1, 1);
+    state.remove_observer(OBSERVER);
+    for index in 0..WIDE_OBSERVERS {
+        state.add_observer(observer(
+            &wide_observer(index),
+            PRINCIPAL,
+            treasury(),
+            1_000,
+        ));
+    }
+    state
+}
+
+/// When the parts' bytes, not their count, pass fiscal's share (here the
+/// minimum share's bytes and 20,000 more, with the default counts of bodies
+/// and entries), every boundary still commits: it publishes no more payload
+/// than the share, and far fewer records than the share's count. A report
+/// cut by bytes names in its summary exactly the parts left, those after the
+/// last one published. The drains at the same instant complete every report,
+/// each what the fiscal records derive, and a run restored mid-drain and the
+/// run's exact replay agree.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn parts_past_the_byte_share_follow_at_the_same_instant() {
+    let share = FiscalReportBudget {
+        payload_bytes: FiscalReportBudget::MINIMUM.payload_bytes + 20_000,
+        ..FiscalReportBudget::DEFAULT
+    };
+    let fixture = Fixture::with_report_budget(share);
+    let mut canwu = fixture.runtime(scenario_from_state(wide_state()));
+    let rows = TREASURY_SCOPES + 1 + WIDE_EXTRA_SCOPES;
+    let parts = u32::try_from(rows.div_ceil(FISCAL_REPORT_ROWS_PER_PART)).expect("parts");
+    assert_eq!(parts, 38);
+    let cycle = "authored.000";
+    let at = canwu.time();
+    enqueue_tick(&mut canwu);
+    let mut seen = 0;
+    let mut boundaries = 0;
+    let mut cut = 0;
+    while let Some(receipt) = canwu.step_canonical().expect("every boundary commits") {
+        boundaries += 1;
+        assert!(boundaries <= 64, "the drains at the instant end");
+        assert_eq!(canwu.time(), at);
+        let records = published_report_records(&canwu, PRINCIPAL);
+        let published = &records[seen..];
+        seen = records.len();
+        assert_eq!(published.len(), receipt.knowledge_record_count);
+        assert!(!published.is_empty(), "every boundary publishes some");
+        let bytes: usize = published
+            .iter()
+            .map(|(record, _)| {
+                serde_json::to_vec(&record.payload)
+                    .expect("a payload")
+                    .len()
+            })
+            .sum();
+        assert!(bytes <= share.payload_bytes, "{bytes} bytes");
+        assert!(published.len() * 100 < share.bodies, "bytes cut, not count");
+        for (observer_id, report) in reports_of(&canwu, PRINCIPAL) {
+            if report.is_complete() {
+                continue;
+            }
+            cut += 1;
+            let shown: BTreeSet<u32> = report
+                .projection
+                .facts
+                .keys()
+                .filter_map(|fact| FiscalReportFact::part_of(fact))
+                .map(|(_, part)| part)
+                .collect();
+            let next = u32::try_from(shown.len()).expect("parts shown");
+            assert!(next > 0 && next < parts, "{observer_id}");
+            assert_eq!(shown, (0..next).collect(), "{observer_id}");
+            assert_eq!(
+                report.pending,
+                BTreeMap::from([(cycle.to_owned(), (next..parts).collect())]),
+                "{observer_id} names the parts left"
+            );
+        }
+        if boundaries == 1 {
+            fixture.assert_restore_and_replay(&canwu);
+        }
+    }
+    assert!(boundaries > 2, "{boundaries} boundaries");
+    assert!(cut > 0, "some report was cut by bytes");
+    assert_eq!(drains(&canwu), boundaries - 1);
+    let reports = assert_reports_match_state(&canwu);
+    assert_eq!(reports.len(), WIDE_OBSERVERS);
+    assert!(reports.values().all(|report| report.projection.as_of == at));
+    let state = fiscal_state(&canwu);
+    assert!(state.report_queue.is_empty());
+    assert_eq!(state.root.earliest_due, None);
     fixture.assert_restore_and_replay(&canwu);
 }
 
@@ -637,7 +760,7 @@ fn a_held_republication_past_the_slots_is_owed_whole() {
     fixture.assert_restore_and_replay(&canwu);
 }
 
-/// A report cut by the boundary's publication limit can leave more parts of
+/// A report cut by fiscal's share of the budget can leave more parts of
 /// one cycle than queued work names. They are owed as the whole cycle
 /// instead, which the drain publishes the same way: the parts the boundary
 /// published match their digests and are skipped. Eleven observers of a
@@ -648,7 +771,7 @@ fn a_held_republication_past_the_slots_is_owed_whole() {
 fn a_cycle_cut_past_the_queued_parts_is_owed_whole() {
     const EXTRA: usize = 1_596;
     const OBSERVERS: usize = 11;
-    let fixture = Fixture::new();
+    let fixture = shared();
     let mut canwu = fixture.runtime(scenario(|state| {
         state.remove_observer(OBSERVER);
         add_treasury_scopes(state, EXTRA);
@@ -678,10 +801,7 @@ fn a_cycle_cut_past_the_queued_parts_is_owed_whole() {
         .step_canonical()
         .expect("the settling boundary")
         .expect("a boundary settles the batch");
-    assert_eq!(
-        settling.knowledge_record_count,
-        MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY
-    );
+    assert_eq!(settling.knowledge_record_count, SHARE);
     let state = fiscal_state(&canwu);
     let (cut, owed) = state
         .report_queue
@@ -871,10 +991,7 @@ fn a_sealed_run_publishes_what_a_revived_observer_is_owed_as_its_replay_does() {
     assert_eq!(report.projection.facts.len(), 2);
     let deputy = KnowledgeHolderRef::Person(DEPUTY);
     let ledger = |knowledge: &canwu_api::KnowledgeSnapshot| {
-        knowledge
-            .for_holder(&deputy)
-            .expect("the deputy's ledger")
-            .clone()
+        support::held_records(knowledge, &deputy).expect("the deputy's ledger")
     };
     assert_eq!(ledger(sealed.knowledge()), ledger(unsealed.knowledge()));
     assert_eq!(
@@ -944,7 +1061,7 @@ fn a_queue_naming_an_unknown_observer_is_refused_when_the_run_is_created() {
 /// the next boundary that runs the fiscal systems publishes more of it.
 #[test]
 fn owed_reports_wait_in_a_run_with_direct_command_history() {
-    let fixture = Fixture::new();
+    let fixture = shared();
     let mut canwu = fixture.runtime(scenario_from_state(crowded_state()));
     let direct_command_boundary = |canwu: &mut Canwu| {
         canwu
@@ -964,10 +1081,7 @@ fn owed_reports_wait_in_a_run_with_direct_command_history() {
     };
 
     let first = direct_command_boundary(&mut canwu);
-    assert_eq!(
-        first.knowledge_record_count,
-        MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY
-    );
+    assert_eq!(first.knowledge_record_count, SHARE);
     assert!(first.generated_ingress.is_empty(), "no drain is scheduled");
     let owed = |canwu: &Canwu| fiscal_state(canwu).report_queue.len();
     let owed_after_first = owed(&canwu);
@@ -982,43 +1096,46 @@ fn owed_reports_wait_in_a_run_with_direct_command_history() {
 
 /// A scenario whose knowledge carries a report record of schema version 1,
 /// the one-record report of 0.14.0, is refused when the run is created: only
-/// version 4 is registered, and the engine accepts no record of a schema it
+/// version 5 is registered, and the engine accepts no record of a schema it
 /// does not know.
 #[test]
 fn a_scenario_with_a_version_one_report_record_is_refused() {
     let fixture = Fixture::new();
     let holder = KnowledgeHolderRef::Person(PRINCIPAL);
     let mut version_one = fiscal_report_knowledge_schema_id();
-    assert_eq!(version_one.version, 4);
+    assert_eq!(version_one.version, 5);
     version_one.version = 1;
     let mut scenario = scenario(|_| {});
     let id = KnowledgeRecordId::new(1);
-    scenario.knowledge.records.insert(KnowledgeRecord {
-        id,
-        holder,
-        schema: version_one,
-        subjects: vec![KnowledgeSubject {
-            role: "fiscal_observer".to_owned(),
-            target: KnowledgeSubjectTarget::DomainRecord(
-                fiscal_observer_reference(OBSERVER).into_untyped(),
-            ),
-        }],
-        payload: serde_json::json!({
-            "actor": PRINCIPAL,
-            "as_of": SimTime::EPOCH,
-            "confidence_per_mille": 1_000,
-            "facts": {},
-        }),
-        as_of: Some(SimTime::EPOCH),
-        learned_at: SimTime::EPOCH,
-        confidence_per_mille: 1_000,
-        origin: KnowledgeOrigin {
-            method: "fiscal_authority_report_v1".to_owned(),
-            evidence: Vec::new(),
+    support::seed_knowledge_record(
+        &mut scenario,
+        KnowledgeRecord {
+            id,
+            holder,
+            schema: version_one,
+            subjects: vec![KnowledgeSubject {
+                role: "fiscal_observer".to_owned(),
+                target: KnowledgeSubjectTarget::DomainRecord(
+                    fiscal_observer_reference(OBSERVER).into_untyped(),
+                ),
+            }],
+            payload: serde_json::json!({
+                "actor": PRINCIPAL,
+                "as_of": SimTime::EPOCH,
+                "confidence_per_mille": 1_000,
+                "facts": {},
+            }),
+            as_of: Some(SimTime::EPOCH),
+            learned_at: SimTime::EPOCH,
+            confidence_per_mille: 1_000,
+            origin: KnowledgeOrigin {
+                method: "fiscal_authority_report_v1".to_owned(),
+                evidence: Vec::new(),
+            },
+            supersedes: Vec::new(),
+            contradicts: Vec::new(),
         },
-        supersedes: Vec::new(),
-        contradicts: Vec::new(),
-    });
+    );
     let error = fixture
         .try_runtime(scenario)
         .err()
@@ -1070,6 +1187,7 @@ fn a_full_part_of_the_longest_rows_fits_one_knowledge_record() {
         slot: u16::MAX,
         part: u32::MAX,
         rows,
+        books_summed: Some(u32::MAX),
     });
     let bytes = serde_json::to_vec(&part).expect("part bytes").len();
     assert!(bytes < 65_536, "a full part takes {bytes} bytes");

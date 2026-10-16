@@ -585,6 +585,51 @@ one warm-up). `--mode allocations`, in a build with `--features
 allocation-counting`, counts allocator calls as `fiscal-profile` does; the
 two modes are separate builds.
 
+Two options configure the observers (see
+[`docs/proposals/fiscal-observers-at-scale.md`](../docs/proposals/fiscal-observers-at-scale.md)).
+`--courts institution` puts each partition's court, its observer of every
+institution, at institution granularity (one row per institution and
+mechanism, summed over its books); the regional observers stay at scope
+granularity, and the default `--courts scope` is the world of the 0.16.0
+runs. `--cadence interval` gives every observer a monthly cadence,
+`FiscalReportCadence::staggered(30 days, index, 30)`, so about a thirtieth of
+them are due each day, instead of the default `--cadence on-change`. The
+initial publication then settles the observers due at the start, which have
+no book to report yet and are only queued for their next due time, the
+bursts publish no report (none is due), the idle boundaries have 4,000
+interval observers and nothing due, and two rows are added under
+`interval_reports`:
+
+- `spread_due_day`: after every scope is assessed, the boundary on the first
+  day that a tick makes event-bearing, at which the observers due that day
+  (`index % 30 == 1`, about 134) publish their first report with the burst's
+  cycle, and the drains at its instant;
+- `due_instant`: a second run of the same world whose observers are all due
+  monthly at the same instants settles them at the start (as above),
+  assesses every scope, and settles the boundary thirty days on, at which
+  every observer is due owing one dirty cycle, and the drains at its
+  instant: the gate case of the design, which settles in one boundary now
+  that fiscal publishes against the engine's publication budget.
+
+Each of the two rows records, besides the boundary figures, a `publication`
+object for the measured boundary (record bodies, holder entries, payload
+bytes as the engine's budget charges them, directives, which are the
+`KnowledgePublished` events, and distinct holders), and, in an allocation
+build, `heap_peak_bytes`: the most the heap grew during the boundary.
+
+`--held-cycles N` adds `held_knowledge`: `N` monthly cycles on a fork of the
+base run that seals its evidence after each month (so retained evidence does
+not grow). Each month every scope is assessed on its first day, a tick each
+day lets the observers due that day publish, and on its last day every book
+is closed and archived in commits of 4,096 books. After each month it
+records the record bodies, holder entries, and payload bytes the run holds,
+the bytes of the continuation checkpoint, and the month's wall time up to
+its seal; after the last, the time to restore that checkpoint. With the
+default report retention the held knowledge stays flat.
+
+The gate preset is `--preset world --courts institution --cadence interval
+--held-cycles 24`.
+
 The 2026-10-15 runs were recorded from the world-scale change's Phase 2
 (before the version bump), on one machine, the elapsed runs with nothing else
 running and the allocation runs alongside builds (allocation counts do not
@@ -621,6 +666,55 @@ again inside verifying and queueing (0.4 to 0.7 s) and finalizing (0.4 s).
 After the burst of every
 scope the unsealed snapshot is 1.09 GB of JSON, almost all of it retained
 boundary evidence and published knowledge, and restoring it takes 231 s.
+
+The 2026-10-16 runs were recorded on the 0.17.0 branch (the engine's shared
+knowledge publication and fiscal's publication budget), on the same machine,
+the elapsed run with nothing else running when checked:
+[`world` institution interval elapsed](baselines/2026-10-16-fiscal-world-world-institution-interval-elapsed.json)
+(`--preset world --courts institution --cadence interval --held-cycles 24`)
+and [`world` institution interval allocations](baselines/2026-10-16-fiscal-world-world-institution-interval-allocations.json)
+(the same without `--held-cycles`). With every observer on a monthly
+cadence, the bursts, receipts, closes, and archive commits publish no
+report (none is due); the reports are published on the due days. Medians of
+the elapsed run, in milliseconds:
+
+| Boundary | Admission | Settlement | Fiscal handlers | Engine | Drains at the same instant | Report records |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Idle (one tick, nothing fiscal due) | | 0.63 | 0.00 | | | |
+| Assess 64 scopes | 17.1 | 8.97 | 4.62 | 4.35 | none | 0 |
+| A spread day (137 scopes) | 34.4 | 15.2 | 7.73 | 7.79 | none | 0 |
+| Assess 1,024 | 176 | 91.6 | 46.8 | 44.6 | none | 0 |
+| Assess 4,096 | 473 | 326 | 187 | 139 | none | 0 |
+| Assess 16,384 | 1,020 | 1,503 | 937 | 525 | none | 0 |
+| Assess every scope (50,000) | 1,510 | 4,568 | 3,091 | 1,457 | none | 0 |
+| Spread due day (134 observers due) | | 43.2 | 22.8 | 20.5 | none | 304 |
+| Due instant (4,000 observers due) | | 2,504 | 1,821 | 676 | none | 9,603 |
+| 1,024 receipts | | 90.6 | 48.7 | 41.9 | none | 0 |
+| 16,384 receipts | | 1,693 | 1,113 | 572 | none | 0 |
+| Close every book (50,000) | 1,626 | 5,052 | 3,690 | 1,362 | none | 0 |
+| Archive commit of 256 books | | 26.6 | 10.3 | 16.3 | none | 0 |
+| Archive commit of 4,096 books | | 228 | 132 | 97.6 | none | 0 |
+
+The due instant settles in one boundary: 9,603 record bodies (one holder
+entry each, 15.7 MB of payload) to 4,000 holders in 10 directives, within
+fiscal's default share of the boundary's budget (16,384 bodies, 16,384
+entries, 32 MiB), with nothing left for a drain. In the allocation build
+the boundary makes 6.52 million allocator calls and the heap grows by at
+most 472 MB during it (213,438 calls and 33 MB for the spread due day).
+
+Over 24 months (`held_knowledge`) the run holds 14,138 report bodies and
+entries (15.1 MB of payload) from the second month to the 24th: each holder
+keeps its current reports only. A month of the world (every scope assessed,
+28 daily ticks, every book closed and archived, the seal) takes 73 s in the
+first month, about 111 s by the fifth as the records' outcome rings fill,
+and about 129 s by the 24th, rising by about 1 s a month after the fifth,
+which this profile does not break down. The continuation checkpoint grows
+from 172 MB after the first month to 293 MB after the 24th, about 3.8 MB a
+month from the fifth. That growth is not fiscal state or knowledge, which
+stay flat, but the engine's request index, which keeps the idempotency
+outcome of every tracked command (about 440 bytes a command on the smoke
+preset). Restoring the 293 MB checkpoint takes 58 s.
+
 ## Knowledge-ledger profile
 
 The standalone `knowledge-ledger-profile` binary measures what a boundary

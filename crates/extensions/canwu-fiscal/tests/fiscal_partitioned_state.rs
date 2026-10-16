@@ -9,38 +9,156 @@
 //! historical-context changes, and a transition, and after every boundary
 //! check that the records assemble to a state that validates and that they
 //! are exactly what that state partitions into (`audit_fiscal_records`), and
-//! that every report the observers hold, one of the treasury and one of the
-//! treasury and the granary together, is complete and is what the records
-//! derive. At the end, a restore and an exact replay agree with the run.
+//! that every report the observers hold is what the records derive at the
+//! boundary that published it: the projection invariant. The observers are
+//! one of the treasury and one of the treasury and the granary together at
+//! scope granularity, one of both at institution granularity (the treasury
+//! has scopes of two mechanisms), all on change, and two of both on
+//! interval cadences, at scope and institution granularity. An on-change
+//! report is current after every step; an interval report is published only
+//! at or after one of its due times. At the end, a restore and an exact
+//! replay agree with the run.
 
 mod support;
 
-use canwu_api::{Canwu, PersonId};
+use canwu_api::{Canwu, PersonId, SimDuration, SimTime, SimulationGranularity};
 use canwu_fiscal::{
     FiscalAction, FiscalAdoptionStage, FiscalAuditSeverity, FiscalHistoricalContextPacket,
-    FiscalHistoricalMode, FiscalSettledAction, compute_projection,
-    fiscal_historical_context_ingress, fiscal_reports,
+    FiscalHistoricalMode, FiscalMechanism, FiscalObserverBinding, FiscalReport,
+    FiscalReportCadence, FiscalReportGranularity, FiscalScopeBinding, FiscalSettledAction,
+    compute_projection, finalize_fiscal_archive_retention, fiscal_historical_context_ingress,
+    fiscal_reports,
 };
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use support::{
     Draft, Fixture, GRANARY_AUTHORITY, GRANARY_PRINCIPAL, GRANARY_SCOPE, MemoryArchiveStore,
-    PRINCIPAL, REFORM, REFORMED_RULE, TREASURY_AUTHORITY, TREASURY_SCOPES, archive, assessment,
-    close, collection, draft, enqueue_batches, enqueue_results, execution_claim, fiscal_state,
-    granary, observer_binding, receipt_packet, result_versions, scenario, settle, treasury,
+    PRINCIPAL, REFORM, REFORMED_RULE, TREASURY_AUTHORITY, TREASURY_SCOPES, assessment, close,
+    collection, draft, enqueue_archive, enqueue_batches, enqueue_results, execution_claim,
+    fiscal_state, granary, observer_binding, receipt_packet, result_versions, scenario, treasury,
     treasury_scope,
 };
 
 /// An observer of both institutions, whose parts mix the scopes of two
 /// offices.
 const BOTH: &str = "observer.both";
+/// An observer of both institutions at institution granularity.
+const INSTITUTIONS: &str = "observer.institutions";
+/// An observer of both institutions due every seven minutes from the third.
+const INTERVAL: &str = "observer.interval";
+/// An observer of both institutions at institution granularity, due every
+/// five minutes.
+const INTERVAL_INSTITUTIONS: &str = "observer.interval.institutions";
 
-/// Every report the principal holds is complete and is what the records
-/// derive, and every observer whose institutions hold a hot book has one.
+/// Every observer the principal holds a report of, with its granularity and
+/// cadence.
+fn watched() -> [(&'static str, FiscalReportGranularity, FiscalReportCadence); 5] {
+    let interval = |every, offset| FiscalReportCadence::Interval {
+        every: SimDuration::minutes(every),
+        offset: SimDuration::minutes(offset),
+    };
+    [
+        (
+            support::OBSERVER,
+            FiscalReportGranularity::Scope,
+            FiscalReportCadence::OnChange,
+        ),
+        (
+            BOTH,
+            FiscalReportGranularity::Scope,
+            FiscalReportCadence::OnChange,
+        ),
+        (
+            INSTITUTIONS,
+            FiscalReportGranularity::Institution,
+            FiscalReportCadence::OnChange,
+        ),
+        (INTERVAL, FiscalReportGranularity::Scope, interval(7, 3)),
+        (
+            INTERVAL_INSTITUTIONS,
+            FiscalReportGranularity::Institution,
+            interval(5, 0),
+        ),
+    ]
+}
+
+thread_local! {
+    /// Each watched report as it stood after the last boundary, so that a
+    /// report that differs was published by the boundary just settled.
+    static SEEN: RefCell<BTreeMap<&'static str, FiscalReport>> =
+        const { RefCell::new(BTreeMap::new()) };
+}
+
+/// Settles what is due at the run's time one boundary at a time, as
+/// `support::settle` does, and checks after each boundary every report it
+/// published: complete, as of the boundary, what the records derive at that
+/// boundary, and, for an interval report, at or after a due time later than
+/// its last publication.
+fn settle(canwu: &mut Canwu) {
+    let at = canwu.time();
+    while let Some(receipt) = canwu.step_canonical().expect("a boundary") {
+        assert_eq!(receipt.settled_at, at);
+        check_publications(canwu, at);
+    }
+    canwu
+        .advance_canonical(SimDuration::minutes(1))
+        .expect("the clock moves");
+}
+
+fn check_publications(canwu: &Canwu, at: SimTime) {
+    let state = fiscal_state(canwu);
+    let viewer = canwu.viewer_for_actor(PRINCIPAL).expect("viewer");
+    let mut reports = fiscal_reports(&viewer).expect("reports");
+    SEEN.with_borrow_mut(|seen| {
+        for (observer, _, cadence) in watched() {
+            let Some(report) = reports.remove(observer) else {
+                assert!(!seen.contains_key(observer), "{observer} keeps its report");
+                continue;
+            };
+            if seen.get(observer) == Some(&report) {
+                continue;
+            }
+            assert_eq!(report.projection.as_of, at, "{observer} is as of {at}");
+            assert!(report.is_complete(), "{observer} is complete");
+            let derived = compute_projection(&state, observer, at)
+                .expect("projection")
+                .expect("an observer");
+            assert_eq!(
+                report.projection.facts, derived.facts,
+                "{observer} reports what the records derive at {at}"
+            );
+            if cadence.is_interval() {
+                let due = seen.get(observer).map_or_else(
+                    || cadence.due_at_or_after(SimTime::EPOCH),
+                    |previous| cadence.due_after(previous.projection.as_of),
+                );
+                assert!(
+                    due.is_some_and(|due| due <= at),
+                    "{observer} is published at {at}, between its due times"
+                );
+            }
+            seen.insert(observer, report);
+        }
+    });
+}
+
+/// Archives up to `books` closed books, as `support::archive` does, through
+/// the checked `settle`.
+fn archive(canwu: &mut Canwu, store: &MemoryArchiveStore, books: usize) {
+    let receipt = enqueue_archive(canwu, store, books);
+    settle(canwu);
+    finalize_fiscal_archive_retention(canwu, store, &receipt).expect("retention finalized");
+    settle(canwu);
+}
+
+/// Every on-change report the principal holds is complete and is what the
+/// records derive, and every such observer whose institutions hold a hot
+/// book has one.
 fn assert_reports_current(canwu: &Canwu) {
     let state = fiscal_state(canwu);
     let viewer = canwu.viewer_for_actor(PRINCIPAL).expect("viewer");
     let reports = fiscal_reports(&viewer).expect("reports");
-    for observer in [support::OBSERVER, BOTH] {
+    for observer in [support::OBSERVER, BOTH, INSTITUTIONS] {
         let derived = compute_projection(&state, observer, canwu.time())
             .expect("projection")
             .expect("an observer");
@@ -342,12 +460,27 @@ fn reform(canwu: &mut Canwu, store: &MemoryArchiveStore, ledger: &mut Ledger, ro
 fn run(seed: u64, rounds: usize) {
     let fixture = Fixture::new();
     let mut canwu = fixture.runtime(scenario(|state| {
-        state.add_observer(observer_binding(
-            BOTH,
-            PRINCIPAL,
-            BTreeSet::from([treasury(), granary()]),
-        ));
+        // A treasury scope of a second mechanism, with no book: the treasury
+        // has two rows at institution granularity.
+        state.add_scope(FiscalScopeBinding {
+            id: "scope.treasury.tribute".to_owned(),
+            institution: treasury(),
+            jurisdiction_id: "region.a".to_owned(),
+            subject_scope: "registered_land".to_owned(),
+            mechanism: FiscalMechanism::GrainTribute,
+            authoritative_granularity: SimulationGranularity::Aggregate,
+        });
+        for (observer, granularity, cadence) in watched() {
+            if observer != support::OBSERVER {
+                state.add_observer(FiscalObserverBinding {
+                    granularity,
+                    cadence,
+                    ..observer_binding(observer, PRINCIPAL, BTreeSet::from([treasury(), granary()]))
+                });
+            }
+        }
     }));
+    SEEN.with_borrow_mut(BTreeMap::clear);
     let store = MemoryArchiveStore::default();
     let mut random = Random(seed);
     let mut ledger = Ledger::default();

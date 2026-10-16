@@ -14,11 +14,11 @@ use crate::model::{
     FiscalAction, FiscalActionBatch, FiscalActionEntry, FiscalActionIssuer, FiscalActionRequest,
     FiscalActionTarget, FiscalAppointmentDecision, FiscalAuthorityBinding, FiscalCatalogRecord,
     FiscalExecutionReceiptPacket, FiscalHistoricalContextPacket, FiscalIssuerRole,
-    FiscalRecentOutcome, FiscalState, MAX_FISCAL_ACTION_JSON_BYTES, MAX_FISCAL_ACTION_TEXT_BYTES,
-    MAX_FISCAL_BATCH_ENTRIES, MAX_FISCAL_BATCH_JSON_BYTES, MAX_FISCAL_EVIDENCE_PER_RECORD,
-    MAX_FISCAL_IDENTIFIER_BYTES, MAX_FISCAL_LEDGER_RECORD_BYTES, MAX_FISCAL_RECEIPTS_PER_PACKET,
-    MAX_FISCAL_RECORD_BYTES, MAX_FISCAL_REFERENCES_PER_DEFINITION, fiscal_catalog_reference,
-    invalid, validate_identifier,
+    FiscalRecentOutcome, FiscalReportBudget, FiscalState, MAX_FISCAL_ACTION_JSON_BYTES,
+    MAX_FISCAL_ACTION_TEXT_BYTES, MAX_FISCAL_BATCH_ENTRIES, MAX_FISCAL_BATCH_JSON_BYTES,
+    MAX_FISCAL_EVIDENCE_PER_RECORD, MAX_FISCAL_IDENTIFIER_BYTES, MAX_FISCAL_LEDGER_RECORD_BYTES,
+    MAX_FISCAL_RECEIPTS_PER_PACKET, MAX_FISCAL_RECORD_BYTES, MAX_FISCAL_REFERENCES_PER_DEFINITION,
+    fiscal_catalog_reference, invalid, validate_identifier,
 };
 use crate::projection::committed_fiscal_catalog;
 use crate::records::{
@@ -41,11 +41,12 @@ use canwu_api::{
     DomainRecordMutationPolicy, DomainRecordSchema, DomainRecordType, DomainRecordVersionRef,
     DomainReferenceSchema, DomainReferenceTargetKind, EntityRef, ErrorCode, EvidenceCursor,
     IngressClass, IngressId, IngressPayload, IngressReceipt, Issuer, KnowledgeHolderRef,
-    KnowledgeWriteGrant, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD, PayloadSchema, PersonId,
-    PluginActionDescriptor, PluginArchiveObjectProvider, PluginArchiveRetention,
-    PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest, PluginRegistrar, SimTime,
-    SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence, SystemDirective,
-    canonical_hash, payload_required_evidence_continuation_property_v1,
+    KnowledgeRetention, KnowledgeWriteGrant, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
+    PayloadSchema, PersonId, PluginActionDescriptor, PluginArchiveObjectProvider,
+    PluginArchiveRetention, PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest,
+    PluginRegistrar, SimTime, SimulationPlugin, SimulationView, StateKey, StateVisibility,
+    SystemCadence, SystemDirective, canonical_hash,
+    payload_required_evidence_continuation_property_v1,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -106,8 +107,8 @@ pub const FISCAL_ACTION_SETTLED_EVENT: &str = "canwu.fiscal.action_settled.v1";
 /// Event recorded for every settled archive commit, applied or stale.
 pub const FISCAL_ARCHIVE_MAINTENANCE_EVENT: &str = "canwu.fiscal.archive_maintenance.v1";
 
-const PLUGIN_VERSION: &str = "0.3.0-experimental";
-const SEMANTIC_HASH: &str = "8a3f61c0d52e94b7a1c86e03f4d7b25e9c10a6f38d2b74e5c19f0a87b3e6d214";
+const PLUGIN_VERSION: &str = "0.4.0-experimental";
+const SEMANTIC_HASH: &str = "e1550867aa531e3e15c623dd1685603ba0ff01d188eea61569e899945a3292ec";
 
 static ARCHIVE_COMMIT_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static ARCHIVE_RETENTION_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
@@ -122,10 +123,54 @@ struct FiscalArchiveRetentionPacket {
     handle_id: String,
 }
 
-#[derive(Clone, Debug, Default)]
+/// The fiscal plugin.
+///
+/// # Report-system cadence
+///
+/// The report system (`materialize-fiscal-reports-v1`, phase 13) is
+/// event-driven: it runs in every boundary that admits an event or ingress,
+/// which includes every same-instant drain boundary, so a host whose
+/// boundaries carry events publishes a report due at `t` in the first such
+/// boundary at or after `t`. A host whose boundaries can pass without any
+/// event sets [`Self::with_report_cadence`]: every boundary that carries
+/// that cadence category and no event then wakes the report system when
+/// report work is due, so a due report waits at most until the next such
+/// boundary, and is published at its instant.
+///
+/// The configuration (the evidence and authority-basis kinds, and the
+/// report cadence, budget share, and retention) is recorded in the plugin
+/// descriptor that every snapshot persists: a run is restored and replayed
+/// only with a plugin configured the same way, so changing it takes a new
+/// run.
+///
+/// # Report budget and retention
+///
+/// The report system publishes at most its share of each boundary's
+/// knowledge publication budget ([`FiscalReportBudget`], half of the
+/// engine's by default, [`Self::with_report_budget`]); what does not fit
+/// waits for the drain boundary at the same instant, which a boundary
+/// schedules only when it did some of the work owed, so the drains at one
+/// instant end even when the systems before the report system spend the
+/// budget (the work then waits for the next run of the report system).
+/// Report records are
+/// retired from their holder when a newer record of the same line
+/// supersedes them ([`KnowledgeRetention::RetireWhenSuperseded`], the
+/// default), so held reports stay flat over a run; a host that reads a
+/// closed cycle's figures after they leave the reports sets
+/// [`Self::with_report_retention`] to [`KnowledgeRetention::Keep`].
+#[derive(Clone, Debug)]
 pub struct FiscalPlugin {
     external_evidence_kinds: Vec<DomainRecordKind>,
     authority_basis_kinds: Vec<DomainRecordKind>,
+    report_cadence: Option<SystemCadence>,
+    report_budget: FiscalReportBudget,
+    report_retention: KnowledgeRetention,
+}
+
+impl Default for FiscalPlugin {
+    fn default() -> Self {
+        Self::new([])
+    }
 }
 
 impl FiscalPlugin {
@@ -138,7 +183,93 @@ impl FiscalPlugin {
         Self {
             external_evidence_kinds: canonical_kinds(external_evidence_kinds),
             authority_basis_kinds: Vec::new(),
+            report_cadence: None,
+            report_budget: FiscalReportBudget::DEFAULT,
+            report_retention: KnowledgeRetention::RetireWhenSuperseded,
         }
+    }
+
+    /// Sets fiscal's share of each boundary's knowledge publication budget:
+    /// the most record bodies, holder entries, and payload bytes the report
+    /// system publishes in one boundary, where the engine's remaining budget
+    /// allows. A larger share publishes more of a burst in one boundary; a
+    /// smaller one leaves more of the engine's budget to other plugins and
+    /// defers the rest to drain boundaries at the same instant.
+    ///
+    /// The share is recorded in the plugin descriptor (in the report
+    /// system's name), so a run restores and replays only with the same
+    /// share, and changing it takes a new run. Registration fails with
+    /// `InvalidPluginRegistration` for a share below
+    /// [`FiscalReportBudget::MINIMUM`] or above the engine's per-boundary
+    /// limits.
+    #[must_use]
+    pub fn with_report_budget(mut self, budget: FiscalReportBudget) -> Self {
+        self.report_budget = budget;
+        self
+    }
+
+    /// Fiscal's share of each boundary's publication budget.
+    #[must_use]
+    pub fn report_budget(&self) -> FiscalReportBudget {
+        self.report_budget
+    }
+
+    /// Sets the retention of the report knowledge schema: under
+    /// [`KnowledgeRetention::RetireWhenSuperseded`], the default, a report
+    /// record leaves its holder in the boundary that publishes the record
+    /// superseding it on its line, so a holder holds one current record per
+    /// line and held knowledge stays flat over a run; a closed cycle's
+    /// figures leave the holder once its emptied parts supersede them. Under
+    /// [`KnowledgeRetention::Keep`] every report record a holder was given
+    /// stays, readable through a full-history query, and held knowledge
+    /// grows with every publication.
+    ///
+    /// The retention is part of the registered schema, so it is in the
+    /// plugin descriptor: a run restores and replays only with the same
+    /// retention, and changing it takes a new run.
+    #[must_use]
+    pub fn with_report_retention(mut self, retention: KnowledgeRetention) -> Self {
+        self.report_retention = retention;
+        self
+    }
+
+    /// The retention of the report knowledge schema.
+    #[must_use]
+    pub fn report_retention(&self) -> KnowledgeRetention {
+        self.report_retention
+    }
+
+    /// Wakes the report system in every boundary that carries `cadence`
+    /// and admits no event or ingress (in an event-bearing boundary it runs
+    /// anyway), so that a report due at a time no event-bearing boundary
+    /// follows soon is published at the next boundary of `cadence`. Canwu
+    /// keeps no calendar: the host decides which boundaries carry the
+    /// category.
+    ///
+    /// The waking system (`wake-fiscal-reports-on-cadence-v1`, phase 13)
+    /// reads the root alone; when report work is due it schedules the
+    /// internal [`FISCAL_REPORT_DRAIN_INGRESS`] packet, due at once, so the
+    /// next boundary at the same instant, which `advance_canonical` and
+    /// `step_canonical` settle, runs the report system. Parked entries alone
+    /// wake nothing. (Two systems of one phase may not write the same
+    /// records, so the report system itself cannot also be registered on the
+    /// cadence.)
+    ///
+    /// The cadence is recorded in the plugin descriptor, so a run restores
+    /// and replays only with the same one, and changing it takes a new run.
+    /// Registration fails with `InvalidPluginRegistration` for
+    /// `SystemCadence::EventDriven`, which the report system already is and
+    /// which is not a category a host schedules.
+    #[must_use]
+    pub fn with_report_cadence(mut self, cadence: SystemCadence) -> Self {
+        self.report_cadence = Some(cadence);
+        self
+    }
+
+    /// The cadence category whose boundaries wake the report system, if any.
+    #[must_use]
+    pub fn report_cadence(&self) -> Option<SystemCadence> {
+        self.report_cadence.clone()
     }
 
     /// Declares the record kinds that an authority binding may cite as its
@@ -324,7 +455,8 @@ impl SimulationPlugin for FiscalPlugin {
 
     fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
         register_fiscal_record_schemas(registrar)?;
-        let report_schema = fiscal_report_knowledge_schema();
+        self.report_budget.validate()?;
+        let report_schema = fiscal_report_knowledge_schema(self.report_retention);
         registrar.register_knowledge_schema(report_schema.clone())?;
 
         let mut fiscal_reads = vec![catalog_key()];
@@ -373,7 +505,7 @@ impl SimulationPlugin for FiscalPlugin {
         registrar.register_boundary_system(settle, settle_fiscal_ingress)?;
 
         let mut reports = BoundarySystemContract::new(
-            "materialize-fiscal-reports-v1",
+            report_system_name(self.report_budget),
             BoundaryPhase::PerspectiveAndReportMaterialization,
             SystemCadence::EventDriven,
         );
@@ -389,7 +521,32 @@ impl SimulationPlugin for FiscalPlugin {
             visibilities: vec![StateVisibility::SameBoundary],
         }];
         reports.visibility = StateVisibility::SameBoundary;
-        registrar.register_boundary_system(reports, materialize_fiscal_reports)
+        let on_cadence = match self.report_cadence.clone() {
+            None => None,
+            Some(SystemCadence::EventDriven) => {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidPluginRegistration,
+                    "the fiscal report system is event-driven already; give with_report_cadence a cadence a host schedules",
+                ));
+            }
+            Some(cadence) => {
+                // It writes nothing: two systems of one phase may not write
+                // the same state, so it wakes the report system instead.
+                let mut contract = BoundarySystemContract::new(
+                    "wake-fiscal-reports-on-cadence-v1",
+                    BoundaryPhase::PerspectiveAndReportMaterialization,
+                    cadence,
+                );
+                contract.reads = vec![kind_key(&FiscalRecordKind::Root.kind())];
+                contract.visibility = StateVisibility::SameBoundary;
+                Some(contract)
+            }
+        };
+        registrar.register_boundary_system(reports, materialize_fiscal_reports)?;
+        match on_cadence {
+            Some(contract) => registrar.register_boundary_system(contract, wake_fiscal_reports),
+            None => Ok(()),
+        }
     }
 }
 
@@ -442,7 +599,10 @@ fn register_fiscal_record_schemas(registrar: &mut PluginRegistrar<'_>) -> Result
     let mut index = DomainRecordSchema::for_record::<crate::records::FiscalIndexRecord>();
     index.mutation_policy = DomainRecordMutationPolicy::CreateOnly;
     registrar.register_record_schema(index)?;
-    registrar.register_record_schema(DomainRecordSchema::for_record::<FiscalReportQueueRecord>())
+    registrar.register_record_schema(DomainRecordSchema::for_record::<FiscalReportQueueRecord>())?;
+    registrar.register_record_schema(DomainRecordSchema::for_record::<
+        crate::records::FiscalReportScheduleRecord,
+    >())
 }
 
 /// Registers the plugin's ingress types. Only the command's admission queues
@@ -1646,11 +1806,85 @@ fn settle_fiscal_ingress(
     settle_fiscal_packets(view, context, &catalog, &packets)
 }
 
+/// The report system's name, which carries fiscal's share of the
+/// publication budget when it is not the default, so that the share is in
+/// the plugin descriptor and the handler, a plain function, reads it from
+/// its own name.
+fn report_system_name(budget: FiscalReportBudget) -> String {
+    if budget == FiscalReportBudget::DEFAULT {
+        REPORT_SYSTEM.to_owned()
+    } else {
+        format!(
+            "{REPORT_SYSTEM}/share/{}/{}/{}",
+            budget.bodies, budget.entries, budget.payload_bytes
+        )
+    }
+}
+
+/// The share a report system's name carries; see [`report_system_name`].
+fn report_system_share(name: &str) -> Result<FiscalReportBudget, CanwuError> {
+    let Some(share) = name.strip_prefix(REPORT_SYSTEM) else {
+        return Err(invalid("the fiscal report system has an unknown name"));
+    };
+    if share.is_empty() {
+        return Ok(FiscalReportBudget::DEFAULT);
+    }
+    let parts: Vec<&str> = share
+        .strip_prefix("/share/")
+        .map(|share| share.split('/').collect())
+        .unwrap_or_default();
+    let number = |index: usize| -> Result<usize, CanwuError> {
+        parts
+            .get(index)
+            .and_then(|part| part.parse().ok())
+            .ok_or_else(|| invalid("the fiscal report system's name carries no share"))
+    };
+    if parts.len() != 3 {
+        return Err(invalid("the fiscal report system's name carries no share"));
+    }
+    Ok(FiscalReportBudget {
+        bodies: number(0)?,
+        entries: number(1)?,
+        payload_bytes: number(2)?,
+    })
+}
+
+const REPORT_SYSTEM: &str = "materialize-fiscal-reports-v1";
+
 fn materialize_fiscal_reports(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
-    materialize_reports(view, context, || committed_fiscal_catalog(view))
+    let share = report_system_share(&context.system)?;
+    materialize_reports(view, context, || committed_fiscal_catalog(view), share)
+}
+
+/// Wakes the report system in a boundary of the host's report cadence that
+/// has no event or ingress, so the event-driven report system does not run
+/// in it: when report work is due, it schedules the internal drain packet,
+/// due at once, and the next boundary at the same instant runs the report
+/// system. It reads the root alone. Parked entries alone wake nothing: the
+/// rotation advances in the runs of the report system that happen anyway (a
+/// revival is itself an event, and interval observers fall due regularly).
+fn wake_fiscal_reports(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+) -> Result<BoundaryProposal, CanwuError> {
+    if !context.admitted_events.is_empty() || !context.admitted_ingress.is_empty() {
+        return Ok(BoundaryProposal::default());
+    }
+    let Some(root) = crate::working::active_record(view, &crate::fiscal_root_reference())? else {
+        return Ok(BoundaryProposal::default());
+    };
+    let earliest_due: Option<canwu_api::SimTime> =
+        crate::working::field(&root.payload, "earliest_due")?;
+    if earliest_due.is_none_or(|due| due > context.at) || !view.can_schedule_ingress() {
+        return Ok(BoundaryProposal::default());
+    }
+    Ok(BoundaryProposal {
+        directives: vec![crate::report::drain_directive()],
+        ..BoundaryProposal::default()
+    })
 }
 
 /// The command that submits one batch of fiscal actions.

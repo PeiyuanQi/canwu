@@ -9,8 +9,8 @@
 //! [`FiscalRecordKind`]: one root, one archive head, an office per
 //! institution, a ledger per scope binding, a jurisdiction per catalog
 //! region in use, an observer per observer binding, and the binding
-//! directory, scope index, and report queue they derive. A boundary decodes
-//! and writes only the records its packets touch.
+//! directory, scope index, report queue, and report schedule they derive. A
+//! boundary decodes and writes only the records its packets touch.
 
 #![allow(clippy::missing_errors_doc)]
 
@@ -45,9 +45,10 @@ pub use records::{
     FiscalArchiveRecord, FiscalDirectoryBucket, FiscalDirectoryRecord, FiscalIndexOwner,
     FiscalIndexPage, FiscalIndexRecord, FiscalJurisdictionRecord, FiscalLedgerRecord,
     FiscalObserverRecord, FiscalOfficeRecord, FiscalRecordKind, FiscalReportQueuePage,
-    FiscalReportQueueRecord, FiscalRootRecord, audit_fiscal_record_set, audit_fiscal_records,
-    fiscal_archive_reference, fiscal_jurisdiction_reference, fiscal_ledger_reference,
-    fiscal_observer_reference, fiscal_office_reference, fiscal_root_reference,
+    FiscalReportQueueRecord, FiscalReportScheduleRecord, FiscalRootRecord, audit_fiscal_record_set,
+    audit_fiscal_records, fiscal_archive_reference, fiscal_jurisdiction_reference,
+    fiscal_ledger_reference, fiscal_observer_reference, fiscal_office_reference,
+    fiscal_report_schedule_reference, fiscal_root_reference,
 };
 pub use report::{fiscal_report_knowledge_schema_id, fiscal_reports, fiscal_reports_of_holder};
 pub use settle::FiscalSettledAction;

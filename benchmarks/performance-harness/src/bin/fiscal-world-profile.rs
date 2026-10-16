@@ -26,14 +26,14 @@
 
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundaryReceipt,
-    BoundaryRequest, BoundarySystemContract, Canwu, CanwuError, CommandEnvelope, CommandRequest,
-    CommandRequestId, DomainRecordDraft, DomainRecordKind, DomainRecordMutation,
-    DomainRecordSchema, DomainRecordType, DomainValueKindClass, EntityRef, Government,
-    GovernmentId, IngressClass, IngressPayload, Issuer, KnowledgeHolderRef, KnowledgeSnapshot,
-    MapPoint, OrganizationId, PayloadSchema, Person, PersonId, PluginIngressDescriptor,
-    PluginIngressRequest, PluginRegistrar, ResourceId, Scenario, SimTime, SimulationGranularity,
-    SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence, Territory,
-    TerritoryId, TypedDomainRecordRef, WorldSnapshot,
+    BoundaryRequest, BoundarySystemContract, Canwu, CanwuError, CanwuRun, CommandEnvelope,
+    CommandRequest, CommandRequestId, CompactedCanwu, DomainRecordDraft, DomainRecordKind,
+    DomainRecordMutation, DomainRecordSchema, DomainRecordType, DomainValueKindClass, EntityRef,
+    Government, GovernmentId, IngressClass, IngressPayload, Issuer, KnowledgeHolderRef,
+    KnowledgeSnapshot, MapPoint, OrganizationId, PayloadSchema, Person, PersonId,
+    PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar, ResourceId, Scenario,
+    SimDuration, SimTime, SimulationGranularity, SimulationPlugin, SimulationView, StateKey,
+    StateVisibility, SystemCadence, Territory, TerritoryId, TypedDomainRecordRef, WorldSnapshot,
 };
 use canwu_fiscal::{
     CompiledFiscalCatalog, FiscalAction, FiscalActionBatch, FiscalActionDisposition,
@@ -44,12 +44,12 @@ use canwu_fiscal::{
     FiscalCoverageStatus, FiscalExecutionEvidence, FiscalExecutionKind,
     FiscalExecutionReceiptPacket, FiscalHistoricalMode, FiscalMechanism, FiscalObserverBinding,
     FiscalPackManifest, FiscalPaymentForm, FiscalPeriodDefinition, FiscalPlugin, FiscalProvenance,
-    FiscalReceiptDisposition, FiscalRegionDefinition, FiscalRuleDefinition, FiscalScopeBinding,
-    FiscalSettledAction, FiscalState, HistoricalConfidence, HistoricalYearWindow,
-    MAX_FISCAL_BATCH_ENTRIES, MAX_FISCAL_RECEIPTS_PER_PACKET, PLUGIN_NAME, audit_fiscal_records,
-    compile_fiscal_content, enqueue_execution_receipts, enqueue_fiscal_archive,
-    finalize_fiscal_archive_retention, fiscal_action_command, fiscal_target_revision,
-    load_fiscal_state,
+    FiscalReceiptDisposition, FiscalRegionDefinition, FiscalReportCadence, FiscalReportGranularity,
+    FiscalRuleDefinition, FiscalScopeBinding, FiscalSettledAction, FiscalState,
+    HistoricalConfidence, HistoricalYearWindow, MAX_FISCAL_BATCH_ENTRIES,
+    MAX_FISCAL_RECEIPTS_PER_PACKET, PLUGIN_NAME, audit_fiscal_records, compile_fiscal_content,
+    enqueue_execution_receipts, enqueue_fiscal_archive, finalize_fiscal_archive_retention,
+    fiscal_action_command, fiscal_target_revision, load_fiscal_state,
 };
 use serde_json::{Value, json};
 #[cfg(feature = "allocation-counting")]
@@ -184,6 +184,10 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 thread_local! {
     /// Whether this thread counts, and the allocator calls counted so far.
     static ALLOCATIONS: Cell<(bool, u64)> = const { Cell::new((false, 0)) };
+    /// While counting, the bytes allocated less those freed since the
+    /// measurement started, and the most they reached: the heap peak above
+    /// the start.
+    static HEAP: Cell<(i64, i64)> = const { Cell::new((0, 0)) };
 }
 
 #[cfg(feature = "allocation-counting")]
@@ -196,29 +200,63 @@ fn count_allocation() {
     });
 }
 
+/// Adds `bytes` (negative when freed) to the heap of the measurement in
+/// progress.
+#[cfg(feature = "allocation-counting")]
+fn count_heap(bytes: i64) {
+    let counting = ALLOCATIONS.try_with(|state| state.get().0).unwrap_or(false);
+    if counting {
+        let _ = HEAP.try_with(|heap| {
+            let (live, peak) = heap.get();
+            let live = live.saturating_add(bytes);
+            heap.set((live, peak.max(live)));
+        });
+    }
+}
+
+/// The heap peak above the start of the last measurement, in bytes; zero in
+/// an elapsed build.
+#[allow(clippy::cast_precision_loss)]
+fn heap_peak() -> f64 {
+    #[cfg(feature = "allocation-counting")]
+    {
+        return HEAP.with(|heap| heap.get().1) as f64;
+    }
+    #[allow(unreachable_code)]
+    0.0
+}
+
 // SAFETY: every operation delegates to `System` with the original pointer and
 // layout; the thread-local counter only observes allocator calls.
 #[cfg(feature = "allocation-counting")]
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         count_allocation();
+        count_heap(i64::try_from(layout.size()).unwrap_or(i64::MAX));
         // SAFETY: the caller supplies the layout required by `GlobalAlloc`.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         count_allocation();
+        count_heap(i64::try_from(layout.size()).unwrap_or(i64::MAX));
         // SAFETY: the caller supplies the layout required by `GlobalAlloc`.
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        count_heap(-i64::try_from(layout.size()).unwrap_or(i64::MAX));
         // SAFETY: the caller returns the pointer with its original layout.
         unsafe { System.dealloc(pointer, layout) };
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         count_allocation();
+        count_heap(
+            i64::try_from(new_size)
+                .unwrap_or(i64::MAX)
+                .saturating_sub(i64::try_from(layout.size()).unwrap_or(i64::MAX)),
+        );
         // SAFETY: the caller supplies the pointer, original layout, and size.
         unsafe { System.realloc(pointer, layout, new_size) }
     }
@@ -235,6 +273,7 @@ impl Meter {
     fn start() -> Self {
         #[cfg(feature = "allocation-counting")]
         if COUNT_ALLOCATIONS.load(Ordering::Relaxed) {
+            HEAP.with(|heap| heap.set((0, 0)));
             ALLOCATIONS.with(|state| state.set((true, 0)));
         }
         Self(Instant::now())
@@ -567,7 +606,36 @@ fn catalog(partitions: usize) -> Fallible<CompiledFiscalCatalog> {
     )?)
 }
 
-fn fiscal_state(world: &World) -> Fallible<FiscalState> {
+/// How the generated observers are configured: the granularity of each
+/// partition's court (its observer of every institution) and every
+/// observer's cadence, by its index among all observers.
+struct Observers {
+    courts: FiscalReportGranularity,
+    cadence: fn(u64) -> FiscalReportCadence,
+}
+
+/// Thirty days, the interval of the generated interval cadences.
+const MONTH: SimDuration = SimDuration::days(30);
+
+/// Monthly, observer `index` due on day `index % 30`: about one
+/// thirtieth of the observers due each day.
+fn staggered(index: u64) -> FiscalReportCadence {
+    FiscalReportCadence::staggered(MONTH, index, 30)
+}
+
+/// Monthly, every observer due at the same instants.
+fn aligned(_: u64) -> FiscalReportCadence {
+    FiscalReportCadence::Interval {
+        every: MONTH,
+        offset: SimDuration::ZERO,
+    }
+}
+
+fn on_change(_: u64) -> FiscalReportCadence {
+    FiscalReportCadence::OnChange
+}
+
+fn fiscal_state(world: &World, observers: &Observers) -> Fallible<FiscalState> {
     let mut state = FiscalState::new(150, FiscalHistoricalMode::Counterfactual, SimTime::EPOCH);
     state
         .root
@@ -611,12 +679,19 @@ fn fiscal_state(world: &World) -> Fallible<FiscalState> {
             } else {
                 BTreeSet::from([institution_entity(first + observer + 1)?])
             };
+            let index = u64::try_from(partition * OBSERVERS_PER_PARTITION + observer)?;
             state.add_observer(FiscalObserverBinding {
                 id: format!("observer.{partition:03}.{observer:02}"),
                 actor: Some(holder),
                 knowledge_holder: KnowledgeHolderRef::Person(holder),
                 visible_institutions: visible,
                 confidence_per_mille: 850,
+                granularity: if observer == 0 {
+                    observers.courts
+                } else {
+                    FiscalReportGranularity::Scope
+                },
+                cadence: (observers.cadence)(index),
                 controlled_by: None,
                 rebound_by: None,
                 removed: None,
@@ -722,6 +797,11 @@ struct Samples {
     record_changes: usize,
     applied: usize,
     rejected: usize,
+    /// In allocation mode, the heap peak of the measured boundary above its
+    /// start, in bytes.
+    heap_peak: Vec<f64>,
+    /// What the measured boundary published, when it is recorded.
+    publication: Option<Value>,
 }
 
 /// What one boundary's profile says: the fiscal handlers' time, the
@@ -761,6 +841,7 @@ impl Samples {
             ("drain_boundaries_ms", &self.drains),
             ("host_ms", &self.host),
             ("audit_after_ms", &self.audit),
+            ("heap_peak_bytes", &self.heap_peak),
         ] {
             if !samples.is_empty() {
                 map.insert(key.to_owned(), summary(samples));
@@ -775,6 +856,9 @@ impl Samples {
                     .collect::<serde_json::Map<_, _>>()
                     .into(),
             );
+        }
+        if let Some(publication) = &self.publication {
+            map.insert("publication".to_owned(), publication.clone());
         }
         value
     }
@@ -855,6 +939,20 @@ fn enqueue_actions(
     world: &World,
     actions: Vec<(usize, String, FiscalAction)>,
 ) -> Fallible<()> {
+    for request in action_requests(&*canwu, world, actions)? {
+        canwu.enqueue_command(canwu.time(), 0, request)?;
+    }
+    Ok(())
+}
+
+/// The tracked commands that carry `actions`, through either run handle:
+/// one batch per institution and chunk of `MAX_FISCAL_BATCH_ENTRIES`, each
+/// entry against its ledger's revision now.
+fn action_requests<H: CanwuRun + ?Sized>(
+    canwu: &H,
+    world: &World,
+    actions: Vec<(usize, String, FiscalAction)>,
+) -> Fallible<Vec<CommandRequest>> {
     let mut by_institution: BTreeMap<usize, Vec<FiscalActionEntry>> = BTreeMap::new();
     for (scope, action_id, action) in actions {
         let expected_revision =
@@ -871,29 +969,26 @@ fn enqueue_actions(
     }
     let revision = canwu.revision();
     let mut offset = 0_u64;
+    let mut requests = Vec::new();
     for (institution, entries) in by_institution {
         for chunk in entries.chunks(MAX_FISCAL_BATCH_ENTRIES) {
             let batch = FiscalActionBatch {
                 authority_binding_id: authority_id(institution),
                 entries: chunk.to_vec(),
             };
-            canwu.enqueue_command(
-                canwu.time(),
-                0,
-                CommandRequest::new(
-                    CommandRequestId::new(revision + offset + 1),
-                    revision + offset,
-                    CommandEnvelope::new(
-                        Issuer::Actor(principal(institution)?),
-                        fiscal_action_command(&batch)?,
-                    )
-                    .at_time(canwu.time()),
-                ),
-            )?;
+            requests.push(CommandRequest::new(
+                CommandRequestId::new(revision + offset + 1),
+                revision + offset,
+                CommandEnvelope::new(
+                    Issuer::Actor(principal(institution)?),
+                    fiscal_action_command(&batch)?,
+                )
+                .at_time(canwu.time()),
+            ));
             offset += 1;
         }
     }
-    Ok(())
+    Ok(requests)
 }
 
 fn assessments(scopes: &[usize]) -> Vec<(usize, String, FiscalAction)> {
@@ -1250,9 +1345,289 @@ fn measured_archive(base: &Canwu, preset: &Preset, books: usize) -> Fallible<Val
     Ok(value)
 }
 
+/// Partitions an authored state and starts a run of it; returns the run and
+/// the cost of partitioning and of activation.
+fn start(
+    world: &World,
+    catalog: &CompiledFiscalCatalog,
+    state: FiscalState,
+    plugins: &[&dyn SimulationPlugin],
+) -> Fallible<(Canwu, f64, f64)> {
+    let started = Meter::start();
+    let records = state.into_records(catalog)?;
+    let partition_cost = started.finish();
+    let mut domain_records = vec![catalog.clone().into_record()?];
+    domain_records.extend(records);
+    let scenario = scenario(world, domain_records)?;
+    let started = Meter::start();
+    let run = Canwu::new_with_plugins(41, scenario, plugins)?;
+    Ok((run, partition_cost, started.finish()))
+}
+
+/// The assessment of every scope in one monthly cycle, and the close of each
+/// book of it.
+fn cycle_actions(scopes: usize, cycle: usize) -> [Vec<(usize, String, FiscalAction)>; 2] {
+    let id = format!("month.{cycle:04}");
+    [
+        (0..scopes)
+            .map(|scope| {
+                (
+                    scope,
+                    format!("assess.{cycle:04}.{scope:06}"),
+                    FiscalAction::OpenAssessment {
+                        assessment_id: format!("assess.{cycle:04}.{scope:06}"),
+                        rule_id: RULE.to_owned(),
+                        scope_binding_id: scope_id(scope),
+                        accounting_cycle_id: id.clone(),
+                        quantity: 1_000 + u64::try_from(cycle).unwrap_or(0),
+                        unit: "grain".to_owned(),
+                        payment_form: FiscalPaymentForm::Grain,
+                        commutation_quote: None,
+                    },
+                )
+            })
+            .collect(),
+        (0..scopes)
+            .map(|scope| {
+                (
+                    scope,
+                    format!("close.{cycle:04}.{scope:06}"),
+                    FiscalAction::CloseAccountingCycle {
+                        scope_binding_id: scope_id(scope),
+                        accounting_cycle_id: id.clone(),
+                    },
+                )
+            })
+            .collect(),
+    ]
+}
+
+/// Moves a sealed run's clock to `at` and settles a boundary there that a
+/// tick makes event-bearing, with the drains at its instant.
+fn tick_compact(run: &mut CompactedCanwu, at: SimTime) -> Fallible<()> {
+    let wait = at.checked_sub(run.time()).ok_or("the day has passed")?;
+    run.advance_canonical(wait)?;
+    run.enqueue_plugin_ingress(PluginIngressRequest::new(
+        SUPPORT_PLUGIN,
+        TICK_INGRESS,
+        run.time(),
+        json!({}),
+    ))?;
+    run.advance_canonical(SimDuration::ZERO)?;
+    Ok(())
+}
+
+/// Moves a sealed run's clock to `at` without a boundary.
+fn wait_compact(run: &mut CompactedCanwu, at: SimTime) -> Fallible<()> {
+    let wait = at.checked_sub(run.time()).ok_or("the day has passed")?;
+    if !run.advance_canonical(wait)?.is_empty() {
+        return Err("a boundary came before the day".into());
+    }
+    Ok(())
+}
+
+/// Held knowledge over simulated years: `cycles` monthly cycles on a run
+/// that seals its evidence after each, the observers on their monthly
+/// interval cadences. Each month every scope is assessed on its first day,
+/// a tick each day lets the observers due that day publish, and on its last
+/// day every book is closed and archived. After each month: the record
+/// bodies, holder entries, and payload bytes the run holds, the bytes of its
+/// continuation checkpoint, and the month's wall time up to its seal (not
+/// these measurements or the audit after them); after the last, the time to
+/// restore that checkpoint. Held knowledge must stay flat after the second
+/// month.
+#[allow(clippy::too_many_lines)]
+fn held_over_cycles(
+    base: &Canwu,
+    world: &World,
+    plugins: &[&dyn SimulationPlugin],
+    cycles: usize,
+) -> Fallible<Value> {
+    let mut run = base.fork().into_compacted()?;
+    let store = MemoryArchiveStore::default();
+    let scopes = world.scope_institution.len();
+    let day = |cycle: usize, day: i64| -> Fallible<SimTime> {
+        Ok(SimTime::EPOCH + SimDuration::days(i64::try_from(cycle)? * 30 + day))
+    };
+    let mut rows = Vec::new();
+    for cycle in 0..cycles {
+        let started = Instant::now();
+        let [assess, close] = cycle_actions(scopes, cycle);
+        wait_compact(&mut run, day(cycle, 1)?)?;
+        for request in action_requests(&run, world, assess)? {
+            run.enqueue_command(run.time(), 0, request)?;
+        }
+        run.advance_canonical(SimDuration::ZERO)?;
+        for date in 2..29 {
+            tick_compact(&mut run, day(cycle, date)?)?;
+        }
+        wait_compact(&mut run, day(cycle, 29)?)?;
+        for request in action_requests(&run, world, close)? {
+            run.enqueue_command(run.time(), 0, request)?;
+        }
+        run.advance_canonical(SimDuration::ZERO)?;
+        loop {
+            let state = load_fiscal_state(&run)?.ok_or("no fiscal state")?;
+            if state.books().next().is_none() {
+                break;
+            }
+            let prepared = state.prepare_fiscal_archive(4_096, &store, None)?;
+            drop(state);
+            let receipt = enqueue_fiscal_archive(&mut run, &prepared, &store, None)?;
+            run.advance_canonical(SimDuration::ZERO)?;
+            finalize_fiscal_archive_retention(&mut run, &store, &receipt)?;
+            run.advance_canonical(SimDuration::ZERO)?;
+        }
+        tick_compact(&mut run, day(cycle, 29)? + SimDuration::hours(12))?;
+        drop(run.seal_evidence()?);
+        #[allow(clippy::cast_precision_loss)]
+        let month_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        let ledgers = &run.knowledge().records;
+        let mut payload_bytes = 0_usize;
+        for body in ledgers.bodies() {
+            payload_bytes += body.payload_bytes()?;
+        }
+        let (bodies, entries) = (ledgers.body_count(), ledgers.entry_count());
+        let (checkpoint, _) = run.continuation_checkpoint()?;
+        let checkpoint_bytes = checkpoint.to_json()?.len();
+        drop(checkpoint);
+        audit_fiscal_records(&run)?;
+        let row = json!({
+            "cycle": cycle + 1,
+            "bodies": bodies,
+            "entries": entries,
+            "payload_bytes": payload_bytes,
+            "continuation_checkpoint_bytes": checkpoint_bytes,
+            "month_wall_ms": round(month_ms),
+        });
+        eprintln!("held after cycle {}: {row}", cycle + 1);
+        rows.push(row);
+    }
+    let (checkpoint, hash) = run.continuation_checkpoint()?;
+    let json = checkpoint.to_json()?;
+    drop(checkpoint);
+    let started = Instant::now();
+    let restored =
+        CompactedCanwu::from_continuation_checkpoint_json_verified(&json, &hash, plugins)?;
+    #[allow(clippy::cast_precision_loss)]
+    let restore_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    if restored.checkpoint_hash() != run.checkpoint_hash() {
+        return Err("the restored run differs from the run it was written from".into());
+    }
+    Ok(json!({
+        "cycles": rows,
+        "continuation_checkpoint_bytes": json.len(),
+        "continuation_restore_ms": round(restore_ms),
+        "archive_store_objects": store.objects.borrow().len(),
+    }))
+}
+
+/// What the run's last boundary published: record bodies, holder entries,
+/// payload bytes (as the engine's budget charges them), directives (each one
+/// `KnowledgePublished` event), and distinct holders.
+fn publication(canwu: &Canwu, receipt: &BoundaryReceipt) -> Fallible<Value> {
+    let boundary = canwu.boundaries().last().ok_or("the run has no boundary")?;
+    let mut payload_bytes = 0_usize;
+    let mut holders = BTreeSet::new();
+    for change in &boundary.knowledge_changes {
+        for body in &change.records {
+            payload_bytes += body.payload_bytes()?;
+        }
+        holders.extend(change.holders.iter().map(|publication| &publication.holder));
+    }
+    Ok(json!({
+        "bodies": receipt.knowledge_record_count,
+        "entries": receipt.knowledge_entry_count,
+        "payload_bytes": payload_bytes,
+        "directives": receipt.knowledge_batch_count,
+        "holders": holders.len(),
+    }))
+}
+
+/// Settles, on forks of `base`, the boundary at `at` that a tick of another
+/// plugin makes event-bearing, and the drains that follow at its instant:
+/// the interval report work due at `at`, and nothing else fiscal.
+fn measured_due(base: &Canwu, preset: &Preset, at: SimTime) -> Fallible<Samples> {
+    let mut samples = Samples::default();
+    for sample in 0..preset.warmup + preset.samples {
+        let last = sample + 1 == preset.warmup + preset.samples;
+        let mut run = base.fork();
+        let wait = at
+            .checked_sub(run.time())
+            .ok_or("the due time has passed")?;
+        if !run.advance_canonical(wait)?.is_empty() {
+            return Err("a boundary came before the due time".into());
+        }
+        run.enqueue_plugin_ingress(PluginIngressRequest::new(
+            SUPPORT_PLUGIN,
+            TICK_INGRESS,
+            run.time(),
+            json!({}),
+        ))?;
+        let (receipt, cost, split) = timed_boundary(&mut run)?;
+        if sample < preset.warmup {
+            continue;
+        }
+        if counting() {
+            samples.heap_peak.push(heap_peak());
+        }
+        samples.publication = Some(publication(&run, &receipt)?);
+        if last {
+            audit_after(&run, &mut samples)?;
+        }
+        let (drains, drain_cost, published) = drain(&mut run, last, &mut samples)?;
+        samples.settlement.push(cost);
+        samples.record_split(split);
+        samples.drains.push(drain_cost);
+        samples.drain_boundaries = drains;
+        samples.records_published = receipt.knowledge_record_count + published;
+        samples.record_changes = receipt.record_change_count;
+    }
+    Ok(samples)
+}
+
+/// The world with every observer due monthly at the same instants: the
+/// observers settled at 0 (no book to report yet, so only queued for their
+/// next due time), every scope assessed (one dirty cycle owed to every
+/// observer, and nothing published, since none is due), and the measured
+/// boundary at the next due time, every observer due at once.
+fn due_instant(
+    world: &World,
+    preset: &Preset,
+    courts: FiscalReportGranularity,
+    order: &[usize],
+    plugins: &[&dyn SimulationPlugin],
+) -> Fallible<Value> {
+    let catalog = catalog(preset.partitions)?;
+    let state = fiscal_state(
+        world,
+        &Observers {
+            courts,
+            cadence: aligned,
+        },
+    )?;
+    let (mut base, _, _) = start(world, &catalog, state, plugins)?;
+    let initial = publish_initial_reports(&mut base)?;
+    let assessed = action_boundaries(&base, world, assessments(order), None)?;
+    drop(base);
+    let samples = measured_due(&assessed, preset, SimTime::EPOCH + MONTH)?;
+    Ok(json!({
+        "observers_due": preset.partitions * OBSERVERS_PER_PARTITION,
+        "initial_report_publication": initial,
+        "boundaries": samples.render(),
+    }))
+}
+
 struct Options {
     count_allocations: bool,
     preset: String,
+    /// The courts' granularity: `scope` (the default) or `institution`.
+    courts: FiscalReportGranularity,
+    /// Monthly interval cadences, staggered over the month, instead of
+    /// on-change reports.
+    interval: bool,
+    /// Monthly cycles of the held-knowledge measurement; none when zero.
+    held_cycles: usize,
     seed: u64,
     machine: String,
     recorded_on: String,
@@ -1263,6 +1638,9 @@ fn options() -> Fallible<Options> {
     let mut options = Options {
         count_allocations: false,
         preset: "smoke".to_owned(),
+        courts: FiscalReportGranularity::Scope,
+        interval: false,
+        held_cycles: 0,
         seed: 0xF15C_0016,
         machine: "unspecified".to_owned(),
         recorded_on: "unspecified".to_owned(),
@@ -1284,6 +1662,21 @@ fn options() -> Fallible<Options> {
                 };
             }
             "--preset" => options.preset = value()?,
+            "--courts" => {
+                options.courts = match value()?.as_str() {
+                    "scope" => FiscalReportGranularity::Scope,
+                    "institution" => FiscalReportGranularity::Institution,
+                    other => return Err(format!("unsupported court granularity {other}").into()),
+                };
+            }
+            "--held-cycles" => options.held_cycles = value()?.parse()?,
+            "--cadence" => {
+                options.interval = match value()?.as_str() {
+                    "on-change" => false,
+                    "interval" => true,
+                    other => return Err(format!("unsupported report cadence {other}").into()),
+                };
+            }
             "--seed" => options.seed = value()?.parse()?,
             "--machine" => options.machine = value()?,
             "--recorded-on" => options.recorded_on = value()?,
@@ -1291,7 +1684,8 @@ fn options() -> Fallible<Options> {
             "--help" | "-h" => {
                 println!(
                     "fiscal-world-profile [--mode elapsed|allocations] [--preset smoke|world] \
-                     [--seed N] [--machine LABEL] [--recorded-on DATE] [--output PATH]"
+                     [--courts scope|institution] [--cadence on-change|interval] \
+                     [--held-cycles N] [--seed N] [--machine LABEL] [--recorded-on DATE] [--output PATH]"
                 );
                 std::process::exit(0);
             }
@@ -1320,16 +1714,16 @@ fn main() -> Fallible<()> {
 
     // Partition the authored state and start the run.
     let catalog = catalog(preset.partitions)?;
-    let state = fiscal_state(&world)?;
-    let started = Meter::start();
-    let records = state.into_records(&catalog)?;
-    let partition_cost = started.finish();
-    let mut domain_records = vec![catalog.into_record()?];
-    domain_records.extend(records);
-    let scenario = scenario(&world, domain_records)?;
-    let started = Meter::start();
-    let mut base = Canwu::new_with_plugins(41, scenario, &plugins)?;
-    let activation = started.finish();
+    let observers = Observers {
+        courts: options.courts,
+        cadence: if options.interval {
+            staggered
+        } else {
+            on_change
+        },
+    };
+    let state = fiscal_state(&world, &observers)?;
+    let (mut base, partition_cost, activation) = start(&world, &catalog, state, &plugins)?;
     let started = Instant::now();
     audit_fiscal_records(&base)?;
     #[allow(clippy::cast_precision_loss)]
@@ -1361,6 +1755,21 @@ fn main() -> Fallible<()> {
     let assessed = assessed.ok_or("no burst assessed every scope")?;
     let sizes_assessed = record_sizes(&assessed)?;
     let idle_assessed = idle(&assessed, preset.idle_samples)?;
+    // With monthly cadences staggered over the month, the observers due on
+    // the first day after the burst: about a thirtieth of them, each owing
+    // its first report with the burst's cycle in it.
+    let mut cadence_rows = serde_json::Map::new();
+    if options.interval {
+        let samples = measured_due(&assessed, &preset, SimTime::EPOCH + SimDuration::days(1))?;
+        eprintln!("spread due day: {}", samples.render());
+        let due = (0..preset.partitions * OBSERVERS_PER_PARTITION)
+            .filter(|index| index % 30 == 1)
+            .count();
+        cadence_rows.insert(
+            "spread_due_day".to_owned(),
+            json!({ "day": 1, "observers_due": due, "boundaries": samples.render() }),
+        );
+    }
     let snapshot_started = Instant::now();
     let snapshot = assessed.snapshot_json()?;
     #[allow(clippy::cast_precision_loss)]
@@ -1408,6 +1817,27 @@ fn main() -> Fallible<()> {
         eprintln!("archive {books}: {value}");
         archive.insert(books.to_string(), value);
     }
+    // Held knowledge over simulated years, on a run of the base world.
+    let held = if options.held_cycles > 0 {
+        Some(held_over_cycles(
+            &base,
+            &world,
+            &plugins,
+            options.held_cycles,
+        )?)
+    } else {
+        None
+    };
+    drop((closed, assessed, base));
+
+    // Every observer due at one instant, owing one dirty cycle: the gate
+    // case, on a run of the same world whose observers share their due
+    // times.
+    if options.interval {
+        let value = due_instant(&world, &preset, options.courts, &order, &plugins)?;
+        eprintln!("due instant: {value}");
+        cadence_rows.insert("due_instant".to_owned(), value);
+    }
 
     let largest_partition = world.partitions.iter().map(Vec::len).max().unwrap_or(0);
     let mut report = json!({
@@ -1424,6 +1854,12 @@ fn main() -> Fallible<()> {
             "institutions": world.institutions,
             "observers": preset.partitions * OBSERVERS_PER_PARTITION,
             "cycle": "annual, one cycle",
+            "courts": options.courts,
+            "report_cadence": if options.interval {
+                "monthly, staggered over thirty days"
+            } else {
+                "on change"
+            },
         },
         "samples": preset.samples,
         "state": {
@@ -1446,6 +1882,12 @@ fn main() -> Fallible<()> {
         "close_every_book": close_samples.render(),
         "archive_commits": archive,
     });
+    if !cadence_rows.is_empty() {
+        report["interval_reports"] = Value::Object(cadence_rows);
+    }
+    if let Some(held) = held {
+        report["held_knowledge"] = held;
+    }
     if options.count_allocations {
         relabel(&mut report);
     }

@@ -26,10 +26,11 @@ use canwu_fiscal::{
     FiscalCoverageSelector, FiscalCoverageStatus, FiscalExecutionKind, FiscalExecutionRequest,
     FiscalHistoricalMode, FiscalLedgerRecord, FiscalMechanism, FiscalObserverBinding,
     FiscalOutcomeRing, FiscalPackManifest, FiscalPaymentForm, FiscalPeriodDefinition, FiscalPlugin,
-    FiscalProvenance, FiscalRecentOutcome, FiscalRegionDefinition, FiscalRuleDefinition,
-    FiscalScopeBinding, FiscalSettledAction, FiscalState, HistoricalConfidence,
-    HistoricalYearWindow, MAX_FISCAL_HOT_BOOKS_PER_LEDGER, audit_fiscal_records,
-    compile_fiscal_content, fiscal_action_command, fiscal_ledger_reference, fiscal_target_revision,
+    FiscalProvenance, FiscalRecentOutcome, FiscalRegionDefinition, FiscalReportCadence,
+    FiscalReportGranularity, FiscalRuleDefinition, FiscalScopeBinding, FiscalSettledAction,
+    FiscalState, HistoricalConfidence, HistoricalYearWindow, MAX_FISCAL_HOT_BOOKS_PER_LEDGER,
+    audit_fiscal_records, compile_fiscal_content, fiscal_action_command, fiscal_ledger_reference,
+    fiscal_target_revision,
 };
 use serde_json::{Value, json};
 #[cfg(feature = "allocation-counting")]
@@ -419,12 +420,22 @@ fn observer_reports(canwu: &Canwu, observers: usize) -> Result<(usize, usize), B
     let mut held = (0, 0);
     for observer in 0..observers {
         let holder = KnowledgeHolderRef::Person(principal(observer)?);
-        for record in canwu.knowledge().for_holder(&holder).into_iter().flatten() {
+        for payload in held_payloads(canwu, &holder) {
             held.0 += 1;
-            held.1 += serde_json::to_vec(&record.1.payload)?.len();
+            held.1 += serde_json::to_vec(&payload)?.len();
         }
     }
     Ok(held)
+}
+
+/// The payloads of the knowledge records `holder` holds: the one place the
+/// profile reads the engine's holder ledger.
+fn held_payloads(canwu: &Canwu, holder: &KnowledgeHolderRef) -> Vec<serde_json::Value> {
+    canwu
+        .knowledge()
+        .for_holder(holder)
+        .map(|ledger| ledger.values().map(|record| record.payload).collect())
+        .unwrap_or_default()
 }
 
 fn authority_id(institution: usize) -> String {
@@ -594,6 +605,8 @@ fn fiscal_history(
                 .map(institution_entity)
                 .collect::<Result<_, _>>()?,
             confidence_per_mille: 850,
+            granularity: FiscalReportGranularity::Scope,
+            cadence: FiscalReportCadence::OnChange,
             controlled_by: None,
             rebound_by: None,
             removed: None,

@@ -20,11 +20,11 @@ use canwu_api::{
     DomainRecordLifecycle, DomainRecordMutation, DomainRecordSchema, DomainRecordType,
     DomainRecordVersionRef, DomainRecordVersionSource, DomainValueKindClass, EntityRef,
     EvidenceJournalSegment, Government, GovernmentId, IngressClass, IngressPayload, Issuer,
-    KnowledgeHolderRef, KnowledgeRecord, KnowledgeSnapshot, LifeState, MapPoint, OrganizationId,
-    PayloadSchema, Person, PersonAvailability, PersonId, PluginIngressDescriptor,
-    PluginIngressRequest, PluginRegistrar, ResourceId, Scenario, SimDuration, SimTime,
-    SimulationGranularity, SimulationPlugin, SimulationView, StateKey, StateVisibility,
-    SystemCadence, Territory, TerritoryId, TypedDomainRecordRef, WorldSnapshot,
+    KnowledgeHolderRef, KnowledgeRecord, KnowledgeRetention, KnowledgeSnapshot, LifeState,
+    MapPoint, OrganizationId, PayloadSchema, Person, PersonAvailability, PersonId,
+    PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar, ResourceId, Scenario,
+    SimDuration, SimTime, SimulationGranularity, SimulationPlugin, SimulationView, StateKey,
+    StateVisibility, SystemCadence, Territory, TerritoryId, TypedDomainRecordRef, WorldSnapshot,
 };
 use canwu_fiscal::{
     CompiledFiscalCatalog, FiscalAction, FiscalActionBatch, FiscalActionEntry, FiscalActionTarget,
@@ -35,11 +35,12 @@ use canwu_fiscal::{
     FiscalCoverageStatus, FiscalExecutionEvidence, FiscalExecutionKind,
     FiscalExecutionReceiptPacket, FiscalHistoricalMode, FiscalMechanism, FiscalObserverBinding,
     FiscalPackManifest, FiscalPaymentForm, FiscalPeriodDefinition, FiscalPlugin, FiscalProvenance,
-    FiscalReceiptDisposition, FiscalRegionDefinition, FiscalReport, FiscalReportRecord,
-    FiscalRuleDefinition, FiscalScopeBinding, FiscalSettledAction, FiscalState,
-    FiscalTransitionDefinition, HistoricalConfidence, HistoricalYearWindow, audit_fiscal_records,
-    compile_fiscal_content, enqueue_fiscal_archive, finalize_fiscal_archive_retention,
-    fiscal_action_command, fiscal_action_target, fiscal_reports, fiscal_target_revision,
+    FiscalReceiptDisposition, FiscalRegionDefinition, FiscalReport, FiscalReportBudget,
+    FiscalReportCadence, FiscalReportGranularity, FiscalReportRecord, FiscalRuleDefinition,
+    FiscalScopeBinding, FiscalSettledAction, FiscalState, FiscalTransitionDefinition,
+    HistoricalConfidence, HistoricalYearWindow, audit_fiscal_records, compile_fiscal_content,
+    enqueue_fiscal_archive, finalize_fiscal_archive_retention, fiscal_action_command,
+    fiscal_action_target, fiscal_reports, fiscal_target_revision,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -357,6 +358,39 @@ impl Fixture {
         }
     }
 
+    /// The fixture's plugins, with fiscal's share of the publication budget
+    /// set to `budget` (`FiscalPlugin::with_report_budget`).
+    #[must_use]
+    pub fn with_report_budget(budget: FiscalReportBudget) -> Self {
+        let fixture = Self::new();
+        Self {
+            fiscal: fixture.fiscal.with_report_budget(budget),
+            ..fixture
+        }
+    }
+
+    /// The fixture's plugins, with the report schema's retention set to
+    /// `retention` (`FiscalPlugin::with_report_retention`).
+    #[must_use]
+    pub fn with_report_retention(retention: KnowledgeRetention) -> Self {
+        let fixture = Self::new();
+        Self {
+            fiscal: fixture.fiscal.with_report_retention(retention),
+            ..fixture
+        }
+    }
+
+    /// The fixture's plugins, with the report system also run on `cadence`
+    /// (`FiscalPlugin::with_report_cadence`).
+    #[must_use]
+    pub fn with_report_cadence(cadence: SystemCadence) -> Self {
+        let fixture = Self::new();
+        Self {
+            fiscal: fixture.fiscal.with_report_cadence(cadence),
+            ..fixture
+        }
+    }
+
     #[must_use]
     pub fn plugins(&self) -> [&dyn SimulationPlugin; 2] {
         [&self.commissions, &self.fiscal]
@@ -383,23 +417,32 @@ impl Fixture {
     /// Asserts that a snapshot restore and an exact replay both reproduce the
     /// run, fiscal state and command attempts included.
     pub fn assert_restore_and_replay(&self, canwu: &Canwu) {
-        let plugins = self.plugins();
-        let snapshot = canwu.snapshot_json().expect("snapshot");
-        let restored =
-            Canwu::from_snapshot_json_with_plugins(&snapshot, &plugins).expect("restored run");
-        assert_eq!(fiscal_state(&restored), fiscal_state(canwu));
-        assert_eq!(
-            restored.snapshot_json().expect("restored snapshot"),
-            snapshot
-        );
-        let replayed =
-            Canwu::replay_from_journal(&plugins, &canwu.replay_journal()).expect("replayed run");
-        assert_eq!(replayed.command_attempts(), canwu.command_attempts());
-        assert_eq!(
-            replayed.snapshot_json().expect("replayed snapshot"),
-            snapshot
-        );
+        assert_restore_and_replay_with_plugins(canwu, &self.plugins());
     }
+
+    /// As [`Self::assert_restore_and_replay`], for a run of the fixture's
+    /// plugins and one more.
+    pub fn assert_restore_and_replay_with(&self, canwu: &Canwu, extra: &dyn SimulationPlugin) {
+        assert_restore_and_replay_with_plugins(canwu, &self.plugins_with(extra));
+    }
+}
+
+fn assert_restore_and_replay_with_plugins(canwu: &Canwu, plugins: &[&dyn SimulationPlugin]) {
+    let snapshot = canwu.snapshot_json().expect("snapshot");
+    let restored =
+        Canwu::from_snapshot_json_with_plugins(&snapshot, plugins).expect("restored run");
+    assert_eq!(fiscal_state(&restored), fiscal_state(canwu));
+    assert_eq!(
+        restored.snapshot_json().expect("restored snapshot"),
+        snapshot
+    );
+    let replayed =
+        Canwu::replay_from_journal(plugins, &canwu.replay_journal()).expect("replayed run");
+    assert_eq!(replayed.command_attempts(), canwu.command_attempts());
+    assert_eq!(
+        replayed.snapshot_json().expect("replayed snapshot"),
+        snapshot
+    );
 }
 
 #[must_use]
@@ -586,6 +629,8 @@ pub fn observer_binding(
         knowledge_holder: KnowledgeHolderRef::Person(actor),
         visible_institutions,
         confidence_per_mille: 1_000,
+        granularity: FiscalReportGranularity::Scope,
+        cadence: FiscalReportCadence::OnChange,
         controlled_by: None,
         rebound_by: None,
         removed: None,
@@ -731,18 +776,48 @@ pub fn published_report_records(
     canwu: &Canwu,
     actor: PersonId,
 ) -> Vec<(KnowledgeRecord, FiscalReportRecord)> {
-    let holder = KnowledgeHolderRef::Person(actor);
-    canwu
-        .boundaries()
-        .iter()
-        .flat_map(|boundary| &boundary.knowledge_changes)
-        .flat_map(|change| change.records_of(&holder).collect::<Vec<_>>())
+    published_to(canwu, &KnowledgeHolderRef::Person(actor))
+        .into_iter()
         .map(|record| {
             let payload = serde_json::from_value(record.payload.clone())
                 .expect("a fiscal report record payload");
             (record, payload)
         })
         .collect()
+}
+
+// The engine's knowledge shapes. These three helpers are the only places
+// the fiscal tests read or build the engine's publication evidence, holder
+// ledgers, and stored knowledge records, so that a change of those shapes
+// is one change here; each body only adapts the shape.
+
+/// Every knowledge record the run's retained boundary evidence shows
+/// published to `holder`, in the order published.
+#[must_use]
+pub fn published_to(canwu: &Canwu, holder: &KnowledgeHolderRef) -> Vec<KnowledgeRecord> {
+    canwu
+        .boundaries()
+        .iter()
+        .flat_map(|boundary| &boundary.knowledge_changes)
+        .flat_map(|change| change.records_of(holder).collect::<Vec<_>>())
+        .collect()
+}
+
+/// The records `holder` holds in a knowledge snapshot, oldest first; `None`
+/// when the snapshot holds no ledger for it.
+#[must_use]
+pub fn held_records(
+    knowledge: &KnowledgeSnapshot,
+    holder: &KnowledgeHolderRef,
+) -> Option<Vec<KnowledgeRecord>> {
+    knowledge
+        .for_holder(holder)
+        .map(|ledger| ledger.values().collect())
+}
+
+/// Adds one stored record to a scenario's knowledge, held by its `holder`.
+pub fn seed_knowledge_record(scenario: &mut Scenario, record: KnowledgeRecord) {
+    let _replaced = scenario.knowledge.records.insert(record);
 }
 
 /// One fiscal action that has not been stamped with its target's revision

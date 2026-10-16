@@ -9,17 +9,19 @@
 
 use crate::model::{
     CompiledFiscalCatalog, FISCAL_REPORT_QUEUE_CYCLES, FISCAL_REPORT_QUEUE_PARTS,
-    FiscalActionTarget, FiscalOffice, FiscalOutcomeRing, FiscalReportQueueEntry, FiscalState,
-    MAX_FISCAL_REPORT_CYCLE_SLOTS, fiscal_office_key, invalid, office_binding_ids,
+    FiscalActionTarget, FiscalMechanism, FiscalOffice, FiscalOfficeObserver, FiscalOutcomeRing,
+    FiscalReportQueueEntry, FiscalReportSchedule, FiscalState, MAX_FISCAL_REPORT_CYCLE_SLOTS,
+    fiscal_office_key, invalid, office_binding_ids,
 };
 use crate::records::{
     FiscalArchiveRecord, FiscalDirectoryBucket, FiscalDirectoryRecord, FiscalIndexOwner,
     FiscalIndexRecord, FiscalJurisdictionRecord, FiscalLedgerRecord, FiscalObserverRecord,
     FiscalOfficeRecord, FiscalReportQueuePage, FiscalRootRecord, archive_draft, directory_bucket,
     directory_draft, directory_reference, fiscal_archive_reference, fiscal_jurisdiction_reference,
-    fiscal_ledger_reference, fiscal_observer_reference, fiscal_root_reference, index_reference,
-    jurisdiction_draft, ledger_draft, observer_draft, office_draft, office_reference, queue_draft,
-    queue_reference, report_queue_page, root_draft,
+    fiscal_ledger_reference, fiscal_observer_reference, fiscal_report_schedule_reference,
+    fiscal_root_reference, index_reference, jurisdiction_draft, ledger_draft, observer_draft,
+    office_draft, office_reference, queue_draft, queue_reference, report_queue_page, root_draft,
+    schedule_draft,
 };
 use canwu_api::{
     CanwuError, DomainRecord, DomainRecordDraft, DomainRecordMutation, DomainRecordRef,
@@ -149,8 +151,12 @@ pub(crate) struct Working<'a, S: RecordSource + ?Sized> {
     /// Each loaded report-queue page as it was loaded, so that only a page
     /// that changed is written.
     queue_loaded: BTreeMap<String, FiscalReportQueuePage>,
-    /// Index pages read, by identity.
-    index: BTreeMap<String, Option<Vec<String>>>,
+    /// The report schedule as it was loaded, once it is; the state holds it
+    /// as it stands now.
+    schedule_loaded: Option<FiscalReportSchedule>,
+    /// Index pages read, by owner and page number: each is decoded once per
+    /// working set, and found again without naming its record.
+    index: BTreeMap<FiscalIndexOwner, BTreeMap<u32, Option<Vec<String>>>>,
 }
 
 impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
@@ -173,6 +179,7 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
                 jurisdictions: BTreeMap::new(),
                 observers: BTreeMap::new(),
                 report_queue: BTreeMap::new(),
+                report_schedule: FiscalReportSchedule::default(),
             },
             archive_loaded: false,
             entry_revisions: BTreeMap::new(),
@@ -182,6 +189,7 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
             versions,
             queue: BTreeMap::new(),
             queue_loaded: BTreeMap::new(),
+            schedule_loaded: None,
             index: BTreeMap::new(),
         }))
     }
@@ -315,6 +323,18 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
         Ok(())
     }
 
+    /// Loads the report schedule into the state, once.
+    pub(crate) fn ensure_schedule(&mut self) -> Result<(), CanwuError> {
+        if self.schedule_loaded.is_none() {
+            let schedule = self
+                .load(&fiscal_report_schedule_reference())?
+                .ok_or_else(|| invalid("the fiscal report schedule record is missing"))?;
+            self.state.report_schedule = schedule.clone();
+            self.schedule_loaded = Some(schedule);
+        }
+        Ok(())
+    }
+
     /// The office the binding directory names for a binding or policy ID.
     pub(crate) fn binding_office(&self, id: &str) -> Result<Option<String>, CanwuError> {
         self.directory_entry(id, "bindings")
@@ -385,26 +405,40 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
             .and_then(|scopes| scopes.get(place).cloned()))
     }
 
-    fn index_page(
+    /// One page of an index. A page is read and decoded once per working
+    /// set; a later read finds it by owner and number, without naming its
+    /// record, so a run of rows of one office costs one decode per page.
+    pub(crate) fn index_page(
         &mut self,
         owner: &FiscalIndexOwner,
         page: u32,
     ) -> Result<Option<&Vec<String>>, CanwuError> {
-        let id = owner.page_id(page);
-        if !self.index.contains_key(&id) {
+        let cached = self
+            .index
+            .get(owner)
+            .is_some_and(|pages| pages.contains_key(&page));
+        if !cached {
+            let id = owner.page_id(page);
             let scopes = match active_record(self.source, &index_reference(&id))? {
                 Some(record) => {
-                    let page = record.decode_payload::<FiscalIndexRecord>()?;
-                    if page.owner != *owner {
+                    let decoded = record.decode_payload::<FiscalIndexRecord>()?;
+                    if decoded.owner != *owner || decoded.page != page {
                         return Err(invalid("a fiscal index page names another owner"));
                     }
-                    Some(page.scopes)
+                    Some(decoded.scopes)
                 }
                 None => None,
             };
-            self.index.insert(id.clone(), scopes);
+            self.index
+                .entry(owner.clone())
+                .or_default()
+                .insert(page, scopes);
         }
-        Ok(self.index.get(&id).and_then(Option::as_ref))
+        Ok(self
+            .index
+            .get(owner)
+            .and_then(|pages| pages.get(&page))
+            .and_then(Option::as_ref))
     }
 
     /// What admission reads of a scope's ledger, without decoding it.
@@ -498,15 +532,29 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
             .transpose()
     }
 
-    /// The observers of an office with the first row of its institution in
-    /// each one's report, read without decoding the office.
-    pub(crate) fn office_observers(&self, key: &str) -> Result<BTreeMap<String, u32>, CanwuError> {
+    /// The observers of an office, each with the first row of its
+    /// institution in its report, its granularity, and whether it is on an
+    /// interval, and the
+    /// office's mechanisms, read without decoding the office.
+    pub(crate) fn office_observers(
+        &self,
+        key: &str,
+    ) -> Result<
+        (
+            BTreeMap<String, FiscalOfficeObserver>,
+            BTreeSet<FiscalMechanism>,
+        ),
+        CanwuError,
+    > {
         if let Some(office) = self.state.offices.get(key) {
-            return Ok(office.observers.clone());
+            return Ok((office.observers.clone(), office.mechanisms.clone()));
         }
         match active_record(self.source, &office_reference(key))? {
-            Some(record) => field(&record.payload, "observers"),
-            None => Ok(BTreeMap::new()),
+            Some(record) => Ok((
+                field(&record.payload, "observers")?,
+                field(&record.payload, "mechanisms")?,
+            )),
+            None => Ok((BTreeMap::new(), BTreeSet::new())),
         }
     }
 
@@ -559,15 +607,13 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
     }
 
     /// A copy of the records `touch` names, for one action to change. The
-    /// root comes without its queue index, which no action reads.
+    /// report queue and schedule, which no action reads, are left out.
     pub(crate) fn copy(&self, touch: &Touch) -> FiscalState {
         fn pick(keys: &BTreeSet<String>) -> impl Iterator<Item = String> + '_ {
             keys.iter().cloned()
         }
-        let mut root = self.state.root.clone();
-        root.queue_pages.clear();
         FiscalState {
-            root,
+            root: self.state.root.clone(),
             archive: if touch.archive {
                 self.state.archive.clone()
             } else {
@@ -616,11 +662,13 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
                 })
                 .collect(),
             report_queue: BTreeMap::new(),
+            report_schedule: FiscalReportSchedule::default(),
         }
     }
 
     /// Takes back a copy an action changed, marking every record that
-    /// differs, and queues the report work the copy holds.
+    /// differs, and queues the report work the copy holds, as the binding it
+    /// is for is scheduled after the action.
     pub(crate) fn absorb(&mut self, touch: &Touch, copy: FiscalState) -> Result<(), CanwuError> {
         let FiscalState {
             archive,
@@ -664,29 +712,61 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
                 self.state.jurisdictions.insert(key, jurisdiction);
             }
         }
+        let mut rebound = BTreeSet::new();
         for (key, observer) in observers {
             if self.state.observers.get(&key) != Some(&observer) {
+                if self
+                    .state
+                    .observers
+                    .get(&key)
+                    .is_some_and(|before| before.binding != observer.binding)
+                {
+                    rebound.insert(key.clone());
+                }
                 self.dirty
                     .insert(fiscal_observer_reference(&key).into_untyped());
                 self.state.observers.insert(key, observer);
             }
         }
         for (observer, entry) in report_queue {
-            self.queue(&observer, entry)?;
+            let interval = self
+                .state
+                .observers
+                .get(&observer)
+                .is_some_and(|observer| observer.binding.scheduled_cadence().is_interval());
+            self.queue(&observer, entry, interval)?;
+            // A binding re-pointed or removed has a new holder, or none, so
+            // the holder its entry was parked for no longer matters: the
+            // report system checks the binding again when the entry is due.
+            if rebound.contains(&observer)
+                && let Some(queued) = self
+                    .queue_page(&report_queue_page(&observer))?
+                    .entries
+                    .get_mut(&observer)
+            {
+                queued.parked = false;
+            }
         }
         Ok(())
     }
 
-    /// Adds report work owed to one observer to its queue page.
+    /// Adds report work owed to one observer to its queue page. Work for an
+    /// observer scheduled on change is due at the earlier of its own time and
+    /// what the observer's entry is due at already. Work for an observer on
+    /// an interval (`interval`) joins the entry an active interval binding
+    /// always has, whose due time does not move; an interval binding without
+    /// one has been removed, is never published to again, and is owed
+    /// nothing.
     pub(crate) fn queue(
         &mut self,
         observer: &str,
         entry: FiscalReportQueueEntry,
+        interval: bool,
     ) -> Result<(), CanwuError> {
         let page = self.queue_page(&report_queue_page(observer))?;
         if let Some(existing) = page.entries.get_mut(observer) {
-            merge_queue_entry(existing, entry);
-        } else {
+            merge_queue_entry(existing, entry, interval);
+        } else if !interval {
             let mut entry = entry;
             bound_queue_entry(&mut entry);
             page.entries.insert(observer.to_owned(), entry);
@@ -711,9 +791,14 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
 
     /// Queues the report parts that the change of each changed ledger's
     /// books touches, for every observer of the ledger's office: one part of
-    /// each changed cycle, the one that holds the scope's row.
+    /// each changed cycle, the one that holds the scope's row, or, at
+    /// institution granularity, the row of the scope's mechanism. Each
+    /// office's observer index is read once, and each observer gets one
+    /// entry for all of its office's changes, due as its cadence schedules
+    /// it; no observer record is read.
     pub(crate) fn queue_changed_books(&mut self, at: SimTime) -> Result<(), CanwuError> {
-        let mut owed = Vec::new();
+        type Change = (u32, FiscalMechanism, Vec<String>);
+        let mut owed = BTreeMap::<String, Vec<Change>>::new();
         for scope in self.changed_ledgers() {
             let Some(ledger) = self.state.ledgers.get(scope) else {
                 continue;
@@ -737,25 +822,31 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
             if cycles.is_empty() {
                 continue;
             }
-            owed.push((
-                ledger.office.clone(),
+            owed.entry(ledger.office.clone()).or_default().push((
                 ledger.rank,
+                ledger.scope.mechanism,
                 cycles.into_iter().cloned().collect::<Vec<_>>(),
             ));
         }
-        for (office, rank, cycles) in owed {
-            for (observer, first_row) in self.office_observers(&office)? {
-                let part = crate::derive::part_of_row(first_row.saturating_add(rank));
+        for (office, changes) in owed {
+            let (observers, mechanisms) = self.office_observers(&office)?;
+            for (observer, listed) in observers {
+                let mut cycles = BTreeMap::<String, BTreeSet<u32>>::new();
+                for (rank, mechanism, changed) in &changes {
+                    let part =
+                        crate::derive::part_of_row(listed.row(*rank, *mechanism, &mechanisms));
+                    for cycle in changed {
+                        cycles.entry(cycle.clone()).or_default().insert(part);
+                    }
+                }
                 self.queue(
                     &observer,
                     FiscalReportQueueEntry {
                         due_at: at,
-                        cycles: cycles
-                            .iter()
-                            .map(|cycle| (cycle.clone(), BTreeSet::from([part])))
-                            .collect(),
+                        cycles,
                         ..FiscalReportQueueEntry::default()
                     },
+                    listed.interval,
                 )?;
             }
         }
@@ -838,27 +929,64 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
         Ok(buckets)
     }
 
+    /// Brings the report schedule and the root up to date with the queue
+    /// pages that changed: the schedule keeps each page's earliest due time
+    /// and parked count, and the root the least due time and whether any
+    /// entry is parked. Each is marked changed only when it differs from
+    /// what was loaded.
+    fn update_schedule(&mut self) -> Result<(), CanwuError> {
+        let pages_changed = self
+            .queue
+            .iter()
+            .any(|(page, entries)| self.queue_loaded.get(page) != Some(entries));
+        if pages_changed {
+            self.ensure_schedule()?;
+        }
+        let Some(loaded) = &self.schedule_loaded else {
+            return Ok(());
+        };
+        let mut schedule = self.state.report_schedule.clone();
+        for (page, entries) in &self.queue {
+            if self.queue_loaded.get(page) != Some(entries) {
+                schedule.update_page(page, entries.entries.values());
+            }
+        }
+        if schedule != *loaded {
+            crate::model::validate_report_schedule(&schedule)?;
+            self.dirty
+                .insert(fiscal_report_schedule_reference().into_untyped());
+        }
+        let (earliest_due, parked) = schedule.root_fields();
+        let cursor = if parked {
+            self.state.root.parked_cursor.clone()
+        } else {
+            None
+        };
+        if (earliest_due, parked, &cursor)
+            != (
+                self.state.root.earliest_due,
+                self.state.root.parked,
+                &self.state.root.parked_cursor,
+            )
+        {
+            self.state.root.earliest_due = earliest_due;
+            self.state.root.parked = parked;
+            self.state.root.parked_cursor = cursor;
+            self.dirty.insert(fiscal_root_reference().into_untyped());
+        }
+        self.state.report_schedule = schedule;
+        Ok(())
+    }
+
     /// The writes of every changed record, each validated on its own, and
-    /// of the directory buckets, queue pages, and root index they need.
+    /// of the directory buckets, queue pages, schedule, and root they need.
     pub(crate) fn directives(
         mut self,
         catalog: &CompiledFiscalCatalog,
         summary: &str,
     ) -> Result<Vec<canwu_api::BoundaryDirective>, CanwuError> {
         let directory = self.directory_changes()?;
-        // The root lists the queue pages that hold an entry.
-        let mut pages = self.state.root.queue_pages.clone();
-        for (page, entries) in &self.queue {
-            if entries.entries.is_empty() {
-                pages.remove(page);
-            } else {
-                pages.insert(page.clone());
-            }
-        }
-        if pages != self.state.root.queue_pages {
-            self.state.root.queue_pages = pages;
-            self.dirty.insert(fiscal_root_reference().into_untyped());
-        }
+        self.update_schedule()?;
         let mut drafts: Vec<DomainRecordDraft> = Vec::new();
         for reference in &self.dirty {
             let draft = if reference.kind.matches_type::<FiscalRootRecord>() {
@@ -867,6 +995,11 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
             } else if reference.kind.matches_type::<FiscalArchiveRecord>() {
                 self.state.archive.validate()?;
                 archive_draft(&self.state.archive)?
+            } else if reference
+                .kind
+                .matches_type::<crate::records::FiscalReportScheduleRecord>()
+            {
+                schedule_draft(&self.state.report_schedule)?
             } else if reference.kind.matches_type::<FiscalOfficeRecord>() {
                 let office = self
                     .state
@@ -960,12 +1093,17 @@ fn cycle_office(office: &FiscalOffice) -> FiscalOffice {
     copy
 }
 
-/// Merges new report work into what an observer is owed already.
+/// Merges new report work into what an observer is owed already. The entry
+/// keeps the earlier due time, or, for an `Interval` observer's entry
+/// (`keep_due`), its own: an interval report is never published on change.
 pub(crate) fn merge_queue_entry(
     existing: &mut FiscalReportQueueEntry,
     entry: FiscalReportQueueEntry,
+    keep_due: bool,
 ) {
-    existing.due_at = existing.due_at.min(entry.due_at);
+    if !keep_due {
+        existing.due_at = existing.due_at.min(entry.due_at);
+    }
     existing.republish |= entry.republish;
     if existing.whole || entry.whole {
         existing.whole = true;

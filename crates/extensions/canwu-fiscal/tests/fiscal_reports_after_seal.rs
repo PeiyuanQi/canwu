@@ -6,11 +6,16 @@
 //! fiscal state again. With the publishing boundaries gone from retained
 //! evidence, the sealed run still supersedes exactly the records it published
 //! before the seal, as an unsealed fork, a restore from the sealed segments,
-//! and its own exact replay do.
+//! and its own exact replay do. The runs keep every report record
+//! (`KnowledgeRetention::Keep`), so the ledger shows each supersession; under
+//! the default retention the superseded records leave the ledger in the same
+//! commit, which the retention tests cover.
 
 mod support;
 
-use canwu_api::{BoundaryRequest, Canwu, CompactedCanwu, KnowledgeHolderRef, KnowledgeRecord};
+use canwu_api::{
+    BoundaryRequest, Canwu, CompactedCanwu, KnowledgeHolderRef, KnowledgeRecord, KnowledgeRetention,
+};
 use canwu_fiscal::{FiscalReportRecord, compute_projection};
 use support::{
     Fixture, MemoryEvidenceArchive, OBSERVER, PRINCIPAL, TREASURY_AUTHORITY, assessment,
@@ -31,11 +36,8 @@ fn assess(action_id: &str, scope: usize) -> support::Draft {
 
 /// The observer's ledger, oldest record first.
 fn ledger(knowledge: &canwu_api::KnowledgeSnapshot) -> Vec<KnowledgeRecord> {
-    knowledge
-        .for_holder(&KnowledgeHolderRef::Person(PRINCIPAL))
+    support::held_records(knowledge, &KnowledgeHolderRef::Person(PRINCIPAL))
         .expect("the observer's ledger")
-        .values()
-        .collect()
 }
 
 fn is_summary(record: &KnowledgeRecord) -> bool {
@@ -47,7 +49,7 @@ fn is_summary(record: &KnowledgeRecord) -> bool {
 
 #[test]
 fn a_sealed_run_supersedes_the_report_it_published_before_the_seal() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::with_report_retention(KnowledgeRetention::Keep);
     let plugins = fixture.plugins();
     let mut base = fixture.runtime(scenario(|_| {}));
 

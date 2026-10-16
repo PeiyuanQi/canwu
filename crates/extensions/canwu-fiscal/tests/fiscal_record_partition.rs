@@ -15,16 +15,20 @@
 
 mod support;
 
-use canwu_api::{DomainRecord, DomainReferenceTarget, EntityRef};
+use canwu_api::{DomainRecord, DomainReferenceTarget, EntityRef, SimDuration};
 use canwu_fiscal::{
-    FiscalDirectoryBucket, FiscalIndexPage, FiscalJurisdiction, FiscalObserver, FiscalOffice,
-    FiscalScopeLedger, FiscalState, audit_fiscal_record_set, fiscal_office_key,
+    FiscalDirectoryBucket, FiscalIndexPage, FiscalJurisdiction, FiscalObserver,
+    FiscalObserverBinding, FiscalOffice, FiscalReportCadence, FiscalScopeLedger, FiscalState,
+    audit_fiscal_record_set, fiscal_office_key,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use support::{
     Fixture, GRANARY_SCOPE, OBSERVER, PRINCIPAL, RULE, TREASURY_AUTHORITY, catalog, granary,
-    scenario, treasury, treasury_scope,
+    observer_binding, scenario, treasury, treasury_scope,
 };
+
+/// An observer binding on a monthly interval.
+const INTERVAL: &str = "observer.interval";
 
 fn fiscal(records: &[DomainRecord]) -> Vec<&DomainRecord> {
     records
@@ -71,6 +75,7 @@ fn the_partition_names_every_record_by_what_owns_it() {
     assert_eq!(kinds["jurisdiction"], 1);
     assert_eq!(kinds["observer"], 1);
     assert_eq!(kinds["report-queue"], 1);
+    assert_eq!(kinds["report-schedule"], 1);
     assert!(kinds["directory"] >= 1);
     // An index page of each office and of the region.
     assert_eq!(kinds["index"], 3);
@@ -78,6 +83,7 @@ fn the_partition_names_every_record_by_what_owns_it() {
     for record in of_kind(&records, "root")
         .into_iter()
         .chain(of_kind(&records, "archive"))
+        .chain(of_kind(&records, "report-schedule"))
     {
         assert_eq!(record.reference.id, "primary");
     }
@@ -327,4 +333,66 @@ fn an_empty_directory_bucket_left_over_is_accepted() {
         .expect("a leftover empty bucket");
     let state: FiscalState = support::fiscal_state(&canwu);
     assert!(state.authority_binding(TREASURY_AUTHORITY).is_some());
+}
+
+/// The chain from the report-queue pages to the root is derived and
+/// checked: the report schedule keeps each page's earliest due time and the
+/// root the least of them, an active interval binding has its one entry at
+/// one of its due times, and the rotation's cursor exists only while an
+/// entry is parked. A run whose records break the chain is refused.
+#[test]
+fn a_report_schedule_out_of_step_is_refused() {
+    let interval_refusal = |change: fn(&mut Vec<DomainRecord>)| {
+        let fixture = Fixture::new();
+        let mut scenario = scenario(|state| {
+            state.add_observer(FiscalObserverBinding {
+                cadence: FiscalReportCadence::Interval {
+                    every: SimDuration::days(30),
+                    offset: SimDuration::days(3),
+                },
+                ..observer_binding(INTERVAL, PRINCIPAL, BTreeSet::from([treasury()]))
+            });
+        });
+        assert!(fixture.try_runtime(scenario.clone()).is_ok());
+        change(&mut scenario.domain_records);
+        fixture
+            .try_runtime(scenario)
+            .err()
+            .expect("changed fiscal records must be refused")
+            .message
+    };
+    // The root's earliest due time is not the schedule's least.
+    let message = interval_refusal(|records| {
+        record(records, "root", "primary").payload["earliest_due"] = serde_json::json!(1);
+    });
+    assert!(message.contains("derive"), "{message}");
+    // A page's earliest due time is not its entries'.
+    let message = interval_refusal(|records| {
+        let schedule = record(records, "report-schedule", "primary");
+        for due in schedule.payload["page_due"]
+            .as_object_mut()
+            .expect("page due times")
+            .values_mut()
+        {
+            *due = serde_json::json!(due.as_i64().expect("a time") + 1);
+        }
+    });
+    assert!(message.contains("derive"), "{message}");
+    // A cursor while nothing is parked.
+    let message = interval_refusal(|records| {
+        record(records, "root", "primary").payload["parked_cursor"] = serde_json::json!(OBSERVER);
+    });
+    assert!(message.contains("cursor"), "{message}");
+    // The interval binding's entry is not at one of its due times.
+    let message = interval_refusal(|records| {
+        let page = records
+            .iter_mut()
+            .find(|record| {
+                record.reference.kind.name == "report-queue"
+                    && record.payload["entries"].get(INTERVAL).is_some()
+            })
+            .expect("the interval binding's page");
+        page.payload["entries"][INTERVAL]["due_at"] = serde_json::json!(1);
+    });
+    assert!(message.contains("due times"), "{message}");
 }

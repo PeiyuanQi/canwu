@@ -30,10 +30,10 @@ use canwu_fiscal::{
     FiscalActionTarget, FiscalAdoptionState, FiscalArchiveError, FiscalArchiveStore,
     FiscalAuthorityBinding, FiscalContentSelection, FiscalExecutionKind,
     FiscalExternalOperationRef, FiscalObserverBinding, FiscalPaymentForm, FiscalReceiptDisposition,
-    FiscalScopeBinding, FiscalSettledAction, FiscalState, MAX_FISCAL_ARCHIVE_COMMIT_RECORDS,
-    audit_fiscal_records, enqueue_execution_receipts, enqueue_fiscal_archive,
-    finalize_fiscal_archive_retention, fiscal_action_command, fiscal_catalog_reference,
-    fiscal_target_revision, load_fiscal_state,
+    FiscalReportCadence, FiscalReportGranularity, FiscalScopeBinding, FiscalSettledAction,
+    FiscalState, MAX_FISCAL_ARCHIVE_COMMIT_RECORDS, audit_fiscal_records,
+    enqueue_execution_receipts, enqueue_fiscal_archive, finalize_fiscal_archive_retention,
+    fiscal_action_command, fiscal_catalog_reference, fiscal_target_revision, load_fiscal_state,
 };
 use canwu_ming_fiscal::{MingFiscalFixture, compile_ming_fiscal, ming_fiscal_fixture};
 use canwu_reference_world::{ReferenceWorldIds, ReferenceWorldPlugin, demo_scenario};
@@ -130,6 +130,8 @@ pub fn ming_fiscal_reference_scenario(
         knowledge_holder: canwu_api::KnowledgeHolderRef::Person(world_ids.observer),
         visible_institutions,
         confidence_per_mille: 850,
+        granularity: FiscalReportGranularity::Scope,
+        cadence: FiscalReportCadence::OnChange,
         controlled_by: None,
         rebound_by: None,
         removed: None,
