@@ -101,7 +101,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `PlanOperation` | 签发者指挥这支部队；战术 | 一条处于 `Planned` 的 `strategic` 行动；之后不会被推进 |
 | `OrderMarch` | 签发者指挥这支部队；战术 | 部队转为 `Moving`，建立 `march` 行动，一分钟后推进 |
 | `PrepareAmbush` | 签发者指挥这支部队；战术 | 在某节点布置 `prepared_ambush`，有效七天 |
-| `Recon` | 签发者指挥这支部队 | 一次抽样和事件 `canwu.military.transition_applied.v1` |
+| `Recon` | 签发者指挥这支部队 | 一次引用已准入命令数据包的抽样、一条 `Accepted` 结果和事件 `canwu.military.transition_applied.v1` |
 | `ExecuteSpecialOperation` | 签发者指挥这支部队 | 部队转为 `Moving`，建立 `special` 行动，一天后推进 |
 | `EstablishOccupation` | 签发者指挥这支部队 | 部队位于该节点且不处于 `Routing` 时建立占领，并每天推进 |
 | `SetOccupationPolicy` | 签发者指挥占领部队；数值不超过 1,000 | `policy_revision` 匹配时写入安全、合作和征敛负担 |
@@ -229,7 +229,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | 特种行动 | `special-operation` | 行动 ID 作为规范键，槽位 0 | `special-operation-success` | 650 及以上为成功 |
 | 战斗轮 | `combat-round` | 战斗记录的精确版本，槽位为轮次 | `combat-round-remainder` | 除以 8 的余数计入额外损失 |
 
-应用不提供任何概率。650 这个门槛和损失公式都是 `canwu-military` 中的常量。插件从军事目录中只读取兵种名和战术名；规则集里的各项数值、节点配置和指挥官配置都不会被读取。
+每次抽样都把携带正在应用的命令或推进包的已准入数据包作为操作证据，所以在实时运行、封存过的运行和精确重放中都同样被接受。应用不提供任何概率。650 这个门槛和损失公式都是 `canwu-military` 中的常量。插件从军事目录中只读取兵种名和战术名；规则集里的各项数值、节点配置和指挥官配置都不会被读取。
 
 军事状态全部保存在领域记录中，所以快照会把它和知识账本、抽样证据以及待执行的推进包一起保存。插件身份由名称 `canwu-military`、插件版本 `0.1.0` 和一个固定的语义哈希组成；恢复快照或重放日志都要求身份一致。生命周期测试 `complete_military_lifecycle_is_persisted_and_replayed` 验证：恢复出的运行和用 `replay_from_journal` 重放的运行，检查点哈希都与原运行相同。
 

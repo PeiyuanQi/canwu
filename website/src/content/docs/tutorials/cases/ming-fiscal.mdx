@@ -41,12 +41,14 @@ fixture=wanli-1581 checkpoint=1c79fd79784d86ac285ad81e80e0f54dd7b0389edce99a8351
 fixture=hongguang-1644 checkpoint=8aa76890d6bdf198a8d1b620ee5db3597157b642f27e757bc9f120a5e451df50 frames=6 trace_manifest=... trace_steps=...
 ```
 
-种子固定为 `DEFAULT_SEED`，所以同一 fixture 每次运行打印的检查点哈希都相同。`frames=6` 是结算过的边界数：每个财政行动两个，适配器的证据记录一个，凭证一个。trace 写到工作区的 `artifacts/traces/ming-fiscal-reference/<fixture>/`：`manifest.json`，外加 `steps.jsonl` 中每个边界一行 JSON。洪武最后一行里，`fiscal.state.aggregates` 和 `fiscal.projections` 记录了结果（已删减）：
+种子固定为 `DEFAULT_SEED`，所以同一 fixture 每次运行打印的检查点哈希都相同。`frames=6` 是结算过的边界数：每个财政行动两个，适配器的证据记录一个，凭证一个。trace 写到工作区的 `artifacts/traces/ming-fiscal-reference/<fixture>/`：`manifest.json`，外加 `steps.jsonl` 中每个边界一行 JSON。洪武最后一行里，`fiscal.state.ledgers` 下该范围的账册和 `fiscal.projections` 下尚书的报告记录了结果（已删减）：
 
 ```text
-"aggregate.0000":{...,"assessed":100,"remission_granted":0,"collected":70,...,"outstanding":30}
-"fact.0000":{...,"assessed":{"minimum":100,"maximum":109},"collected":{"minimum":70,"maximum":71},"outstanding":{"minimum":30,"maximum":31}}
+"totals":{...:{"assessed":100,"remission_granted":0,"collected":70,...,"outstanding":30}}
+"<cycle>:0000:0":{...,"assessed":{"minimum":100,"maximum":109},"collected":{"minimum":70,"maximum":71},"outstanding":{"minimum":30,"maximum":31}}
 ```
+
+旁边的 `fiscal.counts` 统计财政记录里有什么：账册、核算、请求、凭证，以及各条记录的最近结果。
 
 每个起点核算的采纳记录不同：
 
@@ -103,7 +105,7 @@ FiscalAuthorityBinding {
 
 `rebound_by` 一直是 `None`，直到运行中有 `RebindAuthority` 行动更换这个绑定的角色；这几个起点都不会这样做。
 
-fixture 中的每条采纳记录变成一个 `FiscalScopeBinding`（把一个辖区和一种机制交给某个机构，粒度为 `SimulationGranularity::Aggregate`）和一条带 fixture 阶段的采纳状态。观察者绑定 `observer.revenue-minister` 让户部尚书以 `confidence_per_mille: 850` 看到这些机构的总数。
+fixture 中的每条采纳记录变成一个 `FiscalScopeBinding`（把一个辖区和一种机制交给某个机构，粒度为 `SimulationGranularity::Aggregate`）和一条带 fixture 阶段的采纳状态；每个范围各有一条[范围账](/reference/terminology/)记录。观察者绑定 `observer.revenue-minister` 让户部尚书以 `confidence_per_mille: 850` 看到这些机构的总数；它把尚书写在 `actor`、把他本人写在 `knowledge_holder`，`controlled_by: None` 表示没有财政行动能改指它。随后 `FiscalState::into_records` 把状态拆分成场景携带的各条记录。
 
 ### 3. 注册插件
 
@@ -112,7 +114,7 @@ let canwu = Canwu::new_with_plugins(seed, reference.scenario, &[&world, &adapter
 validate_ming_fiscal_reference(&canwu)?;
 ```
 
-`new_ming_fiscal_reference` 注册参考世界、执行适配器和 `ming_fiscal_plugin()`。后者是一个只接受一种证据的 `FiscalPlugin`，这种证据就是适配器的 `fiscal_execution_evidence` 记录。`validate_ming_fiscal_reference` 是参考整合包的语义校验：重新计算聚合和改革候选，并把每张凭证与其证据重新核对一遍。
+`new_ming_fiscal_reference` 注册参考世界、执行适配器和 `ming_fiscal_plugin()`。后者是一个只接受一种证据的 `FiscalPlugin`，这种证据就是适配器的 `fiscal_execution_evidence` 记录。`validate_ming_fiscal_reference` 是参考整合包的语义校验：把每张凭证与其证据重新核对一遍，并只用封存无法改变的状态检查每处引用，所以它接受 `Canwu` 或封存过的 `CompactedCanwu`，答案相同。
 
 ### 4. 开立核算并授权征收
 
@@ -131,29 +133,30 @@ action: FiscalAction::OpenAssessment {
 },
 ```
 
-`submit_reference_action_with_trace` 用 `fiscal_action_command` 包装 `FiscalActionRequest`，以绑定中的角色身份提交。第一个边界上，准入过程核对角色与绑定、绑定机构与范围；下一个边界把 `expected_procedure_revision` 与这个边界开始时财政状态的修订号对照，再把行动结算进 `action_outcomes`。示例每次只提交一个行动；如果按同一个修订号构造多个行动，它们会在这一个边界里按准入顺序一起结算。核算周期 ID 由上层应用决定，与历史时期相互独立。第二个行动 `AuthorizeExecution` 允许把资源 `ResourceId::new(1)` 中的 70 从该角色征收给机构，资源余额保持不变。
+`reference_batch` 用 `fiscal_target_revision` 读出范围账的修订号，并按它把行动放进一个只有一个条目的 `FiscalActionBatch`；`submit_reference_action_with_trace` 用 `fiscal_action_command` 包装这个批次，以绑定中的角色身份提交。第一个边界上，准入过程核对角色与绑定、绑定机构与范围；下一个边界把条目的 `expected_revision` 与这个边界开始时范围账的修订号对照，结算行动，把结果记入范围账的结果环，并发出 `canwu.fiscal.action_settled.v1`，辅助函数用 `FiscalSettledAction::from_events` 读回它。示例每次只提交一个行动；一个包含多个条目的批次，或按同一个修订号构造的多个批次，会在这一个边界里按准入顺序一起结算。核算周期 ID 由上层应用决定，与历史时期相互独立；某周期的第一笔核算为该范围开立这个周期的账册。第二个行动 `AuthorizeExecution` 允许把资源 `ResourceId::new(1)` 中的 70 从该角色征收给机构，资源余额保持不变。
 
 ### 5. 记录征收并结算凭证
 
 `settle_sample_execution_with_trace` 扮演资源一方。它通过 `enqueue_reference_execution_result` 发出一条 `FiscalExecutionEvidence`（70 单位、`Fulfilled`，带 `external_operation_id`）。第 5 个边界上，适配器按已授权的请求核对这条结果，并写成一条只可创建的领域记录。随后函数提交该记录的精确版本：
 
 ```rust
-enqueue_execution_receipt(
+enqueue_execution_receipts(
     canwu,
     now,
-    &canwu_fiscal::FiscalExecutionReceiptPacket {
+    &[canwu_fiscal::FiscalExecutionReceiptPacket {
         receipt_id: format!("{id_prefix}.receipt"),
+        scope_binding_id,
         request_id,
         external_evidence: [evidence_version].into_iter().collect(),
-    },
+    }],
 )?;
 ```
 
-第 6 个边界上，`FiscalPlugin` 解码每条被引用的记录，检查记录种类，并逐项核对请求、执行类型、支付形态、资源、来源、目标和单位是否与授权一致，再从证据推出凭证的数量（70）和处置结果（`fulfilled`）。
+第 6 个边界上，`FiscalPlugin` 解码每条被引用的记录，检查记录种类，并逐项核对范围、请求、执行类型、支付形态、资源、来源、目标和单位是否与授权一致，再从证据推出凭证的数量（70）和处置结果（`fulfilled`）。插件不能接受的凭证会以 `canwu.fiscal.ingress_rejected.v1` 事件被拒绝，绝不会让边界失败。
 
-### 6. 读取聚合与报告
+### 6. 读取账册合计与报告
 
-此时聚合显示应征 100、已征 70、未结 30。只要某个边界改动了观察者能看到的内容，`FiscalPlugin` 就把这位观察者的报告发布为他持有的知识记录：一条摘要记录，加上有变化的分段，每段 16 条事实。户部尚书的报告在这里只有一条事实，所以是一条摘要加一个分段。[`derive.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-fiscal/src/derive.rs) 里的 `estimate` 按观察者的置信度把每个总数归入一个区间：
+此时该范围的账册显示应征 100、已征 70、未结 30。只要某个边界改动了观察者能看到的账册，`FiscalPlugin` 就把这位观察者的报告发布为他持有的知识记录：一条摘要记录，加上各行有变化的分段，每段 16 个范围行。户部尚书的报告在这里只有一行，所以是一条摘要加一个分段。[`derive.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-fiscal/src/derive.rs) 里的 `estimate` 按观察者的置信度把每个总数归入一个区间：
 
 ```rust
 let precision_divisor = match confidence_per_mille {
@@ -166,18 +169,26 @@ let bucket_width = (magnitude / precision_divisor).max(2);
 let minimum = value / bucket_width * bucket_width;
 ```
 
-`magnitude` 是不超过该值的最大 10 的幂。置信度为 850‰ 时，100 的区间宽度为 10（100-109），70 取最小宽度 2（70-71）。trace 以户部尚书的视角读回报告：`trace.rs` 中的 `collect_projections` 打开 `canwu.viewer_for_actor`，再调用 `fiscal_reports(&viewer)`，由它把摘要和分段拼回每个观察者绑定的一份 `FiscalReport`：
+`magnitude` 是不超过该值的最大 10 的幂。置信度为 850‰ 时，100 的区间宽度为 10（100-109），70 取最小宽度 2（70-71）。trace 从持有人那里读回每位观察者的报告：`trace.rs` 中的 `collect_projections` 调用 `fiscal_reports_of_holder(canwu, &binding.knowledge_holder)`，即 `fiscal_reports(&viewer)` 的受信任上层应用形式，由它把摘要和分段拼回每个观察者绑定的一份 `FiscalReport`：
 
 ```rust
-let viewer = canwu.viewer_for_actor(binding.actor).ok()?;
-let report = fiscal_reports(&viewer).ok()?.remove(observer_id)?;
+let report = fiscal_reports_of_holder(canwu, &binding.knowledge_holder)
+    .ok()?
+    .remove(observer_id)?;
 Some((observer_id.clone(), report.projection))
 ```
+
+面向玩家的客户端改用 `fiscal_reports(&canwu.viewer_for_actor(actor)?)`，它只读视图所属持有人自己的账本。
+
+### 7. 关闭周期并归档账册
+
+要运行多年的游戏会关闭每个核算周期并归档它的账册，让财政记录保持小巧。`close_ming_fiscal_sample_cycle` 为示例范围和周期提交 `CloseAccountingCycle`，关闭后的账册只接受审计结论。`archive_ming_fiscal_books(&mut canwu, &store)` 随后对你提供的 `FiscalArchiveStore` 执行归档协议：`prepare_fiscal_archive`、`enqueue_fiscal_archive`、一个结算提交的边界，再 `finalize_fiscal_archive_retention`，直到没有已关闭的账册为止。`archive_century` 测试每年跑一次示例周期，跑一百年，每年关闭、每十年归档，财政记录始终只有几 KB；没有任何边界读取归档存储。
 
 ## 值得注意的地方
 
 - 已征数量只能经由适配器的证据记录进入财政状态，比授权晚两个边界。
-- 凭证的数量和处置结果来自所引用的证据。在同一份财政状态中，每个精确证据版本、每个证据种类与 `external_operation_id` 的组合，最多结算一张凭证。
+- 凭证的数量和处置结果来自所引用的证据。一个精确证据版本最多结算一张凭证，一个证据种类与 `external_operation_id` 的组合在该范围的常驻账册内最多结算一张。
+- 每个行动只写明它改动的那条记录（这里是范围账）的修订号，所以其他范围上的行动不会让它过期。
 - 三个起点共用一套代码，由 fixture JSON 决定流程使用的法规、范围和机构。
 - 户部尚书看到的是 100-109，权威状态中的值是 100。
 - `wanli-1581` 的 trace 把 `adopt_single_whip_north` 和 `adopt_single_whip_southwest` 列为转型候选；在 `ApplyTransition` 行动结算之前，它们一直只是候选。
@@ -185,14 +196,14 @@ Some((observer_id.clone(), report.projection))
 ## 动手改一改
 
 - **报告精度。** 在 `ming_fiscal_reference_scenario` 中把观察者的 `confidence_per_mille` 改为 600。除数变为 2，应征区间变成 100-149，已征区间变成 70-74。
-- **部分征收。** 在 `settle_sample_execution_with_trace` 中把证据改为 `quantity: 40` 和 `disposition: FiscalReceiptDisposition::Partial`。聚合随之显示已征 40、未结 60。
+- **部分征收。** 在 `settle_sample_execution_with_trace` 中把证据改为 `quantity: 40` 和 `disposition: FiscalReceiptDisposition::Partial`。账册随之显示已征 40、未结 60。
 - **实施改革。** 在 `wanli-1581` 中提交 `adopt_single_whip_north` 的 `ApplyTransition`，把 `single_whip_north` 绑定到 `scope.north.land`，写法可参照测试 `single_whip_transition_atomically_suspends_the_superseded_rule`。华北的折银采纳变为 `suspended`，出现一条 `implemented` 的 `single_whip_north` 采纳，华北的候选随之消失。
 
 ## 示例之外
 
 真正的游戏还要补上一层：上层应用的适配器在自己的资源、市场、生产或物流领域执行实际操作，再像第 5 步那样提交证据。
 
-模型的其余部分见[财政制度](/architecture/fiscal/)：覆盖单元及明代内容包 704 个单元的构成、历史语境与改革候选、代理角色，以及状态上限。
+模型的其余部分见[财政制度](/architecture/fiscal/)：覆盖单元及明代内容包 704 个单元的构成、拆分后的记录及其预算、行动批次与按记录的修订号、核算周期与归档、历史语境与改革候选、代理角色与审计人任命，以及各项上限。
 
 ### 时期与出处
 

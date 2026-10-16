@@ -258,9 +258,17 @@ The legal bridge proceeds in fixed, persisted stages:
    kernel-committed producing boundary before advancing only dirty or due
    proceedings. Direct host injection into the provider namespace is not
    evidence. It never trusts a caller-declared signal kind. Publicity events
-   additionally bind the retained provider payload to the exact proposal,
-   occurrence time, medium, and scope; generic practice signals remain
-   identity-and-boundary evidence.
+   additionally bind the provider payload to the exact proposal,
+   occurrence time, medium, and scope; the plugin keeps that payload in its
+   own bounded legal provider index (`LawBudgets::max_provider_packets`,
+   4,096 by default) when it admits the packet, so a seal never changes
+   what a later boundary reads. Generic practice signals remain
+   identity-and-boundary evidence. Each admitted packet is applied or refused
+   on its own with `canwu.law.ingress_rejected.v1`; a per-boundary budget
+   defers the rest of the work to a zero-delay wake at the same instant, and a
+   proposal a boundary can never advance (a stale host compare-and-set, a
+   retired culture dependency, an adoption guard that can never hold) is
+   rejected with `canwu.law.proposal_rejected.v1`.
 3. A proceeding creates a holder-bound decision outbox item. The adapter first
    persists its expected revision (`prepare_pending_decision_enqueues`),
    registers each exact seat controller at most once, then submits ticket-open

@@ -84,7 +84,9 @@ All authored collections are canonically sorted, stable IDs are preserved,
 dense plan-local keys are deterministic, and hashes use Canwu's canonical hash
 contract. Law-local `LegalRecordRef` values name records inside the aggregate;
 they deliberately do not claim kernel-issued domain-record version provenance.
-Only the aggregate runtime record is registered and persisted. Host-owned
+The plugin registers and persists its own plan, directory, shard, and
+archive-head records (`law_record_schemas()`); legal objects live inside them,
+not as kernel records of their own. Host-owned
 `expected_versions` remain genuine Canwu version references, while
 `expected_rule_head` provides the law-local compare-and-set guard for rule
 changes. A host version must be its record's current version, read from the

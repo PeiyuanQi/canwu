@@ -79,9 +79,11 @@ Only a fresh draw needs its operation evidence to exist at the reader's cut: ret
 
 ### What a keyed draw costs later
 
-The engine answers operation-keyed requests from an index of drawn addresses. It keeps the index in memory, extends it when a boundary commits, and rebuilds it on restore; the index is never saved or hashed. The work of settling a boundary therefore does not grow with the draws the run has already made, so a mechanic that draws by operation key every simulated day does not slow later boundaries down.
+The engine answers operation-keyed requests from the **keyed-draw ledger**, the record of every address the run has drawn, retained or sealed. It keeps the ledger in memory as a persistent map, extends it when a boundary commits, restores it when a boundary fails, shares it with a fork and a seal, and rebuilds it once on restore; a [continuation checkpoint](/en/developer/persistence/#continuation-checkpoints) carries it. The ledger is never hashed, and keyed draws are no longer evidence dependencies, so the work of settling a boundary, taking a checkpoint or a paged checkpoint, sealing, and forking does not grow with the draws the run has already made.
 
-Two costs remain. The index holds one entry for each address the run has drawn, for as long as the run lives: 522 bytes each in the recorded measurement, and more with longer stream names, operation IDs, and targets. And a checkpoint, a paged checkpoint, a seal, a fork, and a restore still do work for every keyed draw the run has made.
+One cost remains. The ledger holds one entry for each address the run has drawn, for as long as the run lives: about 522 bytes each in the recorded measurement, and more with longer stream names, operation IDs, and targets. That is the price of exact idempotency for ever.
+
+A fresh draw must cite seal-stable operation evidence: evidence produced earlier in the same boundary, an event, command, attempt, ingress record, boundary, or draw that the journal counters prove exists (sealed or not), or a record's committed current version or initial-scenario version. A retained version that is no longer current is refused with `InvalidRandomOperationEvidence` in every run, so a sealed run and its exact replay accept the same first draws.
 
 ## Draw evidence
 

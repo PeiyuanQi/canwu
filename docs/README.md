@@ -21,6 +21,11 @@ coding agents.
 - [Boundary window](proposals/boundary-window.md)
 - [Same-instant supersession and unplaced persons](proposals/same-instant-supersession-and-unplaced-persons.md)
 - [Keyed-draw index, draw ID, and boundary profile](proposals/keyed-draw-index-and-settlement-profile.md)
+- [Knowledge ledger cost and authentication](proposals/knowledge-ledger-cost-and-authentication.md)
+- [Record store ceiling and cost](proposals/record-store-ceiling-and-cost.md)
+- [Continuation checkpoint](proposals/continuation-checkpoint.md)
+- [Command admission history index](proposals/command-admission-history-index.md)
+- [Reference archive and replay profile](proposals/reference-archive-and-replay-profile.md)
 - [End-state design](end-state.md)
 - [Reusable-engine conformance](engine-conformance.md)
 - [Versioning and compatibility](versioning.md)
@@ -47,6 +52,11 @@ current published **social diffusion simulation module**
 - [Resource archive lookup and volume](proposals/resource-archive-lookup-and-volume.md)
 - [Single-step completion lease and runtime protected-floor install](proposals/resource-single-step-lease-and-floor-install.md)
 - [Fiscal throughput and authority](proposals/fiscal-throughput-and-authority.md)
+- [Fiscal and society limits](proposals/fiscal-and-society-limits.md)
+- [World-scale fiscal state](proposals/world-scale-fiscal.md)
+- [Resource refusals without stalls](proposals/resource-refusals-without-stalls.md)
+- [Production archive volume](proposals/production-archive-volume.md)
+- [Law, information, and military correctness](proposals/law-information-military-correctness.md)
 - [Downstream grand-strategy gap set](proposals/downstream-grand-strategy-gap-set.md)
 
 ## Runnable cases, reference content, and starter kits

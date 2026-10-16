@@ -106,7 +106,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `ResourceOperationOutcome` | 每个操作的不可变凭证，状态为 `Applied`、`Rejected` 或 `Duplicate` |
 | `ResourceAccessGrantV1` | 授权方保管人记录在案的同意：被授权方可以在额度和时间窗口内动用它的存量 |
 | `CompletionLeaseActivationCertificateV1` | 某个持有人可以执行某项不可逆操作的凭证，锁定该操作依赖的精确记录 |
-| `ResourceState` | 整个资源根状态，保存为一条领域记录 |
+| `ResourceState` | 内存中的整个资源根状态；持久化时拆成一条活动根记录（`ResourceLiveRootV1`）和若干常驻终态桶记录（`ResourceHotTerminalBucketV1`） |
 
 生产类型，都在 `canwu-production` 中：
 
@@ -149,7 +149,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | --- | --- | --- |
 | 带请求标识的命令 `apply_resource_operation_v1` | 对自己掌控的存量采取行动的持有人。命令主体必须是掌控目标记录的持有人。 | `CreateAccount`、`SubmitDemand`、`AmendDemand`、`CancelDemand`、`BeginTransfer`、`BeginExchange`、`CancelTransfer`、以 `AcceptLocal`、`Lose` 或 `Return` 处置的 `CompleteTransfer`、`RecordLoss`、`ExternalOutflow`、`SetProtectedFloor`、`IssueAccessGrant`、`RevokeAccessGrant`，以及租约的申请和放弃 |
 | 适配器输入 `resource_adapter_operation_v1` | 提供方插件。请求中的证据字段必须等于数据包引用的精确记录版本，带时间的请求只能在它写明的时间结算。 | `Consume`、`AdvanceTransfer`、以 `Accept`、`AcceptLocal` 或 `ExternalOutflow` 处置的 `CompleteTransfer`、`RecordLoss`、`ExternalOutflow`、外部流入的 `Credit`，以及观察记录 |
-| 插件自有的数据包 | 上层应用通过辅助函数发送，或由 `canwu-production` 发送 | 分配请求（`resource_authorized_allocation_v1`）、租约状态转移（`resource_completion_operation_v1`，包括单步完成租约）和生产产出批次（`resource_production_output_batch_v1`） |
+| 插件自有的数据包 | 上层应用通过辅助函数发送，或由 `canwu-production` 发送 | 分配请求（`resource_authorized_allocation_v1`）、租约状态转移（`resource_completion_operation_v1`，包括一步式完成租约）和生产产出批次（`resource_production_output_batch_v1`） |
 
 <Steps>
 1. 准备。上层应用在 `ResourceState` 中安装资源定义、单位、期初账户、底线政策和报告授权，用 `ResourceState::into_record` 转成场景中的领域记录，再注册 `ResourcePlugin::new(adapter_evidence_kinds)`。这个列表写明哪些记录种类可以为适配器操作提供证明。生产状态以同样的方式通过 `ProductionState::into_initial_record` 和 `ProductionPlugin` 进入。
@@ -158,9 +158,11 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 4. 租约。执行任何不可逆步骤之前，行动的持有人需要一份已激活的完成租约，通过 `enqueue_resource_completion_operation` 取得。租约要经过四个操作（申请、授权、准备、激活）才会激活，因为每个参与方各自授权、各自准备：对于生产执行，由 `canwu-production` 协调租约，`canwu-resource` 作为参与方加入。如果资源插件是唯一的参与方（例如发起转移、本地验收、损耗或流出），一个 `SingleStepLease` 操作就能完成全部四步，检查相同，得到的凭证也相同，见[完成租约](/developer/production-economy/#完成租约)。凭证锁定该步骤依赖的精确账户、分配腿和记录。每次消费、转移发起、转移处置、入账、损耗和流出都必须携带这份凭证。
 5. 扣减。消费者插件用 `enqueue_resource_adapter_operation` 经适配器输入发送 `Consume`，并引用授权这次扣减的自有记录的精确版本。另一种方式是来源保管人用 `BeginTransfer` 发起转移，相应数量移入托管。转移进度和 `Accept` 以适配器操作的形式到达，并引用运输证据。`AcceptLocal`、`Lose` 和 `Return` 以其他方式结束转移。转移的每一步都写明预期的转移修订号，所以同一次到货不会入账两次。
 6. 生产。生产命令（`apply_production_operation_v1`）创建并批准工单。`StartExecution` 引用 `canwu-resource` 已经消费的投入：每个 `ResourceInputBinding` 写明分配腿、消费记录和对应结果。它还带上产能分配，由第 7 阶段标为 `Consumed`。`AdvanceExecution` 推进在制品，`CompleteExecution` 让生产执行进入 `CompletedPendingOutputSettlement`，其产出数量可以按实际产出比例缩放。
-7. 产出。在第 12 阶段，生产插件把当前的生产记录版本固定为该执行的 `output_source`，并安排一条 `resource_production_output_batch_v1` 输入。在之后的某个边界，资源写入系统要么为批次中的全部产出入账，要么一项也不入账，然后安排一条 `production_output_ack_v1`。生产插件的第 7 阶段保存这些结果，释放产能，并把生产执行标为 `Settled`。
-8. 检查与发布。第 8 阶段校验每个扩展的候选状态；守恒或产能规则被破坏时，边界失败。第 13 阶段发布持有人报告。
+7. 产出。在第 12 阶段，生产插件把当前的生产记录版本固定为该执行的 `output_source`，并安排一条 `resource_production_output_batch_v1` 输入。在之后的某个边界，资源写入系统要么为批次中的全部产出入账，要么一项也不入账，然后安排一条带 `settled_at`（入账结算的时刻）的 `production_output_ack_v1`。在资源记录里放不下的批次会被延后，不会丢失（见[跳过的数据包与延后结算](#跳过的数据包与延后结算)），它的各笔入账改到实际结算的时刻。生产插件的第 7 阶段检查每个结果的请求摘要都绑定了 `settled_at`，保存这些结果和 `output_settled_at`，释放产能，并把生产执行标为 `Settled`。
+8. 检查与发布。第 8 阶段校验每个扩展的候选状态；守恒或产能规则被破坏属于引擎不变量失败，边界失败。第 13 阶段发布持有人报告。
 </Steps>
+
+`StartExecution` 会把资源插件永远不可能入账的产出集合作为记录在案的拒绝拒掉：操作键落在保留前缀 `resource:completion:` 之下、被另一个运行中或等待产出结算的执行占用、或已被资源记录或其归档中的某个操作结果持有，产出超过 `MAX_PRODUCTION_OUTPUT_BATCH_CREDITS`（64）项，或者产出集合在资源记录的限制下永远放不下（`ResourceState::production_output_batch_can_fit`）。工艺最多声明 64 项产出，超出的在场景阶段就被拒绝。
 
 分配在资源插件的第 7 阶段写入系统中进行，面对的是持久化的账户和需求。[阶段边界与资源分配教程](/tutorials/phased-boundary/)中内核第 6 阶段的资源预留原语（`ReservationRequest`）是另一套机制，处理在单个边界内声明的供给和请求，`canwu-resource` 没有使用它。
 
@@ -211,29 +213,52 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 设施降级后如何处理，由一张[决策票据](/architecture/decisions/)决定：`degraded_facility_decision_ticket` 构建带 `ContinueDegraded`、`StopForRepair` 和 `DeferOrder` 三个选项的票据。
 
-每个扩展只保存一条领域记录：`canwu.resource` 中的 `ResourceRuntimeRecord` 和 `canwu.production` 中的 `ProductionRuntimeRecord`。快照把它们和内核状态存放在一起。恢复和重放请使用包装函数，它们会拒绝伪造的摘要、守恒失败、修订号不符和缺失的精确证据：
+生产扩展只保存一条领域记录：`canwu.production` 中的 `ProductionRuntimeRecord`。资源根状态则分成几部分保存：活动根记录 `resource:runtime:v1`（`ResourceRuntimeRecord`，载荷为 `ResourceLiveRootV1`）保存除常驻终态记录之外的一切，常驻终态记录只在其中的一本账里计数；每条常驻终态记录是某条桶记录 `resource:hot-terminal:{bucket}`（`ResourceHotTerminalBucketV1`）中的一个条目，由其标识的哈希决定落在哪个桶。`ResourceState::into_records` 把状态写成这些记录，`from_records` 读回来。一个边界只读写活动根和它触及的记录所在的桶：资源插件在结算每个数据包之前，先挂载该数据包点名的每条常驻终态记录以及这些记录引用的记录；与资源插件无关的边界完全不读资源根。你自己的插件要读资源根时，用 `resource_root_in_view(view, keys)` 或 `ResourceRootReader` 点名需要的常驻终态记录，或者用 `whole_resource_root_in_view` 读全部桶，并在活动根的读取声明之外再声明 `resource_hot_terminal_state_key()` 的读取；上层应用用 `resource_state` 读整个根。快照把这些记录和内核状态存放在一起。恢复和重放请使用包装函数，它们会拒绝伪造的摘要、守恒失败、修订号不符和缺失的精确证据：
 
 - 资源：`from_resource_snapshot_json`、`from_resource_checkpoint_journal`、`replay_resource_from_journal`，用其他方式加载后调用 `validate_resource_runtime`；
 - 生产：存在归档状态时，使用 `from_production_snapshot_json_with_archives`、`from_production_checkpoint_journal_with_archives`、`replay_production_from_journal_with_archives` 和 `validate_production_runtime_with_archives`。
+
+带 `_with_archive_store` 和 `_with_archives` 的恢复函数以 `Arc<dyn … + Send + Sync>` 接收每个存储并挂到运行上：运行和它的派生分支共用这个存储，分支可以移到别的线程，所以请把被持有的存储的映射放在 `Mutex` 或 `RwLock` 后面。只借给某一次调用的存储（例如传给 `prepare_resource_archive` 的）按引用传入，不需要这个约束。
 
 精确重放读取已记录的命令和输入，所以排入它们的上层应用代码和决策控制者都不会再次运行。详见[存档、重放与派生分支](/developer/persistence/)。
 
 ### 归档终态记录
 
-完成的工作会在资源记录里留下终态记录：操作结果、已关闭的需求和预留、已结算的转移，以及各种凭证。每个改动资源记录的边界都要把整条记录重写一遍，所以上层应用要把终态记录移到按内容寻址的归档里，每次做一次归档提交：
+完成的工作会在资源根里留下终态记录：操作结果、已关闭的需求和预留、已结算的转移，以及各种凭证。它们占用归档候选预算，每次恢复都要校验它们，所以上层应用要把终态记录移到按内容寻址的归档里，每次做一次归档提交：
 
 1. `ResourceState::prepare_resource_archive(candidate_limit, store)` 选出热终态记录，并准备好对应的归档对象。它要读取归档存储来续写查找索引，所以要传入你用来归档的存储。模拟运行的第一次提交还没有索引可读，这一步传 `()` 就够了。
 2. `enqueue_resource_archive` 写入这些对象，通过批次的 `store_and_verify` 校验，然后把这次提交排入队列，由下一个边界应用。
-3. 提交结算之后，用 `finalize_resource_archive_retention` 确认。每次提交都要在下一次提交把它的凭证归档之前完成确认。
+3. 提交结算之后，用 `finalize_resource_archive_retention` 确认。它从状态里的保留句柄读取提交是怎样结算的，所以在之后的提交把它的凭证归档之后也能确认。
 
-生产扩展为自己的归档提供了对应的函数。这个归档在本版本中没有变化：它没有查找索引，一次提交只带一页、最多 512 条记录，一次模拟运行最多做 8,192 次生产归档提交。
+生产扩展为自己的归档提供同样的协议：`prepare_production_archive(candidate_limit, store)`、`enqueue_production_archive` 和 `finalize_production_archive_retention`。从 0.16.0 起，生产归档在自己的命名空间下有同样的查找索引，一次提交最多带 16 个 blob、每个 64 条记录，已应用提交的维护凭证由下一次提交归档，所以根记录最多只留一条，一次模拟运行可以做任意多次提交；`archived_production_terminal_record` 查找已归档的记录。财政扩展和两个参考经济插件也按同样的方式归档。
 
-- **容量。** 一次提交最多带 16 页、4,096 条记录；一次模拟运行可以做任意多次归档提交。
-- **查找。** 每个资源操作都要问归档：自己的操作键以前用过没有。这样，即使操作结果已经移出记录，重发的操作也不会再次生效。每次提交都会续写一份累积的归档查找索引，这项检查只读归档头目录，再沿索引每层读一个经过认证的页。在记录的测量中，已归档约一千条记录时，一次未命中读 4 个对象，约一百万条时读 7 个，与提交次数无关。归档对象缺失或损坏属于错误，会让边界失败，绝不会被当成“没有归档过”。
-- **顺序与容量。** 同一个边界里，归档提交和保留确认（即 `finalize_resource_archive_retention` 排入的输入）先于资源插件的其他输入结算。归档提交不会因为空间不够而失败。如果别的提交或操作先结算，使某次提交失效，这次提交什么也不改变，它的凭证在你确认之后移除。
-- **保留好查找页。** 恢复、精确重放或派生分支会读取沿途每个归档头的查找索引，引擎从不删除查找页。每个准备好的批次都列出 `superseded_lookup_pages`，即新索引不再用到的页。只有当你放弃从这次提交之前的时间点恢复、重放和派生分支时才能删除它们，而且要等这次提交以 `Applied` 结算，并且已经有一份在它之后保存的持久快照或检查点。`live_resource_archive_lookup_pages` 可以重新算出实时运行仍会读取的页。
+- **容量。** 一次资源归档提交最多带 64 页、16,384 条记录；一次模拟运行可以做任意多次归档提交。提交只对准备它时的那个根生效，根由状态修订号、已准入序号、常驻终态记录数和归档头的摘要指明；请从整个根（`resource_state`）准备提交。
+- **查找。** 每个资源操作都要问归档：自己的操作键以前用过没有。这样，即使操作结果已经移出记录，重发的操作也不会再次生效。每次提交都会续写一份累积的归档查找索引，这项检查只读归档头目录，再沿索引每层读一个经过认证的页。在记录的测量中，已归档约一千条记录时，一次未命中读 4 个对象，约一百万条时读 7 个，与提交次数无关。归档对象缺失或损坏属于错误，会让边界失败，存储能提供该对象后边界才会结算；它绝不会被当成“没有归档过”。
+- **顺序与容量。** 同一个边界里，归档提交和保留确认（即 `finalize_resource_archive_retention` 排入的输入）先于资源插件的其他输入结算。归档提交不会因为空间不够而失败。如果别的提交先结算，使某次提交失效，这次提交什么也不改变，它的凭证在你确认之后移除；重复的确认结算为空操作。
+- **保留好查找页。** 恢复、精确重放或派生分支会读取沿途每个归档头的查找索引，引擎从不删除查找页。每个准备好的批次都列出 `superseded_lookup_pages`，即新索引不再用到的页。只有当你放弃从这次提交之前的时间点恢复、重放和派生分支时才能删除它们，而且要等这次提交以 `Applied` 结算，并且已经有一份在它之后保存的持久快照或检查点。`live_resource_archive_lookup_pages` 和 `live_production_archive_lookup_pages` 可以重新算出实时运行仍会读取的页。
 
-普通结算从不扫描冷历史。
+普通结算从不扫描冷历史。生产的恢复校验通过资源归档的查找索引解析每个已归档的资源投入，每个投入只读一条索引路径和一个 blob，并且只要资源归档有归档头就把它审计一次。
+
+### 跳过的数据包与延后结算
+
+上层应用或持有人能发送的任何数据包都不会让资源边界失败。因可预期的原因无法结算的数据包什么也不改变，操作键保持空闲，由一个 `canwu.resource.ingress_skipped.v1` 事件（`RESOURCE_INGRESS_SKIPPED_EVENT`，用 `ResourceIngressSkipV1::from_event` 读回）指明它的输入 ID、携带的操作键和原因，边界带着其他数据包照常提交：
+
+| 原因 | 含义 | 怎样才能结算 |
+| --- | --- | --- |
+| `operation_key_taken` | 另一个请求持有这个键，在资源记录或归档中 | 无法结算：换一个键重发 |
+| `reserved_operation_key` | 不是完成操作的请求使用了 `resource:completion:` 之下的键 | 无法结算：改用前缀之外的键 |
+| `failed_settlement_checks` | 数据包无法解码，或未通过它的入口在结算时做的检查（带请求标识的命令、提供方绑定、凭证、边界时间、当前证据，或生产产出批次中被拒绝的一笔入账） | 改正后的数据包，可以沿用原来的键 |
+| `archive_backlog` | 结果放不进归档候选或热操作结果预算，而归档全部热候选的一次提交能腾出空间 | 提交应用之后重发同一请求 |
+| `reserved_capacity` | 即使积压为空，结果也放不下：空间被已准入租约的预留或报告尚未发布的已完成参与方占着，或者预算本身小于这项工作（详情会说明何时永远腾不出空间） | 等租约完成、释放或过期后重发同一请求，或调大 `max_archive_candidates` |
+| `root_limit` | 结果越过了资源记录的其他限制，实际上就是操作可以使用的状态字节上限份额（`ResourceLimitsV1::operation_state_bytes`，即上限减去 `MAINTENANCE_STATE_BYTE_RESERVE`） | 资源记录变小之后重发同一请求 |
+
+空间按结果计算，所以被拒绝的操作只需要它结果的空间，已应用的操作需要它新增记录和预留的空间。结果已经记录在案的重发什么也不结算，也不留事件。领域层面的拒绝（修订号过期、目标不存在、预算不允许的租约）仍然是该操作记录在案的拒绝结果。
+
+其他插件安排的工作绝不会被交回上层应用，因为那个插件可能不会再发一次。生产产出批次，以及插件安排的、以后仍能作为同一步骤结算的完成步骤（`Prepare`、`Abort`、`Release`，以及外部参与方的准备、完成和释放），放不进资源记录、而一次归档提交或租约释放能腾出空间时，会被**延后**：资源插件把同样的工作作为内部的 `resource_deferred_packet_v1` 数据包排给自己，一分钟后到期，之后每次延后翻倍，最长 1,024 分钟，把批次的各笔入账改到那个时刻，并发出带 `deferred_until` 的跳过事件。等待积压或预留空间的工作会一直重试，直到结束短缺的提交或释放到来；等待字节上限的工作在 1,024 分钟的那次重试之后被跳过；任何提交或释放都腾不出空间的工作，以及绑定了边界时间的步骤（申请、授权、激活、消费、过期、一步式租约），立即被跳过。延后的工作等待期间输入队列不为空，所以运行不能封存；上层应用的归档维护结束这段等待。因空间不够被跳过的过期检查不再安排后续检查，下一次应用的归档提交会恢复它，`enqueue_resource_completion_expiry_tick` 也可以手动排入一次。
+
+因空间不够、键被占用、或等待期间产出账户修订号变化而被跳过的批次，会让它的执行停在 `CompletedPendingOutputSettlement`；生产插件在执行开始时就拒绝会必然导致这种情况的键和产出集合。仍会让资源边界失败的只有无效记录或引擎不变量：查找键时归档对象缺失、伪造或无法读取，伪造的归档提交或保留确认，结算后因限制以外的原因无法通过校验的资源记录，一个边界内超出字节预留的维护写入，以及算术或编码失败。
+
+生产插件遵循同样的规则：无法解码的数据包以 `canwu.production.ingress_refused.v1` 被拒绝（确认为 `canwu.production.output_ack_refused.v1`），操作数据包只有在由带请求标识的生产命令的准入排入时才结算，生产检查拒绝的完成步骤或接续见证什么也不结算，失效或重复的归档提交结算为空操作。仍会让生产边界失败的只有来自其他插件的伪造归档数据包、失败的存储读取、计数器溢出和根记录 256 MiB 的字节上限。
 
 ## 上层应用需要提供什么
 
@@ -249,21 +274,21 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 | 限制 | 取值 |
 | --- | --- |
-| `ResourceLimitsV1::canonical()` | 账户、需求、转移各 8,192 个（硬上限 262,144）；每次分配 2,048 个候选；2,048 个待处理需求；每个边界 4,096 次变更、256 份报告；8,192 条热操作结果；256 条热终态归档候选（硬上限 4,096；维护凭证预算不得小于它）；状态 256 MiB |
+| `ResourceLimitsV1::canonical()` | 账户、需求、转移各 8,192 个（硬上限 262,144）；每次分配 2,048 个候选；2,048 个待处理需求；每个边界 4,096 次变更、256 份报告；8,192 条热操作结果（硬上限 16,384）；256 条热终态归档候选（硬上限 16,384；维护凭证预算不得小于它）；状态 256 MiB，按活动根加全部常驻终态条目计算 |
 | `MAX_DEMAND_SOURCE_ACCOUNTS` | `ExactAccounts` 或 `Granted` 列表最多 256 个账户 |
 | `MAX_RESOURCE_ACCESS_GRANTS` | 每个资源状态最多 4,096 份动用授权，已撤销的也计入 |
-| 完成租约 | 每个生命周期 16 条终态凭证（`MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE`）；每个权限主体 16 个、全局 1,024 个待处理申请；始终未激活的授权在 8 个边界后过期（`PREACTIVATION_LEASE_TTL_BOUNDARIES`）；单步完成租约结算时需要 `2 + 16` 个归档候选名额和 `1 + 16` 个热操作结果名额 |
+| 完成租约 | 每个生命周期 16 条终态凭证（`MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE`）；每个权限主体 16 个、全局 1,024 个待处理申请；始终未激活的授权在 8 个边界后过期（`PREACTIVATION_LEASE_TTL_BOUNDARIES`）；已应用的一步式完成租约占用 `2 + 16` 个归档候选名额和 `1 + 16` 个热操作结果名额，被拒绝的只占它结果的名额 |
 | 受保护存量底线 | 一条资源记录最多 4,096 个政策版本，预先编写的和按内容寻址的合计（`MAX_PROTECTED_FLOOR_POLICY_REVISIONS`）；按内容寻址的版本最多 16 个覆盖类别，每个 1 到 160 字节 |
 | 生产产出批次 | 同一份凭证下 1 到 64 笔入账 |
 | `ProductionLimitsV1::canonical()` | 工艺版本和生产地点各 2,048 个；设施、工单、生产执行、产能分配和设施项目各 4,096 个；每个边界 512 次事故检查、64 份报告；状态 256 MiB |
 | 工艺与报告规模 | 64 个要求组（`MAX_REQUIREMENT_GROUPS`），每组 16 个备选（`MAX_REQUIREMENT_ALTERNATIVES`），每份报告 256 条事实和阻塞项（`MAX_REPORT_FACTS`） |
 | 投影 | 8 个来源适配器（`MAX_TYPED_SOURCE_ADAPTERS`），256 条观察事实（`MAX_OBSERVATION_FACTS`），32 个价格因素（`MAX_PRICE_FACTORS`） |
 
-触及上限时返回错误或被拒绝的结果，存量不会改变。每份租约都在任何扣减发生之前预留好自己的终态记录名额，所以热归档已满时，已被接受的工作仍能完成；下一份租约（四步或单步）则要等一次归档提交腾出空间后才能取得。
+触及上限时返回错误、被拒绝的结果或跳过的数据包，存量不会改变。每份租约都在任何扣减发生之前预留好自己的终态记录名额，所以热归档已满时，已被接受的工作仍能完成；下一份租约（四步或一步式）会以 `reserved_capacity` 被跳过，直到租约释放空间或调大 `max_archive_candidates`。
 
-最需要留意的是归档候选预算 `max_archive_candidates`。如果一个操作会产生的终态记录放不下，它所在的边界会失败，操作留在队列里，直到一次归档提交腾出空间；它不会被记录为拒绝。预算要能容纳你保留的积压，再加上同一个边界到期的操作可能产生的全部终态记录（每个操作 1 到 8 条，视种类而定）。边界因为预算已满而失败时，请排入一次选中全部候选的提交：从同一份记录准备的第二次提交，会在第一次提交应用后失效。一次提交最多腾出“预算减一”个名额，因为它自己的维护凭证仍占一个候选名额。如果同一个边界到期的操作需要的名额比这还多，任何提交都无济于事，这个边界在该预算下无法结算。
+最需要留意的是归档候选预算 `max_archive_candidates`。结果放不下的操作什么也不结算，由带 `archive_backlog`（归档提交能腾出空间）或 `reserved_capacity`（腾不出）的跳过事件指明；它不会被记录为拒绝，操作键保持空闲，空间恢复后由发送方重发。遇到 `archive_backlog` 时，请排入一次选中全部候选的提交，也可以就在同一个边界里，因为归档提交先结算；从同一份记录准备的第二次提交，会在第一次提交应用后失效。一次提交最多腾出“预算减一”条记录的空间，因为它自己的维护凭证仍占一个候选名额，超出的请求会再次被跳过，排在下一次提交之后结算。被跳过的请求不会被排入任何队列，所以长时间的短缺只会产生事件和重发，绝不会让运行停下。
 
-4,096 这个上限是为突发留的余量，不是日常的工作规模。每个改动资源记录的边界，都要重写其中全部热终态记录并写入日志；在记录的测量中，每条热记录约占 1.1 KB 日志和 50 到 95 微秒。归档要勤，积压要小。
+16,384 这个上限是为突发留的余量，不是日常的工作规模。结算操作的边界不管积压多少都花同样的代价（记录的测量中，0 条和 4,000 条常驻记录时都约 0.2 毫秒、8 KB 日志），因为它只写活动根和它触及的桶。积压的代价在归档时支付：应用提交的边界每归档一条记录就要重写一个桶，每条约 25 微秒、1.3 KB 日志（4,054 条 103 毫秒，16,054 条 524 毫秒），准备提交要读全部常驻记录，恢复要校验它们。积压很大时请分批提交，每批确认之后再准备下一批；另外，一次 64 页的提交如果失效，会在活动根里留下约 13 KB 的保留句柄，所以接近字节上限的根大约只放得下五次未确认的这种失效提交。
 
 ## 动手试试
 

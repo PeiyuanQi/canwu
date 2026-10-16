@@ -1,6 +1,6 @@
 # Continuation Checkpoint
 
-Status: reviewed design for 0.16.0, delivered in two commits. The first
+Status: implemented in 0.16.0; reviewed design delivered in two commits. The first
 commit implements the three prerequisites and the resumable journal
 commitments (Parts A, C, D, and F); the second implements sealing with work in
 flight and the continuation checkpoint itself (Parts B and E). The 0.15.0

@@ -21,16 +21,19 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
     Run["运行中的模拟"] -->|"snapshot_json()"| Snap["快照"]
     Run -->|"checkpoint_journal_json()"| CJ["检查点 + 后续日志"]
     Run -->|"replay_journal()"| Journal["ReplayJournal"]
+    Run -->|"continuation_checkpoint()"| Cont["接续检查点"]
     Run -->|"fork()"| Fork["派生分支：新输入，平行现实"]
     Snap -->|"from_snapshot_json_with_plugins()"| Restored["恢复后的模拟"]
     CJ -->|"from_checkpoint_journal_json_with_plugins()"| Restored
+    Cont -->|"CompactedCanwu::from_continuation_checkpoint_verified()"| Continued["接续运行的模拟（紧凑模式）"]
     Journal -->|"replay_from_journal()"| Replayed["重放得到的模拟"]
     Plugins["匹配的插件集合"] -.-> Restored
+    Plugins -.-> Continued
     Plugins -.-> Replayed
 `}
 />
 
-恢复或重放得到的模拟，`checkpoint_hash()` 与原运行相同。派生分支从相同状态出发，之后各自发展。
+恢复、接续或重放得到的模拟，`checkpoint_hash()` 与原运行相同。派生分支从相同状态出发，之后各自发展。
 
 ## 先确定恢复目标
 
@@ -38,6 +41,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | --- | --- | --- | --- |
 | 普通存档或服务重启 | `snapshot_json()` | `Canwu::from_snapshot_json_with_plugins()` | 保存完整快照，加载时提供相同的插件集合 |
 | 长期运行的紧凑存储 | `checkpoint_journal_json()` | `Canwu::from_checkpoint_journal_json_with_plugins()` | 保存检查点及其后连续不断的日志 |
+| 不随战役变长、不需要重放的存档 | `continuation_checkpoint()` | `CompactedCanwu::from_continuation_checkpoint_verified()` | 保存检查点及其 `continuation_hash`，见[接续检查点](#接续检查点) |
 | 只保存变化部分的增量存档 | `prepare_paged_checkpoint()` | `Canwu::from_paged_checkpoint_and_journal_with_plugins()` | 保留每个状态页和连续不断的证据前缀，见[分页检查点](#分页检查点) |
 | 审计或精确重建 | `replay_journal()` | `Canwu::replay_from_journal()` 或 `replay_from_journal_json()` | 保存完整日志，并保留匹配的插件集合 |
 | 向外部系统发送效果 | `outbox_entries()` | — | 至少投递一次，按 `delivery_id` 去重，并保存确认状态 |
@@ -93,6 +97,13 @@ assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
 
 `fork()` 把当前时点的模拟复制成一个独立的模拟，适合比较另一组命令、策略或研究假设。派生分支照常通过命令和时间接口推进；输入一旦不同，它就是新的平行现实，与原运行的精确重放是两回事。
 
+派生分支也是不暂停游戏就能存档的办法。`Canwu`、`CompactedCanwu` 和每个派生分支都是 `Send`（不承诺 `Sync`），派生分支与原运行共用归档提供方，所以可以在模拟线程上调用 `fork()`，把分支移到工作线程，在那里写出检查点日志、接续检查点或封存段，模拟线程则继续结算原运行；工作线程写出的字节与在原线程上做同样的事完全相同。四条规则保证这样做是安全的：
+
+- **只用来存档的分支不会读归档提供方。** `checkpoint_journal_json`、`continuation_checkpoint` 和 `seal_evidence` 只读运行自己的状态和证据。如果你还在工作线程上推进、恢复或校验这个分支，它就会和原运行同时读提供方，所以要挂一个能同时服务两者的提供方。
+- **同一对象只有一个答案。** 提供方或存储对同一个 `(namespace, object_id)`，不管调用顺序和并发情况如何，都必须给每个运行同样的答案；忙的时候（比如另一个线程正在写入）要阻塞，而不是返回 `None` 或错误，否则边界会把它当成对象缺失或不可读。运行持有的存储以 `Arc<dyn … + Send + Sync>` 传入，请把它的映射放在 `Mutex` 或 `RwLock` 后面。
+- **保留活跃分支还在读的东西。** 删除归档提交淘汰的查找页，就放弃了运行中所有读取它们的更早时点，包括头部早于这次提交的分支，见[归档终态记录](/architecture/resources-production/#归档终态记录)。分支还在工作线程上活跃时，不要删除它仍会读的页或参考包归档对象。
+- **分支的封存只属于分支。** 封存分支不碰原运行的证据和封存历史，分支返回的封存段属于分支自己的存档，不属于原运行的段链。
+
 ## 向外部发送效果：外发队列
 
 需要送达外部系统的边界输出会出现在 `outbox_entries()` 中。每个 `OutboxEntry` 都有稳定的 `delivery_id`，由运行、结算边界、事件和输出序号派生而来。
@@ -102,7 +113,31 @@ assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
 3. 接收方按 `delivery_id` 去重，因为同一次网络调用可能发生不止一次。
 4. 精确重放会生成相同的 `delivery_id`，投递仍由上层应用负责。
 
-在紧凑模式（`CompactedCanwu`）下，`seal_evidence()` 返回封存后的 `EvidenceJournalSegment`。请把这个日志段与投递、确认状态一起保存。封存或压缩证据，并不表示效果已经投递或确认。
+在紧凑模式（`CompactedCanwu`）下，`seal_evidence()` 返回封存后的 `EvidenceJournalSegment`。请把这个日志段与投递、确认状态一起保存。封存或压缩证据，并不表示效果已经投递或确认。封存不再等待输入队列清空：它把事件、命令和命令尝试封存到准入游标为止，其他日志封存到末尾，并把仍在进行中的工作可能还要读取的证据（待处理输入及其原因、需要保留载荷的依赖，以及尚未准入的尾部）留在内存里，所以忙碌的运行想封存多频繁都可以。只有当某个插件声明依赖的证据运行已经不再持有时，封存才以 `ArchiveNotReady` 失败，并且什么也不改变。
+
+## 接续检查点
+
+**接续检查点**（`ContinuationCheckpoint`）是一种不带证据历史就能继续运行的存档。它包含当前状态、仍在进行中的工作可能还要读取的证据、恢复时无法脱离历史重建的派生索引（[操作定址抽样账](/architecture/randomness/#抽样之后还有哪些开销)、让每个带请求标识的请求保持幂等的请求索引、已封存证据的时间索引，以及边界账），以及可续写形式的日志承诺。它不包含任何仍在进行中的工作读不到的边界、事件、命令、输入或抽样记录，所以它的大小取决于当前状态以及带请求标识的请求和操作定址抽样的数量，与战役的长度无关：在记录的 `continuation-profile` 运行中，第 14 个月时它是 2.2 到 5.7 MB，完整存档则是 150 到 160 MB；写出只需完整存档 4% 到 9% 的时间，恢复只需 1% 到 3%。
+
+```rust
+let (checkpoint, continuation_hash) = canwu.continuation_checkpoint()?;
+// 两者都要保存；哈希是信任锚点
+let continued = CompactedCanwu::from_continuation_checkpoint_verified(
+    checkpoint,
+    &continuation_hash,
+    &[&plugin],
+)?;
+assert_eq!(continued.checkpoint_hash(), canwu.checkpoint_hash());
+```
+
+- **写出。** `Canwu::continuation_checkpoint()` 和 `CompactedCanwu::continuation_checkpoint()` 返回检查点及其 `continuation_hash`。写出不改动模拟运行。在同一个切点上，无论运行从未封存、在任何切点封存过，还是本身就是从接续检查点恢复的，检查点都逐字节相同。封存会失败的情况下它同样以 `ArchiveNotReady` 失败。
+- **恢复。** `CompactedCanwu::from_continuation_checkpoint_verified(checkpoint, expected_hash, plugins)` 先把重新计算的哈希与你保存的那份比较，再检查格式、完整性、结构、状态、操作定址抽样、身份（每个状态根和检查点哈希），以及携带的证据是否恰好是恢复后的状态所需要的，然后才重新装载插件。`_with_plugins` 形式和 JSON 形式跳过与保存哈希的比较，只能发现损坏，不能发现篡改；凡不是自己在同一进程里写出的检查点，都请用带校验的形式。恢复得到的是 `CompactedCanwu`，永远不是 `Canwu`。
+- **接续后的运行能做什么。** 结算边界、准入和撤回输入、处理命令和决策、封存、派生分支、再写接续检查点，以及回答所有不需要历史的上层应用读取，结果与未中断的运行相同。`CompactedCanwu::continuation_base()` 报告它的起点切点。
+- **不能做什么。** 不能写出完整快照、重放日志、检查点日志或分页检查点（`ErrorCode::HistoryUnavailable`）；不能读取起点之前的已归档日志段；通过保留证据的读取也看不到起点之前的边界、事件和轨迹。需要精确重放或审计的上层应用，请同时保留完整存档。
+- **信任。** 接续检查点和快照一样包含真值，绝不要交给玩家、智能体、观察者或远程客户端。它自带的 `continuation_hash` 字段只能发现损坏，发现不了篡改：携带的证据、待处理集合和已结算切点只由你保存的那份哈希覆盖。
+- **上层应用辅助函数。** 扩展中为上层应用排队或读取的每个辅助函数都接受任何 `CanwuRun`，即 `Canwu` 和 `CompactedCanwu` 都实现的 trait，所以带归档的运行或接续后的运行与完整历史的运行用同样的调用驱动。会重放历史的模块恢复包装函数（技术、生产、society、历史研究）没有接续形式。
+
+需要让某条规则的证据在封存之后仍可读取的插件，要在当前记录中把它声明为需要保留载荷；插件不得这样声明初始场景中的记录版本（它不用声明也始终可读，引擎会在封存时拒绝这种声明）。
 
 ## 高级存储与归档
 
@@ -110,7 +145,7 @@ assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
 
 - 按内容标识保存每个状态页，并原样返回相同字节；缺页必须报错，不能当作空数据；
 - 保留每个检查点所需的连续日志前缀和归档保留根；
-- 保留资源归档的查找页：恢复、精确重放或派生分支沿途经过的每个归档头都需要它们（见[归档终态记录](/architecture/resources-production/#归档终态记录)）；
+- 保留资源、生产、财政和参考包归档的查找页：恢复、精确重放或派生分支沿途经过的每个归档头都需要它们（见[归档终态记录](/architecture/resources-production/#归档终态记录)）；
 - 为每个插件恢复相同的归档契约和语义哈希；
 - 删除冷数据前，先从已提交的根做可达性检查。
 
@@ -122,7 +157,7 @@ assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
 - **恢复。** `Canwu::from_paged_checkpoint_and_journal(checkpoint, provider, segments)` 和 `from_paged_checkpoint_and_journal_with_plugins` 根据提供方和证据前缀重建模拟运行。证据前缀是从运行开始到该检查点为止、连续不断的日志段，可以在运行过程中用 `journal_segment_since` 逐段收集。每个日志段至少要包含一条新记录，所以起点与终点相同的日志段要跳过。恢复时执行的验证与加载快照相同。提供方只需持有恢复时实际读取的页；读取的页缺失时会以 `StatePageUnavailable` 失败，不会当作空数据。对已归档的决策历史，恢复只读取热决策状态所依赖的页；其他已归档历史会报告 `Unresolved`，直到通过提供相同页的 `DecisionArchiveProvider` 调用 `decision_history_location_with_provider` 查到它。
 - **紧凑模式。** `CompactedCanwu` 提供同样的调用。它的证据前缀是你已封存的日志段（按封存先后排列），再加上用 `journal_segment_since` 从最后一段的终点取得的日志段；如果封存之后没有记录任何内容，就跳过这最后一段。紧凑模式恢复之后，证据前缀会改变，见[重启紧凑模式的模拟运行](#重启紧凑模式的模拟运行)。
 
-检查点本身不携带证据记录。除了紧凑模式的接续信息（例如每次封存对应的一个归档日志段头），它的大小取决于当前状态，而不是运行持续了多久；每份增量只包含发生变化的页。准备检查点时仍可能读取保留的证据，恢复时也仍会验证完整的证据前缀。
+检查点本身不携带证据记录。除了紧凑模式的接续信息（例如每次封存对应的一个归档日志段头），它的大小取决于当前状态，而不是运行持续了多久；每份增量只包含发生变化的页。准备检查点时仍可能读取保留的证据，恢复时也仍会验证完整的证据前缀。领域记录页是二进制页（`raw-canonical-v2`）：超过 1 MiB 的记录按内容寻址切成 1 MiB 的记录值分块分页保存，没有变化的分块不会存两次，最大 512 MiB（`MAX_PAGED_RECORD_BYTES`）的记录都能分页；更长的记录会让 `prepare_paged_checkpoint` 以 `ValueOutOfRange` 失败，这不是页损坏。恢复时会先按页描述的大小分配内存（每条记录最多到这个上限），然后才能拒绝一个把同一分块列了很多次的页，所以来源不可信的检查点请先按它的根认证，再恢复。
 
 需要注意：
 
@@ -146,22 +181,34 @@ assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
 ## 版本与存档兼容
 
 :::note
-参伍 0.15.0 写出快照格式 8、承诺格式 4、检查点/证据日志格式 4 和分页检查点封装格式 4。存档还记录了精确的 `engine_version`，所以 0.15.0 引擎只能加载 0.15.0 写出的存档。0.14.0 及更早版本的存档不能加载，改写其中记录的版本号也不行；需要读取时，请保留旧引擎，或用自己的工具导出数据。
+参伍 0.16.0 写出快照格式 8、承诺格式 5、检查点/证据日志格式 5、分页检查点封装格式 5 和接续检查点格式 1。参伍的 crate 只依赖彼此完全相同的版本，存档也记录了精确的 `engine_version`，所以 0.16.0 引擎只能加载 0.16.0 写出的存档。0.15.0 及更早版本的存档不能加载，改写其中记录的版本号也不行；需要读取时，请保留旧引擎，或用自己的工具导出数据。
 :::
 
-参伍 0.15.0 是次版本。各种格式和哈希算法都没有变化，引擎也没有往存档里多写任何东西：回答[操作定址随机抽样](/architecture/randomness/#抽样之后还有哪些开销)的索引在恢复时重建，[边界耗时剖面](/architecture/settlement/#边界耗时剖面)从不保存。与存档和代码有关的变化如下：
+参伍 0.16.0 是次版本，改变了三种格式，新增一种。承诺格式 5 增量计算知识账本的哈希，并把边界的知识变化的每个字段都纳入边界哈希；检查点/证据日志格式 5 去掉了操作定址抽样的预留项，因为[操作定址抽样账](/architecture/randomness/#抽样之后还有哪些开销)现在保存每个抽过的地址；分页检查点封装格式 5 把最大 512 MiB 的记录按 1 MiB 分块分页；[接续检查点](#接续检查点)是新增的。哈希算法没有变化，但每个检查点哈希、边界哈希和领域记录根都与 0.15.0 不同，`authoritative_state_hash` 现在是承诺格式的状态哈希，封存过、未封存和恢复后的运行得到相同的值。与存档和代码有关的变化如下：
+
+- **存档不再随进行中的工作增长。** 有待处理输入时也能封存；接续检查点用几 MB 就能保存一场长战役。引用已封存证据的首次[操作定址随机抽样](/architecture/randomness/#封存证据之后的重试)在封存过和未封存的运行中都被接受，引用已被取代的记录版本的首次抽样在任何运行中都被拒绝。
+- **需要修改的代码。** `DomainRecordChange::previous` 和 `current` 的类型是 `Arc<DomainRecord>`。`KnowledgeSnapshot::records` 的类型是 `HolderLedgers`，它的迭代器只能正向遍历（`.rev()` 和 `next_back` 不能编译；用 `last_key_value` 读最新记录）。`ErrorCode` 标记为 non-exhaustive，并新增 `HistoryUnavailable`。`SocietyIngressQueue` 用 `queued` 和 `batches` 取代了 `entries`。`ProductionState::prepare_production_archive` 多了一个归档存储参数，`prepare_force_archive` 和 `prepare_economy_archive` 也是。财政 API 围绕记录、批次和按记录的修订号重建：`FiscalActionBatch` 取代 `FiscalActionRequest`，`enqueue_execution_receipts` 取代 `enqueue_execution_receipt`，`FiscalState::into_records` 取代 `into_record`，`FiscalAction` 新增六个变体。命令处理器不能再安排一条会排入插件输入的延时指令（`InvalidPayload`）；请直接给 `EnqueuePluginIngress` 设定延时。
+- **插件身份。** society 插件（它的语义哈希现在还取决于[转移结算模式](/tutorials/cases/local-community-diffusion/#换一种结算节奏)）、财政、资源、生产、法律、信息和军事插件，以及两个参考经济插件的语义哈希改变。
+- **归档。** 生产归档和参考包归档获得了资源归档的查找索引，财政归档是新增的；请像对资源归档一样，保留每种归档的查找页。0.15.0 写出的生产记录和归档对象、财政状态、society 队列记录和参考包归档目录无法解码，不过 0.16.0 的模拟运行不可能读到它们。
+- **资源根。** `RESOURCE_STATE_FORMAT_VERSION` 升到 3：资源根持久化为活动根（`resource:runtime:v1`，载荷 `ResourceLiveRootV1`，用一本账计数常驻终态记录）和每个常驻终态桶一条记录（新记录种类 `canwu.resource` `hot-terminal`，`resource:hot-terminal:{bucket}`，格式 1），字节上限按活动根加全部条目计算。归档 blob、保留句柄和目录引用 v2 的归档来源根，所以它们的 id 与 0.15.0 不同，形状不变。原来从 `ResourceRuntimeRecord::Payload` 读常驻终态记录的代码，改用 `resource_root_in_view`、`ResourceRootReader` 或 `whole_resource_root_in_view`，并声明 `resource_hot_terminal_state_key()`；含终态记录的根用 `ResourceState::into_records` 取代 `into_record`；force-supply 的恢复函数多了一个归档提供方参数。见[资源与生产](/architecture/resources-production/#随机性持久化与重放)。
+- **拒绝不再卡住模拟运行。** 各扩展中，因可预期的原因无法结算的数据包都是记录在案的拒绝、带事件的跳过或延后结算：放不进资源记录或操作键已被占用的资源数据包（[跳过的数据包](/architecture/resources-production/#跳过的数据包与延后结算)）、无法解码或未通过检查的生产数据包、财政凭证、语境变更和归档数据包、超出预算或上层应用版本过期的法律数据包，以及相互冲突的信息数据包。任何预算或拒绝都不会再让边界失败。
+- **进入时的检查。** 不是有效状态精确拆分的财政记录集合、头与批次不一致的 society 队列、产出超过 64 项的工艺，以及会排入插件输入的已调度工作，都在创建或恢复模拟运行时被拒绝。插件不得把初始场景中的记录版本声明为需要保留载荷；这样声明的运行无法封存。
+
+和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.15.0 的存档；需要读取时，请保留 0.15.0 引擎。
+
+上一个次版本参伍 0.15.0 保留了 0.14.0 的各种格式和哈希算法，引擎也没有往存档里多写任何东西：回答[操作定址随机抽样](/architecture/randomness/#抽样之后还有哪些开销)的索引在恢复时重建，[边界耗时明细](/architecture/settlement/#边界耗时明细)从不保存。与存档和代码有关的变化如下：
 
 - **修正了一种写出后无法加载的存档。** 知识记录可以[取代或标为矛盾](/architecture/knowledge-information/#取代先前的记录)哪些记录，加载存档时现在使用与结算相同的规则。在 0.14.0 中，如果插件在同一时刻的两个边界里先后取代某位持有人的记录，写出的存档就无法加载。
 - **封存过的模拟运行与重放的行为一致。** 完全相同的[操作定址随机抽样](/architecture/randomness/#封存证据之后的重试)重试，即使它引用的证据已被 `seal_evidence` 移走，也能拿回已记录的抽样；0.14.0 会以 `InvalidRandomOperationEvidence` 拒绝。封存之后发布的[财政报告](/architecture/fiscal/#报告如何发布)会取代封存之前发布的那一份；在 0.14.0 中，持有人会同时留着两份当前报告，封存过的模拟运行也无法通过精确重放。
 - **需要修改的代码。** `PersonDraft` 用可选的 `PersonPlacement` 取代了 `government` 和 `current_location` 两个字段，`BoundaryPersonCreation::person` 的类型变为 `BoundaryCreatedPerson`。`SocietyPlugin` 不再是单元结构体，请写 `SocietyPlugin::DAILY`。`ResourceState::prepare_resource_archive` 多了一个归档存储参数。`ResourceCompletionOperationV1` 和 `FiscalAction` 新增了变体。`SocietyCohortExchangeLedger`、`ResourceArchiveIndexDirectoryV1`、`PreparedResourceArchiveBatchV1`、`ResourceProtectedFloorRequestV1`、`FiscalAuthorityBinding`、`FiscalAuditFinding` 和 `FiscalState` 新增了公开字段，所以底线请求的结构体字面量要加上 `install: None`，权限绑定的字面量要加上 `rebound_by: None`。`MAX_RESOURCE_ARCHIVE_LOOKUP_DIRECTORIES` 已移除。读取财政报告请用 `fiscal_reports`；单独一条 `fiscal_report` 记录不再能解码成完整的 `FiscalProjection`。
 - **插件身份。** society 插件、资源插件和财政插件的语义哈希改变。使用 society 的模拟运行，只能用注册了相同[结算节奏](/tutorials/cases/local-community-diffusion/#换一种结算节奏)的插件恢复和重放。
 - **资源归档。** 请保留资源归档的查找页：恢复、精确重放或派生分支会读取沿途每个归档头的查找索引，见[归档终态记录](/architecture/resources-production/#归档终态记录)。0.14.0 写出的归档目录无法解码，不过 0.15.0 的模拟运行不可能读到它们。
-- **财政记录在进入时校验。** 无效的财政目录或状态，在创建或恢复模拟运行时就会被拒绝；在 0.14.0 中，要到第一个准入了内容的边界才失败。财政状态记录现在引用每个观察者指向的人物，所以请用 `FiscalState::into_record` 构造它；写到了不存在的观察者的状态会被拒绝。`fiscal_report` 知识 schema 升到版本 2，场景的知识里如果带有版本 1 的报告记录，也会被拒绝。
+- **财政记录在进入时校验。** 无效的财政目录或状态，在创建或恢复模拟运行时就会被拒绝；在 0.14.0 中，要到第一个准入了内容的边界才失败。当时的财政状态记录引用每个观察者指向的人物，由 `FiscalState::into_record` 构造（0.16.0 改为 `into_records` 的多条记录）；写到了不存在的观察者的状态会被拒绝。`fiscal_report` 知识 schema 当时升到了版本 2（0.16.0 是版本 4），场景的知识里如果带有更早版本的报告记录，也会被拒绝。
 - **拒绝不再卡住模拟运行。** 被拒绝的 society 命令和有缺陷的 society 输入现在记录为拒绝；候选预算已满时，失效的资源归档提交也不再让之后的每个边界失败。带请求标识的资源命令如果用已有的操作键提交内容不同的请求，会被拒绝或不予结算。同一个边界可以结算多个财政行动，连结果都记不下的行动会被丢弃并留下一个事件。
 
-和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.14.0 的存档；需要读取时，请保留 0.14.0 引擎。
+0.15.0 的精确引擎版本检查会拒绝 0.14.0 的存档；需要读取时，请保留 0.14.0 引擎。
 
-上一个次版本参伍 0.14.0 把 0.13.3 按天读取边界的方式，换成了可以读取[任意一段模拟时间](/architecture/settlement/#统计一段时间内的边界)的方式：`SimulationView::boundaries_between(from, to)` 返回 `BoundaryWindow`，供上层应用调用的是 `Canwu::boundaries_between` 和 `CompactedCanwu::boundaries_between`。边界系统用新的契约字段 `BoundarySystemContract::boundary_schedule_horizon` 声明要往回读多远（最长 `MAX_BOUNDARY_SCHEDULE_HORIZON`，即 366 天）。`boundaries_on_day` 和 `DayBoundaries` 已移除，所以用到它们的代码，以及用结构体字面量构造 `BoundarySystemContract` 的代码，都需要修改。这个字段为零时不会写入保存的契约，所以其他插件的描述和语义哈希不变，各种格式和哈希算法也不变。和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.13.3 的存档；需要读取时，请保留 0.13.3 引擎。
+再往前的次版本参伍 0.14.0 把 0.13.3 按天读取边界的方式，换成了可以读取[任意一段模拟时间](/architecture/settlement/#统计一段时间内的边界)的方式：`SimulationView::boundaries_between(from, to)` 返回 `BoundaryWindow`，供上层应用调用的是 `Canwu::boundaries_between` 和 `CompactedCanwu::boundaries_between`。边界系统用新的契约字段 `BoundarySystemContract::boundary_schedule_horizon` 声明要往回读多远（最长 `MAX_BOUNDARY_SCHEDULE_HORIZON`，即 366 天）。`boundaries_on_day` 和 `DayBoundaries` 已移除，所以用到它们的代码，以及用结构体字面量构造 `BoundarySystemContract` 的代码，都需要修改。这个字段为零时不会写入保存的契约，所以其他插件的描述和语义哈希不变，各种格式和哈希算法也不变。和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.13.3 的存档；需要读取时，请保留 0.13.3 引擎。
 
 此前的补丁版本参伍 0.13.3 首次加入了这项读取，当时按天读取：边界系统声明新的 `StateKey::core_boundary_schedule` 读取后可调用的 `SimulationView::boundaries_on_day`，供上层应用调用的 `Canwu::boundaries_on_day` 和 `CompactedCanwu::boundaries_on_day`，类型 `DayBoundaries`、`BoundarySummary`、`BoundaryIngressCount`、`BoundaryIngressKind` 和 `BoundaryIngressOrigin`，以及 `SimTime::day` 和 `SimTime::MINUTES_PER_DAY`。恢复时，引擎根据日志重建当天已结算的边界，所以存档没有新增字段。所有改动都是新增，现有代码无需修改即可编译，各种格式、公开类型的结构和哈希算法都没有变化。和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.13.2 的存档；需要读取时，请保留 0.13.2 引擎。
 

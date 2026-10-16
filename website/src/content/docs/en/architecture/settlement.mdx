@@ -211,6 +211,7 @@ A profile holds:
 - `boundary_id` and `settled_at`: which boundary it is, and its simulation time.
 - `total_micros`: the wall time of the whole settlement, in microseconds.
 - `handlers`: one `BoundaryHandlerTiming` for each plugin handler call, in call order, with its `kind`, `phase`, `plugin`, `name`, and `elapsed_micros`.
+- `engine`: one `BoundaryEngineTiming` per **engine phase** (`BoundaryEnginePhase`), the simulation core's own time split by kind of work: `Admission` (checking the request, the rollback point, admitting due ingress, commands, decisions, maintenance, and scheduled actions), `SystemDispatch` (preparing each system's view and checking its proposal), `Staging` (overlays, allocation, and transition audits between phases; when every phase-7 record write is visible in the same boundary, most of the record-write work shows here), `Commit`, `Knowledge`, `Journal`, and `Hashing`. `engine_micros(phase)` reads one. The handlers and the engine phases partition `total_micros`: their sum falls short of it by less than one microsecond per listed value.
 
 A boundary runs three kinds of plugin handler, and each has a `BoundaryHandlerKind`:
 
@@ -220,10 +221,12 @@ A boundary runs three kinds of plugin handler, and each has a `BoundaryHandlerKi
 | `CommandHandler` | The handler of a queued plugin command the boundary admitted | None |
 | `EventSystem` | A synchronous event-driven plugin system that such a command, or a scheduled action due at the boundary, triggered | None |
 
-Command handlers and event systems run while the boundary admits its input, before the first phase, so they have no phase. `plugin_micros(plugin)` adds up every handler of one plugin. `remaining_micros()` is what is left: the engine's own admission, validation, commit, and hashing.
+Command handlers and event systems run while the boundary admits its input, before the first phase, so they have no phase. `plugin_micros(plugin)` adds up every handler of one plugin. `remaining_micros()` is what is left, the engine's own time, and equals the sum of the engine phases within the same tolerance.
 
-- A profile is a host diagnostic and stays outside the simulation. It is not part of authoritative state, evidence, a snapshot, a checkpoint, or a replay journal, and no plugin can read it. A profiled run produces the same receipts, evidence, and hashes as an unprofiled one. Profile values differ between two runs of the same input, so do not feed them back into commands or plugin input.
-- Profiling is off in a new, restored, replayed, or forked run; turn it on again after a load. An exact replay settles its boundaries inside the replay call and is not profiled. Entering compact mode and sealing evidence keep the setting and the profiles not yet taken.
+To find where an exact replay spends its time, call `Canwu::replay_from_journal_with_boundary_profiles(plugins, &journal, archive_provider, on_profile)`: it replays with profiling on from the first recorded boundary and hands each boundary's profile to `on_profile` as the boundary settles, in journal order, so the retained-profile cap does not limit a long replay. The returned run has profiling off. A replay that does not match its journal fails as an unprofiled one does, after `on_profile` has received the profiles up to and including the mismatching boundary.
+
+- A profile is a host diagnostic and stays outside the simulation. It is not part of authoritative state, evidence, a snapshot, a checkpoint, or a replay journal, and no plugin can read it. A profiled run produces the same receipts, evidence, and hashes as an unprofiled one, and while profiling is off settlement reads no clock. Profile values differ between two runs of the same input, so do not feed them back into commands or plugin input.
+- Profiling is off in a new, restored, replayed, or forked run; turn it on again after a load. Entering compact mode and sealing evidence keep the setting and the profiles not yet taken.
 - A boundary that fails leaves no profile.
 - The run keeps at most `MAX_RETAINED_BOUNDARY_PROFILES` (1,024) profiles. If more boundaries settle before you take them, the oldest are dropped, and `BoundaryProfileBatch::dropped` reports how many.
 - Plugin archive maintenance runs when the host schedules it, outside settlement, and appears in no profile. The boundary only applies the commit it produced, which counts as engine time.

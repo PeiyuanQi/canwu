@@ -15,8 +15,8 @@ agent tools, not runtime `SimulationPlugin` implementations.
   not instruct clients to mutate `canwu-sim` state directly.
 - Claude-compatible loaders for packaged downstream skills may live under
   `../.claude/skills/`, but the packaged skill remains the source of truth.
-- Actor-facing workflows must use actor-relative reads and
-  `available_actions` before `act`.
+- Actor-facing workflows must use actor-relative reads (`viewer_for_actor`,
+  `viewer_context`) before submitting a validated command for that actor.
 - Keep skill instructions short and link to repository source-of-truth docs.
 - Validate every `SKILL.md`, `agents/openai.yaml`, and plugin manifest after a
   change.

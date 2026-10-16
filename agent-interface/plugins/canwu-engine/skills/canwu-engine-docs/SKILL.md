@@ -69,8 +69,8 @@ not silently combine incompatible statements.
   the host application.
 - Use actor-relative reads for actor-facing workflows. Do not replace missing
   knowledge with omniscient world state.
-- Discover legal actions with `available_actions` before `act` when guiding an
-  actor or AI agent.
+- When guiding an actor or AI agent, read its knowledge through
+  `viewer_for_actor` before it submits a validated `CommandEnvelope`.
 - Never instruct a client to obtain mutable live simulation state or depend on
   `canwu-sim` directly.
 

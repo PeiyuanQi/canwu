@@ -181,7 +181,20 @@ The final design should contain:
 If implementation is requested, inspect every affected public, persistence,
 replay, documentation, and test surface in the change map, then make the
 smallest coherent change. Add committed tests only for reusable, non-trivial
-contracts or failure paths; run narrower checks inline otherwise. If website
+contracts or failure paths; run narrower checks inline otherwise. Test in
+proportion to the change. While iterating, run only the tests of the crates
+you changed and of crates that depend on what you changed; do not run
+unrelated suites, the performance harness, the website build, or long scale
+probes, and do not add tests for parts the change does not touch. Run the
+full verification list once before a change set is committed or integrated;
+in multi-agent work the integrating agent runs it once for the integrated
+whole. Design every expected refusal as a recorded rejection, a skipped packet
+with a trace, or a deferral, never a failed boundary; never let a plugin
+declare an initial-scenario version as payload-required; and never iterate an
+`im` ordered map or set in reverse (`.rev()`, `next_back`, `rfind`, reverse
+ranges) or use `get_prev` / `lookup_prev`, because im 15.1 drops elements
+past three tree levels: key the collection in the order you need and iterate
+forward (`get_min` and `get_max` are safe). If website
 copy changes, update the canonical documentation and supported language
 mirrors, and obtain the repository-required independent readability review
 before deployment. Do not claim conformance or scale from a design sketch.

@@ -285,9 +285,16 @@ simulations. Current-state checkpoints and contiguous evidence-journal segments
 provide incremental persistence without changing the canonical snapshot view.
 Format 8 additionally exposes content-addressed state-page deltas and typed
 decision-history locations so a host can keep only bounded hot state while
-retaining exact archive receipts. The opt-in compact runtime can seal completed live tails into caller-owned
-segments while preserving continuation, exact idempotency, commitments, and
-reconstruction through that same contract.
+retaining exact archive receipts. The opt-in compact runtime can seal settled
+live tails into caller-owned segments, with work still in flight, while
+preserving continuation, exact idempotency, commitments, and reconstruction
+through that same contract. Since 0.16.0 a continuation checkpoint is the save
+from which a run continues without its evidence history: it carries the
+current state, the journal frontiers, the pinned evidence the run still
+needs, and every keyed draw under one hash, restores to a runtime that settles,
+seals, and forks as the uninterrupted run does, and is the host's ground
+truth; only a full snapshot, replay journal, or checkpoint journal needs the
+history.
 Post-Format-8 work may add richer historical research adapters, branch metadata
 and lineage, world/outcome comparison across branches, and external dataset
 provenance. Provider-backed exact legal and decision hydration, typed
@@ -423,9 +430,20 @@ Since 0.15.0, a completion lease whose only participant is the resource plugin
 is taken in one operation with the checks and certificate of the four-step
 path, and an account's custodian can set a protected floor of any quantity at
 runtime as a content-addressed policy revision. Terminal records leave the
-resource root in archive commits of up to 4,096 records, and a cumulative
+resource root in archive commits of up to 16,384 records, and a cumulative
 lookup index keeps the per-operation check for an archived operation key
-independent of the number of commits.
+independent of the number of commits. Since 0.16.0 the root persists as a
+live root and one record per hot terminal bucket, so a boundary reads and
+writes only the live root and the buckets of the records it touches, costs
+the same at every backlog, and reads nothing of the root when it has nothing
+for the resource plugin. Since 0.16.0 no packet a host or a
+holder can send fails a resource boundary: a packet whose result has no room,
+whose operation key another request holds, or that fails its settlement
+checks is skipped with a named reason and sent again, scheduled work another
+plugin cannot resend is deferred to the plugin itself, and room is measured on
+the packet's result, so a refusal needs room for its outcome only. The
+production archive keeps the same lookup index, its receipts leave the root,
+and a production output batch the resource plugin deferred still settles.
 
 `canwu-production` consumes that public resource boundary and exact
 `canwu-technology` evidence. It owns process, site, facility, capacity, work
@@ -513,6 +531,11 @@ Since 0.15.0 the host chooses the cadence category on which society settles
 (`Daily` by default), a settlement that changes nothing writes nothing, and an
 institution can revise, within its alignment's cohorts, the policy pressure it
 issued and the activity and reach of influence edges and organization nodes.
+Since 0.16.0 the host also chooses how a settlement checks the transfers due
+at it (every transfer against the state the period's issuers could see, the
+default, or one by one against the state the earlier transfers left), the
+society queue is a head record and one batch record per admitting boundary,
+and a packet that finds the queue full is a recorded outcome, not a drop.
 
 Promotion from this domain extension into core requires an independently
 implemented second domain system needing the same primitive, evidence that the
@@ -616,7 +639,17 @@ settled rebind replaces a binding's actors and basis at runtime, a separate
 audit binding admits an outside auditor for audit findings only, several
 fiscal actions settle in one boundary in admission order, and an observer's
 report is published as a summary and parts so that only what changed is
-republished.
+republished. Since 0.16.0 the fiscal state is partitioned into records (a
+root, offices, one scope ledger per scope binding with one book per hot
+accounting cycle, jurisdictions, observers, a directory, index pages, and a
+report queue) so that a boundary reads and writes only the records its
+packets name; actions arrive in batches, each against its target's own
+revision; closed cycles leave the hot records through an archive with the
+resource archive's lookup index; an institution's appointment policy says who
+nominates, appoints, and petitions for the removal of its auditors; a
+government holds reports with no actor; and no fiscal packet fails a
+boundary. The lifetime caps of 0.15.0 are gone: a run is bounded by its hot
+cycles and record byte budgets, not by how long it has run.
 
 ## Debug client
 

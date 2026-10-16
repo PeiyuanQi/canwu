@@ -132,9 +132,9 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 <Steps>
 1. 输入到达。上层应用提交 `apply_information_operation_v1` 命令，每条命令带一个 `InformationOperationEnvelope`。命令处理器检查幂等性，然后排入 `information_operation_v1` [规范化输入](/reference/terminology/)；命令本身不写任何记录。信息提供方也可以直接排入这条输入。通信通过 `initiate_correspondence_v1`、`delegate_carrier_v1` 和 `resolve_correspondence_v1` 三条命令，以及 `install_correspondence_knowledge_v1`、`communication_opportunity_v1` 和 `correspondence_incident_v1` 三种输入进入。
-2. 第 7 阶段运行信息生命周期。事件驱动的系统 `information_lifecycle_v1` 让每个已准入的操作依次进入 `Accepted`、`ApplyingDomainChanges`，最后应用变更，每个边界前进一步。应用之前，它检查解读权限；如果带有真伪判定，还要检查判定引用的是某个带自称来源的表现形式的当前版本。检查失败时，操作保存为 `Rejected`，错误码为 `invalid_authority` 或 `invalid_lifecycle`。`InformationLifecycle::plan` 返回记录变更，以及这次变更引出的知识发布。
+2. 第 7 阶段运行信息生命周期。事件驱动的系统 `information_lifecycle_v1` 让每个已准入的操作依次进入 `Accepted`、`ApplyingDomainChanges`，最后应用变更，每个边界前进一步。应用之前，它检查解读权限；如果带有真伪判定，还要检查判定引用的是某个带自称来源的表现形式的当前版本。检查失败时，操作保存为 `Rejected`，错误码为 `invalid_authority` 或 `invalid_lifecycle`。`InformationLifecycle::plan` 返回记录变更，以及这次变更引出的知识发布。操作按先后顺序规划，最早的在前；计划会改动同一轮中更早的操作已经改动的记录的操作，等到下一个边界再规划。无法解码的数据包，以及对另一个数据包或已持久化的操作已占用的操作 ID 带来不同输入的数据包，以 `canwu.information.ingress_rejected.v1` 事件被跳过，绝不会让边界失败。同一个系统还把命令授权所指的每条已准入命令中的委托声明记入只可创建的 `DelegatedAuthority` 记录，之后的 `InterpretationAuthority::Delegated` 按这条记录而不是按命令检查，所以命令封存之后判断不变。
 3. 第 7 阶段同时运行通信。`correspondence-lifecycle-v1` 结算启动、推进、意外事件、通信机会、恢复和委托。处理启动时，它读取承运人当前的规划知识，从中解析收件人地址，调用 `plan_route`，保存 `CorrespondenceOperation`，并为 `canwu-information` 安排信息操作。之后的 `progress_correspondence_v1` 输入等待这些操作结束，再开始和完成各段路程。
-4. 第 13 阶段发布知识。`information_publication_v1` 把一个操作要发布的知识转为 `PublishKnowledge` 指令，每个持有人一批，每个操作在一个边界内最多发布 64 条。下一个边界，`information_operation_finalize_v1` 输入记录已发布的 ID，并放出下一批。`correspondence-knowledge-ingress-v1` 发布知识种子和承运人的尝试报告。
+4. 第 13 阶段发布知识。`information_publication_v1` 把一个操作要发布的知识转为 `PublishKnowledge` 指令，每个持有人一批，每个操作在一个边界内最多发布 64 条；每个持有人、种类和主体集合在一个边界内最多发布一次，引擎不接受的持有人（已死亡的人物、不存在的军队或政府、已退休的实体）留着不发布，操作带着其余部分完成。下一个边界，内部输入 `information_operation_finalize_v1` 记录已发布的 ID（通过 `knowledge_heads` 查到，而不是从保留的证据里找），并放出下一批。`correspondence-knowledge-ingress-v1` 发布知识种子和承运人的尝试报告。
 5. 模拟内核校验并提交。内核只接受满足以下全部条件的 `PublishKnowledge` 指令：
    - 来自第 4 或第 13 阶段的系统，且该系统在 `knowledge_writes` 中以相应的可见性声明了这个 schema；
    - schema 可写，并由同一个插件注册；
@@ -160,10 +160,11 @@ let heads = view.knowledge_heads(&holder, &schema.kind, &[subject])?;
 draft.supersedes = heads.records;
 ```
 
-- 它返回该持有人在这一 schema 种类下当前记录的全局 ID，也就是没有被该持有人其他记录取代的记录（知识头记录）。只有带有所列全部主体的记录才算匹配，空列表则选中整个种类。如果你的插件为同一持有人维护多条记录线，要给每条线一个其他线没有的主体。
+- 它返回该持有人在这一 schema 种类下当前记录的全局 ID，也就是没有被该持有人其他记录取代的记录（当前知识记录）。只有带有所列全部主体的记录才算匹配，空列表则选中整个种类。如果你的插件为同一持有人维护多条记录线，要给每条线一个其他线没有的主体。
 - 返回的每个 ID，都可以作为该系统向同一持有人发布同种类记录时的有效目标，并且已经按草稿要求的升序排列。
 - 最多返回 64 个 ID，这也是一条记录最多能取代的数量。匹配的记录更多时，返回最新的那些，并设置 `truncated`。这不是错误：其余较旧的当前记录会在之后的发布中陆续被取代。
 - 结果来自已提交状态和正在结算的边界，所以实时运行、封存过证据的运行、恢复后的运行和精确重放得到的 ID 相同。
+- 这次读取的开销只与该种类下带有所列最窄主体的当前记录成正比，与持有人账本的大小无关：每个持有人账本都按种类和主体维护一份当前记录索引，由记录派生，从不保存。不发布任何内容的边界不会为运行持有的知识做任何工作，发布的边界只为它自己的记录付出开销。
 
 :::caution
 `SimulationView::knowledge_changes_by_correlation` 和 `knowledge_changes_by_correlation_prefix` 扫描的是仍然保留的边界证据。`seal_evidence` 移走发布边界之后，它们对这个边界什么也读不到，而精确重放仍然读得到。不要用它们挑选要取代的记录，也不要用它们做任何必须能精确重放的判断。

@@ -161,8 +161,23 @@ contracts, never the reverse.
   path that format, lint, compile, or a simple accessor assertion cannot prove.
 - Run useful verification that falls below that bar once inline and leave it out
   of the committed test suite.
+- Never iterate an `im` ordered map or set in reverse (`.rev()`, `next_back`,
+  `rfind`, reverse ranges) and never use `get_prev` / `lookup_prev`: im 15.1
+  drops elements past three tree levels. Key the collection in the order you
+  need and iterate forward; `get_min` and `get_max` are safe.
+- An expected refusal is a recorded rejection, a skipped packet with a trace,
+  or a deferral, never a failed boundary.
+- Plugins must not declare initial-scenario versions as payload-required.
 
 ## Verification
+
+- Test in proportion to the change. While iterating, run only the tests of the
+  crates you changed and of crates that depend on what you changed; do not run
+  unrelated suites, the performance harness, the website build, or long scale
+  probes, and do not add tests for parts the change does not touch. Run the
+  full verification list once before a change set is committed or integrated;
+  in multi-agent work the integrating agent runs it once for the integrated
+  whole.
 
 - Format: `cargo fmt --all -- --check`
 - Lint: `cargo clippy --workspace --all-targets -- -D warnings`

@@ -180,7 +180,7 @@ execution
 let alternate = route_plan(self.canwu.time(), month, true)?;
 ```
 
-同一个运输执行以 `ItineraryRevisionReason::Disaster` 改道，经 `ridge-post` 走陆路。承运人在中转点交接，转移先后进入 `InTransit` 和 `ArrivalPending`。只有 `CompleteTransfer` 以 `ResourceTransferDispositionV1::Accept` 结算之后，驻军账户才会入账。每个不可逆步骤（发起、验收、消费、入账）都带有完成租约凭证（证明持有人已激活执行该操作的一次性权利），详见[生产、资源与运输的职责划分](/developer/production-economy/)。发起转移的那份租约只锁定资源记录，所以示例用一个操作取得它，也就是[单步完成租约](/developer/production-economy/#完成租约)；消费、收成入账和验收的租约还要锁定经济插件拥有的记录，仍然走四步路径。
+同一个运输执行以 `ItineraryRevisionReason::Disaster` 改道，经 `ridge-post` 走陆路。承运人在中转点交接，转移先后进入 `InTransit` 和 `ArrivalPending`。只有 `CompleteTransfer` 以 `ResourceTransferDispositionV1::Accept` 结算之后，驻军账户才会入账。每个不可逆步骤（发起、验收、消费、入账）都带有完成租约凭证（证明持有人已激活执行该操作的一次性权利），详见[生产、资源与运输的职责划分](/developer/production-economy/)。发起转移的那份租约只锁定资源记录，所以示例用一个操作取得它，也就是[一步式完成租约](/developer/production-economy/#完成租约)；消费、收成入账和验收的租约还要锁定经济插件拥有的记录，仍然走四步路径。
 
 ### 5. 供应民食、赈济和驻军
 

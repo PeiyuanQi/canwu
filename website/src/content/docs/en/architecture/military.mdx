@@ -101,7 +101,7 @@ Every `MilitaryCommand` variant carries a `MilitaryOperationKey`, and its issuer
 | `PlanOperation` | Issuer commands the force; tactic | A `strategic` operation in `Planned`; nothing advances it later |
 | `OrderMarch` | Issuer commands the force; tactic | Force `Moving`, a `march` operation, and a tick one minute later |
 | `PrepareAmbush` | Issuer commands the force; tactic | A `prepared_ambush` at a node for seven days |
-| `Recon` | Issuer commands the force | One draw and the event `canwu.military.transition_applied.v1` |
+| `Recon` | Issuer commands the force | One draw citing the admitted command packet, an `Accepted` outcome, and the event `canwu.military.transition_applied.v1` |
 | `ExecuteSpecialOperation` | Issuer commands the force | Force `Moving`, a `special` operation, and a tick one day later |
 | `EstablishOccupation` | Issuer commands the force | An occupation if the force stands at the node and is not `Routing`, plus a daily tick |
 | `SetOccupationPolicy` | Issuer commands the occupying force; values up to 1,000 | Security, collaboration, and extraction burden, if `policy_revision` matches |
@@ -229,7 +229,7 @@ All draws come from one [random stream](/en/architecture/randomness/), `canwu-mi
 | Special operation | `special-operation` | Canonical key of the operation ID, slot 0 | `special-operation-success` | Success at 650 or more |
 | Combat round | `combat-round` | Exact combat record version, slot = round | `combat-round-remainder` | Extra losses from the value mod 8 |
 
-Your application supplies no probability. The 650 threshold and the loss formula are constants in `canwu-military`. From the catalog the plugin reads only branch and tactic names; the ruleset's numeric profiles, node profiles, and commander profiles are never read.
+Every draw cites, as its operation evidence, the admitted packet that carries the command or tick being applied, so it is accepted alike in a live run, a sealed run, and exact replay. Your application supplies no probability. The 650 threshold and the loss formula are constants in `canwu-military`. From the catalog the plugin reads only branch and tactic names; the ruleset's numeric profiles, node profiles, and commander profiles are never read.
 
 All military state lives in domain records, so snapshots save it with the knowledge ledgers, draw evidence, and the queue of scheduled ticks. The plugin identity is the name `canwu-military`, plugin version `0.1.0`, and a fixed semantic hash; restoring a snapshot or replaying a journal requires the same identity. The lifecycle test `complete_military_lifecycle_is_persisted_and_replayed` checks that a restored run and a run replayed with `replay_from_journal` reach the same checkpoint hash as the live run.
 

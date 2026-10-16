@@ -48,8 +48,19 @@ person-by-place-by-domain matrices.
    Advance simulation time explicitly, independently of render frames.
 5. Emit causal events or records that the host can project into gameplay,
    research output, and the run explorer.
-6. Save and restore with exact plugin rehydration. Use exact replay for the same
-   causal run and `fork()` for a continuation with different inputs.
+6. Save and restore with exact plugin rehydration. Use a continuation
+   checkpoint (`continuation_checkpoint`, restored with
+   `from_continuation_checkpoint_verified`) as the player's save, seal retained
+   evidence as the run grows, keep a full snapshot or replay journal only where
+   exact replay or debugging needs it, and use `fork()` for a continuation with
+   different inputs.
+7. Choose each extension's settlement knobs before the run starts: the society
+   transfer settlement mode (`Batch` by default; `OneByOne` only when each
+   transfer must see the previous one's result), the fiscal appointment policy
+   of every audited institution, and the budgets a plugin declares. Treat a
+   recorded rejection, a skipped packet, or a deferral as the normal answer to
+   an inadmissible input, never a failed boundary, and never declare an
+   initial-scenario record version as payload-required.
 
 For technology or culture progression, avoid one global unlock flag when the
 game needs local variation. Separate knowledge, material access, capability,

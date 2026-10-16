@@ -546,6 +546,29 @@ save, or offers research-only forks belongs to the host application's save
 policy. The engine persists enough state for all three policies but does not
 silently convert deterministic replay into irreversible play.
 
+`Simulation`, `CompactedSimulation`, `Canwu`, `CompactedCanwu`, and every
+fork of them are `Send` (`Sync` is not promised): the run holds its plugin
+archive provider as `Arc<dyn PluginArchiveObjectProvider + Send + Sync>`,
+which a fork shares, so a host takes `fork()` on the simulation thread, moves
+the fork to a worker, and advances, seals, checkpoints, or saves it there
+while the simulation thread keeps settling the original; what the worker
+writes is byte-equal to the same steps on the original thread, and nothing a
+boundary decides depends on the thread it runs on. Four rules keep that
+safe. A save-only fork never loads from the provider (`checkpoint_journal_json`,
+`continuation_checkpoint`, and `seal_evidence` read only the run's own state
+and evidence; a fork that is also advanced, restored, or validated loads at
+the same time as the original). A provider gives every run one answer per
+`(namespace, object_id)`, whatever the order or concurrency of the calls,
+and blocks while it is busy rather than returning `None` or an error, which
+a boundary would take for a missing object. The host keeps what a live fork
+reads: deleting the lookup pages an archive commit superseded gives up every
+earlier point of the run that reads them, a fork whose head precedes the
+commit included, and the same holds for any package archive object a fork's
+state still names. And a fork's seal is the fork's: it leaves the original's
+evidence and seal history alone, and the segments it returns belong to the
+fork's save. Host-side archive writes stay with the thread that drives the
+run they belong to. See [a `Send` runtime](proposals/send-runtime.md).
+
 ## Simulation domain extensions / 模拟领域扩展
 
 Canwu calls an optional domain-specific module built on the public engine
@@ -613,15 +636,27 @@ a run is restored and replayed only with a plugin of the same cadence.
 Everything the phase-7 system writes waits for the cadence: due cohort
 transfers, queued rebases, lifecycle deltas and pressure revisions,
 institutional decisions, and transitions. An application that needs such a
-change within a day registers a `Daily` society. A coarser cadence has three
-further consequences. Of the due transfers that share a cohort, one completes
-per settlement and the others settle as `stale_source`, which is also the rule
-for transfers due on one day of a `Daily` society. The owner-side queue is one
-record that every admitting boundary rewrites whole, so the evidence of a
-queue that waits a period grows with the square of the packets it collects.
-And the queue holds at most `MAX_SOCIETY_INGRESS_QUEUE` (4,096) packets; one
-that arrives while it is full is dropped with only a
-`society_ingress_rejected_v1` event.
+change within a day registers a `Daily` society. How a settlement checks the
+cohort transfers due at it is a second option of the plugin,
+`SocietyPlugin::with_transfer_settlement` (`TransferSettlement`), recorded in
+its identity like the cadence. `Batch`, the default, checks every due
+transfer against the state at the start of the settlement, the state every
+issuer of the period could see, and applies the ones that still fit in
+admission order, each to the state the earlier ones left; a transfer whose
+cohorts an earlier settlement changed after it was admitted settles as
+`stale_source`, and one whose quantity no longer fits its source cohort as
+`insufficient_source`, a recorded outcome. `OneByOne` keeps the 0.15.0 rule:
+each due transfer is checked against the state the earlier transfers of the
+same settlement left, so of the due transfers that share a cohort one
+completes and the others settle as `stale_source`. The owner-side queue is a
+small head record (`SocietyIngressQueue`, schema 2) and one
+`SocietyIngressBatch` record per admitting boundary, so its evidence follows
+what each boundary admits, never the queue's length. The queue holds at most
+`MAX_SOCIETY_INGRESS_QUEUE` (4,096) packets; one that arrives while it is full
+is refused by the boundary that admits it, with a terminal `queue_full`
+outcome in the cohort exchange ledger and one event, and a
+`revise_society_pressure` command is refused at admission while the queue is
+full.
 
 A settlement that changes nothing writes nothing. `last_transition_at` is the
 time of the last settlement in which a transition changed a distribution or a
@@ -816,9 +851,11 @@ committed current version, a version proposed earlier in the boundary and not
 superseded since, or an initial-scenario version, and the exact reference still
 fixes the cited meaning after the record changes. `canwu-history-research`
 assessment admission, `canwu-fiscal` receipt settlement, and `canwu-fiscal`
-commutation-quote admission follow this rule. Generic evidence has no such
-read: after a seal, both its existence and its time depend on what the seal
-kept, and `canwu-history-research` still checks generic citations that way.
+commutation-quote admission follow this rule. Generic evidence has no body
+read of that kind, but its existence and time are seal-stable: the journal
+counters and the time index answer `evidence_exists` and `evidence_time` for
+a sealed ordinal reference as the exact replay does, so
+`canwu-history-research` checks a generic citation the same way in every run.
 Module-owned restore wrappers re-run technology semantics after normal core
 snapshot, checkpoint, or replay validation.
 
@@ -857,22 +894,82 @@ and terminal demand archives. Retained reservations must match the policy while
 their demand is retained; active reservations require that demand. Archive
 payloads retain canonical policy shape and authenticated demand digests.
 
+The resource root is one `ResourceState` in memory and persists in parts: the
+live root, the domain record `resource:runtime:v1` (`ResourceLiveRootV1`),
+holds everything except the hot terminal records, the root's archive
+candidates, which it only counts in a `ResourceHotTerminalLedgerV1`; each hot
+terminal record is an entry of a bucket record `resource:hot-terminal:{bucket}`
+(`ResourceHotTerminalBucketV1`), chosen by a domain-separated hash of its
+identity among as many buckets as the candidate budget rounded up to a power
+of two. `ResourceState::into_records` persists a state and `from_records`
+restores it, checking that every entry lies in its bucket, that the ledger
+counts exactly the stored entries, and that the whole state validates;
+activation runs the same checks. A boundary reads and writes what it touches:
+before it settles a packet the resource plugin attaches the outcome under
+every key the packet settles under, every hot terminal record the payload
+names, and their closures, and every rule that counts hot terminal records
+reads the ledger, so a partial root settles as the whole root would (every
+debug build settles each boundary again on the whole root and asserts the
+same proposal). It then writes the live root and the buckets whose entries
+changed; a boundary with nothing for the resource plugin reads nothing of
+the root, and one that would write over a hot terminal record it did not
+attach fails with `invalid_boundary`. Another plugin reads the root with
+`resource_root_in_view` or `ResourceRootReader`, naming the hot terminal
+records it needs, or `whole_resource_root_in_view`, and declares the read of
+`resource_hot_terminal_state_key()` beside the live root's; the host's
+`resource_state` reads the whole root. See the
+[resource root write cost proposal](proposals/resource-root-write-cost.md).
+
 Terminal resource records leave the root in archive commits that the host
 application prepares with `prepare_resource_archive`, stores, and queues. One
-commit carries up to 16 pages (4,096 records), and a run may make any number
-of commits. Each commit directory commits to a cumulative lookup index, so the
+commit carries up to 64 pages (16,384 records), and a run may make any number
+of commits; a commit applies only to the root it was prepared from, named by
+a digest of the state revision, the admitted sequence, the number of hot
+terminal records, and the archive head. The commit that clears a backlog
+rewrites one bucket per archived record, so a host commits a large backlog in
+batches and acknowledges each before it prepares the next. Each commit directory commits to a cumulative lookup index, so the
 per-operation check for an archived operation key reads the head directory and
 one authenticated lookup page per index level, however many commits the run
 has made. A boundary only reads archive objects, by content id, and a missing
 or malformed object is an error, never a miss. Within one boundary the
 resource plugin settles archive commits and retention acknowledgements before
-its other packets, and an archive commit never fails for capacity. An
-operation whose terminal records do not fit `max_archive_candidates` (256 by
-default, at most 4,096) fails its boundary and stays queued until a commit
-makes room; it is not a recorded rejection. A restore, an exact replay, or a
-fork reads the lookup index of each archive head it passes, so the archive
-store keeps those pages. See the
+its other packets, and an archive commit never fails for capacity. A restore,
+an exact replay, or a fork reads the lookup index of each archive head it
+passes, so the archive store keeps those pages. The index functions take key
+digests and are public, so the production archive, the fiscal archive, and
+the reference package archive keep an index in the same format under their
+own namespaces. See the
 [resource archive lookup and volume proposal](proposals/resource-archive-lookup-and-volume.md).
+
+No packet a host application or a holder can send fails a resource boundary.
+Room is measured on the result: a refused operation needs room for its
+outcome only, an applied one for the records it adds and the reservations it
+makes. A packet whose result does not fit the archive-candidate or hot-outcome
+budget (`max_archive_candidates`, 256 by default, at most 16,384) or the
+operations' share of the state byte cap, whose operation key a different
+request holds or lies under the reserved prefix, or that does not decode or
+fails its settlement checks is skipped: it changes nothing, leaves its key
+free, and is named by one `canwu.resource.ingress_skipped.v1` event with a
+stable reason (`operation_key_taken`, `reserved_operation_key`,
+`failed_settlement_checks`, `archive_backlog`, `reserved_capacity`,
+`root_limit`), and the sender sends it again when room returns. Work another
+plugin scheduled, which may never be sent again (a production output batch,
+or a completion step that can settle later as the same step), is instead
+deferred to the plugin itself through the internal
+`resource_deferred_packet_v1` ingress, one minute after the first deferral and
+doubling up to 1,024 minutes, while an archive commit or a lease release can
+make room; the output acknowledgement then carries `settled_at`. A resend
+whose outcome is recorded settles nothing. An expiry tick skipped for room
+schedules no successor; the next applied archive commit resumes it. What
+still fails a resource boundary is an invalid record or an engine invariant:
+an unreadable or forged archive object during a key lookup, a forged archive
+packet, a root that does not validate for a reason other than a limit,
+maintenance writes past `MAINTENANCE_STATE_BYTE_RESERVE` in one boundary, a
+hot terminal bucket that is malformed or short of what the ledger counts,
+the `invalid_boundary` backstop above, and arithmetic or encoding failure.
+An expiry tick whose settlement key a host completion operation holds is a
+resend or is skipped with `operation_key_taken` and scheduled again. See the
+[resource refusals without stalls proposal](proposals/resource-refusals-without-stalls.md).
 
 A completion lease becomes active through four operations (acquire, grant,
 prepare, activate) because a lease may have several participants, each of
@@ -888,11 +985,13 @@ ingress (`enqueue_resource_completion_operation`, or a plugin that declares
 that ingress), never as a tracked holder command, because an activated lease
 does not expire and holds its exact target locks. A domain refusal is the
 operation's recorded rejection and leaves no acquisition, grant, or lock
-behind; what can still fail the settling boundary is a request that does not
-fit the archive-candidate or hot-outcome budget, a failed archive lookup, and
-the state byte cap. The four-step path remains for a lease that needs a grant
-owned by another plugin or that another plugin coordinates. Operation keys
-under `resource:completion:` are reserved for completion operations.
+behind; a refused single step needs room for its outcome only, and one whose
+applied result does not fit is skipped with `archive_backlog` or
+`reserved_capacity`. Only a failed archive lookup still fails the settling
+boundary. The four-step path remains for a lease that needs a grant owned by
+another plugin or that another plugin coordinates; a tracked `Acquire` must
+be eligible at the instant it is admitted and cite current evidence. Operation
+keys under `resource:completion:` are reserved for completion operations.
 
 A protected floor is an immutable `ProtectedFloorPolicyRevision` of one of two
 kinds. An authored revision has an identity its author chose; the scenario
@@ -912,8 +1011,10 @@ revisions that no account and no demand in the root refers to. See the
 
 A tracked resource command that reuses an operation key for a different
 request never fails a boundary: it is refused at admission when the key's
-outcome is in the root or the archive, and is left unsettled when it was
-admitted before the first request settled.
+outcome is in the root or the archive, and its packet is skipped with
+`operation_key_taken` when it was admitted before the first request settled.
+An allocation pass, an adapter packet, or a production output batch whose key
+another request holds is skipped the same way.
 
 A `Pooled` or `ExactAccounts` source policy selects accounts; it does not prove
 cross-custodian delegation, which only a `Granted` policy backed by an access
@@ -1074,12 +1175,60 @@ realization evidence.
 `AdvanceFacilityProject` does not reread a project's provider and technology
 evidence, whose exact bodies and bindings its creation already validated, and
 rechecks only its live resource evidence. A compact run therefore admits and
-rejects exactly the production commands its exact replay does.
+rejects exactly the production commands its exact replay does. Every hot
+execution and facility project, terminal ones included, declares the record
+versions restore validation reads for it as payload-required until the
+archive removes it; neither the production root nor the resource root
+declares an initial-scenario version, which stays readable after any seal and
+which the engine refuses as a declaration.
+
+The production archive follows the resource archive: each commit directory
+names the root of a cumulative lookup index under
+`canwu.production.archive.lookup-page`, one commit carries up to
+`MAX_ARCHIVE_COMMIT_PAGES` (16) blobs of `MAX_ARCHIVE_PAGE_ENTRIES` (64)
+records, the maintenance receipt of an applied commit is an archive candidate
+that the next commit archives first, so the root holds at most one and a run
+may make any number of commits, and `archived_production_terminal_record`
+reads the head directory, one page per level, and one blob. Settling a commit
+reads no store: `enqueue_production_archive` requires the batch to equal what
+the current root and the store derive, the boundary rebuilds an applied
+commit's blobs and directory from the root's records and compares them,
+records any other commit as stale, keeps the applied handle of a duplicate,
+and settles a repeated acknowledgement as a no-op; archive commits settle
+before the plugin's other packets. Restore validation resolves each compacted
+resource input through the resource archive's lookup index and audits that
+archive once whenever it has a head.
+
+No production packet fails a boundary by not decoding, and no completion step
+or continuation witness by being refused: each emits
+`canwu.production.ingress_refused.v1` (an acknowledgement
+`canwu.production.output_ack_refused.v1`) and settles nothing. An operation
+packet settles only when the admission of a tracked production command queued
+it, so every applied operation went through command admission. The output
+acknowledgement carries `settled_at`, every outcome's request digest commits
+to it, and the execution records it as `output_settled_at`, so an output
+batch the resource plugin deferred still settles and archives.
+`StartExecution` refuses, as a recorded rejection, an output key under the
+reserved prefix, one another unsettled execution names, or one a resource
+outcome holds in the root or its archive, more than
+`MAX_PRODUCTION_OUTPUT_BATCH_CREDITS` (64) outputs, and an output set the
+resource root can never hold; a process may declare at most 64 outputs. What
+still fails a production boundary is a forged archive packet from another
+plugin, a failed store read, counter overflow, and the root's 256 MiB byte
+cap. See the
+[production archive volume proposal](proposals/production-archive-volume.md).
 
 `canwu-force-supply-reference` proves that a second independent domain can
 consume the same resource API. It owns force-local recurring demand,
 consumption intent, readiness and shortage consequences, and the requisition
-saga. It cannot write civilian population, cooperation, harvest, property, or
+saga. Its package archive, which the economy reference also uses, keeps the
+resource archive's lookup index under its own namespace, so a lookup inside a
+boundary reads the head directory, one page per level, and one blob on a hit;
+a reused operation ID is skipped with an `operation_rejected` event; and the
+enqueue helpers refuse, host-side, a commit the root's receipt or handle room
+cannot take. A run makes at most `MAX_PACKAGE_ARCHIVE_MAINTENANCE_RECEIPTS`
+(8,192) package archive commits per reference plugin, because receipts never
+leave that root. It cannot write civilian population, cooperation, harvest, property, or
 occupation state; the receiving integration applies or rejects those typed
 externality intents at an exact expected revision. In `canwu-economy-reference`
 the exact target is the local economy, which must be unchanged since the
@@ -1140,51 +1289,92 @@ at admission, and settlement re-checks that role against the state the action
 settles on: an action of a replaced actor is rejected with
 `FISCAL_ISSUER_NOT_BOUND`. The binding records the rebind in `rebound_by`.
 
-A `FiscalAuditBinding`, held in `FiscalState::audit_bindings` beside the
-authority bindings, admits an auditor from outside an institution. Under it
+A `FiscalAuditBinding`, held in its office record beside the authority
+bindings, admits an auditor from outside an institution. Under it
 only `RecordAudit` is admitted, only on targets whose scope the audited
 institution owns, and only while the binding's own authority basis is current
-(`FISCAL_AUTHORITY_BASIS_NOT_CURRENT` otherwise). `FiscalAction::RebindAudit`
-installs, replaces, or removes one under the rules of an authority rebind, and
-every settled finding names who entered it in
-`FiscalAuditFinding::entered_by`. The audited institution installs and removes
-its own auditors, so an audit binding establishes attribution, not
-independence; who appoints an auditor stays an application decision.
+(`FISCAL_AUTHORITY_BASIS_NOT_CURRENT` otherwise). Who installs and removes an
+auditor is the institution's `FiscalAppointmentPolicy`: an `appointer` (an
+institution or a person), the `nominators` whose `NominateAuditor` proposal
+the appointer needs before it installs unless the policy says
+`appoints_without_nomination`, and the `petitioners` whose
+`PetitionAuditorRemoval` it needs before it removes unless it says
+`removes_without_petition`. The appointer decides a pending proposal with
+`DecideAuditAppointment`, and every settled finding names who entered it, who
+appointed the auditor, and the nomination it rests on. Without a policy no
+audit binding changes at runtime (`FISCAL_APPOINTMENT_POLICY_MISSING`);
+`RebindAudit` keeps its 0.15.0 meaning only under a policy that makes the
+audited institution its own appointer without nomination or petition. A policy
+that names an appointer outside the audited institution makes an audit
+independent; what the policy says stays an application decision.
 
-Several fiscal actions settle in one boundary, in admission order. Each is
-compared with the procedure revision the state had when the boundary began and
-is validated against the state the previous action left. A later action is
-stale only when it would overwrite an adoption, authority binding, or audit
-binding that an earlier action of the same boundary created or changed. One
-boundary applies at most `MAX_FISCAL_ACTIONS_PER_BOUNDARY` (64) actions, and no
-action fails the boundary for the others: an action is applied, rejected as
-its own outcome, or, when no outcome can be recorded for it, dropped with a
-`canwu.fiscal.action_dropped.v1` event. A receipt whose evidence does not
-validate, or a receipt or historical-context change past the state byte
-budget, still fails its boundary.
+The fiscal state is partitioned into records so that no boundary reads or
+writes the whole of it: a root, the archive head, one office record per
+institution (its authority bindings, audit bindings, appointment policy, and
+hot cycle totals), one scope ledger per scope binding (its adoptions and one
+accounting cycle book per hot cycle, which holds that cycle's assessments,
+remissions, execution requests, receipts, and audits), jurisdiction records,
+observer records, the binding directory, scope index pages, and report queue
+pages (`FiscalRecordKind`). `FiscalState` remains the model a host authors and
+reads; `into_records` partitions it and `load_fiscal_state` assembles it. A
+fiscal command is a `FiscalActionBatch` of up to `MAX_FISCAL_BATCH_ENTRIES`
+(4,096) entries under one authority binding. Every action has a target
+(`FiscalActionTarget`: a ledger, an office, a jurisdiction, or an observer),
+names its target's current revision, and settles against the target alone, so
+actions on different targets never make each other stale. A target keeps a
+ring of its `FISCAL_RECENT_OUTCOMES` (8) latest outcomes and the revision
+floor below which outcomes are forgotten; admission refuses a repeated action
+ID in the ring, a revision above the target's, and one at or below the floor,
+and refuses a whole batch for one inadmissible entry, naming it. Several
+batches settle in one boundary, in admission order, each entry validated
+against the state the previous one left, and no entry fails the boundary: it
+is applied or rejected as its own outcome, published in
+`canwu.fiscal.action_settled.v1`, and every limit is a rejected outcome, among
+them `MAX_FISCAL_ACTIONS_PER_BOUNDARY` (65,536) actions and
+`MAX_FISCAL_ACTIONS_PER_RECORD_PER_BOUNDARY` (64) per target in one boundary,
+`MAX_FISCAL_PARTITION_KEYS` (4) partition keys per scope ledger, 64 hot books
+per ledger and hot cycles per office, and the record byte budgets, 256 KiB
+for a ledger and 1 MiB for an office or jurisdiction, each held at settlement
+less a 4 KiB reserve for the outcome ring. Execution receipts arrive in
+packets of up to `MAX_FISCAL_RECEIPTS_PER_PACKET` (4,096) through
+`enqueue_execution_receipts`; a receipt or a historical-context change that
+does not validate or fit is refused with one
+`canwu.fiscal.ingress_rejected.v1` event carrying a stable reason, never a
+failed boundary.
 
-The four fiscal boundary systems are event-driven and return before they
-decode the fiscal records on a boundary that has nothing for them: settlement
-when the boundary admitted no fiscal ingress, the transition-candidate and
-aggregate systems when an earlier boundary established the state's current
-version, and the report system when no earlier phase of the boundary changed
-the state. Plugin activation validates the fiscal catalog and state instead,
-so an invalid record is refused when a run is created or restored.
+The two fiscal boundary systems are event-driven: `settle-fiscal-ingress-v1`
+(phase 7) runs only on a boundary that admitted fiscal ingress and touches
+only the records its packets name, and `materialize-fiscal-reports-v1` (phase
+13) only on a boundary whose earlier phases changed a fiscal record or that
+carries the internal report drain packet. Plugin activation audits the records
+instead (`audit_fiscal_records`), so a record set that is not the exact
+partition of a valid state is refused when a run is created or restored.
 
-An observer's report is one summary record and parts of 16 facts, published as
-version 2 of the `fiscal_report` knowledge schema. Aggregate IDs are stable, so
-new facts fill the last part and earlier parts keep their members. The
-aggregate system records which parts changed in `FiscalState::report_plan`, and
-the report system publishes only those, each superseding the current record of
-its own line, found with `SimulationView::knowledge_heads`. Report supersession
-therefore never depends on retained evidence. One boundary publishes at most
-`MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY` (1,024) report records; the parts that
-are left are named in the summary's `pending_parts` and go out with the next
-boundary that changes the fiscal state. Nothing is published to an observer
-whose actor is dead, and the state record references each observer's person so
-that a state naming a person who does not exist is refused where it enters a
-run. Hosts and clients read reports with `fiscal_reports(&viewer)`. See the
-[fiscal throughput and authority proposal](proposals/fiscal-throughput-and-authority.md).
+`CloseAccountingCycle` closes a cycle's books; closed books leave the hot
+records through fiscal archive commits that the host prepares with
+`FiscalState::prepare_fiscal_archive`, stores, and queues, in the format and
+with the cumulative lookup index of the resource archive under the fiscal
+namespaces, so an archived book or a cycle's institution totals is read by
+key through the head directory, one page per level, and one blob. A commit may
+cite only records whose evidence lies at or below the sealed cut it names.
+
+An observer's report is held by the observer's knowledge holder, which may be
+a government with no actor, as one summary record and, per hot cycle slot (64
+per observer), parts of `FISCAL_REPORT_ROWS_PER_PART` (16) rows, published as
+version 4 of the `fiscal_report` knowledge schema on stable lines (`1 + slot
+× 1,024 + part`). The materialization system publishes only the parts whose
+digest changed, each superseding the current record of its own line, found
+with `SimulationView::knowledge_heads`, so report supersession never depends
+on retained evidence. One boundary publishes at most
+`MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY` (1,024) report records; the parts
+left over wait in the report queue, named in the summary's pending list, and
+go out with the next boundary at the same instant through the internal drain
+packet, or with the boundary that revives a dead observer, without a fiscal
+change. Hosts and clients read reports with `fiscal_reports(&viewer)` and a
+trusted host any holder's with `fiscal_reports_of_holder`. See the
+[fiscal throughput and authority proposal](proposals/fiscal-throughput-and-authority.md),
+the [fiscal and society limits proposal](proposals/fiscal-and-society-limits.md),
+and the [world-scale fiscal proposal](proposals/world-scale-fiscal.md).
 
 ### Reference content and starter kits / 参考内容与入门套件
 
@@ -1414,6 +1604,26 @@ when more match, and does not depend on retained evidence, so a sealed run
 supersedes the same records as its exact replay.
 `knowledge_changes_by_correlation` and its prefix form scan retained boundary
 evidence and must not drive a decision that has to replay exactly.
+
+The holder ledgers are a persistent structure (`HolderLedgers`, a map of
+`HolderLedger`s built on `im`) that the runtime shares between the committed
+state, every transaction checkpoint, the stable state of phases 1 to 9, and
+forks instead of copying; a publication copies only the paths it changes.
+Each holder ledger keeps a derived index of its current records by schema
+kind and by kind and subject, rebuilt on decode and never persisted, which
+`knowledge_heads` reads, and a count per namespace. A boundary that publishes
+nothing therefore does no work in proportion to the knowledge a run holds,
+and a publishing boundary pays for its own records. Superseded records stay
+in the ledger, in `FullHistory` views, in the holder-local IDs, and in every
+snapshot, as before. The iterators of these ledgers, and of the persistent
+decision log, are forward only: `im` 15.1 drops elements when an ordered
+collection is iterated backwards past three tree levels, so the engine keys
+each set of current records newest first and never walks an `im` map in
+reverse. The commitment root of the knowledge is two sub-roots, an actor
+projection root and a records root hashed incrementally in global ID order,
+and the boundary record hash covers every field of the boundary's knowledge
+changes (commitment format 5). See the
+[knowledge ledger cost and authentication proposal](proposals/knowledge-ledger-cost-and-authentication.md).
 
 Holder queries are owned, bounded, and deterministically ordered. Current-head
 and full-history views can filter by schema, subject, and learned-time cuts.
@@ -1790,17 +2000,23 @@ proposal](proposals/boundary-window.md).
 A host can turn on a wall-time profile of settled boundaries with
 `set_boundary_profiling(true)` and take the profiles with
 `take_boundary_profiles()`, on `Canwu` and `CompactedCanwu`. Each
-`BoundaryProfile` gives the wall time of one settled boundary and of each
+`BoundaryProfile` gives the wall time of one settled boundary, of each
 plugin handler it ran (boundary systems, plugin command handlers, and
-event-driven plugin systems) by kind, phase, plugin, and name, so a host can
-check a plugin against a time budget. The profiler is host context outside
-authoritative state: it is never persisted, committed, or replayed, no plugin
-can read it, and a profiled run produces the same receipts, evidence, and
-hashes. It is off in a new, restored, replayed, and forked runtime, a failed
-boundary leaves no profile, and the runtime keeps at most
-`MAX_RETAINED_BOUNDARY_PROFILES` (1,024) profiles that were not taken yet.
-Owner-authorized maintenance participants run outside settlement and appear in
-no profile.
+event-driven plugin systems) by kind, phase, plugin, and name, and of each
+engine phase (`BoundaryEnginePhase`: admission, system dispatch, staging,
+commit, knowledge, journal, and hashing), so a host can check a plugin against
+a time budget and see where the simulation core's own time goes; the handlers
+and the engine phases partition the boundary's time to within one microsecond
+per listed value. `replay_from_journal_with_boundary_profiles` profiles an
+exact replay from its first recorded boundary and hands each profile over as
+the boundary settles. The profiler is host context outside authoritative
+state: it is never persisted, committed, or replayed, no plugin can read it,
+settlement reads no clock while it is off, and a profiled run produces the
+same receipts, evidence, and hashes. It is off in a new, restored, replayed,
+and forked runtime, a failed boundary leaves no profile, and the runtime keeps
+at most `MAX_RETAINED_BOUNDARY_PROFILES` (1,024) profiles that were not taken
+yet. Owner-authorized maintenance participants run outside settlement and
+appear in no profile.
 
 The kernel owns ingress, snapshot, ordinary commit, and conditional-transition
 commit. Phase-six systems publish resource capacity and competing claims.
@@ -1854,7 +2070,20 @@ the journal.
 The hot runtime keeps monotonic attempt, accepted-command, and event admission
 cursors. Each settlement reads only the unadmitted journal tails and advances
 the cursors after the boundary record commits, so admission work is proportional
-to newly admitted evidence instead of all prior boundaries and journals. The
+to newly admitted evidence instead of all prior boundaries and journals.
+Admitting one command is likewise independent of the retained history: the
+retained commands, attempts, and ingress are `RetainedJournal` values that
+change only through the runtime's push, truncate, seal, and restore methods,
+which keep a derived `CommandHistoryIndex` (queued requests, the first attempt
+per request, the first legacy-direct command, the first unqueued attempt) in
+step, and the unqueued-history, legacy-command, cached-outcome, and
+request-in-use checks read it instead of rescanning the journals. The index
+is never persisted, hashed, or committed; a seal and every restore rebuild it,
+and each answer equals the scan it replaces (see the
+[command admission history index proposal](proposals/command-admission-history-index.md)).
+What remains per command is the transaction checkpoint that clones the
+people, letter, army, plugin component, and scheduled action maps for
+rollback, which grows with the world's size, not its history. The
 cursors are persisted derived metadata: loading validates them against the
 global boundary-prefix proof, and failed settlement restores them with the rest
 of the boundary. Format 8 does not derive them for older snapshots because
@@ -1863,12 +2092,13 @@ older snapshots are outside the supported load contract.
 Append-only events, commands, command attempts, ingress, boundary records, and
 random draws have one internal owner, `RuntimeEvidence`, separate from mutable
 world/knowledge/plugin state. Public flat snapshots and replay journals retain
-their existing serialized shapes. Checkpoint-journal format 4 adds a separate
+their existing serialized shapes. Checkpoint-journal format 5 is the separate
 incremental persistence path: `SimulationCheckpoint` captures current state,
 scheduler, counters, metadata, and the already-computed full commitment roots
 while leaving every append-only evidence array empty. `EvidenceCursor` records
 the exact cut through all six journals, and `EvidenceJournalSegment` stores only
-the records after a prior cut. Loading requires segments to start at the global
+the records after a prior cut; a segment's per-journal cursors need not end at
+one boundary. Loading requires segments to start at the global
 zero cut, remain contiguous, advance at least one journal, encode truthful end
 cursors, and finish exactly at the checkpoint cut. It then reconstructs the
 flat snapshot in memory and runs the current validation path, so
@@ -1887,7 +2117,7 @@ segments followed by `journal_segment_since` the end of the last one.
 
 `CompactedSimulation` and `CompactedCanwu` add the explicit live archive
 contract. Entering compact mode preserves the retained history;
-`seal_evidence` then moves one fully settled, contiguous tail into a caller-owned
+`seal_evidence` then moves a settled tail into a caller-owned
 `EvidenceJournalSegment` and advances the private retained-window cursor. The
 caller keeps every returned segment in exact cursor order. A compact restore,
 flat or paged, keeps its whole supplied prefix as retained evidence, so the
@@ -1896,40 +2126,111 @@ replaces every earlier sealed segment; prefixes for later checkpoints start
 from that segment. Current-state checkpoints continue to carry the total cut,
 while full snapshot and replay materialization require the sealed prefix to
 be supplied again. Segment gaps, tampering, and checkpoint mismatches
-therefore reach the same validator as a flat snapshot.
+therefore reach the same validator as a flat snapshot. `CompactedCanwu` has
+every host read and ingress entry point of `Canwu` whose meaning does not need
+full history (the archive-provider attach, viewers, `fork`, exact-version and
+evidence reads, and the retained-tail journal reads); the methods that promise
+full history (`snapshot`, `replay_journal`, the checkpoint journal) stay on
+`Canwu`. `canwu_api::CanwuRun`, implemented by both, is the read-and-ingress
+contract that extension host helpers take.
 
-Sealing is intentionally fail-closed. The canonical ingress queue must be
-empty and every retained command, attempt, ingress record, event, boundary,
-random draw, and domain-record version must belong to a completed causal prefix.
-Before removal, the runtime derives a sorted `EvidenceDependency` set and marks
-each reference as `IdentityOnly` or `PayloadRequired`. Identity-only dependencies
-can continue from committed `ArchivedEvidenceReceipt` values; payload-required
-rules must resolve the exact archived item through an `ArchiveProvider` before
-the seal or later validation succeeds. Two-phase sealing prepares immutable,
-content-addressed segments, lets the host store them idempotently, then commits
-only the exact prepared token. Segment manifests, receipt roots, dependency
-roots, and operation-keyed random reservations are part of the compact
-checkpoint commitment and are recomputed during reconstruction.
+Sealing is fail-closed but works with work in flight. A seal moves events,
+commands, and command attempts up to the boundary admission cursors and
+ingress, boundaries, and random draws to the journal end, so pending ingress
+and the unadmitted tail no longer block it. The continuation closure below
+the archived cut, which is a function of state and the cut and never of when
+the run sealed, stays in memory as pinned evidence: every pending ingress
+record with its provenance fact (the boundary that generated it, with issuer,
+target plugin, packet type, and status, or that no boundary did), the command
+or event records that cause pending ingress and scheduled actions, every
+`PayloadRequired` dependency a current record declares, and the identity facts
+of every `IdentityOnly` dependency (the membership of a non-current record
+version, the provenance of an ingress record). A boundary that replaces,
+retires, or deletes a version whose establishing boundary is sealed pins the
+version it replaces at commit, so a dependency declared on it can still be
+kept. Before removal, the runtime derives a sorted `EvidenceDependency` set
+and requires every declared dependency to resolve: a `PayloadRequired` item
+from a retained or pinned record, a record-version membership from the
+current index, a pin, or a fact, and an ordinal reference from the journal
+counters, which prove that every ID at or below the archived cut existed. A
+declared dependency that no longer resolves, including an ingress record
+first declared after its seal and no longer held, fails the seal with
+`ArchiveNotReady` and changes nothing; a plugin that declares an ingress
+record a host cites checks it with `SimulationView::ingress_is_declarable`
+first. A plugin must not declare an initial-scenario record version as
+payload-required: it stays readable after any seal, and the engine refuses
+the declaration. Two-phase sealing prepares immutable, content-addressed
+segments, lets the host store them idempotently, then commits only the exact
+prepared token; its commit accepts a pinned `PayloadRequired` item in place of
+a receipted, loadable one. Segment manifests, receipt roots, and dependency
+roots are part of the compact checkpoint commitment (`canwu.compact-checkpoint.v2`,
+with the seal token in `canwu.evidence.seal-token.v2`) and are recomputed
+during reconstruction; keyed draws are no longer evidence dependencies.
 A live domain-record schema can declare sorted identity-only evidence
 dependencies; their compact receipts remain reachable without retaining or
 hydrating payload bytes. Generated plugin-ingress receipts also Merkle-bind the
 provider plugin, packet type, and producing boundary.
 
+After a seal, existence of sealed ordinal evidence comes from the journal
+counters and its time from a run-length time index that each seal extends, so
+`evidence_exists` and `evidence_time` answer alike in a live, sealed,
+restored, and replayed run; a payload read of a sealed, unpinned record
+(`command`, `event`, `ingress`, or the body of a non-current version whose
+existence is known) reports `EvidenceContentUnavailable`. A boundary decision
+that reads an evidence payload outside the closure is a plugin rule
+violation, and the first-party extensions read none: `canwu-law` keeps a
+bounded legal provider index of the provider packets its boundaries admitted,
+`canwu-information` records delegations in `DelegatedAuthority` records and
+finalizes publications through `knowledge_heads`, `canwu-military` cites the
+admitted packet of every keyed draw, and the Ming fiscal validator reads only
+current records, replay-stable versions, and the journal counters.
+
 The runtime keeps compact canonical request commitments and original
 outcomes/receipts for exact idempotency, plus the prior boundary-chain head and
-evidence-family flags needed for safe continuation. Commitment accumulators keep
-their already-validated prefix state and consume only the new retained tail.
-Ordinary `Simulation` history slices, flat snapshots, and replay journals keep
-their full-history behavior; compaction is available only through the dedicated
-type, so evidence never disappears implicitly. Checkpoint-journal format 4
-wraps the current snapshot format 8 contract. Older checkpoint-journal
-envelopes are rejected rather than reinterpreted or migrated in place.
+evidence-family flags needed for safe continuation. The five journal
+commitments are resumable BLAKE3 stream hashes (the stream length, the
+chaining values of completed subtrees, and the unfinished chunk), whose
+exported form, the journal frontier, lets a run restored without its prefix
+extend the same streams and reach the same checkpoint hash; the roots are the
+same values a plain hasher computes. Ordinary `Simulation` history slices,
+flat snapshots, and replay journals keep their full-history behavior;
+compaction is available only through the dedicated type, so evidence never
+disappears implicitly. Checkpoint-journal format 5 wraps the current snapshot
+format 8 contract. Older checkpoint-journal envelopes are rejected rather than
+reinterpreted or migrated in place.
+
+A **continuation checkpoint** (`ContinuationCheckpoint`, format 1, hash
+domain `canwu.continuation-checkpoint.v1`) is the save from which a run
+continues without its evidence history: the current state with its checkpoint
+hash and commitment roots, the journal end and settled cut, the boundary-chain
+head, the five journal frontiers, the unadmitted tail, the pinned evidence,
+the pending ingress IDs and provenance facts, the known record-version
+memberships, the current-version provenance index, every keyed draw in
+draw-ID order, the request index, the history flags, the time index, and the
+boundary ledger, under one `continuation_hash`. `continuation_checkpoint()` on
+`Canwu` and `CompactedCanwu` derives every part from the runtime, so an
+unsealed run, a run sealed at any cuts, and a run restored from an earlier
+continuation checkpoint write byte-identical checkpoints at the same cut.
+`CompactedCanwu::from_continuation_checkpoint_verified` compares the
+recomputed hash with the one the host stored, then checks formats, shape,
+state, the keyed draws' values against the root seed, the identity (every
+state root and the checkpoint hash recomputed from the built runtime), and
+that the closure derived from the restored state equals the carried one,
+before it rehydrates the plugins. Restore yields a `CompactedCanwu`; a
+continuation runtime settles, seals, forks, and checkpoints as the
+uninterrupted run does, with equal receipts and hashes, but cannot produce a
+full snapshot, a replay journal, a checkpoint journal, or a paged checkpoint
+(`HistoryUnavailable`). What restore cannot verify without history (the
+carried evidence records, the pending set, the keyed entries' evidence, the
+settled cut) is bound only by the host-stored hash, so the checkpoint is
+ground truth for the host alone. See the
+[continuation checkpoint proposal](proposals/continuation-checkpoint.md).
 
 Boundary emissions enter the next boundary's admission cut, so an emitting
 boundary remains retained until a later completed boundary admits those events.
-This preserves the global causal-prefix invariant across every seal; the same
-rule keeps generated ingress retained through its own later admission or
-terminal cancellation.
+The same rule keeps generated ingress retained through its own later admission
+or terminal cancellation, and when a seal passes such ingress its record and
+provenance fact are pinned instead.
 
 The checkpoint/journal wire types, cursor logic, live sealing, compact
 continuation indexes, export, and reconstruction helpers live in the dedicated
@@ -1955,12 +2256,32 @@ the complete scheduler and ingress queue, and every append-only journal cut.
 In format 8, generic domain records are held by private persistent Patricia
 roots. Boundary capture and simulation cloning share those roots in constant
 time; a record mutation creates structurally shared successor paths rather than
-cloning the complete flat record map. The store owns canonical primary,
+cloning the complete flat record map. The store holds each record behind
+`Arc` and shares it with the overlays a boundary builds, the evidence journal,
+and `DomainRecordChange`; the current-version index is a persistent map whose
+capture, restore, and fork share it; phase 7 applies its same-boundary writes
+once and the phase-9 commit takes the prepared result when the roots and
+requests are unchanged; and a Patricia node's page ID is computed lazily, once
+per boundary. An idle boundary therefore allocates nothing per stored record,
+and a record write costs the record's own encoding (about 24 µs and 91
+allocations for a 2.45 KiB structured record in the recorded measurement).
+The store owns canonical primary,
 reverse-reference, successor, and predecessor commitments. Portable snapshots
 deliberately remain flat and materialize records in stable reference order;
 compact checkpoints instead persist content-addressed Patricia pages and
 bounded decision locator segments, emitting only pages missing from the
-provider. Decision keys first select one of 4,096 stable hash-prefix buckets
+provider. The state-page codec is `raw-canonical-v2`: Patricia nodes and
+record-value chunks are binary pages whose page ID is the node hash; a record
+longer than `STATE_PAGE_VALUE_CHUNK_BYTES` (1 MiB) is cut into content-addressed
+1 MiB chunk pages that its leaf names, up to `MAX_PAGED_RECORD_BYTES`
+(512 MiB), so an unchanged chunk is never stored again and no boundary can
+fail on a record's size; only `prepare_paged_checkpoint` of a longer record
+fails, with `value_out_of_range`. A record-page defect on load is
+`invalid_snapshot`, a missing page `state_page_unavailable`. A restore
+allocates what the pages describe, up to the ceiling per record, before it
+can refuse a leaf that names one chunk many times, so a host authenticates a
+checkpoint from an untrusted source by its root before restoring it. See the
+[record store ceiling and cost proposal](proposals/record-store-ceiling-and-cost.md). Decision keys first select one of 4,096 stable hash-prefix buckets
 and then one of 16 deterministic subsegments. Each page is limited to 64
 entries and 1 MiB, so an exact cold lookup loads one committed segment instead
 of decoding an ever-growing bucket. The hot decision-history commitment is an
@@ -1986,7 +2307,7 @@ the dedicated private `canwu-sim` state module. This is an implementation
 ownership boundary only: public snapshots and replay journals remain flat and
 unchanged.
 
-Every current snapshot stores commitment format 4 roots for world, knowledge,
+Every current snapshot stores commitment format 5 roots for world, knowledge,
 plugin components, generic records, scheduler state, commands and attempts,
 events, ingress, random state/evidence, the boundary chain, run/plugin identity,
 and runtime control counters. Unordered collections are canonicalized by stable
@@ -2022,21 +2343,27 @@ recomputes that time from the recorded value. Validation also requires every
 report-dispatch event to have exactly one such draw, so removing both draw and
 stream progress cannot preserve an apparently coherent report history.
 
-Operation-keyed draws are answered from an index of drawn addresses that the
-runtime keeps as derived state beside the draw journal: a boundary commit
-extends it, a failed boundary restores it, a seal leaves it unchanged, and a
-restore rebuilds it from the retained draws and the keyed reservations. It is
-not persisted or committed, and settling a boundary does no work in proportion
-to the draws a run has kept. `random_draw_for_operation` returns the sample
+Operation-keyed draws are answered from the keyed-draw ledger, the record of
+every drawn address, retained or sealed, that the runtime keeps as a
+persistent ordered map beside the draw journal: a boundary commit extends it,
+a failed boundary restores it, a seal and a fork share it, every restore
+builds it once from the full draw journal, and a continuation checkpoint
+carries it in draw-ID order. It is not hashed or committed, keyed draws are no
+longer evidence dependencies, and neither settling a boundary nor a
+checkpoint, a paged checkpoint, a seal, or a fork does work in proportion to
+the draws a run has made; the ledger keeps one entry per drawn address for
+the life of the run. `random_draw_for_operation` returns the sample
 with the `RandomDrawId` of its draw evidence, so a record can cite the draw it
 was computed from. An exact retry, with the same evidence reference, bound,
-and purpose, is answered from the index whatever has become of its evidence,
+and purpose, is answered from the ledger whatever has become of its evidence,
 so a sealed run answers as its unsealed replay does; a request that differs
-from the recorded draw is refused with `RandomOperationConflict`. Only a fresh
-draw needs evidence that is retained or was produced earlier in the boundary.
-A system that may draw an address for the first time after a seal therefore
-cites evidence that survives one, such as the initial-scenario version of a
-record or evidence newer than the seal, and lets a refusal fail the boundary.
+from the recorded draw is refused with `RandomOperationConflict`. A fresh draw
+cites seal-stable operation evidence: evidence produced earlier in the same
+boundary, an ordinal reference the journal counters prove exists (sealed or
+not), or a record's committed current or initial-scenario version. A retained
+version that is no longer current is refused with
+`InvalidRandomOperationEvidence` in every run, so a sealed run and its exact
+replay accept the same first draws.
 
 The legacy immediate command/event path remains for the movement slice and
 compatibility examples. It is atomic, but it is not a substitute for the
@@ -2079,7 +2406,10 @@ does not authenticate a freely constructed `CommandEnvelope`; network, IPC, and
 account adapters must authenticate callers before selecting an `Issuer` and
 authority context. Handlers return directives and cannot take a mutable world
 reference. Directives can update declared components, emit attributable custom
-events, or schedule future directives. `CommandPolicyContext` intentionally
+events, or schedule future directives; a scheduled directive may not wrap
+`EnqueuePluginIngress` at any depth (`InvalidPayload`), because the packet it
+would fire carries a cause but no issue time that a load could check, and
+`EnqueuePluginIngress` takes its own delay instead. `CommandPolicyContext` intentionally
 omits run purpose, observation, and trace, preventing authoritative handlers
 from branching on presentation-only dimensions.
 
@@ -2250,9 +2580,11 @@ Operating-system window-system features are confined to `canwu-debug`; Linux
 enables Wayland and X11 while Windows and macOS use their native `eframe`
 integration. CI verifies all three targets.
 
-All first-party crates share one SemVer version from the workspace manifest.
-Persistent snapshots additionally carry an independent format version so engine
-releases and storage migrations do not have to move in lockstep.
+All first-party crates share one SemVer version from the workspace manifest,
+and each depends on the exact same version of every other first-party crate
+it uses (`=X.Y.Z`); nothing one version wrote is read by another. Persistent
+snapshots additionally carry an independent format version, which names the
+contract that version writes.
 
 ## Reusable-engine conformance
 

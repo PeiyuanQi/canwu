@@ -53,7 +53,8 @@ sidebar:
 | [转移清单](/architecture/settlement/) | transition manifest | `TransitionManifest`, `BoundaryDirective::RegisterTransitionManifest` | 协调插件为一次多所有者转移作出的声明，列出参与插件、预期记录版本和唯一的就绪边界。参与者在该边界第 10 阶段用 `StageTransitionWrite` 暂存写入；清单之外的第 10 阶段指令不受影响。 |
 | [转移审计](/architecture/settlement/) | transition audit | `TransitionAuditRecord` | 内核在第 11 阶段对本边界就绪的每份清单所做的检查。清单仅被部分参与者暂存，或预期版本不符，都会使整个边界失败；没有任何参与者暂存的清单则过期。提交或过期的结果作为只读边界证据，供第 12 阶段系统读取。 |
 | [边界账](/architecture/settlement/#统计一段时间内的边界) | boundary ledger | `SimulationView::boundaries_between`、`BoundaryWindow`、`BoundarySummary`、`BoundaryIngressOrigin`、`boundary_schedule_horizon` | 一段模拟时间内的边界：其中已经结算的、正在结算的和仍在排队的边界，每个都带有时间、节奏，以及按类别、种类和来源计数的输入。只有分阶段的边界系统可以在声明 `canwu.core.boundary_schedule` 读取后读它，在把工作带到另一个边界之前先数清这段时间的边界；它用 `boundary_schedule_horizon` 声明要往回读多远。已结算的边界在实时、封存、恢复和重放的运行中完全相同；排队列表只是下限。 |
-| [边界耗时剖面](/architecture/settlement/#边界耗时剖面) | boundary profile | `BoundaryProfile`、`set_boundary_profiling`、`take_boundary_profiles` | 上层应用按需开启的诊断数据：一个已结算边界的现实耗时，以及它运行的每个插件处理器的现实耗时，按种类、阶段、插件和名称列出。它不属于权威状态、证据、快照或重放，插件也读不到它。 |
+| [边界耗时明细](/architecture/settlement/#边界耗时明细) | boundary profile | `BoundaryProfile`、`set_boundary_profiling`、`take_boundary_profiles`、`replay_from_journal_with_boundary_profiles` | 上层应用按需开启的诊断数据：一个已结算边界的现实耗时，它运行的每个插件处理器的现实耗时（按种类、阶段、插件和名称列出），以及每个引擎阶段的耗时。它不属于权威状态、证据、快照或重放，插件也读不到它。精确重放可以逐个边界计时。 |
+| [引擎阶段](/architecture/settlement/#边界耗时明细) | engine phase | `BoundaryEnginePhase`、`BoundaryEngineTiming`、`BoundaryProfile::engine` | 边界耗时明细中模拟内核自身工作的一个类别：准入、系统调度、暂存、提交、知识、日志和哈希。引擎阶段与插件处理器一起分完一个边界的现实耗时。它是计时类别，不是结算阶段。 |
 
 ## 插件与扩展
 
@@ -77,6 +78,8 @@ sidebar:
 | [接触信号批次](/architecture/culture-law/) | exposure signal batch | `CultureExposureSignalBatch`, `culture_exposure_v1` | 信息或通信提供方在解决访问与解释之后产生的有界、带证据的报告，说明哪些 cohort 接触了某一文化目标代际；它在之后的边界准入。 |
 | [cohort 人口校准](/tutorials/cases/local-community-diffusion/) | cohort headcount rebase | `CohortHeadcountRebaseV1`, `cohort_headcount_rebase_v1` | 把 cohort 人口重置为所引用外部存量记录的规范化输入；输入准入时，该记录必须是当前版本。下一次 society 结算会按确定性的整数最大余数法，按比例重算每个分布。 |
 | [society 结算节奏](/tutorials/cases/local-community-diffusion/#换一种结算节奏) | society settlement cadence | `SocietyPlugin::with_settlement_cadence`, `SocietyPlugin::DAILY` | 决定 society 在哪些边界结算的 `SystemCadence` 类别：默认是 `Daily`，也可以由上层应用指定。转化速率每次结算生效一次，society 写入系统要应用的一切变化都等到带这个节奏的边界。节奏记录在插件描述中，所以恢复和重放必须使用同一节奏的插件。 |
+| [转移结算模式](/tutorials/cases/local-community-diffusion/#换一种结算节奏) | transfer settlement | `TransferSettlement`、`SocietyPlugin::with_transfer_settlement` | society 结算如何检查到期的 cohort 转移。**批量结算**（`Batch`，默认）把每笔到期转移都按结算开始时的状态检查，仍然成立的按准入顺序逐笔应用，每笔都在前面几笔留下的状态上执行；数量已经放不下的转移结算为 `insufficient_source`。**逐笔结算**（`OneByOne`）把每笔转移按同一次结算中更早的转移留下的状态检查，所以涉及同一个 cohort 的到期转移只有一笔完成，其余结算为 `stale_source`。模式是插件身份的一部分。 |
+| society 输入队列 | society ingress queue | `SocietyIngressQueue`、`SocietyIngressBatch`、`society_ingress_queue_entries` | 等待下一次 society 结算的人口校准、生命周期变化和压力修订所在的队列：一条很小的头记录，加上每个准入了输入的边界各一条批次记录，所以它的证据只随各边界准入的数量增长。队列已满时到达的输入以记录在案的 `queue_full` 结果被拒绝。 |
 | [压力修订](/tutorials/cases/local-community-diffusion/#运行中修订压力) | pressure revision | `PressureRevisionDecision`, `revise_society_pressure`, `society_pressure_revision_v1` | 制度立场（`InstitutionalAlignment`）背后的机构作出的一项带版本的决定：在该立场影响的 cohort 范围内，修订由它签发的政策压力条目，以及其目标下影响边和组织节点的启用状态与触达范围。决定由 society 结算应用，不会新增或删除条目。 |
 | [表决权重](/architecture/culture-law/) | vote weight | `ProcedureStageDefinition::seat_weights` | 某席位的选票在程序阶段中所占的整数权重；未列出的席位权重为 1。quorum 与 threshold 都按权重合计；否决是席位权力，从不加权。 |
 | [表决单元](/architecture/culture-law/) | unit block | `ProcedureStageDefinition::block_of_seat` | 程序阶段中作为一个整体表态的一组席位，其立场取组内席位的加权多数；双方加权票数相等或没有计入选票的单元不表态。 |
@@ -95,25 +98,49 @@ sidebar:
 | 参考内容包 | reference content pack | — | 由第一方或下游提供的版本化、带命名空间、可序列化领域定义、场景数据、本地化和来源信息包；它向领域扩展提供内容，不是内核子系统或求解器。 |
 | 参考整合包 | reference integration | — | 使用对外 API 将通用领域能力映射到小型世界、生产、信息或社会模型的可替换实现；可以包含运行时插件和上层应用适配代码。 |
 | 入门套件 | starter kit | — | 将兼容的参考内容包和参考整合包组合成完整纵向切片的可运行上层应用与组合示例；它是参考代码，不是特权引擎路径。 |
-| [财政模拟扩展](/tutorials/cases/ming-fiscal/) | fiscal simulation extension | `canwu-fiscal` | 通用财政程序领域扩展；负责法规、地区采纳、核算、授权、减免、凭证、审计、聚合与持有人相对知识报告，不负责资源余额与转移。 |
+| [财政模拟扩展](/tutorials/cases/ming-fiscal/) | fiscal simulation extension | `canwu-fiscal` | 通用财政程序领域扩展；负责法规、地区采纳、核算、授权、减免、凭证、审计、核算周期、财政归档与持有人相对知识报告，不负责资源余额与转移。它的状态拆分成多条记录，一个边界只读写它的数据包涉及的记录。 |
+| [范围账](/architecture/fiscal/#记录与字节预算) | scope ledger | `FiscalScopeLedger`、`FiscalRecordKind::Ledger`、`fiscal_ledger_reference` | 一个范围绑定的记录：绑定本身、它的采纳、每个常驻核算周期各一本核算周期账册、修订号与最近结果，以及周期水位线。针对某个范围的行动都以它为目标。 |
+| [核算周期账册](/architecture/fiscal/#核算周期与归档) | accounting cycle book | `FiscalCycleBook`、`FiscalAction::CloseAccountingCycle` | 一个范围在一个核算周期内的核算、减免、执行请求、凭证和审计结论，保存在它的范围账里。打开的账册接受全部对象；关闭的账册只接受审计结论；已归档的账册已离开范围账。账册中的每个对象都写明创建它的行动。 |
+| [财政机构记录](/architecture/fiscal/#记录与字节预算) | fiscal office | `FiscalOffice`、`FiscalRecordKind::Office`、`fiscal_office_key` | 一个机构的记录：它的权限绑定和审计绑定、任命政策和审计人提案、修订号与最近结果、能看到它的观察者，以及每个常驻周期的常驻账册数、分区键和已归档合计。它的标识是**机构键**（office key），即机构引用的摘要。 |
+| 辖区记录 | jurisdiction record | `FiscalJurisdiction`、`FiscalRecordKind::Jurisdiction` | 一个目录地区的记录：各机制的范围数、各法规的采纳数、转型候选，以及修订号与最近结果。`ApplyTransition` 以它为目标。 |
+| 观察者记录 | observer record | `FiscalObserver`、`FiscalRecordKind::Observer`、`FiscalAction::RebindObserver`、`FiscalAction::RemoveObserver` | 一个观察者绑定的记录：绑定本身、报告的行布局、周期槽位和每个已发布分段的摘要，以及修订号。报告行由这条记录上的角色命名，所以改指或移除一个绑定不会移动其他绑定的报告行。 |
+| 绑定目录 | binding directory | `FiscalRecordKind::Directory` | 4,096 条桶记录，把绑定、政策或提案 ID 映射到持有它的财政机构记录，准入只需一次局部读取就能从绑定 ID 找到机构。 |
+| 范围索引页 | scope index page | `FiscalRecordKind::Index`、`FISCAL_INDEX_PAGE_SCOPES` | 只可创建的记录，按名次顺序列出一个机构或一个地区的范围，每页 1,024 个；随场景写入一次。 |
+| 报告队列页 | report-queue page | `FiscalRecordKind::ReportQueue`、`FISCAL_REPORT_DRAIN_INGRESS` | 保存欠观察者的报告工作的 4,096 条记录之一：要发布的周期和分段，或整份报告。一个边界发不完的留在队列里，边界安排内部的排空数据包，同一时刻的下一个边界继续发布。 |
+| [行动目标](/architecture/fiscal/#行动批次与修订号) | action target | `FiscalActionTarget`、`FiscalActionEntry::expected_revision`、`fiscal_target_revision` | 一个行动写明修订号的那条记录：范围账、财政机构记录、辖区记录或观察者记录。只有目标在签发者查看之后发生了变化，行动才算过期。 |
+| [财政行动批次](/architecture/fiscal/#行动批次与修订号) | fiscal action batch | `FiscalActionBatch`、`FiscalActionEntry` | `apply_fiscal_action_v1` 的载荷：一个权限绑定和最多 4,096 个条目，每个条目都是一个普通行动，有自己的 ID、预期修订号、结果和事件。某个条目不能准入时，准入拒绝整个批次并指出它的序号。 |
+| 结果环 | outcome ring | `FISCAL_RECENT_OUTCOMES`、`fiscal_recent_outcome` | 一个行动目标保留的最近八个结果，连同**结果下限**（outcome floor），即最近被挤出的结果的结算修订号。两者只凭常驻状态就能拒绝重发的行动；每个结果都留在它的结算事件里。 |
+| 周期水位线 | cycle watermark | `FISCAL_CYCLE_ARCHIVED` | 一个范围已归档的最大核算周期（范围水位线，scope watermark），或其机构已归档合计的最大核算周期（机构水位线，office watermark）。不在任何一条水位线及以下开立新账册，所以一个核算分区在整个运行中最多核算一次，而无需读取归档。 |
+| 分区键 | partition key | `MAX_FISCAL_PARTITION_KEYS` | 账册或报告行中一条事实的单位和支付形态。一个机构在一个周期、一种机制下的账册最多使用四个。 |
+| [财政归档](/architecture/fiscal/#核算周期与归档) | fiscal archive | `FiscalArchiveStore`、`FiscalState::prepare_fiscal_archive`、`enqueue_fiscal_archive`、`archived_fiscal_record`、`FiscalArchiveKeyV1` | 由上层应用保存、按内容寻址的归档，存放已关闭的账册、各周期的机构合计和维护凭证，带有资源归档格式的累积查找索引。没有任何边界读取它；一次模拟运行可以做任意多次提交。 |
+| [报告周期槽位](/architecture/fiscal/#报告如何发布) | cycle slot | `MAX_FISCAL_REPORT_CYCLE_SLOTS` | 观察者报告中一个常驻周期占用的 64 个位置之一；槽位 `s` 的分段 `p` 对应报告行 `1 + s * 1,024 + p`。离开报告的周期把它的分段发布为空并释放槽位；槽位用完时的周期计入摘要的 `omitted_cycles`。 |
+| [报告分段](/architecture/fiscal/#报告如何发布) | report part | `FiscalReportRecord`、`FISCAL_REPORT_ROWS_PER_PART` | 报告的一条知识记录：一个周期的 16 个相邻范围行，独占一条报告行，只在各行的摘要值变化时重新发布。第 0 行是摘要。 |
 | [历史财政语境](/architecture/fiscal/) | fiscal historical context | `FiscalHistoricalContext` | 用于判断活动时期和改革候选的显式历史年份与模式；只通过规范化输入改变，不会自动实施改革。 |
 | [财政覆盖单元](/architecture/fiscal/) | fiscal coverage cell | `FiscalCoverageCell` | 一个“时期 × 地区 × 机制”单元，通过确定性优先级解析为有支持、原型回退、明确未知或不适用。 |
-| [财政执行凭证](/tutorials/cases/ming-fiscal/) | fiscal execution receipt | `FiscalExecutionReceiptPacket` | 引用精确类型化适配结果版本的结算请求；准入后的凭证从这些结果派生外部观察到的数量与处置。在单个财政运行时状态内，每个精确版本和每个 `(evidence kind, external_operation_id)` 组合最多结算一张凭证；凭证不拥有资源真值。 |
+| [财政执行凭证](/tutorials/cases/ming-fiscal/) | fiscal execution receipt | `FiscalExecutionReceiptPacket` | 引用精确类型化适配结果版本、并写明所结算请求所在范围的结算请求，通过 `enqueue_execution_receipts` 以每包最多 4,096 张提交；准入后的凭证从这些结果派生外部观察到的数量与处置。一个精确版本最多结算一张凭证，一个 `(evidence kind, external_operation_id)` 组合在一个范围的常驻账册内最多结算一张。结算不能接受的凭证会以事件被拒绝，绝不会让边界失败。凭证不拥有资源真值。 |
 | [代理角色](/architecture/fiscal/) | acting actor | `FiscalAuthorityBinding::acting_actor` | 只有当权限依据仍是其记录的当前版本时，才可为某个权限绑定执行财政行动的第二个角色；常设角色不受影响。代理角色不能发起权限改绑；权限改绑可以更换或撤下它。 |
 | [权限依据](/architecture/fiscal/) | authority basis | `FiscalAuthorityBinding::authority_basis`, `FiscalAuditBinding::authority_basis`, `MovementOrderRequestV1::authority_basis` | 授予权限的精确应用记录版本，其记录种类须是所属插件会读取的种类。它可以授予财政权限绑定中的代理角色权限，可以授予审计绑定中的审计人权限，也可以授权一条移动命令（`MovementOrderRequestV1`）移动所有者以外的对象。核验时它必须是其记录的当前版本；该记录出现新版本或退役后，财政授权随之结束，直到一次改绑换上当前版本。 |
 | [权限改绑](/architecture/fiscal/#权限改绑) | authority rebinding | `FiscalAction::RebindAuthority`, `FiscalRebinding` | 一项已结算的财政行动，在一次提交内同时更换权限绑定的常设角色、代理角色和权限依据。它必须在被更换的绑定之下发起，发起者是该绑定的常设角色，或者以整体名义作决定的机构，代理角色不能发起。绑定会记下这次行动及其签发者。 |
-| [审计绑定](/architecture/fiscal/#审计绑定) | audit binding | `FiscalAuditBinding`, `FiscalAction::RebindAudit` | 为某个机构准入一名机构之外的审计人的财政绑定：审计人只能对该机构负责范围内的对象记录审计结论，不能发起其他财政行动，并且只在绑定自身的权限依据仍是当前版本时有效。审计绑定由被审计机构自己安装、更换和移除，所以它说明的是结论由谁录入，而不是审计人的独立性。 |
+| [审计绑定](/architecture/fiscal/#审计绑定) | audit binding | `FiscalAuditBinding`, `FiscalAction::RebindAudit` | 为某个机构准入一名机构之外的审计人的财政绑定：审计人只能对该机构负责范围内的对象记录审计结论，不能发起其他财政行动，并且只在绑定自身的权限依据仍是当前版本时有效。由谁安装、更换和移除它，由被审计机构的审计任命政策决定；只有政策让该机构自己担任任命机构时，`RebindAudit` 才是它自己的直接决定。绑定说明结论由谁录入，它的 `nomination` 说明审计人由谁提名。 |
+| [审计任命政策](/architecture/fiscal/#审计绑定) | appointment policy | `FiscalAppointmentPolicy`、`FiscalState::add_appointment_policy` | 场景声明的政策，每个被审计机构一份，写明谁任命和罢免它的审计人。**任命机构**（appointer）是以 `DecideAuditAppointment` 作决定的机构；**提名方**（nominator）以 `NominateAuditor` 提出候选人；**请求罢免方**（petitioner）以 `PetitionAuditorRemoval` 请求罢免某位审计人；`appoints_without_nomination` 和 `removes_without_petition` 决定任命机构能否不经提名或请求就直接行动。没有政策的机构只有随状态安装的审计绑定。 |
+| 审计人提案 | auditor proposal | `FiscalAuditProposal`、`FiscalProposalResolution`、`FiscalProposalRef` | 被审计机构记录中一条待决的提名或罢免请求，记有提出它的一方，只结案一次：接受、驳回或被取代。一方在一份政策下最多有四条待决提案；每份政策保留最近 64 条已结案提案。 |
 | [资源模拟扩展](/tutorials/cases/production-economy/) | resource simulation extension | `canwu-resource` | 可选的守恒数量扩展，负责精确资源/单位版本、账户、受保护底线、需求、预留、分配、转移、验收交付、消费、损耗、履约和确定性凭证；不拥有货币或市场。 |
 | [生产模拟扩展](/tutorials/cases/production-economy/) | production simulation extension | `canwu-production` | 可选的生产资产扩展，负责工艺、地点、设施、产能、工单、在制品、执行、项目和产出结算；生产地点形态与要求是版本化数据，不是统一建筑等级。 |
 | [资源能力阶段](/tutorials/cases/production-economy/) | resource capability stage | `ResourceCapabilityStage`, `ResourceCapabilityRevision` | 带生效期的修订记录，把某项资源放在从潜在储量到交付验收之间的某个阶段：潜在、已观测或勘查、已探明、技术上可开采、在产地点、路线可达、已交付验收。每条修订都引用其模型卡。 |
 | [受保护存量底线](/tutorials/cases/production-economy/) | protected stock floor | `ProtectedFloorPolicyRevision`, `ResourceProtectedFloorRequestV1::install` | 把种子、口粮或应急库存排除在普通分配之外的版本化政策；只有另行授权的行动才能突破。政策版本可以由场景预先编写，也可以由账户的保管人在运行中以按内容寻址的版本安装；没有任何账户或需求引用的按内容寻址版本会被退役。 |
-| [单步完成租约](/developer/production-economy/#完成租约) | single-step completion lease | `ResourceCompletionOperationV1::SingleStepLease`, `SingleStepCompletionLeaseV1` | 只有资源插件一个参与方的完成租约，用一个操作从无到激活：检查和激活凭证与四步路径相同，只留下一条操作结果和一条凭证。它只能通过完成租约输入进入，持有人命令不能携带它。 |
+| [一步式完成租约](/developer/production-economy/#完成租约) | single-step completion lease | `ResourceCompletionOperationV1::SingleStepLease`, `SingleStepCompletionLeaseV1` | 四个建立步骤（申请、授权、准备、激活）在一个操作内同时生效、否则一个都不生效的完成租约：检查和激活凭证与四步路径相同，只留下一条操作结果和一条凭证。只有资源插件是租约唯一参与方时才能使用，并且只能通过完成租约输入进入，持有人命令不能携带它。 |
+| [跳过的数据包](/architecture/resources-production/#跳过的数据包与延后结算) | skipped packet | `RESOURCE_INGRESS_SKIPPED_EVENT`、`ResourceIngressSkipV1`、`ResourceIngressSkipReasonV1` | 因为可预期的原因（结果放不进资源记录、操作键已被占用或属于保留前缀、未通过结算检查）而无法结算的资源数据包：它什么也不改变，操作键保持空闲，由一个带稳定原因的 `canwu.resource.ingress_skipped.v1` 事件指明，所在边界照常提交。空间恢复后由发送方重发。可预期的拒绝绝不会让边界失败。 |
+| [延后结算](/architecture/resources-production/#跳过的数据包与延后结算) | deferral | `RESOURCE_DEFERRED_INGRESS`、`ResourceIngressSkipV1::deferred_until` | 资源插件处理其他插件安排的工作（生产产出批次，或以后仍能作为同一步骤结算的完成步骤）的方式：当它放不进资源记录、但一次归档提交或租约释放能腾出空间时，插件把同样的工作排给自己，一分钟后到期，之后每次翻倍，最长 1,024 分钟；跳过事件写明延后到何时。 |
 | [账户损耗](/developer/production-economy/) | account-level loss | `ResourceOperationRequestV1::RecordLoss` | 不经转移、直接从单个账户扣减并引用原因的损耗；计入守恒中的已准入损耗，不动用已预留存量，除非明确允许，否则遵守受保护底线。 |
 | [原子交换](/developer/production-economy/) | atomic exchange | `ResourceOperationRequestV1::BeginExchange`, `ResourceExchangeTermsV1` | 两项转移的发起在同一个结果下一起准入或一起拒绝。每条交换腿的完成租约由其来源保管人持有，并绑定到双方约定条款的摘要；之后两项转移独立结算。 |
 | [本地验收](/developer/production-economy/) | local acceptance | `ResourceTransferDispositionV1::AcceptLocal` | 当两个账户声明相同的地点范围时，不经运输执行即可结算尚未发运的转移，并引用精确的交接记录。 |
 | [地点范围](/developer/production-economy/) | place scope | `ResourceAccount::place_scope` | 由上层应用在场景安装账户时声明、不可更改的账户存量地点标识；引擎从不推断它，未声明时不能本地验收。 |
 | [动用授权](/developer/production-economy/) | access grant | `ResourceAccessGrantV1`, `ResourceDemandSourcePolicyV1::Granted` | 授权保管人引用精确权限证据作出的记录化同意：被授权方可在有效期内、在上限以内动用授权方某一精确资源与单位版本的存量。每次扣减都由被授权方自己的完成租约授权，不会回退到其他账户。 |
-| [归档查找索引](/architecture/resources-production/#归档终态记录) | archive lookup index | `ResourceArchiveLookupPageV1`, `ResourceArchiveIndexDirectoryV1::lookup_root` | 每次资源归档提交都会续写的累积索引，按内容寻址。检查某个操作键是否已归档时，只需读取归档头目录，再沿索引每层读一个经过认证的页，与模拟运行已经做过多少次归档提交无关。恢复、精确重放或派生分支需要沿途每个归档头的索引页。 |
+| [活动根](/architecture/resources-production/#随机性持久化与重放) | live root | `ResourceLiveRootV1`、`resource:runtime:v1` | 持久化资源根时不含常驻终态记录的那条领域记录：账户、未关闭的需求及其分配、进行中的转移、租约、报告授权、观察头，以及常驻终态账。每个结算资源工作的边界都会读它。 |
+| [常驻终态记录](/architecture/resources-production/#归档终态记录) | hot terminal record | `ResourceHotTerminalEntryV1`、`ResourceState::hot_terminal_records` | 还没有通过归档提交离开资源根的终态记录（操作结果、已关闭的需求及其预留、已结算的转移、凭证）。它占用归档候选预算，每次恢复都要校验它。 |
+| [常驻终态桶](/architecture/resources-production/#随机性持久化与重放) | hot terminal bucket | `ResourceHotTerminalBucketV1`、`resource:hot-terminal:{bucket}`、`resource_hot_terminal_bucket` | 保存常驻终态记录的桶记录之一，数量为归档候选预算向上取整到二的幂；每条记录按其标识的哈希落入一个桶。边界只写条目有变化的桶，归档提交把桶清空而不删除它。 |
+| [常驻终态账](/architecture/resources-production/#随机性持久化与重放) | hot terminal ledger | `ResourceHotTerminalLedgerV1`、`ResourceState::hot_terminal` | 活动根里的一组计数（记录数、操作结果数、转移数、已应用的维护凭证数、需求请求方、底线政策、租约凭证申请、字节数）。所有规则都读这组计数而不读常驻终态记录本身，所以边界在它挂载的那部分记录上结算，与在整个根上结算的结果相同。 |
+| [归档查找索引](/architecture/resources-production/#归档终态记录) | archive lookup index | `ResourceArchiveLookupPageV1`, `ResourceArchiveIndexDirectoryV1::lookup_root` | 每次归档提交都会续写的累积索引，按内容寻址。检查某个键是否已归档时，只需读取归档头目录，再沿索引每层读一个经过认证的页，与模拟运行已经做过多少次归档提交无关。资源归档、生产归档、财政归档和参考包归档都使用这种格式的索引，各有自己的命名空间。恢复、精确重放或派生分支需要沿途每个归档头的索引页。 |
 | [在制品](/tutorials/cases/production-economy/) | work in progress | `WorkInProgress` | 已进入尚未完成的生产执行，并绑定精确工艺、设施、资源和证据的投入；既不是可用库存，也不是已结算产出。 |
 | [实际产出](/developer/production-economy/) | realized output | `realized_output_per_mille`, `realization_evidence` | 生产执行完成时以工艺名义产出的千分比表示的产出，按向下取整缩放后进入产出结算；任何非名义比例都需要工艺版本声明种类的精确证据记录。 |
 | [移动生命周期扩展](/tutorials/routing-transport/) | movement lifecycle extension | `canwu-movement`, `MovementPlugin` | 负责运输记录生命周期的可选扩展：准入移动命令、在到期时结算路段、分配运力池，并发布持有人相对的移动报告。事故、危险及其随机抽样仍属于应用系统。 |
@@ -133,7 +160,8 @@ sidebar:
 | [抽样证据](/architecture/randomness/) | draw evidence | `RandomDrawRecord` | 一次确定性随机抽样所记录的流、范围、操作和结果。 |
 | [随机决策策略](/tutorials/cases/uncertainty-resolution/) | random decision policy | `DecisionPolicyKind::Random` | 由声明过的边界系统使用可重放抽样证据结算的有界票据选择器，不是通用世界事件生成器。 |
 | [决策选项权重](/tutorials/cases/uncertainty-resolution/) | decision option weight | `DecisionOptionWeight` | 将一个有界抽样映射到票据既有选项的规范 option ID 与非负整数权重。 |
-| [操作定址随机抽样](/architecture/randomness/) | operation-keyed random draw | `random_sample_for_operation`, `random_draw_for_operation`, `RandomOperationDraw` | 按稳定 cause、operation ID、目标、occurrence、purpose 和随机流身份定址的抽样，使重试与重放不会消费另一份结果。`random_draw_for_operation` 还会返回这次抽样的证据 ID；完全相同的重试总能拿回已记录的抽样，不论当初引用的证据是否仍被保留。 |
+| [操作定址随机抽样](/architecture/randomness/) | operation-keyed random draw | `random_sample_for_operation`, `random_draw_for_operation`, `RandomOperationDraw` | 按稳定 cause、operation ID、目标、occurrence、purpose 和随机流身份定址的抽样，使重试与重放不会消费另一份结果。`random_draw_for_operation` 还会返回这次抽样的证据 ID；完全相同的重试由操作定址抽样账回答，不论当初引用的证据是否仍被保留。首次抽样引用的操作证据必须不受封存影响：同一边界内的证据、日志计数器能证明的序号证据，或记录的当前版本或初始场景版本。 |
+| [操作定址抽样账](/architecture/randomness/#抽样之后还有哪些开销) | keyed-draw ledger | `KeyedDrawEntry`、`ContinuationCheckpoint::keyed_draws` | 模拟运行抽过的每个操作地址的持久记录，无论其抽样证据仍保留还是已封存，记有抽样 ID、证据、上界、用途和值。边界提交时续写，边界失败时恢复，封存和派生分支共享它，每次恢复只重建一次；在整个运行期内每个地址保留一个条目。 |
 | [评估轨迹](/architecture/settlement/) | evaluation trace | `EvaluationTraceRecord`, `BoundaryDirective::RecordEvaluationTrace` | 有界的边界证据，逐项说明某条应用规则如何为一个对象得出一个整数结果。它不属于状态；持有人只能通过 `CanwuViewer::evaluation_traces` 读取关于自身实体的轨迹，或者在轨迹评估之前其账本就已得知的对象的轨迹。 |
 | [资源预留](/tutorials/phased-boundary/) | reservation | `ReservationRequest` | 分配前对守恒资源池提出的声明式申请。 |
 | 需求来源策略 | demand source policy | `ResourceDemandSourcePolicyV1` | 在稀缺资源分配前选择合格供给账户：匹配资源池中的账户、由申请者保管的有界精确账户列表，或在动用授权下列出的授权方账户。只有 `Granted` 形式带有跨保管人的权限，且仅限于该授权。 |
@@ -142,7 +170,13 @@ sidebar:
 | [快照](/developer/persistence/) | snapshot | `SimulationSnapshot` | 恢复时必须完整校验的持久化状态映像。 |
 | [检查点](/developer/persistence/) | checkpoint | `SimulationCheckpoint` | 可与后续日志证据衔接的已验证紧凑基础状态。 |
 | [检查点日志](/developer/persistence/) | checkpoint journal | `CheckpointJournal` | 检查点和后续证据的组合，用于紧凑持久化与恢复。代码相邻正文可直接使用类型名。 |
-| [分页检查点](/developer/persistence/) | paged checkpoint | `PagedSimulationCheckpoint`, `prepare_paged_checkpoint` | 检查点按内容寻址的形式，以状态页保存，每个新检查点只增加发生变化的页。恢复时需要截至该检查点的连续证据前缀。分页根还绑定了哪些证据已经封存，因此不是状态标识：从已封存日志段恢复后，检查点哈希不变，分页根却不同。判断状态是否相同应比较检查点哈希。 |
+| [分页检查点](/developer/persistence/) | paged checkpoint | `PagedSimulationCheckpoint`, `prepare_paged_checkpoint` | 检查点按内容寻址的形式，以状态页保存，每个新检查点只增加发生变化的页。恢复时需要截至该检查点的连续证据前缀。分页根还绑定了哪些证据已经封存，因此不是状态标识：从已封存日志段恢复后，检查点哈希不变，分页根却不同。判断状态是否相同应比较检查点哈希。最大 512 MiB 的记录以记录值分块分页保存。 |
+| 记录值分块 | record-value chunk | `STATE_PAGE_VALUE_CHUNK_BYTES`、`MAX_PAGED_RECORD_BYTES` | 分页检查点中，长度超过 1 MiB 的领域记录被切成的每个按内容寻址的 1 MiB 页。记录的叶页按顺序列出它的分块，没有变化的分块不会再存一次，最大 512 MiB 的记录都能分页；更长的记录会让准备分页检查点以 `value_out_of_range` 失败，绝不会让边界失败。 |
+| [接续检查点](/developer/persistence/#接续检查点) | continuation checkpoint | `ContinuationCheckpoint`、`continuation_checkpoint`、`CompactedCanwu::from_continuation_checkpoint_verified` | 不带证据历史就能继续运行的存档：当前状态、接续闭包、操作定址抽样账、请求索引、时间索引、边界账，以及可续写的日志承诺。在同一个切点上，无论运行是否封存过，它都逐字节相同；不需要任何证据日志段就能恢复成 `CompactedCanwu`，并按上层应用保存的 `continuation_hash` 校验。它包含真值，不能交给玩家、智能体或远程客户端。 |
+| 接续闭包 | continuation closure | `PinnedEvidenceRecords`、`UnadmittedEvidence` | 仍在进行中的工作可能还要读取载荷的证据：待处理输入及其输入来源事实、待处理工作的原因、需要保留载荷的依赖，以及尚未准入的尾部。它只取决于当前状态和切点，与运行何时封存无关；封存把它作为**钉存证据**（pinned evidence）保留在封存切点之下。 |
+| 输入来源事实 | provenance fact | `PluginIngressProvenanceFact` | 封存为一条待处理或已声明的输入记录保留的、ID 之外的信息：产生它的边界及其签发者、目标插件、数据包类型和状态（待处理、已准入或已撤回），或者“不是任何边界产生的”。记录封存之后，`plugin_ingress_matches` 和撤回读取这条事实，所以封存过的运行与未封存的运行回答一致。 |
+| 日志前沿 | journal frontier | `JournalFrontiers`、`JournalFrontier` | 一条日志的可续写 BLAKE3 承诺可导出的状态：条目数、字节长度、链接值和未完成的分块，最多约 2.8 KB。接续检查点带着五条，所以恢复后的运行续写同样的承诺流，之后每个边界都得到相同的检查点哈希。 |
+| [运行句柄契约](/developer/persistence/#接续检查点) | run handle contract | `canwu_api::CanwuRun`、`typed_domain_record` | `Canwu` 和 `CompactedCanwu` 都实现的上层应用 trait：当前状态读取、不受封存影响的记录版本、日志计数器、边界账和规范化输入。扩展的上层应用辅助函数接受任何 `CanwuRun`，所以带归档的运行或从接续检查点恢复的运行与完整历史的运行用同样的调用驱动。它不结算任何内容。 |
 | [精确重放](/developer/persistence/) | exact replay | `replay_from_journal()` | 从已记录输入与证据重建并验证同一次运行，不重新调用外部选择。 |
 | [平行现实](/developer/persistence/) | alternative reality | — | 从共同的先前状态选择不同的输入形成新的平行现实，不是精确重放。 |
 | [派生分支](/developer/persistence/) | fork | `fork()` | 从现有时点复制出的独立模拟，可接收新输入；指 API 时保留 `fork`。 |
@@ -159,11 +193,13 @@ sidebar:
 | [生存状态](/developer/integration/) | life state | `LifeState` | `Alive`、`Dead` 或 `Missing`；人物可用性的一部分。 |
 | [人身状态](/developer/integration/) | custody state | `CustodyState` | `Free`、`Detained`、`Hostage`、`Captive`、`Hiding` 或 `Exile`；人物可用性的另一部分。默认只有 `Detained` 和 `Captive` 会阻止准入。 |
 | [人物创建](/architecture/settlement/) | person creation | `BoundaryDirective::CreatePerson`, `PersonDraft`, `PersonPlacement`, `BoundaryCreatedPerson` | 第 7 阶段根据应用草稿和来源证据创建人物、由引擎分配 ID 的指令。草稿可以带一个在 `WorldSnapshot` 投影中的落位（所属政府和所在地域），也可以不带。回执把该 ID 绑定到提出创建的插件、系统和相关标识；新人物从下一边界起可见。 |
-| [未落位人物](/architecture/settlement/#人物与输入指令) | unplaced person | `PersonDraft::placement`, `PersonPlacement` | 创建时不带落位的人物：它在实体注册表中有身份，有人物可用性和创建回执，但在 `WorldSnapshot` 投影中没有 `Person` 记录。它的属性由上层应用保存在自己的记录里；内置的移动、信件和军队报告路径只读投影，所以不会涉及它。 |
+| [无定位人物](/architecture/settlement/#人物与输入指令) | unplaced person | `PersonDraft::placement`, `PersonPlacement` | 创建时不带落位的人物：它在实体注册表中有身份，有人物可用性和创建回执，但在 `WorldSnapshot` 投影中没有 `Person` 记录。它的属性由上层应用保存在自己的记录里；内置的移动、信件和军队报告路径只读投影，所以不会涉及它。 |
 | [角色知识](/developer/reading-state/) | actor knowledge | `ActorKnowledge` | 某一角色知道的内容及来源、可信度和时间，与真值分开保存。 |
 | [报告](/architecture/events/) | report | `EventKind` type `"report_dispatched"` | 在更新角色知识前，在角色之间签发或送达的信息。 |
 | [持有人相对知识](/tutorials/cases/routed-correspondence/) | holder-relative knowledge | `KnowledgeHolderRef`, `KnowledgeReadCut` | 在精确读取切面上从某个人、机构、官署或其他持有人账本读取的事实，不能改读全知状态。 |
-| [知识头记录](/architecture/knowledge-information/#取代先前的记录) | knowledge heads | `SimulationView::knowledge_heads`, `KnowledgeHeads` | 持有人在某一 schema 种类下的当前记录，即没有被该持有人其他记录取代的记录。发布知识的系统按类型化主体筛选，读取它们的全局 ID，用来指明下一条记录要取代哪些记录。读取来自已提交状态和正在结算的边界，所以实时、封存、恢复和重放的运行结果一致。 |
+| [当前知识记录](/architecture/knowledge-information/#取代先前的记录) | current knowledge records | `SimulationView::knowledge_heads`, `KnowledgeHeads`, `HolderLedger::current_records` | 持有人在某一 schema 种类下的当前记录，即没有被该持有人其他记录取代的记录。发布知识的系统按类型化主体筛选，读取它们的全局 ID，用来指明下一条记录要取代哪些记录。读取来自已提交状态的索引和正在结算的边界，所以实时、封存、恢复和重放的运行结果一致，开销也不随持有人账本的大小增长。 |
+| 委托权限记录 | delegated authority record | `DelegatedAuthority`、`delegated_authority_reference` | `canwu-information` 在准入委托命令时写入的只可创建记录：按授权的声明路径取出的委托声明。之后以委托权限进行的解读按这条记录检查，而不是按命令检查，所以封存归档了命令也没有影响。 |
+| 法律提供方索引 | legal provider index | `LegalRuntime::provider_packets`、`LawBudgets::max_provider_packets` | 法律协调分片中记录的、边界准入过的每个已编译提供方数据包：输入 ID、插件、数据包类型，以及到期时间与载荷的哈希。信号或公开引用只有指向已记录的数据包才算数，可以在当时或之后任何边界引用，所以封存过的运行与其精确重放判断一致。 |
 | [持有人规划快照](/developer/reading-state/) | holder planning snapshot | `planning_snapshot_from_holder_knowledge`, `KnowledgeReadCutDigest` | 只用某个持有人账本在读取切面上声明的端点和连接构建的路由 `PlanningSnapshot`，同时返回读取集摘要，证明规划读取了什么。 |
 | [通信](/tutorials/cases/routed-correspondence/) | correspondence | `CorrespondenceOperation` | 把定向通信需求与信息投递，以及必要的物理或信号运输组合起来的流程。 |
 | [受托承运人](/tutorials/cases/routed-correspondence/) | delegated carrier | `delegate_carrier_v1`, `InitiateCorrespondenceRequest::carrier_delegation` | 发送者以外、以自己的委托命令接受承运的承运人；其声明指明发送者，并覆盖每次派发。规划读取承运人的账本，引擎不会把承运人的任何知识发布给发送者。 |
@@ -205,6 +241,10 @@ sidebar:
 | [边界账](/architecture/settlement/#统计一段时间内的边界) / boundary ledger | 日边界账 / day boundary ledger | 已弃用：0.14.0 把 0.13.3 按天读取的 `boundaries_on_day` 换成了按时间窗口读取；请使用 **边界账** 和 `boundaries_between`。 |
 | [平行现实](/developer/persistence/) / alternative reality | 反事实分支 / counterfactual branch；branch（因不同输入形成新因果运行时） | 已弃用：不同输入形成的新因果现实统一使用 **平行现实** 与 **alternative reality**；API 操作和复制出的模拟继续使用 **fork**。 |
 | [权限](/developer/integration/) / authority | permission（指 `CommandAuthority` 时） | 受限：已验证的行动权统一称为 **权限** 与 **authority**；独立的运行策略上下文继续使用 **permission profile**。 |
+| [无定位人物](/architecture/settlement/#人物与输入指令) / unplaced person | 未落位人物 | 已弃用：0.16.0 更改了中文写法；英文写法和 `PersonDraft::placement` 不变。 |
+| [当前知识记录](/architecture/knowledge-information/#取代先前的记录) / current knowledge records | 知识头记录 / knowledge heads | 已弃用（指文字写法）：统一使用 **当前知识记录** 与 **current knowledge records**；代码标识仍是 `knowledge_heads` 和 `KnowledgeHeads`。 |
+| [边界耗时明细](/architecture/settlement/#边界耗时明细) / boundary profile | 边界耗时剖面 | 已弃用：0.16.0 更改了中文写法；`BoundaryProfile` 不变。 |
+| [一步式完成租约](/developer/production-economy/#完成租约) / single-step completion lease | 单步完成租约 | 已弃用：0.16.0 更改了中文写法；`SingleStepLease` 不变。 |
 
 ## 维护规则
 

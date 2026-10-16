@@ -1097,17 +1097,42 @@
         add(`domain.${domain.key}`, `${domain.label} 领域`, "存在快照");
         return;
       }
-      const maps = ["authority_bindings", "scope_bindings", "adoptions", "assessments", "remissions", "execution_requests", "execution_receipts", "audits", "action_outcomes", "transition_candidates", "aggregates"];
+      // Fiscal state since 0.16.0 is partitioned: offices, scope ledgers (with
+      // one book per hot accounting cycle), jurisdictions, and observers each
+      // hold the maps that used to sit on the single state record.
+      const maps = ["offices", "ledgers", "jurisdictions", "observers", "report_queue"];
+      const bookMaps = ["assessments", "remissions", "execution_requests", "execution_receipts", "audits"];
       let added = 0;
-      maps.forEach((mapKey) => {
-        if (!isObject(state[mapKey])) return;
-        Object.entries(state[mapKey]).forEach(([id, value]) => {
-          if (added >= 20) return;
-          const status = isObject(value) ? (value.stage || value.disposition || value.status || value.lifecycle?.state || "当前") : compact(value, 70);
-          add(id, `${domain.label} · ${mapKey}`, String(status), isObject(value) ? (value.mechanism || value.rule_id || value.institution?.id ? compact(value.mechanism || value.rule_id || value.institution?.id, 80) : "") : "");
-          added += 1;
+      const addEntry = (id, mapKey, value) => {
+        if (added >= 20) return;
+        const status = isObject(value) ? (value.stage || value.disposition || value.status || value.lifecycle?.state || "当前") : compact(value, 70);
+        add(id, `${domain.label} · ${mapKey}`, String(status), isObject(value) ? (value.mechanism || value.rule_id || value.institution?.id ? compact(value.mechanism || value.rule_id || value.institution?.id, 80) : "") : "");
+        added += 1;
+      };
+      const addMap = (container, mapKey, label) => {
+        if (!isObject(container?.[mapKey])) return;
+        Object.entries(container[mapKey]).forEach(([id, value]) => addEntry(id, label || mapKey, value));
+      };
+      Object.entries(isObject(state.offices) ? state.offices : {}).forEach(([key, office]) => {
+        addEntry(key, "offices", office);
+        addMap(office, "authority_bindings");
+        addMap(office, "audit_bindings");
+        addMap(office, "audit_proposals");
+      });
+      Object.entries(isObject(state.ledgers) ? state.ledgers : {}).forEach(([key, ledger]) => {
+        addEntry(key, "ledgers", ledger);
+        addMap(ledger, "adoptions");
+        Object.entries(isObject(ledger?.books) ? ledger.books : {}).forEach(([cycle, book]) => {
+          addEntry(`${key}:${cycle}`, "books", book);
+          bookMaps.forEach((mapKey) => addMap(book, mapKey));
         });
       });
+      Object.entries(isObject(state.jurisdictions) ? state.jurisdictions : {}).forEach(([key, jurisdiction]) => {
+        addEntry(key, "jurisdictions", jurisdiction);
+        addMap(jurisdiction, "transition_candidates");
+      });
+      Object.entries(isObject(state.observers) ? state.observers : {}).forEach(([key, observer]) => addEntry(key, "observers", observer));
+      Object.entries(isObject(state.report_queue) ? state.report_queue : {}).forEach(([key, entry]) => addEntry(key, "report_queue", entry));
       if (added < 20) {
         Object.entries(state).forEach(([key, value]) => {
           if (added >= 20 || maps.includes(key)) return;

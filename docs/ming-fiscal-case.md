@@ -49,12 +49,13 @@ host closes a cycle's books with `CloseAccountingCycle` and archives closed
 books into a fiscal archive store it owns (`prepare_fiscal_archive`,
 `enqueue_fiscal_archive`, `finalize_fiscal_archive_retention`); the reference
 integration does both with `close_ming_fiscal_sample_cycle` and
-`archive_ming_fiscal_books`. The hot state holds at most 4,096 assessments,
-8,192 execution requests, 8,192 receipts, and 64 books per scope, with 32
-evidence versions per receipt, under a 32 MiB serialized-state budget, and one
-boundary applies at most 64 fiscal actions. Archiving frees that room, so none
-of these is a lifetime cap. Aggregate rebuilds use single-pass indexes over the
-hot books. Across scopes, and after a book is archived, unique external
+`archive_ming_fiscal_books`. Since 0.16.0 the state is partitioned into
+records: each scope ledger holds at most 64 hot books under a 256 KiB record
+budget, each book at most 256 remissions, requests, and audits and 1,024
+receipts, each receipt at most 32 evidence versions, an office or jurisdiction
+record at most 1 MiB, and one boundary applies at most 65,536 fiscal actions
+and 64 per record. Archiving frees that room, so none of these is a lifetime
+cap. Across scopes, and after a book is archived, unique external
 operation IDs are the evidence domain's guarantee.
 
 运行时财政状态按范围和核算周期保存账册。上层应用用 `CloseAccountingCycle`
@@ -62,11 +63,12 @@ operation IDs are the evidence domain's guarantee.
 （`prepare_fiscal_archive`、`enqueue_fiscal_archive`、
 `finalize_fiscal_archive_retention`）；参考整合用
 `close_ming_fiscal_sample_cycle` 和 `archive_ming_fiscal_books` 完成这两步。
-常驻状态最多容纳 4,096 条核算、8,192 条执行请求、8,192 张凭证，每个范围最多
-64 本账册，每张凭证最多引用 32 个证据版本，序列化状态上限为 32 MiB；一个边界
-最多应用 64 个财政行动。归档会释放这些容量，因此它们都不是整个运行期内的总量
-上限。聚合重建对常驻账册使用单遍索引。跨范围以及账册归档之后，外部操作 ID 的
-唯一性由证据所属领域保证。
+自 0.16.0 起，财政状态被分区为多条记录：每个范围账最多容纳 64 本常驻账册，
+记录预算 256 KiB；每本账册最多 256 条减免、执行请求和审计结论、1,024 张凭证；
+每张凭证最多引用 32 个证据版本；机构记录和辖区记录各不超过 1 MiB；一个边界
+最多应用 65,536 个财政行动，每条记录最多 64 个。归档会释放这些容量，因此它们
+都不是整个运行期内的总量上限。跨范围以及账册归档之后，外部操作 ID 的唯一性
+由证据所属领域保证。
 
 The pack divides the chronology into eight playable periods:
 
@@ -121,7 +123,7 @@ An assessment records what is due. An execution authorization records what an
 institution may collect, remit, disburse, reserve, or return. Neither changes a
 resource balance. A host performs the real operation in the owning resource,
 market, production, or logistics domain, then publishes a typed adapter result
-and calls `enqueue_execution_receipt`. At that live settlement boundary,
+and calls `enqueue_execution_receipts`. At that live settlement boundary,
 admission decodes every exact typed result version and matches its request,
 execution kind, payment form, resource, source, target, and unit. The persisted
 quantity and disposition are derived from those results rather than declared by
@@ -134,7 +136,7 @@ fulfilled, partial, rejected, and excused.
 
 核算记录“应当发生什么”，执行授权记录机构可以征收、汇解、支出、储备或退还
 什么；二者都不会直接改变资源余额。上层应用在资源、市场、生产或物流领域执行
-真实操作，发布类型化适配结果，再调用 `enqueue_execution_receipt`。在运行时结算
+真实操作，发布类型化适配结果，再调用 `enqueue_execution_receipts`。在运行时结算
 边界，接纳过程会解码每个精确类型化结果版本，并逐项核对请求、执行类型、支付
 形态、资源、来源、目标和单位；持久化凭证的数量与处置结果从证据派生，不由调用
 方自行声明。精确适配结果版本写明它结算的范围和请求，因此最多结算一张凭证；
@@ -172,14 +174,14 @@ separate from collected, remitted, disbursed, reserved, and returned execution.
 Only remission and collection reduce assessment outstanding. Actor reports are
 holder-relative knowledge records with non-invertible quantized ranges,
 confidence, and evidence, not exact truth copied into `FiscalState`. A report
-is one summary record and parts of 16 facts; read it with
+is one summary record and parts of 16 scope rows; read it with
 `fiscal_reports(&viewer)` rather than from single records.
 
 历史内容时期与上层应用定义的核算周期彼此独立。聚合按机构、机制、范围、核算
 周期、单位和支付形态分区；应征、减免与征收、汇解、支出、储备、退还分别记录，
 只有减免和征收会减少应征未结量。角色报告是带范围、置信度和证据的持有人相对
 知识记录；估计值使用不可反推精确真值的量化区间，不会把精确真值复制进
-`FiscalState`。一份报告由一条摘要记录和若干分段组成，每段 16 条事实；请用
+`FiscalState`。一份报告由一条摘要记录和若干分段组成，每段 16 行；请用
 `fiscal_reports(&viewer)` 读取整份报告，不要逐条解读单条记录。
 
 ## Playable fixtures / 可玩起点

@@ -1,7 +1,7 @@
 # World-Scale Fiscal State
 
-Status: design for 0.16.0, reviewed ("implement with changes, with phasing")
-and amended. Phase 0, the engine probe, is measured
+Status: implemented in 0.16.0 (Phases 0 to 2); design reviewed ("implement
+with changes, with phasing") and amended. Phase 0, the engine probe, is measured
 ([Phase 0 results](#phase-0-results)), Phase 1 is implemented on the single
 state record ([Phase 1 as implemented](#phase-1-as-implemented)), and Phase 2
 is implemented on the partitioned records

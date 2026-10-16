@@ -49,6 +49,13 @@ Run the reference debug client:
 cargo run -p canwu-debug
 ```
 
+Test in proportion to the change. While iterating, run only the tests of the
+crates you changed and of crates that depend on what you changed; do not run
+unrelated suites, the performance harness, the website build, or long scale
+probes, and do not add tests for parts the change does not touch. Run the full
+verification list once before a change set is committed or integrated; in
+multi-agent work the integrating agent runs it once for the integrated whole.
+
 Before requesting review, run:
 
 ```text
@@ -56,6 +63,11 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+Never iterate an `im` ordered map or set in reverse (`.rev()`, `next_back`,
+`rfind`, reverse ranges) and never use `get_prev` / `lookup_prev`: im 15.1
+drops elements past three tree levels. Key the collection in the order you
+need and iterate forward; `get_min` and `get_max` are safe.
 
 Use a Git worktree under `.worktrees/` when working on unrelated changes at the
 same time. Agents working in this repository must also follow `AGENTS.md`.

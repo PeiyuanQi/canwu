@@ -324,13 +324,23 @@ let plugin = SocietyPlugin::with_settlement_cadence(SystemCadence::Monthly);
   due cohort transfers, rebases, and culture lifecycle changes are applied
   only at a settlement. If such a change must take effect within a day, keep
   the `Daily` cadence.
-- **One due transfer per cohort completes per settlement.** Each due transfer
-  is checked against the state that the earlier transfers of the same
-  settlement left. Of the due transfers that share a cohort, as source or
-  destination, one completes; the others settle as `stale_source` and must be
-  reissued against the new state. A `Daily` society applies the same rule to
-  transfers due on one day, but a coarse cadence collects a whole period of
-  them.
+- **Due transfers settle as a batch by default.** Every issuer of the period
+  decided against the same state, so `TransferSettlement::Batch`, the default
+  for `SocietyPlugin::DAILY`, `default()`, and `with_settlement_cadence`,
+  checks each due transfer against the state at the start of the settlement
+  and applies the ones that still fit in admission order, each to the state
+  the earlier ones left; a transfer whose cohorts an earlier settlement
+  changed after it was admitted settles as `stale_source`, and one whose
+  quantity no longer fits its source cohort as `insufficient_source`.
+  `SocietyPlugin::with_transfer_settlement(TransferSettlement::OneByOne)`
+  restores the 0.15.0 rule: each due transfer is checked against the state
+  the earlier transfers of the same settlement left, so of the due transfers
+  that share a cohort one completes and the others settle as `stale_source`
+  and must be reissued. Choose `Batch` under a coarse cadence, or whenever
+  several transfers may move people out of or into one cohort between two
+  settlements; choose `OneByOne` when each transfer must see the result of
+  the one before it. The mode is part of the plugin identity, so restore and
+  replay with a plugin of the same mode.
 - **A settlement that changes nothing writes nothing.** An idle society writes
   no new record version and no record-change evidence. An observer's
   projection, with its `observed_at` time, changes only when that observer's
@@ -341,10 +351,15 @@ let plugin = SocietyPlugin::with_settlement_cadence(SystemCadence::Monthly);
   `from_society_snapshot_json_with_plugin(&saved, &plugin)`.
 - **A coarse cadence makes the intake queue wait.** The queue holds at most
   4,096 packets (`MAX_SOCIETY_INGRESS_QUEUE`). A packet that arrives while it
-  is full is dropped with only a `society_ingress_rejected_v1` event and must
-  be sent again. Every boundary that admits a packet rewrites the whole queue
-  record, so the evidence of a queue that waits a long period grows with the
-  square of the packets it collects.
+  is full is refused by the boundary that admits it, with a terminal
+  `queue_full` outcome in the cohort exchange ledger and a
+  `society_ingress_rejected_v1` event (or
+  `society_pressure_revision_rejected_v1` for a revision), and must be sent
+  again; a `revise_society_pressure` command is refused at admission while
+  the queue is full. The queue is a small head record plus one batch record
+  per admitting boundary (`SocietyIngressBatch`,
+  `society_ingress_queue_entries` reads it), so its evidence follows what
+  each boundary admits, however long the queue waits.
 
 ### Revise pressure at runtime
 

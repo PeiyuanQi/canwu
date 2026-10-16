@@ -15,7 +15,13 @@ Work from the Canwu repository root. Read `AGENTS.md`, `CONTRIBUTING.md`,
    version. Treat unrelated changes as user-owned.
 2. Choose the SemVer change from `docs/versioning.md`. Do not bump the version
    unless the user authorized a release and the intended compatibility change
-   requires it.
+   requires it. When you bump it, move every `=X.Y.Z` first-party pin with
+   the workspace version: the `[workspace.dependencies]` pins in the root
+   `Cargo.toml` and the pin in `crates/extensions/canwu-production/Cargo.toml`,
+   then run `cargo update --workspace --offline` in the root, in
+   `crates/runtime/canwu-sim/tests/api-delta`, and in
+   `benchmarks/performance-harness` so each lockfile follows. Canwu crates
+   depend only on the exact same version of each other.
 3. Confirm the root `LICENSE` contains the unmodified Apache License 2.0 and
    `NOTICE` identifies Canwu and Peiyuan Qi without unresolved placeholders.
 4. Confirm every first-party crate inherits the workspace `Apache-2.0` SPDX
@@ -25,7 +31,13 @@ Work from the Canwu repository root. Read `AGENTS.md`, `CONTRIBUTING.md`,
 
 ## Verify code and packages
 
-Run:
+Test in proportion to the change. While iterating, run only the tests of the
+crates you changed and of crates that depend on what you changed; do not run
+unrelated suites, the performance harness, the website build, or long scale
+probes, and do not add tests for parts the change does not touch. Run the full
+verification list once before a change set is committed or integrated; in
+multi-agent work the integrating agent runs it once for the integrated whole.
+For the release itself, run the full list once:
 
 ```text
 cargo fmt --all -- --check
