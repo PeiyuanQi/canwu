@@ -141,12 +141,10 @@ assert_eq!(
 
 ### 4. 在下一个每日边界应用政策
 
-`settle_day` 结算一个带 `SystemCadence::Daily` 的边界。`Daily` 正是本示例注册的结算节奏，所以 society 插件的结算系统随之运行：
+`settle_day` 结算一个带 `SystemCadence::Daily` 的边界。`Daily` 正是本示例注册的结算节奏，所以 society 插件的结算系统 `settle-social-transitions` 在第 7 阶段随之运行：
 
-- 阶段 7，`settle-social-transitions`：`apply_pending_policies` 先把待应用的决策写到 `council-alignment` 上，再执行转化规则。
-- 阶段 10，`evaluate-mobilization-candidates`：本次运行没有候选。
-- 阶段 12，`aggregate-social-state`：得到 `main` 打印的计数。
-- 阶段 13，`materialize-society-projections`：为每个观察者生成一份估计。
+- `apply_pending_policies` 先把待应用的决策写到 `council-alignment` 上，再执行转化规则。
+- 同一个系统接着重新算出因它的变化而失效的内容，并只写一次根记录：动员候选（本次运行没有）、聚合状态（`main` 打印的计数），以及每个观察者的一份估计。
 
 制度执行力度为 800‰ 时，`03-public` 的速率为 `800 × 300,000 / 1,000 = 240,000`（单位为百万分之一），23 名同情者中有 5 人转为公开顺从。
 

@@ -243,7 +243,8 @@ The first-party extensions below use the same phases. The table helps you predic
 | `canwu-culture` (`CultureBoundaryPlugin`) | 12, event-driven | `culture_exposure_intake_v1` queues admitted `culture_exposure_v1` batches. |
 | `canwu-culture` (`CultureBoundaryPlugin`) | 7, Monthly | `culture_lifecycle_settle_v1` consumes the queue and accepted institutional decisions, settles the lifecycle against the boundary snapshot of society state, saves culture state, and schedules society deltas and signal batches as next-boundary ingress. |
 | `canwu-society` | 12, event-driven | `intake-society-ingress` queues admitted `cohort_headcount_rebase_v1`, `society_lifecycle_delta_v1`, and `society_pressure_revision_v1` packets. |
-| `canwu-society` | 7, society settlement cadence (Daily by default) | `settle-social-transitions` applies the queue after cohort transfers and before institutional decisions and transitions. |
+| `canwu-society` | 7, society settlement cadence (Daily by default) | `settle-social-transitions` applies the queue after cohort transfers and before institutional decisions and transitions, then materializes the mobilization candidates, aggregates, and observer projections its changes invalidated, so a settlement writes the root once. |
+| `canwu-society` | 7, event-driven | `intake-intergroup-relations` applies admitted `intergroup_relation_revision_v1` packets to the intergroup relations record, each packet as a whole or not at all; a refused packet is one `society_intergroup_relation_rejected_v1` event. |
 
 Movement legs are timed with the internal scheduled ingress `movement_leg_due_v1`. An order schedules its first departure, a departure schedules its arrival after the leg's planned duration, and an arrival schedules the next departure. A due packet takes effect only if it matches the due time saved on the order, so an explicit operation makes older packets stale. Due work never fails a boundary.
 

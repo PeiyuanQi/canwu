@@ -261,7 +261,9 @@ The legal bridge proceeds in fixed, persisted stages:
    additionally bind the provider payload to the exact proposal,
    occurrence time, medium, and scope; the plugin keeps that payload in its
    own bounded legal provider index (`LawBudgets::max_provider_packets`,
-   4,096 by default) when it admits the packet, so a seal never changes
+   256 by default since 0.18.0; each kept packet costs about 9 µs of every
+   law boundary, and a citation of a packet the index has forgotten is
+   refused) when it admits the packet, so a seal never changes
    what a later boundary reads. Generic practice signals remain
    identity-and-boundary evidence. Each admitted packet is applied or refused
    on its own with `canwu.law.ingress_rejected.v1`; a per-boundary budget

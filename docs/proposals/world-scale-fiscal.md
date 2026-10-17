@@ -2156,6 +2156,22 @@ tests), M (one crate, days), L (a crate's storage or settlement redesign), XL
 | Law (G-30) | sharded, but the plan and directory records grow with jurisdictions (default budget 512) and are decoded every boundary; 128 MiB global hot-state budget; 512 mutations a boundary; outbox ID blocks for life; no aggregate caseload (G-30 filed fix) | 50,000 jurisdictions push plan and directory past the record ceiling; caseload per county needs the aggregate | shard plan and directory, add the aggregate caseload record: M to L |
 | Routing (G-24) and transport | no stored caps; every route query rebuilds the adjacency index and hashes the whole network; 10,000 expanded nodes by default; no recurring timetables (G-24 filed fix) | each query costs the size of a county-level network | a compiled, cached network index: M; recurring timetables: S to M |
 | Movement | 1,024 orders, 256 per owner, 64 report holders a boundary, fixed; one root record | world-scale movement | L |
+
+Status in 0.18.0: the resource row is done for accounts, grants, definitions,
+and units ([resource series scale](resource-series-scale.md): live buckets,
+consumption batches; demands, transfers, and leases stay in the live root);
+the society row's cheap part is done ([society intergroup relations and
+settlement cost](society-intergroup-relations.md): one write per settlement,
+local checks, a bounded pending record, an opt-in ledger retention; the root
+is still one record); the law row is done ([law aggregate caseload](law-aggregate-caseload.md):
+the plan record written once, lazy shards, the aggregate caseload record);
+the routing row is done ([recurring traversal](recurring-traversal.md): the
+compiled `RoutingIndex`, recurring departures, edge conditions); the
+production row is done ([production at series scale](production-series-scale.md):
+scope roots, per-root limits of 16,384, the batch command, residue
+archives). The engine
+record-write, idle-floor, and sealing rows, and the movement, military, and
+technology rows, stand.
 | Military | 4,096 records per kind, never deleted (a lifetime cap); an outcome ledger that grows for good | 100 years | archive: M to L |
 | Technology | 5,000 records in total for life; every record loaded each boundary | 100 years at world scale | L |
 | Information, correspondence | one record per object, never deleted; information loads all its records each active boundary | grows for 100 years | archive and indexed reads: M to L |

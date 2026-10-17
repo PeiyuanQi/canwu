@@ -254,8 +254,8 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 - `OpenAssessment` 开立某个周期的账册。`CloseAccountingCycle` 关闭一个范围的一本账册；关闭的账册只接受审计结论（核算、减免或授权为 `FISCAL_CYCLE_CLOSED`，凭证为 `cycle_closed`）。账册可以按任意顺序关闭和归档。
 - 归档提交把已关闭的账册从范围明细移入财政归档。它把每个范围的水位线提高到它归档的最大周期；在归档某个机构某周期最后一本常驻账册的那次提交中，还把该机构这个周期的合计归档一次，并提高机构水位线。不在任何一条水位线及以下开立新账册（`FISCAL_CYCLE_ARCHIVED`），所以一个核算分区（范围、周期、单位、支付形态）在整个运行期内最多核算一次，而无需读取归档。低于机构水位线的常驻账册不受影响。
-- 归档由上层应用完成，协议与资源归档和生产归档相同：`FiscalState::prepare_fiscal_archive(book_limit, store, sealed_cut)` 按（范围、周期）顺序选出已关闭的账册，最多 `MAX_FISCAL_ARCHIVE_COMMIT_RECORDS`（4,096）条记录、每个 blob 64 条，构造 `PreparedFiscalArchiveBatchV1` 的 blob、成员页、时间页、查找索引页和目录；`enqueue_fiscal_archive` 把它们写入你的 `FiscalArchiveStore` 并校验，持久化保留句柄，再把提交排入队列（`fiscal_archive_commit_v1`）；提交结算后，`finalize_fiscal_archive_retention` 排入确认。准备和排队要在同一个边界间隙内完成。两者都要拼出已提交的状态，开销与财政记录数成正比。归档头持有 `MAX_FISCAL_ARCHIVE_PENDING_HANDLES`（64）个未确认句柄时，准备会被拒绝（`FiscalArchiveError::Backpressure`）。
-- 在会封存证据的运行上，把最后一个已封存日志段的终点游标作为 `sealed_cut` 传入：引用了在它之后建立的证据版本的账册会在准备时被拒绝（`FiscalArchiveError::UnsealedCitations`），直到某次封存覆盖它为止，因为归档账册会结束范围明细对它引用的折纳报价和凭证证据的载荷保留声明。这个切点由上层应用传入；会封存的上层应用传 `None` 就跳过了这项拒绝。
+- 归档由上层应用完成，协议与资源归档和生产归档相同：`prepare_fiscal_archive(&run, book_limit, &store)` 按（范围、周期）顺序选出已关闭的账册，最多 `MAX_FISCAL_ARCHIVE_COMMIT_RECORDS`（4,096）条记录、每个 blob 64 条，构造 `PreparedFiscalArchiveBatchV1` 的 blob、成员页、时间页、查找索引页和目录；`enqueue_fiscal_archive(&mut run, &prepared, &store)` 重新准备一次并要求两者相同，把它们写入你的 `FiscalArchiveStore` 并校验，持久化保留句柄，再把提交排入队列（`fiscal_archive_commit_v1`）；提交结算后，`finalize_fiscal_archive_retention` 排入确认。准备和排队要在同一个边界间隙内完成。这几个辅助函数接受任何运行句柄（`CanwuRun`），只读一次提交需要的记录：根记录、归档头、每条范围明细中足以判断它是否有已关闭账册的那一部分，以及本次提交选中账册所在的范围明细和机构记录；确认时只读归档头。归档头持有 `MAX_FISCAL_ARCHIVE_PENDING_HANDLES`（64）个未确认句柄时，准备在读取任何范围明细之前就被拒绝（`FiscalArchiveError::Backpressure`）。
+- 封存切点来自模拟运行本身。引用了运行最近一次封存切点之后建立的证据版本的账册，会在准备时被拒绝（`FiscalArchiveError::UnsealedCitations`），直到某次封存覆盖它为止，因为归档账册会结束范围明细对它引用的折纳报价和凭证证据的载荷保留声明。辅助函数通过 `sealed_evidence_cursor()`（`Canwu`、`CompactedCanwu` 和任何 `CanwuRun` 都有）读取这个切点：最后一个已封存日志段的终点，或恢复所用接续检查点的已结算切点；运行仍保留全部证据时为 `None`。保留全部证据的运行（每个 `Canwu`、从未封存的 `CompactedCanwu`、带完整日志恢复且尚未再次封存的运行）不会拒绝任何账册，所以会封存的上层应用要想让每处已归档的引用都落在已封存的日志段里，就应当在**每次存档时先封存**，再写接续检查点；只用接续检查点存档、从不封存的上层应用，第一个会话里归档不会遇到拒绝，恢复之后这类引用会被拒绝，直到它封存为止。
 - 提交先于所在边界的其他财政数据包结算，并且只对照它绑定的记录检查：归档头、每本选中账册的修订号，以及它们所属机构受影响的周期条目。其他账册上的行动、凭证或提交不影响它。从旧账册准备的提交结算为失效的空操作，留下凭证和一个由上层应用确认的句柄；归档头已持有其句柄的提交副本什么也不记录；两者都记在各自的 `canwu.fiscal.archive_maintenance.v1` 事件里。确认把它的句柄退掉一次。两者都不改变任何修订号。超过归档头余量（64 个未确认的失效句柄）的失效提交，以及不匹配的提交，以拒绝事件被拒绝，什么也不改变；这样的提交在状态中没有保留句柄，所以 `finalize_fiscal_archive_retention` 对它返回错误，由上层应用自己放弃存储中的那份副本。
 - 没有任何边界读取归档存储。准入、结算、幂等和分区唯一性都只用常驻记录，所以无论存储能否读取，运行的结算完全相同，恢复和精确重放也不需要存储。只有上层应用的归档操作读取存储：`archived_fiscal_record` 通过累积的[归档查找索引](/reference/terminology/)按 `FiscalArchiveKeyV1` 查找已归档的账册、某机构某周期的合计或维护凭证，`audit_fiscal_archive` 对照归档头检查整个归档。`()` 是一个什么都不存的存储。
 
@@ -363,7 +363,7 @@ for (binding_id, report) in fiscal_reports(&viewer)? {
 
 ### 报告如何发布
 
-一份报告保存为若干条知识记录，schema 为 `fiscal_report_knowledge_schema_id()`（种类 `canwu-fiscal` / `fiscal_report`，版本 5）：一条摘要记录（写明绑定的粒度和节律），加上报告显示的每个常驻周期的若干分段，每段 `FISCAL_REPORT_ROWS_PER_PART`（16）行（`FiscalReportRecord`）。单独一条记录只是一条摘要或一个分段，所以整份报告请通过 `fiscal_reports` 读取。
+一份报告保存为若干条知识记录，schema 为 `fiscal_report_knowledge_schema_id()`（种类 `canwu-fiscal` / `fiscal_report`，版本 6）：一条摘要记录（写明绑定的粒度和节律），加上报告显示的每个常驻周期的若干分段，每段 `FISCAL_REPORT_ROWS_PER_PART`（16）行（`FiscalReportRecord`）。分段的载荷把各行涉及的机构列成一张表、只写一次，每一行和每条事实都编码为数组，只有原来三分之一大小；`FiscalReportPart` 负责解码，单独的 `FiscalReportRow` 仍是对象形式。单独一条记录只是一条摘要或一个分段，所以整份报告请通过 `fiscal_reports` 读取。
 
 - **报告行落在观察者记录上。** 每条报告记录的主体都是该绑定自己的观察者记录，报告行由这条记录上的角色命名：摘要在第 0 行，槽位 `s` 中周期的分段 `p` 在第 `1 + s * 1,024 + p` 行。改指或移除一个绑定，其他绑定的报告行都留在原处。
 - **每条记录取代本条线上前面的那一条。** 报告系统用 [`SimulationView::knowledge_heads`](/architecture/knowledge-information/#取代先前的记录) 在已提交的知识账本里找到那条记录，所以封存过证据的模拟运行与其重放取代的记录完全相同。范围行的分段把它各行读自的范围明细版本作为证据引用。
@@ -388,7 +388,7 @@ for (binding_id, report) in fiscal_reports(&viewer)? {
 
 财政状态存放在[记录与字节预算](#记录与字节预算)所列的记录中。目录记录只可创建。每条范围明细把它常驻账册中的凭证和折纳报价引用的、运行中产生的精确证据版本标记为需要保留载荷，所以账册常驻期间引擎会让这些载荷始终可以加载；归档账册会结束这项声明，这正是会封存的运行上 `prepare_fiscal_archive` 拒绝未封存引用的原因。观察者记录引用持有人的人物或政府，所以如果状态写到了不存在的持有人，引擎会拒绝它。改绑、审计绑定、提名和结论的 `entered_by` 所写的记录版本则没有这样保留：之后不会再有判断读取它们，`seal_evidence` 之后，其中已被取代的版本可能无法再证明。`load_fiscal_state` 和 `audit_fiscal_records` 校验目录、每条记录和跨记录不变量。
 
-每个边界判断都只读常驻财政记录、目录、本边界自己准入的输入、当前版本索引、不受封存影响的记录版本、人物可用性和 `knowledge_heads`，从不读取保留的证据或归档存储，所以封存过的运行、未封存的派生分支、从已封存日志段恢复的运行和精确重放结算完全一致。插件只安排零延迟的数据包（报告排空），规范化步进会在同一次调用中准入它，所以它不会长时间阻止 `seal_evidence`；报告的到期时间写在队列条目里，从不写成未来到期的数据包。默认留存策略下，报告记录在发布时清退，实时运行和重放一致，与封存无关。快照和[精确重放](/developer/persistence/)要求插件身份一致：名称 `canwu-fiscal`、版本 `0.4.0-experimental` 和它的语义哈希，哈希涵盖你选定的唤醒节奏（`with_report_cadence`）、报告份额和留存策略。重放消费记录下来的命令和输入，不会重新运行玩家或 AI 的选择。参考整合包的 `restore_ming_fiscal_reference` 和 `replay_ming_fiscal_reference` 注册同样的三个插件，然后运行 `validate_ming_fiscal_reference`：它接受任一运行句柄，只用封存无法改变的状态把每张凭证与其证据重新核对一遍。
+每个边界判断都只读常驻财政记录、目录、本边界自己准入的输入、当前版本索引、不受封存影响的记录版本、人物可用性和 `knowledge_heads`，从不读取保留的证据或归档存储，所以封存过的运行、未封存的派生分支、从已封存日志段恢复的运行和精确重放结算完全一致。插件只安排零延迟的数据包（报告排空），规范化步进会在同一次调用中准入它，所以它不会长时间阻止 `seal_evidence`；报告的到期时间写在队列条目里，从不写成未来到期的数据包。默认留存策略下，报告记录在发布时清退，实时运行和重放一致，与封存无关。快照和[精确重放](/developer/persistence/)要求插件身份一致：名称 `canwu-fiscal`、版本 `0.5.0-experimental` 和它的语义哈希，哈希涵盖你选定的唤醒节奏（`with_report_cadence`）、报告份额和留存策略。重放消费记录下来的命令和输入，不会重新运行玩家或 AI 的选择。参考整合包的 `restore_ming_fiscal_reference` 和 `replay_ming_fiscal_reference` 注册同样的三个插件，然后运行 `validate_ming_fiscal_reference`：它接受任一运行句柄，只用封存无法改变的状态把每张凭证与其证据重新核对一遍。
 
 ## 上层应用需要提供什么
 

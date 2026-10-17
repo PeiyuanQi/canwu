@@ -790,7 +790,14 @@ wall time (100 to 240 s, following the load) does not compare with
 5.67 MB of payload against 15.13 MB, and the continuation checkpoint is
 about 10 MB smaller (162 MB after the first month and 284 MB after the
 24th, against 172 and 293), still growing about 3.9 MB a month through the
-engine's request index.
+engine's request index in that run, which was measured before request
+outcome retention was integrated. With it
+([`docs/proposals/request-outcome-retention.md`](../docs/proposals/request-outcome-retention.md),
+the same preset and cadence), the checkpoint grows 0.85 MB in all from
+month 5 (205.45 MB) to month 24 (206.30 MB): its request index holds one
+month of outcomes and receipts and two retired ranges a month, and on the
+smoke preset the compact checkpoint's dependencies and kept receipts stay at
+8,039 for twelve months instead of growing by 2,520 a month.
 
 ## Knowledge-ledger profile
 

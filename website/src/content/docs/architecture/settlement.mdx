@@ -243,7 +243,8 @@ for profile in &batch.profiles {
 | `canwu-culture`（`CultureBoundaryPlugin`） | 第 12 阶段，事件驱动 | `culture_exposure_intake_v1` 把已准入的 `culture_exposure_v1` 批次排入队列。 |
 | `canwu-culture`（`CultureBoundaryPlugin`） | 第 7 阶段，每月 | `culture_lifecycle_settle_v1` 消费队列和已接受的制度决策，基于 `canwu-society` 状态的边界快照结算生命周期，保存文化状态，并把 `canwu-society` 变化和信号批次安排为下一边界的输入。 |
 | `canwu-society` | 第 12 阶段，事件驱动 | `intake-society-ingress` 把已准入的 `cohort_headcount_rebase_v1`、`society_lifecycle_delta_v1` 和 `society_pressure_revision_v1` 输入排入队列。 |
-| `canwu-society` | 第 7 阶段，society 结算节奏（默认每日） | `settle-social-transitions` 在 cohort 转移之后、制度决策与转移规则之前应用队列。 |
+| `canwu-society` | 第 7 阶段，society 结算节奏（默认每日） | `settle-social-transitions` 在 cohort 转移之后、制度决策与转移规则之前应用队列，然后重新算出因它的变化而失效的动员候选、聚合状态和观察者投影，所以一次结算只写一次根记录。 |
+| `canwu-society` | 第 7 阶段，事件驱动 | `intake-intergroup-relations` 把已准入的 `intergroup_relation_revision_v1` 数据包应用到群体间关系记录上，每个数据包要么整体应用、要么完全不应用；被拒绝的数据包记为一条 `society_intergroup_relation_rejected_v1` 事件。 |
 
 移动路段的时序由内部调度输入 `movement_leg_due_v1` 驱动：移动命令安排首次出发，出发按路段计划时长安排到达，到达再安排下一次出发。到期输入只有与移动命令上保存的到期时间一致时才生效，因此显式操作会让旧的到期输入失效。到期工作不会让边界失败。
 

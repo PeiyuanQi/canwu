@@ -1349,6 +1349,12 @@ impl Canwu {
     /// reality, or a save. It shares the attached plugin archive provider and
     /// starts with profiling off. The copy is `Send`, so a host may advance,
     /// checkpoint, or save it on another thread.
+    ///
+    /// Forking takes constant time: the copy shares the run's state and
+    /// journals. While both hold the journals, the first append on either side
+    /// copies them, so a save fork that outlives the original's next boundary
+    /// moves that copy onto that boundary. A sealed run keeps its retained
+    /// journals short, and so the copy small.
     #[must_use]
     pub fn fork(&self) -> Self {
         Self::wrap(self.simulation.fork())
@@ -1822,7 +1828,9 @@ impl CompactedCanwu {
     /// Copies the compact runtime for a look-ahead or an alternative
     /// reality, as [`Canwu::fork`] does. The copy keeps the seal tokens
     /// already committed, shares the attached plugin archive provider, starts
-    /// with profiling off, and may move to another thread.
+    /// with profiling off, and may move to another thread. Like
+    /// [`Canwu::fork`] it takes constant time, and the first append on either
+    /// side while both hold the journals copies them.
     #[must_use]
     pub fn fork(&self) -> Self {
         Self {

@@ -42,9 +42,13 @@ journals the previous and the current record, so a 75 KiB root cost about
 
 **The settlement cadence is an option of the plugin.**
 `SocietyPlugin::with_settlement_cadence(cadence)` returns the plugin whose
-four settlement systems (`settle-social-transitions`,
+settlement systems run on that `SystemCadence` category. (As implemented
+here there were four: `settle-social-transitions`,
 `evaluate-mobilization-candidates`, `aggregate-social-state`, and
-`materialize-society-projections`) run on that `SystemCadence` category.
+`materialize-society-projections`. Since 0.18.0 the phase-7
+`settle-social-transitions` system materializes the derived views itself and
+the other three are gone; see
+[society intergroup relations and settlement cost](society-intergroup-relations.md#settlement-cost).)
 `SocietyPlugin::DAILY` and `SocietyPlugin::default()` are the `Daily` plugin.
 The two event-driven intakes keep queuing admitted work at any boundary; the
 next settlement applies it. `EventDriven` is refused at registration.

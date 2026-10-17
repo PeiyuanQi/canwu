@@ -70,7 +70,16 @@ resources, names, and source data outside Canwu core.
    reads `knowledge_publication_budget()` first and never publishes past it.
    A recorded rejection, a skipped packet, or a deferral is the normal answer
    to an inadmissible input, never a failed boundary; never declare an
-   initial-scenario record version as payload-required.
+   initial-scenario record version as payload-required (the engine refuses it
+   when the plugin registers). A plugin that reads the provenance of a
+   command ingress record (`plugin_ingress_matches`) declares it as an
+   identity-only dependency. Set the run's request outcome retention
+   (`RunConfiguration::with_request_outcome_retention`) for the longest
+   retry a research driver may make, allocate request IDs consecutively,
+   and handle `RequestOutcomeRetired` wherever you handle
+   `IdempotencyConflict`; routine justice at county scale is an aggregate
+   caseload profile on the legal definition, not one `LegalCase` per
+   routine case.
 
 Avoid presentism and single-variable historical determinism. Model the causal
 conditions that matter to the question, and state what is omitted. For a

@@ -68,7 +68,22 @@ person-by-place-by-domain matrices.
    publishes past it. Treat a recorded rejection, a skipped packet, or a
    deferral as the normal answer to an inadmissible input, never a failed
    boundary, and never declare an initial-scenario record version as
-   payload-required.
+   payload-required (the engine refuses it when the plugin registers). A
+   plugin that reads the provenance of a command ingress record
+   (`plugin_ingress_matches`) declares it as an identity-only dependency.
+   Give the run a request outcome retention
+   (`RunConfiguration::with_request_outcome_retention`) that covers your
+   highest speed and longest client retry, allocate request IDs
+   consecutively, and handle `RequestOutcomeRetired` wherever you handle
+   `IdempotencyConflict`; a plugin that must publish knowledge whatever
+   runs before it registers through `KnowledgeReservedPlugin`. A world of
+   many production sites installs one production root per scope (a county,
+   say), each with its own limits, and settles a holder's monthly
+   operations as one production batch command; a scope root's lease and
+   output keys carry the `{scope}/` prefix. A paged restore takes a
+   `PagedRestoreBudget`: the checkpoint's own `assembled_bytes` for saves
+   the game wrote, and a budget near the expected size plus an
+   authenticated root for pages from anywhere else.
 
 For technology or culture progression, avoid one global unlock flag when the
 game needs local variation. Separate knowledge, material access, capability,

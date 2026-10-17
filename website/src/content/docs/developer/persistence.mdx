@@ -104,6 +104,8 @@ assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
 - **保留活跃分支还在读的东西。** 删除归档提交淘汰的查找页，就放弃了运行中所有读取它们的更早时点，包括头部早于这次提交的分支，见[归档终态记录](/architecture/resources-production/#归档终态记录)。分支还在工作线程上活跃时，不要删除它仍会读的页或参考包归档对象。
 - **分支的封存只属于分支。** 封存分支不碰原运行的证据和封存历史，分支返回的封存段属于分支自己的存档，不属于原运行的段链。
 
+`fork()` 本身是常数时间：不复制状态，也不复制日志。两边都还持有共享日志时，先追加的一方要复制日志（完整历史的运行在 65,536 条记录时约 53 毫秒），所以一个在原运行的下一个边界时仍然活着的存档分支，会把这次复制转移到原运行的那个边界上，而在以前的版本里是分支自己承担的；在意这一点时，请在下一个边界之前完成或丢弃存档分支，或者先封存，因为封存过的运行只复制上次封存之后的尾部。
+
 ## 向外部发送效果：外发队列
 
 需要送达外部系统的边界输出会出现在 `outbox_entries()` 中。每个 `OutboxEntry` 都有稳定的 `delivery_id`，由运行、结算边界、事件和输出序号派生而来。
@@ -154,10 +156,12 @@ assert_eq!(continued.checkpoint_hash(), canwu.checkpoint_hash());
 **分页检查点**是当前状态检查点按内容寻址的形式：它以状态页的形式保存在 `StatePageProvider` 中，之后每个新检查点只增加发生变化的页。从 0.13.2 起，可以通过对外 API 写出和恢复分页检查点：
 
 - **写出。** `Canwu::prepare_paged_checkpoint(source, provider)` 把当前状态整理成一个 `PreparedPagedSimulationCheckpoint`。其中的增量不包含提供方已经持有的页；`source` 是上一个检查点（如果有）。`store_and_verify` 负责保存这份增量。准备检查点不会改动模拟运行：状态修订号、检查点哈希和所有日志都保持不变。
-- **恢复。** `Canwu::from_paged_checkpoint_and_journal(checkpoint, provider, segments)` 和 `from_paged_checkpoint_and_journal_with_plugins` 根据提供方和证据前缀重建模拟运行。证据前缀是从运行开始到该检查点为止、连续不断的日志段，可以在运行过程中用 `journal_segment_since` 逐段收集。每个日志段至少要包含一条新记录，所以起点与终点相同的日志段要跳过。恢复时执行的验证与加载快照相同。提供方只需持有恢复时实际读取的页；读取的页缺失时会以 `StatePageUnavailable` 失败，不会当作空数据。对已归档的决策历史，恢复只读取热决策状态所依赖的页；其他已归档历史会报告 `Unresolved`，直到通过提供相同页的 `DecisionArchiveProvider` 调用 `decision_history_location_with_provider` 查到它。
+- **恢复。** `Canwu::from_paged_checkpoint_and_journal(checkpoint, provider, segments, budget)` 和 `from_paged_checkpoint_and_journal_with_plugins` 根据提供方和证据前缀重建模拟运行。证据前缀是从运行开始到该检查点为止、连续不断的日志段，可以在运行过程中用 `journal_segment_since` 逐段收集。每个日志段至少要包含一条新记录，所以起点与终点相同的日志段要跳过。恢复时执行的验证与加载快照相同。提供方只需持有恢复时实际读取的页；读取的页缺失时会以 `StatePageUnavailable` 失败，不会当作空数据。对已归档的决策历史，恢复只读取热决策状态所依赖的页；其他已归档历史会报告 `Unresolved`，直到通过提供相同页的 `DecisionArchiveProvider` 调用 `decision_history_location_with_provider` 查到它。
 - **紧凑模式。** `CompactedCanwu` 提供同样的调用。它的证据前缀是你已封存的日志段（按封存先后排列），再加上用 `journal_segment_since` 从最后一段的终点取得的日志段；如果封存之后没有记录任何内容，就跳过这最后一段。紧凑模式恢复之后，证据前缀会改变，见[重启紧凑模式的模拟运行](#重启紧凑模式的模拟运行)。
 
-检查点本身不携带证据记录。除了紧凑模式的接续信息（例如每次封存对应的一个归档日志段头），它的大小取决于当前状态，而不是运行持续了多久；每份增量只包含发生变化的页。准备检查点时仍可能读取保留的证据，恢复时也仍会验证完整的证据前缀。领域记录页是二进制页（`raw-canonical-v2`）：超过 1 MiB 的记录按内容寻址切成 1 MiB 的记录值分块分页保存，没有变化的分块不会存两次，最大 512 MiB（`MAX_PAGED_RECORD_BYTES`）的记录都能分页；更长的记录会让 `prepare_paged_checkpoint` 以 `ValueOutOfRange` 失败，这不是页损坏。恢复时会先按页描述的大小分配内存（每条记录最多到这个上限），然后才能拒绝一个把同一分块列了很多次的页，所以来源不可信的检查点请先按它的根认证，再恢复。
+检查点本身不携带证据记录。除了紧凑模式的接续信息（例如每次封存对应的一个归档日志段头），它的大小取决于当前状态，而不是运行持续了多久；每份增量只包含发生变化的页。准备检查点时仍可能读取保留的证据，恢复时也仍会验证完整的证据前缀。领域记录页是二进制页（`raw-canonical-v2`）：超过 1 MiB 的记录按内容寻址切成 1 MiB 的记录值分块分页保存，没有变化的分块不会存两次，最大 512 MiB（`MAX_PAGED_RECORD_BYTES`）的记录都能分页；更长的记录会让 `prepare_paged_checkpoint` 以 `ValueOutOfRange` 失败，这不是页损坏。知识账本也按同样的方式分页，分成两张按内容寻址的映射（记录正文按 ID，持有人账本按持有人，各占一个叶页，所以没有变化的正文或持有人仍用原来的页）；紧凑检查点正文和热决策状态是 1 MiB 的分块页，所以分页检查点没有哪一部分受限于单页：有 4,000 个报告持有人、账本 9.8 MB 的世界存成约 16,000 页，准备约 90 毫秒，恢复约 250 毫秒，一天的增量约 2,300 页。
+
+每次分页恢复的最后一个参数都是**恢复预算**。`PagedRestoreBudget { max_assembled_bytes }` 限制恢复从页中组装出来的字节数：每条记录值、知识记录正文、持有人账本、紧凑检查点正文和热决策状态都先计入预算再分配内存，超出预算的值在读取它的任何分块之前就以 `RestoreBudgetExceeded` 失败，什么也不恢复；描述记录声明的数目超过预算时，在读取任何页之前就拒绝。描述记录在 `PagedSimulationCheckpoint::assembled_bytes` 里写明诚实恢复时的精确数目，与页实际组装出来的数目不一致的描述记录会被拒绝，所以恢复自己写出的检查点时，传 `PagedRestoreBudget::new(checkpoint.assembled_bytes)` 即可。`PagedRestoreBudget::DEFAULT`（2 GiB）是你自己更大的检查点的上限。预算限制的是组装出来的字节数，不是堆内存：恢复同时持有组装出来的值、由它们解码出的状态和校验时的副本，解码后的 JSON 可能是文本的许多倍，所以 2 GiB 预算之内的恶意页仍可能让峰值内存达到几十 GiB。来源不可信的页，请传一个接近预期大小的预算（你写出的检查点的 `assembled_bytes` 加上余量），并把根页 ID 与自己记录过的对照认证；`DEFAULT` 不是这种场合的界限。你自己封装分页恢复的入口（例如页存储适配器）也要接收并传入这个预算。
 
 需要注意：
 
@@ -181,12 +185,33 @@ assert_eq!(continued.checkpoint_hash(), canwu.checkpoint_hash());
 ## 版本与存档兼容
 
 :::note
-参伍 0.17.0 写出快照格式 9、承诺格式 6、检查点/证据日志格式 6、分页检查点封装格式 6 和接续检查点格式 2。参伍的 crate 只依赖彼此完全相同的版本，存档也记录了精确的 `engine_version`，所以 0.17.0 引擎只能加载 0.17.0 写出的存档。0.16.0 及更早版本的存档不能加载，改写其中记录的版本号也不行；需要读取时，请保留旧引擎，或用自己的工具导出数据。
+参伍 0.18.0 写出快照格式 9、承诺格式 6、检查点/证据日志格式 6、分页检查点格式 7 和接续检查点格式 3。参伍的 crate 只依赖彼此完全相同的版本，存档也记录了精确的 `engine_version`，所以 0.18.0 引擎只能加载 0.18.0 写出的存档。0.17.0 及更早版本的存档不能加载，改写其中记录的版本号也不行；需要读取时，请保留旧引擎，或用自己的工具导出数据。
 :::
 
-参伍 0.17.0 是次版本，每种持久化格式都变了（快照、承诺、检查点/证据日志、分页检查点封装、接续检查点；状态修订、准入游标和精确重放格式仍是 3），原因只有一个：[知识账本](/architecture/knowledge-information/#知识账本)现在每个记录正文只存一份、每个持有人各一个持有人条目，schema 还可以在发布时清退被取代的条目（[留存](/architecture/knowledge-information/#留存)）。快照格式 9 把账本编码为正文和持有人条目，每个持有人带它的下一个本地记录号；承诺格式 6 按块计算账本的哈希（每个条目一个叶哈希，每 256 个本地记录号一块，每个持有人一个根），所以条目可以离开；检查点/证据日志格式 6 把每次发布记为它的正文和每个持有人的条目，每条指令一个列出全部持有人的 `KnowledgePublished` 事件；分页检查点封装（格式 6）和接续检查点（格式 2）内嵌新的快照。哈希算法没有变化，但每个检查点哈希、边界哈希和状态承诺都与 0.16.0 不同。与存档和代码有关的变化如下：
+参伍 0.18.0 是次版本，平面存档的格式没有变（快照 9、承诺 6、检查点/证据日志 6；状态修订、准入游标和精确重放格式仍是 3），改变的是分页检查点（格式 7）、接续检查点（格式 3）和若干扩展的格式。下面的数字来自仓库中的基准测试，在一台开发机上记录（见 [`docs/versioning.md`](https://github.com/PeiyuanQi/canwu/blob/main/docs/versioning.md)）。与存档和代码有关的变化如下：
 
-- **存档只保存当前的知识。** 在 `RetireWhenSuperseded` 下，持有人每条线只保留一个条目，所以有几千个报告持有人的世界，它的接续检查点在模拟的年月中保持平稳，不再随每次发布增长。分页检查点仍把整本知识账本放在一个 4 MiB 的封装页里，几千个报告持有人的世界放不下；这样的运行请用[接续检查点](#接续检查点)存档。
+- **请求结果只保留一段时间。** 带请求标识的命令请求的精确结果和排队回执，按模拟运行的[请求结果保留期](/reference/terminology/)保留（`RunConfiguration::with_request_outcome_retention`，默认 30 个模拟日，最长 366 天，在创建运行时定下）：保留期内完全相同的重试拿回原来的结果；超过之后请求退役，它的 ID 在整个运行期内仍算已使用，再用这个 ID 提交任何请求，不论是否完全相同的重试，都以 `RequestOutcomeRetired` 被拒绝，不留下尝试、修订号或事件。上层应用凡是把 `IdempotencyConflict` 当作“这个 ID 已被占用，换一个”的分支，都要同样处理 `RequestOutcomeRetired`。规则只看模拟时间，所以现实时间的暂停不会让任何结果退役，模拟速度越快、按现实时间算退役得越早，而未封存的运行、封存过的运行、从接续检查点恢复的运行和精确重放回答一致，写出的接续检查点逐字节相同。
+- **如何选择保留期和分配请求 ID。** 请按最高的模拟速度和客户端最长的重试间隔选择保留期；可能离线更久的客户端，由上层应用用自己收到过的结果回答。请连续分配请求 ID（用运行状态能恢复的计数器，或者批次所依据的修订号加偏移量）：这样退役的 ID 会合并成寥寥几个区间，而按键哈希出来的 ID 每个要在整个运行期内占约 59 字节。恢复之后，下一个可用的 ID 是检查点中 `retired_commands`、`commands`、`queued_commands`、`decision_commands`、未准入的尝试和待处理输入里最大 ID 加一。在世界规模下，原来每个模拟月因请求索引增长约 3.8 MB 的接续检查点，现在从第 5 个月到第 24 个月总共只增长 0.85 MB。
+- **接续检查点格式 3。** `RequestIndex` 新增 `retired_commands`，即已退役请求 ID 的规范化区间；`commands` 只保存保留期内的结果，`queued_commands` 不再保存已退役请求的回执。恢复时会拒绝不规范的区间、落在区间内的已保存结果或回执、超出保留期的结果，以及回执缺失或 ID 已退役的待处理命令请求。
+- **进入时的检查。** 初始记录声明了任何封存都无法接受的证据（需要保留载荷或身份依赖指向初始场景版本、记录自己的版本，或引用畸形）的场景或存档，在插件注册时（`InvalidDomainRecord`）和存档恢复时（`InvalidSnapshot`）就被拒绝，而不是开始一场永远无法封存、也无法写接续检查点的运行。`enqueue_command` 拒绝请求 ID 0。插件描述可以带一份[发布预留](/architecture/knowledge-information/#发布预算)；运行只能用声明了相同预留的插件恢复和重放。
+- **需要修改的代码。**
+  - *财政。* `prepare_fiscal_archive(&run, book_limit, &store)` 取代 `FiscalState::prepare_fiscal_archive`，`enqueue_fiscal_archive` 去掉了 `sealed_cut` 参数，封存切点改由运行本身提供（`sealed_evidence_cursor`，`CanwuRun` 新增的必需方法）；会封存的上层应用在每次存档时先封存。`fiscal_report` schema 升到版本 6（紧凑的分段载荷），插件版本为 `0.5.0-experimental`。
+  - *资源。* `RESOURCE_STATE_FORMAT_VERSION` 升到 4：账户、动用授权、资源定义、单位版本和保管人索引持久化在常驻终态桶旁边的活动桶（`resource:live:{bucket}`）里，两类桶共用记录种类 `canwu.resource` `bucket`（`ResourceBucketRecord` 取代 `ResourceHotTerminalBucketRecord`），常驻终态桶每桶约两条记录。`ResourceState::into_record` 拒绝带期初账户的根，请改用 `into_records`。`max_mutations_per_boundary` 改名为 `max_batch_items_per_boundary` 并真正生效；`ResourceConsumption` 新增 `fulfillment`；上层应用的 `Expire` 在入队时被拒绝；已结束的租约离开资源根。
+  - *路由。* `TraversalModel` 新增 `Recurring`，`RoutingError` 新增 `InvalidConditions`，`RoutePlan` 新增 `edge_conditions_digest`，`ROUTING_ALGORITHM_VERSION` 为 `canwu-routing.v2`，所以保存下来的快照摘要和计划摘要与 0.17.0 不同。
+  - *society。* `SocietyState` 新增 `relation_vocabulary`；插件描述去掉了三个结算系统、新增关系接收系统，所以 society 的每个语义哈希都改变；一次结算只记一条“Settled society”记录变更。
+  - *法律与信息。* `LegalDefinition` 新增 `caseload`；`LEGAL_SHARD_PAYLOAD_FORMAT_VERSION` 升到 2；`LegalRuntime` 序列化时不含 `plan`；`max_provider_packets` 默认 256。信息扩展的 `delegated_authority` 记录改为每个命令授权一本带版本的账，`delegated_authority_reference` 只接受授权代码。
+  - *参考整合包。* `ForceSupplyStateV1` 和 `EconomyReferenceStateV1` 升到格式 2，新增归档凭证链；`prepare_economy_archive` 接收运行的 force-supply 根记录；finalize 辅助函数返回 `Option<IngressReceipt>`。
+  - *生产。* `ProductionState` 新增 `scope`、`limits` 和 `incident_history`；需要多个根的上层应用为每个范围在 `canwu.production:runtime:scope:{scope}` 下安装一条；`ProductionLimitsV1` 用 `max_batch_items` 和 `max_operations_per_boundary` 取代 `max_mutations_per_boundary`，去掉 `max_incident_receipts`；`PRODUCTION_ARCHIVE_BLOB_FORMAT_VERSION` 升到 3（残留记录、三种新归档键、已归档执行上的 `decision_receipts`、凭证上的 `duplicate_settlements`、批次、提交和凭证上的 `scope`，以及 `canwu.production.archive-source-root.v2` 域）；每个数据包都带 `scope`；范围根的租约和产出键以 `{scope}/` 开头，主根的键不含 `/`。
+- **插件身份。** society、法律、信息、通信、财政（`0.5.0-experimental`）、资源、生产和两个参考经济插件的语义哈希改变；军事、移动、技术和文化插件不变。
+- **分页检查点格式 7。** 每个分页恢复入口（`Canwu` 和 `CompactedCanwu` 上的 `from_paged_checkpoint_and_journal` 及其 `_with_plugins` 形式，以及 `PersistentDomainRecordStore::from_state_pages`）新增最后一个参数[恢复预算](#分页检查点)（`PagedRestoreBudget`），`ErrorCode::RestoreBudgetExceeded` 是新错误码；你自己调用分页恢复的页存储适配器或存档封装要加上这个参数。描述记录新增 `assembled_bytes`；紧凑检查点正文从单个封装页改为分块页，知识账本按记录正文和持有人账本分页，决策清单的热状态也分块，所以有几千个报告持有人的世界又能存成分页检查点了。请用 0.18.0 重新写出分页检查点；页收集器照旧通过 `StatePageRetentionLedger` 读取新的封装。
+- **封存快了十倍，字节不变。** `seal_evidence` 对每条封存的记录只编码和哈希一次，只为运行仍保留的依赖生成凭证；约 900,000 条索引条目的封存从 30 到 59 秒降到 3.3 秒，每个日志段、索引、凭证和哈希都逐字节相同。
+- **派生分支和恢复更便宜，字节不变。** 运行时现在用持久化的共享结构保存当前状态、调度器和保留的日志：`fork()` 是常数时间，不复制任何日志；恢复一份大的未封存快照快了约三分之一；每份快照、检查点、日志、哈希和每个拒绝结果都没有变化。派生之后，两边都还持有共享日志时第一次追加的一方要复制日志，所以一个在原运行的下一个边界时仍然活着的存档分支，会把这次复制（65,536 条记录时约 53 毫秒）转移到原运行上；封存过的运行只复制上次封存之后的尾部。见[平行现实](#平行现实)。
+
+和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.17.0 的存档；需要读取时，请保留 0.17.0 引擎。
+
+上一个次版本参伍 0.17.0 改变了每种持久化格式（快照、承诺、检查点/证据日志、分页检查点封装、接续检查点；状态修订、准入游标和精确重放格式仍是 3），原因只有一个：[知识账本](/architecture/knowledge-information/#知识账本)现在每个记录正文只存一份、每个持有人各一个持有人条目，schema 还可以在发布时清退被取代的条目（[留存](/architecture/knowledge-information/#留存)）。快照格式 9 把账本编码为正文和持有人条目，每个持有人带它的下一个本地记录号；承诺格式 6 按块计算账本的哈希（每个条目一个叶哈希，每 256 个本地记录号一块，每个持有人一个根），所以条目可以离开；检查点/证据日志格式 6 把每次发布记为它的正文和每个持有人的条目，每条指令一个列出全部持有人的 `KnowledgePublished` 事件；分页检查点封装（格式 6）和接续检查点（格式 2）内嵌新的快照。哈希算法没有变化，但每个检查点哈希、边界哈希和状态承诺都与 0.16.0 不同。与存档和代码有关的变化如下：
+
+- **存档只保存当前的知识。** 在 `RetireWhenSuperseded` 下，持有人每条线只保留一个条目，所以有几千个报告持有人的世界，它的接续检查点在模拟的年月中保持平稳，不再随每次发布增长。0.17.0 的分页检查点仍把整本知识账本放在一个 4 MiB 的封装页里，几千个报告持有人的世界放不下；从 0.18.0 起账本已分页（见[分页检查点](#分页检查点)），证据前缀长到恢复时无法验证的运行，仍以[接续检查点](#接续检查点)为存档。
 - **需要修改的代码。**
   - *发布方。* 发布知识的插件把原来的指令包一层：`PublishKnowledge { visibility, producer_correlation, supersession: KnowledgeSupersession::Explicit, groups: vec![KnowledgePublicationGroup { holders: vec![holder], records }], summary }`。原来按 `KnowledgeLimitsV1::batches_per_system_boundary`（已移除）控制节奏的插件，改读 `view.knowledge_publication_budget()`，只发布 `take` 允许的部分。每个 `PluginKnowledgeSchema` 都要写明 `retention`。
   - *读事件和边界记录的代码。* `KnowledgePublished` 带 `holders`、`record_count` 和 `entry_count`，受众是 `EventAudience::KnowledgeHolders`；`BoundaryKnowledgeChange` 带 `records`（正文）和 `holders`（条目）。
@@ -198,13 +223,13 @@ assert_eq!(continued.checkpoint_hash(), canwu.checkpoint_hash());
 
 和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.16.0 的存档；需要读取时，请保留 0.16.0 引擎。
 
-上一个次版本参伍 0.16.0 改变了三种格式，新增一种。承诺格式 5 增量计算知识账本的哈希，并把边界的知识变化的每个字段都纳入边界哈希；检查点/证据日志格式 5 去掉了操作定址抽样的预留项，因为[操作定址抽样明细](/architecture/randomness/#抽样之后还有哪些开销)现在保存每个抽过的地址；分页检查点封装格式 5 把最大 512 MiB 的记录按 1 MiB 分块分页；[接续检查点](#接续检查点)是新增的。哈希算法没有变化，但每个检查点哈希、边界哈希和领域记录根都与 0.15.0 不同，`authoritative_state_hash` 现在是承诺格式的状态哈希，封存过、未封存和恢复后的运行得到相同的值。与存档和代码有关的变化如下：
+再往前一个次版本参伍 0.16.0 改变了三种格式，新增一种。承诺格式 5 增量计算知识账本的哈希，并把边界的知识变化的每个字段都纳入边界哈希；检查点/证据日志格式 5 去掉了操作定址抽样的预留项，因为[操作定址抽样明细](/architecture/randomness/#抽样之后还有哪些开销)现在保存每个抽过的地址；分页检查点封装格式 5 把最大 512 MiB 的记录按 1 MiB 分块分页；[接续检查点](#接续检查点)是新增的。哈希算法没有变化，但每个检查点哈希、边界哈希和领域记录根都与 0.15.0 不同，`authoritative_state_hash` 现在是承诺格式的状态哈希，封存过、未封存和恢复后的运行得到相同的值。与存档和代码有关的变化如下：
 
 - **存档不再随进行中的工作增长。** 有待处理输入时也能封存；接续检查点用几 MB 就能保存一场长战役。引用已封存证据的首次[操作定址随机抽样](/architecture/randomness/#封存证据之后的重试)在封存过和未封存的运行中都被接受，引用已被取代的记录版本的首次抽样在任何运行中都被拒绝。
 - **需要修改的代码。** `DomainRecordChange::previous` 和 `current` 的类型是 `Arc<DomainRecord>`。`KnowledgeSnapshot::records` 的类型是 `HolderLedgers`，它的迭代器只能正向遍历（`.rev()` 和 `next_back` 不能编译；用 `last_key_value` 读最新记录）。`ErrorCode` 标记为 non-exhaustive，并新增 `HistoryUnavailable`。`SocietyIngressQueue` 用 `queued` 和 `batches` 取代了 `entries`。`ProductionState::prepare_production_archive` 多了一个归档存储参数，`prepare_force_archive` 和 `prepare_economy_archive` 也是。财政 API 围绕记录、批次和按记录的修订号重建：`FiscalActionBatch` 取代 `FiscalActionRequest`，`enqueue_execution_receipts` 取代 `enqueue_execution_receipt`，`FiscalState::into_records` 取代 `into_record`，`FiscalAction` 新增六个变体。命令处理器不能再安排一条会排入插件输入的延时指令（`InvalidPayload`）；请直接给 `EnqueuePluginIngress` 设定延时。
 - **插件身份。** society 插件（它的语义哈希现在还取决于[转移结算模式](/tutorials/cases/local-community-diffusion/#换一种结算节奏)）、财政、资源、生产、法律、信息和军事插件，以及两个参考经济插件的语义哈希改变。
 - **归档。** 生产归档和参考包归档获得了资源归档的查找索引，财政归档是新增的；请像对资源归档一样，保留每种归档的查找页。0.15.0 写出的生产记录和归档对象、财政状态、society 队列记录和参考包归档目录无法解码，不过 0.16.0 的模拟运行不可能读到它们。
-- **资源根。** `RESOURCE_STATE_FORMAT_VERSION` 升到 3：资源根持久化为活动根（`resource:runtime:v1`，载荷 `ResourceLiveRootV1`，用一本账计数常驻终态记录）和每个常驻终态桶一条记录（新记录种类 `canwu.resource` `hot-terminal`，`resource:hot-terminal:{bucket}`，格式 1），字节上限按活动根加全部条目计算。归档 blob、保留句柄和目录引用 v2 的归档来源根，所以它们的 id 与 0.15.0 不同，形状不变。原来从 `ResourceRuntimeRecord::Payload` 读常驻终态记录的代码，改用 `resource_root_in_view`、`ResourceRootReader` 或 `whole_resource_root_in_view`，并声明 `resource_hot_terminal_state_key()`；含终态记录的根用 `ResourceState::into_records` 取代 `into_record`；force-supply 的恢复函数多了一个归档提供方参数。见[资源与生产](/architecture/resources-production/#随机性持久化与重放)。
+- **资源根。** `RESOURCE_STATE_FORMAT_VERSION` 升到 3（0.18.0 为 4，新增活动桶，记录种类为 `bucket`，见上文）：资源根持久化为活动根（`resource:runtime:v1`，载荷 `ResourceLiveRootV1`，用一本账计数常驻终态记录）和每个常驻终态桶一条记录（新记录种类 `canwu.resource` `hot-terminal`，`resource:hot-terminal:{bucket}`，格式 1），字节上限按活动根加全部条目计算。归档 blob、保留句柄和目录引用 v2 的归档来源根，所以它们的 id 与 0.15.0 不同，形状不变。原来从 `ResourceRuntimeRecord::Payload` 读常驻终态记录的代码，改用 `resource_root_in_view`、`ResourceRootReader` 或 `whole_resource_root_in_view`，并声明 `resource_hot_terminal_state_key()`；含终态记录的根用 `ResourceState::into_records` 取代 `into_record`；force-supply 的恢复函数多了一个归档提供方参数。见[资源与生产](/architecture/resources-production/#随机性持久化与重放)。
 - **拒绝不再卡住模拟运行。** 各扩展中，因可预期的原因无法结算的数据包都是记录在案的拒绝、带事件的跳过或延后结算：放不进资源记录或操作键已被占用的资源数据包（[跳过的数据包](/architecture/resources-production/#跳过的数据包与延后结算)）、无法解码或未通过检查的生产数据包、财政凭证、语境变更和归档数据包、超出预算或上层应用版本过期的法律数据包，以及相互冲突的信息数据包。任何预算或拒绝都不会再让边界失败。
 - **进入时的检查。** 不是有效状态精确拆分的财政记录集合、头与批次不一致的 society 队列、产出超过 64 项的工艺，以及会排入插件输入的已调度工作，都在创建或恢复模拟运行时被拒绝。插件不得把初始场景中的记录版本声明为需要保留载荷；这样声明的运行无法封存。
 

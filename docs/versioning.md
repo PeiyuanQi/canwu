@@ -8,12 +8,12 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.17.0`. A live `SimulationSnapshot` has:
+The workspace version is `0.18.0`. A live `SimulationSnapshot` has:
 
 - snapshot format `9`;
 - commitment format `6`;
 - checkpoint/evidence-journal format `6`;
-- paged-checkpoint envelope format `6` and continuation checkpoint format `2`;
+- paged-checkpoint envelope format `7` and continuation checkpoint format `3`;
 - state revision format `3`;
 - admission cursor format `3`;
 - exact replay revision format `3`;
@@ -25,6 +25,1123 @@ The workspace version is `0.17.0`. A live `SimulationSnapshot` has:
 Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
+
+Version 0.18.0 is a pre-1.0 minor release. Its changes come from the
+packages that close the remaining downstream gaps and engine findings of the
+0.17.0 runs, each with its own proposal:
+
+- [recurring traversal, edge conditions, and the compiled routing index](proposals/recurring-traversal.md)
+  (`canwu-routing`, `canwu-correspondence`);
+- [society intergroup relations and settlement cost](proposals/society-intergroup-relations.md)
+  (`canwu-society`);
+- [law: aggregate caseload, plan records at scale, and bounded bookkeeping](proposals/law-aggregate-caseload.md)
+  (`canwu-law`, `canwu-information`);
+- [request outcome retention](proposals/request-outcome-retention.md)
+  (`canwu-sim`, `canwu-api`);
+- [fiscal archive and due-instant cost](proposals/fiscal-archive-and-due-instant-cost.md)
+  (`canwu-fiscal`, one read on `canwu-sim` and `canwu-api`);
+- [engine load and budget guards](proposals/engine-load-and-budget-guards.md)
+  (`canwu-sim`: initial-scenario declarations checked at load, boundary
+  ingress without an early refresh, knowledge publication reservations,
+  request ID 0 refused at enqueue);
+- [resource series scale](proposals/resource-series-scale.md)
+  (`canwu-resource`: consumption batches, live buckets, cheaper archive
+  commits);
+- [reference archive receipts and operation room](proposals/reference-archive-receipts.md)
+  (`canwu-force-supply-reference`, `canwu-economy-reference`);
+- [production at series scale](proposals/production-series-scale.md)
+  (`canwu-production`: scope roots, the batch command, per-root limits,
+  residue archives, folded incident receipts);
+- [runtime state copies](proposals/runtime-state-copies.md)
+  (`canwu-sim`: persistent current state and scheduler, shared journals, a
+  constant-time `fork`, a cheaper restore; no byte, hash, or API change);
+- [paged restore budget and seal cost](proposals/paged-restore-budget-and-seal-cost.md)
+  (`canwu-sim`, `canwu-api`: a host-supplied budget on every paged
+  restore, the knowledge ledger paged, the compact body and hot decision
+  state chunked, and a seal that hashes each sealed record once; paged
+  format 7).
+
+What changed, in one list:
+
+- A route can follow a **recurring departure** pattern
+  (`TraversalModel::Recurring`), a host applies **edge conditions**
+  (closures and adjustments by departure instant) without rebuilding the
+  network, and a compiled **routing index** (`RoutingIndex`) plans a query in
+  about a hundredth of the 0.17.0 time. `ROUTING_ALGORITHM_VERSION` is
+  `canwu-routing.v2`.
+- Society gains **intergroup relations**: directed, typed relations between
+  two **cohort classes** in a region, in their own record, revised by a
+  public packet; organization relation kinds can be bounded by a vocabulary;
+  a settlement writes the society root once; an opt-in **society outcome
+  retention** bounds the cohort exchange ledger.
+- Law settles **aggregate caseload** reports per jurisdiction and period into
+  bounded records with a **clearance rate**; the plan record is written once;
+  the stale-proposal check is budgeted; `max_provider_packets` defaults to
+  256; an information **delegation ledger** per grant drops expired
+  delegations.
+- A tracked command request's exact outcome is kept for the run's **request
+  outcome retention** (default 30 simulated days); a later request with a
+  retired ID is refused as `RequestOutcomeRetired`. Continuation checkpoint
+  format 3.
+- Fiscal archive helpers take the run and read only the records a commit
+  needs; the sealed cut comes from the run (`sealed_evidence_cursor`); the
+  due instant allocates a third less and publishes a third of the payload
+  (`fiscal_report` schema 6; plugin `0.5.0-experimental`).
+- The engine refuses at load an initial-scenario declaration no seal can
+  accept, computes the checkpoint hash once per boundary, lets a plugin hold
+  a **publication reservation** of every boundary's knowledge budget, and
+  refuses request ID 0 at enqueue.
+- Resource settles up to 256 consumptions under one lease as a **consumption
+  batch**, persists accounts, grants, definitions, and units in **live
+  buckets** with a **custodian index**, retires finished leases, halves the
+  journal of an archive commit, and refuses a host `Expire` at enqueue.
+  `RESOURCE_STATE_FORMAT_VERSION` 4.
+- The reference package archive folds acknowledged receipts into a digest
+  chain and skips an operation without room instead of failing the boundary;
+  both reference roots are format 2.
+- Production splits its state into **scope roots** (one `ProductionState`
+  per host-chosen scope beside the primary root), settles many operations
+  of one holder against one root as a **batch command**
+  (`apply_production_batch_v1`), bounds every collection per root with
+  `ProductionLimitsV1` fixed by the scenario (canonical 16,384 sites, work
+  orders, and executions), and lets nothing a root settles stay for life:
+  residues archive, incident receipts fold, rolled-out observation heads
+  prune. `PRODUCTION_ARCHIVE_BLOB_FORMAT_VERSION` 3.
+- The runtime holds its current state, scheduler, and retained journals in
+  persistent, shared structures, so a `fork` and every rollback copy are
+  constant-time (53 ms to 0.03 ms at 65,536 records) and a large unsealed
+  restore is about a third faster, with every byte, hash, and public
+  signature unchanged.
+- Every paged restore takes a **restore budget** (`PagedRestoreBudget`)
+  that bounds the bytes it assembles from pages, and refuses past it with
+  `RestoreBudgetExceeded` before reading a value's chunks; a descriptor
+  states its **assembled bytes**. The knowledge ledger is paged as two
+  content-addressed maps and the compact body and hot decision state are
+  chunked, so no part of a paged checkpoint is limited to one 4 MiB page and
+  a world of 4,000 report holders now saves as a paged checkpoint (16,347
+  pages, prepared in 89 ms, restored in 244 ms). A seal hashes each sealed
+  record once: about 900,000 index entries in 3.3 s instead of 30 to 59 s,
+  byte-identical. Paged-checkpoint format 7.
+
+**Same version only.** Canwu crates depend only on the exact same version of
+each other: every first-party crate requires `=0.18.0` of every other
+first-party crate it uses, and a host pins `canwu-api = "=0.18.0"` and the
+same version of every extension. Nothing written by 0.17.0 is read by
+0.18.0. There is no migration and no decoding of an old shape: the exact
+engine-version check refuses every 0.17.0 snapshot, checkpoint journal, paged
+checkpoint, continuation checkpoint, replay journal, evidence segment, and
+scenario that records its engine version, and several would also be refused
+by their format or schema versions (continuation format 3, resource state
+format 4 and its `bucket` record kind, legal shard payload format 2,
+`fiscal_report` schema 6, the information delegation ledger, the reference
+roots' format 2, paged-checkpoint format 7). The formats of a flat full save
+(snapshot 9, commitment 6, checkpoint/journal 6) are unchanged, so an old
+snapshot or checkpoint journal is refused by its engine version alone. A scenario built with 0.17.0 types is
+rebuilt with the 0.18.0 types: a resource root with opening accounts is
+installed with `ResourceState::into_records`, a society scenario may author
+an intergroup relations record, and a law plan may declare a caseload
+profile. Retain the 0.17.0 engine to read 0.17.0 data.
+
+Formats and schemas that change, each deliberately versioned:
+
+| Item | 0.17.0 | 0.18.0 | What changed |
+| --- | --- | --- | --- |
+| Snapshot, commitment, checkpoint/evidence-journal formats | 9, 6, 6 | 9, 6, 6 | shape unchanged; the engine version in every checkpoint hash changes |
+| `PAGED_CHECKPOINT_FORMAT_VERSION` (descriptor, envelope, decision manifest and directory pages) | 6 | 7 | the descriptor gains `assembled_bytes`, the exact charge of an honest restore; the envelope is `{ format_version, body: PagedBytes, domain_records, knowledge: { bodies?, holders? }, decision_manifest_page_id }`: the compact checkpoint body is no longer embedded but named as 1 MiB chunk pages (`PagedBytes { bytes, chunks }`), the knowledge ledger leaves the envelope and is paged as two Patricia maps under `canwu.paged-checkpoint.knowledge.bodies.v1` (key the canonical JSON of the body ID, value the body) and `canwu.paged-checkpoint.knowledge.holders.v1` (key the holder, value `{ holder, next_local, entries }`), one leaf per body and per holder ledger, with the record store's codec (`raw-canonical-v2`), chunking, and load checks; the decision manifest's `hot_state` is `PagedBytes` in place of `hot_page_id`; no part of a paged checkpoint is limited to one page. The evidence segment, its archive index, every receipt, the continuation checkpoint, and every hash are unchanged |
+| `CONTINUATION_CHECKPOINT_FORMAT_VERSION` | 2 | 3 | `RequestIndex` gains `retired_commands: Vec<RetiredRequestRange>` (canonical, sorted, disjoint, non-adjacent inclusive ranges of retired request IDs); `commands` holds only outcomes not retired at the checkpoint's `now`, and `queued_commands` no receipt of a retired request; the restore refuses non-canonical ranges, a kept outcome, receipt, or unadmitted attempt inside a range, an outcome outside the retention, and a pending command request whose receipt is missing or whose ID is retired; the hash domain stays `canwu.continuation-checkpoint.v1` |
+| `RunConfiguration` | — | — | `request_outcome_retention: SimDuration`, default 30 days, 0 to 366 days, omitted from the wire at the default, so a default configuration's semantic hash is unchanged; `RUN_CONFIGURATION_FORMAT_VERSION` stays 2 |
+| `PluginDescriptor` | — | — | `knowledge_publication_reservation: Option<KnowledgePublicationReservation>`, omitted when absent, so every existing descriptor's bytes and hash are unchanged; a run restores and replays only with a plugin that declares the same reservation |
+| `ROUTING_ALGORITHM_VERSION` | `canwu-routing.v1` | `canwu-routing.v2` | routes, costs, and refusals are those of v1 for every valid network whose arrival times are representable; `RoutePlan` gains `edge_conditions_digest: Option<String>` (skipped in JSON when `None`); `PlanningSnapshot::digest` is composed from the cut, the versions, and the new `RoutingNetwork::digest`, so snapshot and plan digests differ from 0.17.0; `TraversalModel` gains `Recurring { period, offsets, duration }` |
+| `canwu-correspondence` plugin | — | — | `SEMANTIC_HASH` and the `routing_connection` knowledge schema hash change (its records hold v2 plans and composed snapshot digests; the payload accepts `{"type": "recurring", ...}`); the schema id stays at version 1 |
+| Society root `canwu.society:state` | schema 2 | schema 2 | gains the optional `relation_vocabulary`, omitted while empty, so a root without one encodes byte for byte as before |
+| Society relations record | none | `canwu.society:intergroup-relations`, schema 1 | `IntergroupRelations { schema_version, kinds, edges }`, at most `MAX_INTERGROUP_RELATIONS` (4,096) edges; exists only when a scenario authors it or a revision creates it; binds no record references |
+| `canwu-society` plugin descriptor | — | — | loses the systems `evaluate-mobilization-candidates`, `aggregate-social-state`, and `materialize-society-projections`; gains `intake-intergroup-relations` (phase 7, event-driven), the public ingress `intergroup_relation_revision_v1`, the event `society_intergroup_relation_rejected_v1`, and the relations record schema; `intake-cohort-transfers` reads the ledger; the four pairs of transfer settlement mode and outcome retention have their own semantic hashes, all new |
+| `LEGAL_SHARD_PAYLOAD_FORMAT_VERSION` | 1 | 2 | the plan record holds only the compiled plan, its hash, and its budgets, declares no evidence, and is written once; the ledger counters move to the coordinator shard and the identity-evidence declaration to the directory; order and jurisdiction shards and their archive heads are created when they first hold something; `LegalRuntime` serializes without `plan` |
+| Legal caseload records | none | `LEGAL_CASELOAD_FORMAT_VERSION` 1 | `canwu.law` `caseload_head` and `caseload_period` (`law_record_schemas` returns six schemas; the two new ones declare no evidence); a plan without a caseload profile keeps its encoding and hash |
+| `LawBudgets::max_provider_packets` | default 4,096 | default 256 (`DEFAULT_PROVIDER_PACKETS`) | the default changes every compiled plan's content hash; `LAW_SEMANTIC_HASH` changes |
+| Information `delegated_authority` record | create-only, one per delegation command | `Versioned`, one per command grant | payload `DelegatedAuthorityLedgerPayload { format_version, authority_grant, delegations, expiring }` (`DELEGATED_AUTHORITY_LEDGER_FORMAT_VERSION` 1) at `delegated_authority_reference(grant)`; the plugin semantic hash changes |
+| `fiscal_report` knowledge schema | 5 | 6 | a part lists its rows' institutions once in an `institutions` table and encodes each row and fact as an array; version 5 is no longer registered, so a scenario whose knowledge carries one is refused; the summary, the lines, and the part digests are unchanged |
+| `canwu-fiscal` plugin | `0.4.0-experimental` | `0.5.0-experimental` | a new semantic hash; `FISCAL_RUNTIME_SCHEMA_VERSION` stays 6 and every fiscal record format is unchanged |
+| `RESOURCE_STATE_FORMAT_VERSION` | 3 | 4 | the state gains `live` (a `ResourceLiveLedgerV1` counting what the live root no longer holds) and `custodian_accounts`; `ResourceConsumption` gains `fulfillment`; the live root `resource:runtime:v1` holds no account, access grant, definition, unit revision, or custodian index; the encoded limits name `max_batch_items_per_boundary` instead of `max_mutations_per_boundary`; the adapter ingress accepts `ConsumeBatch`, the skip reason `boundary_budget` is new, and the deferred packet may wrap an adapter packet; `RESOURCE_SEMANTIC_HASH` changes |
+| Resource bucket record | `canwu.resource` `hot-terminal` (`ResourceHotTerminalBucketRecord`) | `canwu.resource` `bucket` (`ResourceBucketRecord`) | one record kind for both bucket families: `ResourceHotTerminalBucketV1` under `resource:hot-terminal:{n}` and the new `ResourceLiveBucketV1` (`RESOURCE_LIVE_BUCKET_FORMAT_VERSION` 1, entries in ascending key order) under `resource:live:{n}`; a hot bucket holds about two records (`RESOURCE_HOT_TERMINAL_RECORDS_PER_BUCKET`), so the bucket count is half the candidate budget rounded up to a power of two and records land in other buckets than in 0.17.0; the byte cap counts the live entries through the ledger |
+| `ForceSupplyStateV1`, `EconomyReferenceStateV1` | 1 (economy), unversioned (force) | 2 (`FORCE_FORMAT_VERSION`, new; `ECONOMY_FORMAT_VERSION`) | each root gains the required `archive_receipt_chain: PackageArchiveReceiptChainV1 { issued, folded, digest }`; `FORCE_SUPPLY_SEMANTIC_HASH` and `ECONOMY_SEMANTIC_HASH` change, and each apply system declares an `operation_skipped` event; archive objects, lookup pages, and the commit and acknowledgement packets keep their shape |
+| Production roots | one root `canwu.production:runtime` | the primary root and one scope root `canwu.production:runtime:scope:{scope}` per scope | `ProductionState` gains `scope` (absent on the primary root, whose encoding is otherwise unchanged), `limits` (`ProductionLimitsV1`, `Default` is `canonical()`, validated against `maximum()`), and `incident_history` (`ProductionIncidentHistoryV1 { folded_receipts, digest }`, a hash chain of folded incident receipts); `ProductionLimitsV1` replaces `max_mutations_per_boundary` with `max_batch_items` and `max_operations_per_boundary`, adds `max_observation_rollover`, and drops `max_incident_receipts`; the new record kind `canwu.production` `boundary-activity` (`ProductionBoundaryActivityV1`, written by the lifecycle system and trusted only as the settling boundary wrote it); every packet carries a `scope` member; a scope root's lease and output keys begin with `{scope}/` and the primary root's hold no `/` |
+| `PRODUCTION_ARCHIVE_BLOB_FORMAT_VERSION` | 2 | 3 | blobs gain `residue_records` (`ProductionResidueArchiveRecordV1`: ended work orders, ended leases that bound no execution, unclaimed outcomes); the archive key gains `WorkOrder`, `CompletionLease`, and `OperationOutcome`; archived executions gain `decision_receipts`; directories and the head gain `archived_residue_count`; maintenance receipts gain `archived_residues` and `duplicate_settlements` (one receipt per handle for repeated stale settlements); prepared batches and commits gain `scope` and `selected_residues`; the archive source root domain is `canwu.production.archive-source-root.v2` and commits to the scope; `ProductionArchiveIngressReceiptV1` gains `scope`; the incident operation key names the root record |
+| `canwu-production` plugin | — | — | `PRODUCTION_SEMANTIC_HASH` changes (BLAKE3 of the string recorded in the proposal); the new packet `production_batch_v1`, the new event `canwu.production.batch_settled.v1`, and the activity record schema are registered; `MAX_HOT_RECEIPTS` is removed |
+| Engine state copies | — | — | no snapshot, checkpoint, journal, hash, or replay input changes: the world-scale snapshot is byte-identical before and after ([runtime state copies](proposals/runtime-state-copies.md)) |
+
+Semantic identities that differ from 0.17.0: `canwu-society` (four hashes,
+one per pair of transfer settlement mode and society outcome retention),
+`canwu-law`, `canwu-information`, `canwu-correspondence`, `canwu-fiscal`
+(version and hash), `canwu-resource`, the `canwu-force-supply-reference` and
+`canwu-economy-reference` plugins, and `canwu-production`. `canwu-military`,
+`canwu-movement`, `canwu-technology`,
+and `canwu-culture` keep their semantic hash constants. As with any version
+change, the engine version in every checkpoint hash changes and first-party
+plugins that take their plugin version from the crate version report a new
+one.
+
+New and changed public contracts, by crate:
+
+- `canwu-routing`, re-exported by `canwu-api`:
+  - `TraversalModel::Recurring { period, offsets, duration }`: departures at
+    `EPOCH + k × period + offset` for every integer `k` and every offset,
+    each of `duration`; `period > 0`, `duration > 0`, 1 to
+    `MAX_RECURRING_OFFSETS` (4,096) strictly increasing offsets in `[0,
+    period)`, refused as `InvalidNetwork`. Source-incompatible for
+    exhaustive matches. `TraversalModel::next_departure(at)` is public: the
+    earliest departure at or after `at` and its duration, `O(log n)` for
+    every scheduled model.
+  - `EdgeConditionSet::new(overlays)` over `EdgeConditionOverlay { id:
+    EdgeConditionRef, connection, window_from, window_until, effect }` with
+    `EdgeConditionEffect::Closed` or `Adjusted { duration_per_mille,
+    resource_cost_per_mille, risk_per_mille }`; at most `MAX_EDGE_CONDITIONS`
+    (65,536) overlays and `MAX_EDGE_CONDITIONS_PER_CONNECTION` (1,024) per
+    connection, unique ids, no overlapping adjustments on one connection,
+    `duration_per_mille` 1 to `MAX_CONDITION_PER_MILLE` (1,000,000); refused
+    as `RoutingError::InvalidConditions`, a new variant. An overlay naming a
+    connection the queried network lacks has no effect.
+  - `RoutingIndex`: `new(snapshot)`, `reobserve(topology_version,
+    timetable_version, observer, observed_at, valid_until, knowledge_cut)`
+    (another revision than the index's is refused as `InvalidSnapshot`),
+    `plan_route`, `plan_route_with_conditions`, `unmatched_conditions`,
+    `digest`, `network_digest`, `network`, the cut accessors, and
+    `to_snapshot`; `Send + Sync`, cheap to clone. `RoutingNetwork::digest`
+    and `RoutingCache::index_key(index, conditions, request)` are new.
+    Additive.
+  - `plan_route` keeps its signature; it compiles a borrowed index per call
+    and now refuses a hand-assembled network that `RoutingNetwork::new`
+    refuses (`InvalidNetwork`). `RoutePlan.edge_conditions_digest` is new
+    (struct literals name it).
+- `canwu-correspondence`: no public type changes; plans with plain
+  `plan_route`; `SEMANTIC_HASH` and the `routing_connection` schema hash are
+  BLAKE3 of the strings recorded in the proposal.
+- `canwu-society`:
+  - `CohortClass { dimension, value }` (authored text of at most
+    `MAX_COHORT_CLASS_TEXT_BYTES`, 4,096 bytes); `IntergroupRelationEdge {
+    id, kind, source_class, target_class, region, acceptance_per_mille,
+    tension_per_mille, trust_per_mille, evidence, revision, revised_by,
+    revised_at }`; `IntergroupRelations { kinds, edges }` with
+    `into_record`; `IntergroupRelationsRecord`;
+    `intergroup_relations_reference()`; `load_intergroup_relations(&canwu)`;
+    `IntergroupRelationRevisionV1 { changes }` with
+    `IntergroupRelationChange` (the edge in full, with `expected_revision`:
+    zero to create it, otherwise its current revision) for the public
+    ingress `intergroup_relation_revision_v1` (1 to
+    `MAX_INTERGROUP_RELATION_CHANGES`, 1,024, changes in ascending ID order);
+    `MAX_INTERGROUP_RELATIONS` (4,096), `MAX_INTERGROUP_RELATION_EVIDENCE`
+    (16), and the other `INTERGROUP_RELATION_*` constants;
+    `SocietyState::cohort_classes()`. Additive.
+  - `SocietyState::relation_vocabulary: BTreeSet<String>` (struct literals
+    name it); while empty any canonical identifier is admitted as an
+    organization relation kind.
+  - `OutcomeRetention::{Keep, LatestSettlement}` (default `Keep`),
+    `SocietyPlugin::with_outcome_retention` and `outcome_retention()`;
+    `SocietyPlugin` gains a private field, so it is built through its
+    constructors. The retention is plugin identity, like the cadence and the
+    transfer settlement mode.
+- `canwu-law`:
+  - `LegalDefinition::caseload: Option<CaseloadProfileDefinition>` and
+    `CompiledLawPlan::caseload` (struct literals add `caseload: None`;
+    `CompiledLawPlan` implements `Default`). `CaseloadProfileDefinition {
+    case_classes, review_levels, retained_periods, max_reports_per_boundary
+    }` with `new`, `max_period_record_bytes`, and `max_state_bytes`; the
+    profile compiles only if its records' widest encoding fits
+    `MAX_CASELOAD_STATE_BYTES` (256 MiB). `CaseloadIntakeReport`,
+    `CaseloadPeriod`, `CaseloadStock`, `CaseloadReviewFlow`,
+    `CaseloadReviewQueue`, `AggregateCaseloadRecord` (with `clearance_bp:
+    Option<u32>`), `LegalCaseloadHead`, `LegalCaseloadState`,
+    `CaseloadRefusalReason` (fourteen stable codes), the record wrappers
+    `LegalCaseloadHeadRecord` and `LegalCaseloadPeriodRecord`,
+    `caseload_head_record_id`, `caseload_period_record_id`,
+    `legal_caseload_head_reference`, `legal_caseload_period_reference`,
+    `enqueue_caseload_intake(run, reports)` (`LAW_CASELOAD_INGRESS`,
+    `caseload_intake_v1`), `load_legal_caseload(run, plan, jurisdiction)`,
+    `LAW_CASELOAD_HEAD`, `LAW_CASELOAD_PERIOD`,
+    `LAW_CASELOAD_REJECTED_EVENT` (`canwu.law.caseload_rejected.v1`),
+    `LEGAL_CASELOAD_FORMAT_VERSION`, `MAX_CASELOAD_CLASSES` (64),
+    `MAX_CASELOAD_REVIEW_LEVELS` (16), `MAX_CASELOAD_RETAINED_PERIODS`
+    (120), `MAX_CASELOAD_REPORTS_PER_BOUNDARY` (16,384),
+    `MAX_CASELOAD_EVIDENCE_PER_REPORT` (16), `MAX_CASELOAD_EVIDENCE_BYTES`
+    (2,048). Additive.
+  - `LawBudgets::max_provider_packets` defaults to `DEFAULT_PROVIDER_PACKETS`
+    (256). `LegalRuntime`'s serialized form omits `plan`, and
+    `LegalRuntime::from_state` sets it from the plan it is given.
+    Source-incompatible for code that read the plan from the runtime's JSON.
+- `canwu-information`: `DelegatedAuthorityLedgerPayload { format_version,
+  authority_grant, delegations, expiring }`, `DelegationExpiry {
+  expires_at, command }`, `DELEGATED_AUTHORITY_LEDGER_FORMAT_VERSION`;
+  `delegated_authority_reference(authority_grant)` takes only the grant, and
+  `DelegatedAuthority`'s payload is the ledger. Source-incompatible.
+- `canwu-sim`, re-exported by `canwu-api`:
+  - `RunConfiguration::request_outcome_retention`,
+    `RunConfiguration::with_request_outcome_retention(SimDuration)`,
+    `RunConfigurationSnapshot::request_outcome_retention()`,
+    `DEFAULT_REQUEST_OUTCOME_RETENTION` (30 days),
+    `MAX_REQUEST_OUTCOME_RETENTION` (366 days); validation refuses a longer
+    retention. `ErrorCode::RequestOutcomeRetired`
+    (`"request_outcome_retired"`): `process_command` returns it as a
+    `CommandOutcome::Rejected` with `attempt_id: None`, `enqueue_command` and
+    `enqueue_decision` as `Err`. `RetiredRequestRange { first, last }` and
+    `RequestIndex::retired_commands`. `CONTINUATION_CHECKPOINT_FORMAT_VERSION`
+    3. Additive, except for `ErrorCode` matches (the enum is
+    `#[non_exhaustive]`).
+  - `Simulation::sealed_evidence_cursor()` and
+    `CompactedSimulation::sealed_evidence_cursor()` return the cut through
+    the evidence the run no longer retains: the end of its last sealed
+    segment, or the settled cut of the continuation checkpoint it was
+    restored from; `None` while the run retains all its evidence (it never
+    sealed, or it was restored with its whole journal). Additive.
+  - `KnowledgePublicationReservation { records, holder_entries,
+    payload_bytes }`, `PluginRegistrar::reserve_knowledge_publication`, and
+    `KnowledgeReservedPlugin::new(&plugin, reservation)`, which registers a
+    plugin and reserves for it; `PluginDescriptor::knowledge_publication_reservation`
+    (struct literals name it). Registration refuses, with
+    `InvalidPluginRegistration`, an empty reservation, a second one, a
+    reservation of a plugin with no knowledge-writing boundary system, and
+    reservations that together exceed `KnowledgeLimitsV1::CURRENT`'s
+    per-boundary bounds; restore refuses such descriptors with
+    `InvalidSnapshot` and another reservation with `PluginManifestMismatch`.
+    `knowledge_publication_budget()` keeps its signature and now excludes
+    every other held reservation's unspent share. Additive, except for the
+    descriptor literal.
+  - `register_plugin` refuses with `InvalidDomainRecord` an initial-scenario
+    record of the plugin whose payload-required continuation or identity
+    dependencies name an initial-scenario version, its own version, or are
+    malformed, and every restore refuses such a record with
+    `InvalidSnapshot`; the seal's per-record checks and the load share one
+    function.
+  - `enqueue_command` refuses request ID 0 with `InvalidPayload`, as
+    admission does; it queues nothing.
+  - Boundary-generated ingress (`ScheduleIngress`, `SchedulePluginIngress`,
+    `CancelPluginIngress`, boundary-generated decisions) no longer refreshes
+    the checkpoint hash mid-boundary. No public change; the checkpoint
+    hash, state hash, and boundary hash after the boundary are unchanged.
+  - Runtime state copies: no public type, signature, or accessor changes.
+    `SimulationView::person` and `army` still return `Option<&Person>` and
+    `Option<&Army>`, `person_availabilities` still yields references, and the
+    journal accessors (`events()`, `boundaries()`, and the rest) still
+    return slices. Internally the current state and the scheduler are
+    persistent `im` collections with rewritten heap values in an `Arc`, the
+    retained journals are `SharedJournal<T>` (an `Arc<Vec<T>>` copied on
+    first change), the command-history index is persistent, and the bound
+    initial scenario is shared; every rollback copy and `fork` share them.
+- `canwu-api`:
+  - `Canwu::sealed_evidence_cursor()`, `CompactedCanwu::sealed_evidence_cursor()`,
+    and the required method `CanwuRun::sealed_evidence_cursor`; a type
+    outside the workspace that implements `CanwuRun` adds it.
+    Source-incompatible for such implementations only.
+  - `Canwu::from_paged_checkpoint_and_journal` and
+    `from_paged_checkpoint_and_journal_with_plugins`, and the same two on
+    `CompactedCanwu`, take a new last parameter `budget: PagedRestoreBudget`
+    (on `canwu-sim`: `Simulation::from_paged_checkpoint`,
+    `from_paged_checkpoint_and_journal(_with_plugins)`,
+    `from_portable_paged_checkpoint`,
+    `CompactedSimulation::from_paged_checkpoint_and_journal(_with_plugins)`,
+    and `PersistentDomainRecordStore::from_state_pages`).
+    `PagedRestoreBudget { max_assembled_bytes: u64 }` with `new`,
+    `DEFAULT` (2 GiB, also `Default`), and
+    `PagedSimulationCheckpoint::assembled_bytes` are new;
+    `ErrorCode::RestoreBudgetExceeded` (`restore_budget_exceeded`) is a
+    new code. Source-incompatible for every paged restore call.
+  - Re-exports the new routing items, `PagedRestoreBudget`, `RetiredRequestRange`, the two
+    retention constants, `KnowledgePublicationReservation`, and
+    `KnowledgeReservedPlugin`.
+- `canwu-fiscal`:
+  - `prepare_fiscal_archive(run, book_limit, store)` is a free function
+    taking any `CanwuRun`; `FiscalState::prepare_fiscal_archive` is gone.
+    `enqueue_fiscal_archive(run, prepared, store)` loses its `sealed_cut`
+    argument and re-derives the batch from the run;
+    `finalize_fiscal_archive_retention(run, store, receipt)` keeps its
+    signature and decodes the archive head alone. The refusal of a book
+    citing a version established after the run's sealed cut
+    (`FiscalArchiveError::UnsealedCitations`) now reads the cut from
+    `sealed_evidence_cursor`. Source-incompatible.
+  - `FiscalReportPart` keeps its fields and decodes the version-6 form;
+    `FiscalReportRow` on its own keeps its object form; `assemble_fiscal_reports`
+    fails to decode a part whose institution table lacks an institution a
+    row names, in a host read only.
+  - The plugin is `0.5.0-experimental`.
+- `canwu-resource`:
+  - `ResourceConsumptionBatchRequestV1` (1 to 256 items beside one consumer
+    evidence, one instant, and one completion certificate;
+    `ResourceOperationRequestV1::ConsumeBatch`,
+    `ResourceOperationKind::ConsumeBatch`) with `item_operation_key` and
+    `locked_targets`; `ResourceConsumptionBatchItemV1`;
+    `MAX_RESOURCE_CONSUMPTION_BATCH_ITEMS` (256);
+    `resource_consumption_batch_item_key(batch key, index)`
+    (`RESOURCE_CONSUMPTION_BATCH_ITEM_KEY_PREFIX`);
+    `RESOURCE_CONSUMPTION_BATCH_ITEM_RECORDS` (6),
+    `RESOURCE_CONSUMPTION_BATCH_RECORDS` (2);
+    `ResourceState::consumption_batch_can_fit(items)`;
+    `ResourceIngressSkipReasonV1::BoundaryBudget`. New variants of
+    exhaustive enums: source-incompatible for exhaustive matches.
+  - `ResourceLiveRecordKeyV1`, `ResourceCustodianAccountsV1`,
+    `ResourceLivePayloadV1`, `ResourceLiveEntryV1`, `ResourceLiveBucketV1`,
+    `ResourceLiveLedgerV1`, `RESOURCE_LIVE_BUCKET_FORMAT_VERSION`,
+    `RESOURCE_HOT_TERMINAL_RECORDS_PER_BUCKET` (2),
+    `RESOURCE_LIVE_RECORDS_PER_BUCKET` (4), `resource_live_bucket_reference`,
+    `resource_live_bucket_count`, `resource_live_bucket`;
+    `ResourceBucketRecord` replaces `ResourceHotTerminalBucketRecord`;
+    `ResourceRootReader::attach_live(keys)` and
+    `attach_custodian_accounts(holder)`; `ResourceState::{live,
+    custodian_accounts}` (fields) and `ResourceState::{live_records_attached,
+    account_count, access_grant_count, definition_count, unit_count,
+    total_account_balance, refresh_custodian_index}`;
+    `ResourceConsumption::fulfillment`. Struct literals of `ResourceState`
+    and `ResourceConsumption` break; a fixture that inserts accounts into
+    `ResourceState::accounts` directly calls `refresh_custodian_index`.
+  - `ResourceLimitsV1`: `max_mutations_per_boundary` is
+    `max_batch_items_per_boundary` and is enforced (canonical
+    `CANONICAL_BATCH_ITEMS_PER_BOUNDARY`, 32; hard
+    `MAX_BATCH_ITEMS_PER_BOUNDARY`, 2,048); `max_definitions` and
+    `max_unit_revisions` may be 16,384 (`MAX_DEFINITIONS`);
+    `MAX_RESOURCE_ACCESS_GRANTS` is 16,384; `max_allocation_candidates` and
+    `max_dirty_demands` keep their canonical 2,048 with a hard maximum of
+    16,384 (`MAX_ALLOCATION_CANDIDATES`); `max_accounts` keeps 8,192
+    canonical and 262,144 hard. Source-incompatible for struct literals and
+    for code that read the renamed field.
+  - `ResourceState::into_record` refuses a root holding accounts, grants,
+    definitions, units, or a custodian index, as it refused hot terminal
+    records; `into_records` is the authoring path. A live root decoded
+    directly (`ResourceRuntimeRecord`) holds no accounts, so a reader
+    attaches what it reads. Validation refuses an account missing from its
+    custodian's index and a consumption naming another fulfillment.
+  - `enqueue_resource_completion_operation` refuses `Expire` and
+    `ExpireExternalParticipants`; `enqueue_resource_completion_expiry_tick`
+    is the host's way to expire grants.
+  - `resource_completion_status`, `resource_completion_certificate`, and
+    `resource_completion_grant` no longer find a finished lease.
+- `canwu-force-supply-reference` and `canwu-economy-reference` (not
+  published): `PackageArchiveReceiptChainV1` (with `fold`),
+  `validate_package_archive_maintenance`,
+  `settle_package_archive_acknowledgement`,
+  `package_archive_finalization`, `PackageRootShortageV1`
+  (`archive_backlog`, `root_limit`), `PackageOperationSkipV1`,
+  `PACKAGE_MAINTENANCE_STATE_BYTE_RESERVE` (128 KiB),
+  `MIN_PACKAGE_STATE_BYTES` (512 KiB), `package_operation_state_bytes`,
+  `FORCE_FORMAT_VERSION`, `FORCE_OPERATION_SKIPPED_EVENT`
+  (`canwu.force-supply.operation_skipped.v1`),
+  `ECONOMY_OPERATION_SKIPPED_EVENT`
+  (`canwu.economy-reference.operation_skipped.v1`), `force_operation_skip`,
+  `economy_operation_skip`, `force_operation_outcome`,
+  `economy_operation_outcome` (a settled outcome, hot or archived),
+  `encoded_len` and `outcome_room_shortage` on both states,
+  `EconomyReferenceStateV1::exceeded_record_cap`.
+  `MAX_PACKAGE_ARCHIVE_MAINTENANCE_RECEIPTS` is 64 (was 8,192) and bounds
+  unacknowledged receipts; both limits validators refuse `max_state_bytes`
+  below `MIN_PACKAGE_STATE_BYTES`; `prepare_economy_archive` takes `force:
+  Option<&ForceSupplyStateV1>`; `finalize_force_archive_retention` and
+  `finalize_economy_archive_retention` return `Option<IngressReceipt>`
+  (`None` once the acknowledgement settled). The force-supply settlement of
+  a resource outcome attaches the outcome, the consumption (whose closure
+  brings its fulfillment and account), the transfer, the participant, and
+  the destination account by identity instead of reading the whole resource
+  root.
+- `canwu-production`:
+  - New: `ProductionScopeId`, `production_scope_runtime_reference(scope)`,
+    `production_root_reference`, `production_root_scope`,
+    `ProductionState::runtime_reference`, `production_root_state`,
+    `ProductionBatchEnvelopeV1 { holder, scope, expected_runtime_revision:
+    Option<u64>, items }` with `ProductionBatchItemV1 { operation_id,
+    operation }`, `PRODUCTION_BATCH_COMMAND` (`apply_production_batch_v1`)
+    and `production_batch_command_descriptor`,
+    `ProductionBoundaryActivityRecord`, `ProductionBoundaryActivityV1`,
+    `ProductionRootActivityV1`, `production_boundary_activity_reference`,
+    `PRODUCTION_BOUNDARY_ACTIVITY_ID`, `ProductionIncidentHistoryV1`,
+    `ProductionResidueArchiveRecordV1`, `ProductionResidueBodyV1`,
+    `ProductionCompletionLeaseArchiveV1`, `ProductionLimitsV1::maximum` and
+    `validate`, `ProductionState::residue_archive_candidates`,
+    `production_root_names_key`, and the `_in_scope` / `_in_root` variants
+    of the completion and continuation enqueue helpers,
+    `production_report`, `production_observation_witness`, and
+    `degraded_facility_decision_ticket`. Additive.
+  - Changed: `ProductionState` gains `scope`, `limits`, and
+    `incident_history`; `ProductionLimitsV1` replaces
+    `max_mutations_per_boundary` with `max_batch_items` (items one batch
+    carries; canonical 1,024, maximum 4,096) and
+    `max_operations_per_boundary` (operations and batch items a root records
+    outcomes for in one boundary; canonical 4,096, maximum 65,536;
+    `max_batch_items` above it is refused), adds `max_observation_rollover`
+    (canonical 8,192), and drops `max_incident_receipts`; the canonical
+    values rise to 16,384 sites, facilities, work orders, executions, and
+    capacity allocations (maxima 65,536), 32,768 operation outcomes
+    (maximum 131,072), and 16,384 observation heads, dirty entries, and
+    archive-due entries (maxima 262,144 heads, 65,536 dirty and archive-due
+    entries); `MAX_HOT_RECEIPTS` is removed;
+    `acknowledge_production_archive_retention` returns whether it changed
+    the root; `ProductionCommandEnvelope` gains `scope`; the archive key,
+    blob, directory, head, receipt, batch, and commit shapes change as the
+    table above says. Source-incompatible for struct literals and for code
+    that read the removed limits.
+  - Behaviour: every bound is a recorded rejection or a refusal with a
+    trace; a command naming no installed root is a recorded command
+    rejection (`InvalidPayload`), as is malformed content, a non-canonical
+    payload (an explicit `null` or unknown member), and a degraded-facility
+    choice without its persisted decision; a lease or output key without its
+    root's scope prefix is a recorded rejection.
+
+The source-incompatible changes are the new enum variants (`TraversalModel`,
+`RoutingError`, `ResourceOperationRequestV1`, `ResourceOperationKind`,
+`ResourceIngressSkipReasonV1`, `ErrorCode`), the new struct fields
+(`RoutePlan`, `SocietyState`, `LegalDefinition`, `PluginDescriptor`,
+`ResourceState`, `ResourceConsumption`, `ResourceLimitsV1`), the renamed
+resource limit and bucket record, the fiscal archive helpers, the required
+`CanwuRun` method, the information delegation payload, and the reference
+helpers. The release is therefore a minor version.
+
+Version 0.18.0 also changes these behaviours, which are visible to existing
+code and runs:
+
+- **Routing.** A departure slot whose arrival overflows the time range makes
+  the connection unusable from that time instead of falling through to the
+  next slot. `plan_route` and `RoutingIndex::new` refuse a hand-assembled
+  network that `RoutingNetwork::new` refuses, where 0.17.0 planned over it.
+  Conditions apply by departure instant: a traveller waits out a closure
+  for the first departure at or after its end, and an adjustment scales the
+  duration and resource cost of a departure inside its window, rounded up,
+  and replaces its risk when given. Plans, costs, and refusals are otherwise
+  those of 0.17.0 (checked on 40,000 random networks, and by the review on
+  200,000). A correspondence carrier's `routing_connection` knowledge now
+  accepts a recurring traversal; a malformed one still fails the boundary as
+  `InvalidDomainRecord`.
+- **Society settles in one write.** The phase-7 settlement materializes the
+  derived views its changes cleared (mobilization candidates, aggregates,
+  and the projections of observers whose estimates changed) before it writes,
+  and the phase-10, -12, and -13 systems are gone, so a settlement journals
+  one root record change, summarized "Settled society", where it journaled
+  up to four. The committed root is byte for byte the root the four systems
+  committed; only record versions and the number of record changes differ. A
+  system of another plugin that reads the root in phases 8 to 13 of a
+  settling boundary reads the derived views materialized, where it read
+  them cleared. Rebases and transfers touch only their cohorts'
+  distributions and the root is validated once before the write; the
+  pending transfer record no longer holds transfers settled before the
+  boundary that queues the next one.
+- **Intergroup relations.** `intergroup_relation_revision_v1` applies in
+  phase 7 of the boundary that admits it, each packet as a whole or not at
+  all; every refusal (`malformed_payload`, `stale_revision`,
+  `identity_conflict`, `unknown_kind`, `unknown_class`, `unknown_region`,
+  `relations_full`) is one `society_intergroup_relation_rejected_v1` event
+  and the boundary commits. A region is an identifier checked when an edge
+  is created, not a record reference, so its owner can still retire or
+  delete it; an edge is never removed. The settlement neither reads nor
+  writes the relations. Run creation and restore check every class an edge
+  names against the root's cohorts.
+- **Society outcome retention.** Under `LatestSettlement` a settlement that
+  records rebase or lifecycle delta outcomes first drops those recorded at
+  an earlier time; transfer outcomes and pressure revision outcomes are kept
+  under both retentions. The default `Keep` is the 0.17.0 behaviour.
+- **Aggregate caseload.** A `caseload_intake_v1` packet's reports settle in
+  phase 7 into one head and a fixed ring of `retained_periods` period
+  records per jurisdiction (the period with ordinal `n` in slot `(n − 1) mod
+  retained_periods`). Periods are contiguous, stocks are conserved, an exact
+  repeat of the newest period is already settled and decided before its
+  evidence is checked, every refused report changes nothing and is one
+  `canwu.law.caseload_rejected.v1` event with a stable code, and a packet
+  that does not decode, that the plan has no profile for, or that carries
+  more reports than `max_reports_per_boundary` is refused whole with
+  `canwu.law.ingress_rejected.v1`. The records declare no evidence, never
+  load the legal runtime, and do not count toward the legal state budget.
+- **Law plan record and provider index.** The plan record is written once
+  and a law boundary decodes the plan once, by reference. The stale-proposal
+  pass checks at most `max_mutations_per_boundary` dirty procedures in
+  procedure-ID order and settlement defers the rest to a continuation
+  boundary at the same time, so no procedure is advanced at a boundary that
+  did not check it. The provider index keeps the newest 256 packets by
+  default and forgets the lowest ingress ID first: a citation of a forgotten
+  packet is refused with `canwu.law.ingress_rejected.v1`, also within one
+  boundary that admits more provider packets than the index keeps.
+- **Delegation expiry.** The lifecycle system removes, at every boundary it
+  already runs, every delegation whose `expires_at` is at or before the
+  boundary time, and does not record a claim already expired at admission.
+  A delegation whose `expires_at` has come authorizes nothing even before it
+  is removed: an interpretation admitted at or after `expires_at` is
+  refused with `invalid_authority` even when it is dated inside the
+  delegation window. A claim without `expires_at` stays for the run.
+- **Late retries.** An exact retry of a tracked command request is answered
+  with its original outcome or receipt while its attempt is inside the
+  run's request outcome retention (default 30 simulated days after the
+  attempt); after that it, and any other request with the ID, is refused
+  with `RequestOutcomeRetired`, without an attempt, a revision, or an
+  event. A retired ID stays used for the life of the run. A request with no
+  attempt (a queued command still pending) is never retired. The rule is
+  pure simulated time, so an unsealed run, a sealed run, a
+  continuation-restored run, and an exact replay answer alike and write
+  byte-identical continuation checkpoints; a seal only moves retired
+  outcomes into the canonical ID ranges. A retired request cites no
+  evidence dependency, so the dependency list, the kept archive receipts,
+  and the provenance facts stay at one window's size. No authoritative
+  state, hash, or journal changes.
+- **Fiscal archive helpers.** `prepare_fiscal_archive` reads the root and
+  the archive head, walks every ledger only far enough to see whether it
+  holds a closed book, and decodes only the ledgers that hold the first
+  `book_limit` closed books in (scope, cycle) order and their offices; it
+  refuses `Backpressure` before it reads any ledger. The selection is the
+  one the whole state would make. The sealed cut is the run's own, so a
+  host cannot pass a wrong one; a run that retains all its evidence (every
+  `Canwu`, a `CompactedCanwu` that never sealed, a run restored with its
+  whole journal until its next seal) refuses nothing, so a host that wants
+  every archived citation inside a sealed segment **seals at each save**,
+  before it writes a continuation checkpoint.
+- **Fiscal due instant.** The report system reads a book's figures without
+  decoding the whole ledger, reads the ledger version a scope row cites for
+  that row alone, copies each observer once, and encodes a part compactly.
+  Report contents, lines, and part digests are unchanged, so nothing is
+  republished because of the change; the publication budget charges less
+  per part.
+- **Initial declarations checked at load.** A scenario or save whose
+  initial records declare evidence no seal can accept is refused at
+  creation (`InvalidDomainRecord`) or restore (`InvalidSnapshot`) instead of
+  starting a run that can never seal or write a continuation checkpoint. An
+  initial record that names evidence which does not exist yet is still
+  accepted.
+- **Boundary ingress without an early refresh.** Settlement computes the
+  checkpoint hash once at its end; a queued command admitted before the
+  first phase keeps its per-admission refresh. A scheduled packet's ID,
+  issue and due times, eligibility cut, queue key, and receipt are claimed
+  exactly as before.
+- **Publication reservations.** A boundary holds the reservations of the
+  plugins with a knowledge-writing boundary system due in it, decided from
+  the boundary's cadences and admitted events before the first phase; a
+  system of another plugin is not shown, and cannot take, a held
+  reservation's unspent share, whatever its dispatch order, while the
+  reserving plugin reads its share through the unchanged
+  `knowledge_publication_budget()`. A plugin publishing in phases 4 and 13
+  has one share for both. Restore validation charges each knowledge change
+  by the same rule. Overshooting what a system was shown still fails the
+  boundary with `KnowledgeLimitExceeded`. Without reservations the figures
+  are the 0.17.0 ones.
+- **Consumption batches.** A batch enters only through its provider's
+  adapter ingress, with a typed consumption intent per item under the
+  item's reserved key. Items settle in order; each is refused alone
+  (a rejected `Consume` outcome under its key, the leg still reserved) or
+  consumed with its own outcome; several items may draw on one account
+  (an item that expects the revision the batch found draws on the account as
+  the batch left it); the batch outcome totals the consumed quantity with
+  the refused quantity as `remainder`; the lease completes once and leaves
+  the root. A batch with no items, more than 256, or a certificate that does
+  not bind exactly its targets is one rejected batch outcome with the lease
+  left active. Room is measured on the whole result: a batch that does not
+  fit is skipped (`archive_backlog`, or `reserved_capacity` when no commit
+  or release can make room) and records nothing. A batch that fits alone
+  but not beside the batches the boundary already applied is deferred, with
+  the `boundary_budget` skip event, to the next boundary at the same
+  instant.
+- **Resource live buckets.** A boundary attaches, before it settles a
+  packet, every live record the packet names and every record those name;
+  a pooled demand attaches every account; settling one operation writes
+  the same records whatever the number of accounts, and creating an account
+  writes its own bucket and its custodian's index. A release build refuses a
+  boundary that would write over a live record it did not attach
+  (`invalid_boundary`); a debug build also settles every boundary on the
+  whole root and requires the same proposal.
+- **Resource leases and expiries.** A finished lease (released or expired,
+  its report reservation published) leaves the root at once; its receipts
+  stay hot terminal records until an archive commit takes them, and the
+  outcomes under its keys answer a resend. An acquisition identity still
+  starts one lease for the run: a reuse is `idempotency_conflict`, at one
+  more archive lookup per lease start. A host `Expire` or
+  `ExpireExternalParticipants` is refused at enqueue; a plugin expiry that
+  names another boundary than the one settling it is skipped with
+  `failed_settlement_checks` and expires nothing early; an expiry that does
+  not fit the root is skipped, never deferred.
+- **Archive commits.** The resource plugin applies an archive commit by
+  grouping the selected keys by bucket and rewriting or deleting each
+  bucket once, without decoding the records it does not read; a hot bucket
+  holds about two records.
+- **Reference package archive.** The acknowledgement of a retention handle
+  folds every receipt recorded under it, oldest first, into the root's
+  digest chain; a repeated acknowledgement is a no-op; a finalization
+  retried after its acknowledgement settled returns `None`. An operation
+  whose outcome finds no hot slot, or whose result passes the share of the
+  byte cap operations may fill (the cap less a 128 KiB maintenance reserve),
+  is skipped with its own `operation_skipped` event (`archive_backlog` or
+  `root_limit`), records nothing, keeps its ID free, and settles under the
+  same ID once an archive commit made room and the host rebuilt the command
+  against the current revision. An economy result past another bounded
+  collection is a recorded `query_budget_exceeded` rejection. The economy's
+  externality materialization waits for a hot slot and for the operation
+  share; `prepare_economy_archive` leaves out an externality outcome the
+  force-supply root still holds hot; `CloseMonth` reads its force-supply
+  operation hot or archived.
+- **Production scope roots.** A host installs one `ProductionState` per
+  scope with the scenario, `scope` set, under
+  `production_scope_runtime_reference(scope)`; the primary root (`scope`
+  absent) is unchanged, so a small world needs nothing new. Every packet
+  names its root (`ProductionCommandEnvelope.scope`, the batch envelope, a
+  `scope` member on completion steps, witnesses, acknowledgements, and
+  wakes, `scope` on archive batches and commits); an output acknowledgement
+  is routed by the production source its execution pinned, and the resource
+  plugin's participant acknowledgement by the participant's coordinator
+  source. A packet naming no installed root is refused with
+  `canwu.production.ingress_refused.v1`; a command naming none is a recorded
+  command rejection. The lifecycle system loads each root a boundary's
+  packets name once, settles them (archive commits first), writes only the
+  roots that changed, and writes the boundary activity record naming each
+  written root and the first packet that changed its production lifecycle;
+  the later systems read that record alone, so a boundary with no production
+  work reads one small record, and a boundary that touches many roots may
+  settle, publish, and draw for each of them, since every per-root budget
+  adds up across roots (only `max_observation_records` and
+  `max_observation_records_per_holder` count across the world). Roots share
+  no identity: a scope root's completion acquisition IDs and lease and
+  output operation keys begin with `{scope}/`, the primary root's hold no
+  `/`, and a scope ID holds no `/` (`production_root_names_key`), so no two
+  roots can name one resource-side key; a key that breaks the rule is a
+  recorded rejection, and every root's validation checks its hot leases and
+  executions.
+- **Production batch command.** `apply_production_batch_v1` carries many
+  operations of one holder against one root. Admission checks the issuer's
+  authority once, the root, at most `max_batch_items` items with distinct
+  operation IDs, no `ResolveDegradedFacility`, and outcome room for every
+  unsettled item; an item whose ID has another operation's outcome refuses
+  the command (`IdempotencyConflict`). A batch whose
+  `expected_runtime_revision` is set and is not the root's, or whose items
+  would take the root past `max_operations_per_boundary`, is refused whole
+  with a trace and records nothing, so it can be sent again; a batch without
+  an expected revision has each item checked by its own rules against the
+  root the items before it left, so a monthly settlement need not predict
+  the revisions of packets other plugins land in the same boundary. Each
+  item's outcome records the batch envelope as it applied, so a single
+  command reusing an item's operation ID meets `IdempotencyConflict`; one
+  `canwu.production.batch_settled.v1` event counts the applied, rejected,
+  already settled, and refused items.
+- **Nothing a production root settles stays for life.** Lease outcomes
+  leave with the execution or project that bound the lease; a work order
+  that ended without an execution, a lease released or expired without one
+  (once every participant grant it recorded has ended), and any other
+  outcome archive as residues, candidates after receipts, executions, and
+  projects; incident receipts of earlier boundaries fold into the root's
+  incident history at its first incident pass; a rolled-out observation head
+  is pruned once a newer head of the same holder and site is eligible, on
+  every pair the report system visits, and a materialization that would
+  roll a head into a full rollover waits as dirty work. Reports are kept for
+  life and outlive their heads; restore checks a report whose head left the
+  root by its content.
+- **Production refusals and duplicates.** A completion step, continuation
+  witness, archive commit, or retention acknowledgement that production's
+  checks refuse is refused with a trace, whoever queued or scheduled it;
+  only a failed store read (`InvalidArchive`) and engine invariants fail the
+  boundary. A stale commit under a handle that already has a stale receipt
+  counts on that receipt's `duplicate_settlements`. A wake no longer runs
+  incident evaluation; a recorded rejection, a continuation witness, and
+  archive maintenance drive no incidents, dispatch, or reports; incident
+  draws cite the trigger packet, and the incident operation key names the
+  root record, so draws of two roots never share an address. Settlement
+  checks each operation's outcome room before it applies it, so two
+  commands admitted at one free slot no longer fail the boundary. The report
+  system reads `knowledge_publication_budget()`, publishes what fits, and
+  retries what did not on a wake a minute later; production reserves no
+  share itself (register it through `KnowledgeReservedPlugin` to hold one).
+- **Paged restores are budgeted.** Before a paged restore allocates any
+  value it assembles from pages (every value of the four domain-record
+  indexes, every knowledge body and holder ledger, the compact body, the hot
+  decision state) it charges the value's canonical length to the host's
+  budget; a value that would pass it fails with `RestoreBudgetExceeded`
+  before any chunk of it is read, and nothing is restored. A descriptor that
+  states more than the budget is refused before any page is read, and one
+  whose `assembled_bytes` differs from what its pages assemble is refused as
+  `invalid_snapshot`. The budget bounds assembled bytes, not heap: a restore
+  holds the assembled values, the state decoded from them, and validation
+  copies, and decoded JSON can take many times its text, so hostile pages
+  inside a 2 GiB budget can peak at tens of GiB. `DEFAULT` is therefore a
+  ceiling for a host's own checkpoints (four times the record ceiling,
+  about ten times the world-scale fiscal state), not a bound for untrusted
+  pages. The page loader refuses branch counts past the addressable range
+  instead of overflowing, and a page graph naming one node page in two
+  places is refused.
+- **The knowledge ledger is paged.** A paged checkpoint builds the two
+  knowledge maps from the live ledger when it is prepared (nothing is kept
+  between checkpoints, so a boundary pays nothing); an unchanged body or
+  holder keeps its leaf page, and a holder whose entries grow at the end
+  keeps its leading chunks. The restore decodes the maps element by element
+  through the ledger's own decoder, checks every value sits under its own
+  canonical key, rebuilds both maps and requires the envelope's roots (so
+  one ledger has one paged form), and then runs the full snapshot
+  validation and commitment as before. A world of 4,000 report holders
+  (a 9.8 MB ledger), refused in 0.17.0 as "state page bytes exceed the
+  bounded page limit", now saves as 16,347 pages and restores in 244 ms;
+  a one-day delta is 2,328 pages.
+- **The seal hashes each sealed record once.** `seal_evidence` encodes each
+  record once, streaming it into both its item commitment and the journal
+  root, builds Merkle levels once, materializes a receipt (with its path)
+  only for the dependencies the run keeps, no longer rebuilds the index to
+  compare it with itself, and moves the index into the segment instead of
+  cloning it. Segments, indexes, receipts, and hashes are byte-identical to
+  0.17.0's; `verify_archived_segment`, used for every segment a host
+  supplies, keeps its full rebuild and comparison. A seal of about 900,000
+  index entries falls from 30.8 to 59.2 s to 3.3 to 3.4 s.
+- **Runtime state copies.** `fork` is constant-time: it copies no state and
+  no journal. The first append on either side while both still hold the
+  shared journals copies them (about 53 ms at 65,536 records), so the pair
+  costs what the fork alone cost before; a save fork that outlives the
+  original's next boundary moves that copy onto the original's boundary,
+  and a sealed run's tail keeps the copy small. A plugin registration's
+  rollback copy costs nothing. The restore decodes by reference, checks
+  unknown fields with a serializer walk that falls back to the full
+  comparison whenever it cannot decide, so every refusal and its message
+  are unchanged.
+
+Upgrading from 0.17.0, for hosts and plugin authors:
+
+- **Pin `=0.18.0`** for `canwu-api` and every extension.
+- **A host that reads `IdempotencyConflict`** as "this request ID is already
+  used, take another" accepts `RequestOutcomeRetired` the same way, from
+  `process_command`, `enqueue_command`, and `enqueue_decision`. Choose the
+  retention from the highest simulation speed and the longest client retry
+  or reconnect delay (`RunConfiguration::with_request_outcome_retention`,
+  up to 366 days); it is fixed when the run is created and cannot be raised
+  later. Allocate request IDs consecutively (a counter the run's state
+  restores, or the revision a batch is built against plus an offset), so
+  retired IDs collapse into a few ranges; IDs hashed from keys cost about 59
+  bytes each for the life of the run. A client that may be away longer than
+  the window is answered from the outcomes the host received. After a
+  restore, the next free ID is one more than the largest ID in the
+  checkpoint's `retired_commands`, `commands`, `queued_commands`,
+  `decision_commands`, unadmitted attempts, and pending ingress. After the
+  next seal, `archived_evidence_receipt` and `load_archived_evidence_segment`
+  no longer find a retired request's attempt, command, events, or ingress
+  through the kept receipts.
+- **A plugin that reads the provenance of a command ingress record**
+  (`plugin_ingress_matches`) declares it as an identity-only dependency, as
+  the evidence rule already requires; an undeclared read answers `false`
+  while the record is retained and `EvidenceContentUnavailable` once a seal
+  removed it. No first-party plugin reads one.
+- **A fiscal host** calls `prepare_fiscal_archive(&run, book_limit, &store)`
+  and `enqueue_fiscal_archive(&mut run, prepared, &store)` without a
+  `sealed_cut`; a type of the host's own that implements `CanwuRun` adds
+  `sealed_evidence_cursor`. A sealing host seals at each save. A host that
+  decoded report parts itself reads the version-6 form through
+  `FiscalReportPart` or `assemble_fiscal_reports`.
+- **A resource host** installs opening accounts with
+  `ResourceState::into_records`, never `into_record`; replaces
+  `ResourceHotTerminalBucketRecord` with `ResourceBucketRecord`; names
+  `max_batch_items_per_boundary` instead of `max_mutations_per_boundary`
+  (and raises `max_archive_candidates` with it for full batches: a batch of
+  256 items needs 1,539 candidates); sets `ResourceConsumption::fulfillment`
+  in any consumption it builds; calls `refresh_custodian_index` after
+  inserting accounts into a state directly; expires grants with
+  `enqueue_resource_completion_expiry_tick`; and no longer reads a finished
+  lease through `resource_completion_status`. A plugin that reads accounts,
+  grants, definitions, or units from the root names them through
+  `ResourceRootReader::attach_live` or `attach_custodian_accounts`, or reads
+  the whole root; a reader of a consumption's fulfillment follows
+  `ResourceConsumption::fulfillment` through `resource_root_in_view`
+  instead of searching every hot fulfillment. A provider that settles many
+  small consumptions authorizes one `ConsumeBatch` with a consumption intent
+  per item, checks `consumption_batch_can_fit` before it takes the lease,
+  and treats a `boundary_budget` skip as a deferral.
+- **A routing host** keeps one `RoutingIndex` per network revision, moves it
+  across read cuts with `reobserve`, plans with `plan_route_with_conditions`
+  when conditions apply, and keys its cache with `RoutingCache::index_key`;
+  `plan_route` still works and is faster. A host that stored
+  `canwu-routing.v1` plans or snapshot digests treats them as another
+  version's. A correspondence host validates a carrier's `routing_connection`
+  payloads before publishing them, as before.
+- **A society host** that read mobilization candidates, aggregates, or
+  projections between phases 8 and 13 of a settling boundary now sees them
+  materialized; a host that counted record-change events per settlement sees
+  one. A scenario may author `IntergroupRelations::into_record` beside the
+  root; a host revises relations with `intergroup_relation_revision_v1`,
+  many per packet, and reads them with `load_intergroup_relations`. The
+  society outcome retention, if chosen, is fixed before the first boundary; a
+  struct literal of `SocietyState` names `relation_vocabulary`.
+- **A law host** adds `caseload: None` to `LegalDefinition` literals, or a
+  `CaseloadProfileDefinition` to report routine justice in aggregate; a
+  host that cites provider packets long after admission raises
+  `max_provider_packets` knowing each kept packet costs about 9 µs of every
+  law boundary; a host that read the plan from `LegalRuntime`'s JSON reads
+  the plan record. An information host that reads
+  `delegated_authority_reference` passes only the grant code and decodes
+  the ledger payload.
+- **A plugin author** who needs a guaranteed share of the publication
+  budget registers the plugin through `KnowledgeReservedPlugin::new(&plugin,
+  reservation)` or calls `reserve_knowledge_publication` in `register`;
+  the reservation is plugin identity, held at every boundary where the
+  plugin's publisher is due. A plugin that declared an initial-scenario
+  version as payload-required is refused at registration now, not at the
+  first seal.
+- **A reference-integration host** acknowledges each package archive commit
+  it queued before it queues many more (64 unacknowledged commits fit), reads
+  a skipped operation with `force_operation_skip` or `economy_operation_skip`
+  and rebuilds the command against the current revision before sending it
+  again, reads an archived outcome with `force_operation_outcome` or
+  `economy_operation_outcome`, passes the run's force-supply root to
+  `prepare_economy_archive`, and treats `None` from a finalize helper as
+  done.
+- **A production host** that needs more than one root installs one
+  `ProductionState` per scope with `scope` set (roots are installed with the
+  scenario; a run cannot add a scope), sets `limits` (or keeps
+  `canonical()`), names the scope in every `ProductionCommandEnvelope`, in
+  the batch envelope, and through the `_in_scope` enqueue helpers, prefixes a
+  scope root's lease and output keys with `{scope}/` and leaves the primary
+  root's keys without `/`, sends a monthly settlement as one
+  `apply_production_batch_v1` per holder and root (`max_batch_items` at most
+  `max_operations_per_boundary`), and keeps each root's archive lookup pages
+  for the heads a restore, replay, or fork passes. Struct literals of
+  `ProductionState` and `ProductionLimitsV1` name the new fields; code that
+  read `max_mutations_per_boundary`, `max_incident_receipts`, or
+  `MAX_HOT_RECEIPTS` reads the per-root bounds; a host that archives reads
+  residues through the three new archive key variants. A fixture that drove
+  incidents with wakes drives them with applied operations.
+- **Every paged restore call passes a budget**, including a downstream
+  host's own entry points (a page-store adapter or save-system wrapper that
+  calls `from_paged_checkpoint_and_journal`, its `_with_plugins` form, or
+  `from_state_pages`). For a checkpoint the host wrote, pass
+  `PagedRestoreBudget::new(checkpoint.assembled_bytes)`, the exact charge
+  of an honest restore; `PagedRestoreBudget::DEFAULT` (2 GiB) is a ceiling
+  for the host's own larger checkpoints. For pages from a source the host
+  does not trust, pass a budget near the size it expects (the
+  `assembled_bytes` of the checkpoints it writes, with headroom) and
+  authenticate the root page ID against one it recorded: the budget bounds
+  assembled bytes, not heap. A host that kept its own checkpoint-size
+  guard keeps the root check; the budget replaces the guard. Write fresh
+  paged checkpoints with 0.18.0 (format 7); a page collector reads the new
+  envelope's body chunks and knowledge roots and the manifest's hot-state
+  chunks through `StatePageRetentionLedger` as before.
+- **A world-scale host may save as a paged checkpoint again**: the knowledge
+  ledger no longer needs to fit one page. The continuation checkpoint stays
+  the save for a run whose evidence prefix is too long to verify on restore.
+- **A host that saves from a fork** on a worker thread keeps doing so;
+  `fork` is now constant-time, but if the save fork is still alive at the
+  original's next boundary, that boundary pays the journal copy the fork
+  used to pay (about 53 ms at 65,536 records on a full-history run; a
+  sealed run copies only its tail).
+- **Saves.** Write a fresh continuation checkpoint, snapshot, or checkpoint
+  journal with 0.18.0; nothing from 0.17.0 loads.
+
+Known limits carried by this release, each stated in its proposal:
+
+- Routes depart as soon as possible at each node; there is no voluntary
+  waiting, and an adjustment can make an edge non-FIFO, the `Piecewise`
+  class. Conditions act on departures, not on a traversal under way; one
+  duration per recurring pattern; a calendar month is not a fixed period;
+  `reobserve` trusts the revision the caller names; the default expansion
+  budget (10,000 pops, stale pops counted) and the unbounded `RoutingCache`
+  are unchanged; `Departures` has no slot cap. Correspondence plans with
+  plain `plan_route` (no conditions or index), hashes the holder snapshot
+  per plan, and still fails the boundary as `InvalidDomainRecord` on a
+  malformed `recurring` payload in a carrier's knowledge
+  ([known limits](proposals/recurring-traversal.md#known-limits)).
+- The society root is still one record rewritten whole by a settlement that
+  changes it (10 MB and about 20 MB of evidence a day at 4,000 cohorts and
+  two targets, half of it the materialized views); under the default `Keep`
+  the ledger still grows with every rebase and lifecycle delta outcome, and
+  transfer outcomes grow under both retentions (about 300 bytes each); the
+  relations record is rewritten whole by a revision (about 30 to 40 ms and
+  2 MB of evidence at 4,096 edges); society does not follow a region's
+  lifecycle; edges are never removed, and observers get no estimate of a
+  relation
+  ([known limits](proposals/society-intergroup-relations.md#known-limits)).
+- A law boundary on a plan of 1,555 jurisdictions still decodes the plan
+  once (about 8 ms); the directory's object routes grow with hot legal
+  objects; `max_provider_packets` (default now 256, stricter than 0.17.0's
+  4,096) bounds how long after admission a provider packet can be cited,
+  and the provider index costs about 9 µs per kept packet on every law
+  boundary; a delegation claim without `expires_at` stays for the run,
+  and a ledger is decoded whole when it changes or is cited; caseload
+  history beyond `retained_periods` is the host's to keep
+  ([known limits](proposals/law-aggregate-caseload.md#known-limits)).
+- Request outcome retention: hashed or random request IDs stay unbounded at
+  about 59 bytes per retired request; `RequestIndex::decisions` and
+  `decision_commands` keep every decision request for the run;
+  `evidence_times` grows with distinct instants (about 2.5 KB a month at
+  smoke scale); between seals the pins of the last seal may still hold the
+  provenance fact of a retired request's ingress, so an undeclared
+  provenance read can answer `false` in a sealed run and fail in a run
+  restored later; there is no read-only request status call
+  ([non-goals and known limits](proposals/request-outcome-retention.md#non-goals-deferred-work-and-known-limits)).
+- `enqueue_command` scans every retained and pinned ingress record for an
+  exact re-enqueue (`O(retained ingress)` per call), recorded as a finding
+  for a later release
+  ([E-29](proposals/request-outcome-retention.md#e-29)); the seal's own
+  cost is now about 2.6 µs an index entry (below).
+- Paged restore and seal: the knowledge maps are rebuilt from the ledger at
+  every paged checkpoint, `O(ledger)` encoding and hashing (about 90 ms for
+  the 4,030-body run), though only changed pages are stored, and a restore
+  builds them once more to check the roots; the budget bounds assembled
+  bytes, not the restore's heap, and the restore still holds a decoded copy
+  of the records beside the loaded store while the snapshot path validates
+  them; a paged restore still needs, and verifies, the whole evidence prefix
+  from the zero cut, so the continuation checkpoint remains the world-scale
+  save; the seal still copies the sealed tail and encodes every sealed
+  record once, about 2.6 µs an entry
+  ([known limits](proposals/paged-restore-budget-and-seal-cost.md#known-limits)).
+- The fiscal books are still summed per boundary from every scope of a
+  court's partition (50,000 ledger reads at the due instant); the view's
+  `current_domain_record_version`, called once per scope row, costs about
+  75 ms there; the engine's own share of the due instant and of its heap
+  peak (the record writes of 4,000 observers and 2,561 queue pages, the
+  journal and commitments) is not reduced; a fiscal host that saves only by
+  continuation checkpoint and never seals archives with no refusal in its
+  first session and, after the restore, sees such citations refused until
+  it seals; external-operation uniqueness is checked within a scope's hot
+  books and resolved auditor proposals are capped at 64 per policy, each
+  with its reason in the proposal
+  ([deviations and limits left](proposals/fiscal-archive-and-due-instant-cost.md#deviations-and-limits-left),
+  [the sealed cut](proposals/fiscal-archive-and-due-instant-cost.md#the-sealed-cut-comes-from-the-run)).
+- A publisher that does not read the budget, or reads it and overshoots,
+  still fails its boundary with `KnowledgeLimitExceeded`; a reservation is
+  held at every boundary where its plugin's publisher is due, whether or not
+  it publishes; two refreshes of the checkpoint hash remain inside a
+  boundary before its first phase (a queued command's admission and a
+  command handler's `EnqueuePluginIngress`), where they hash little
+  ([engine load and budget guards](proposals/engine-load-and-budget-guards.md)).
+- Resource: open demands with their reservations and legs, active transfers,
+  leases, report grants, and observation heads stay in the live root, so
+  `max_demands`, `max_transfers`, leases, and report grants bound what every
+  changing boundary costs (about 790 KB of live root for 500 open household
+  demands; an allocation pass over 8,192 due demands leaves a 12.6 MB live
+  root); a pooled demand's allocation pass reads every account, about 30 µs
+  each (2.0 s at 65,536), so the canonical `max_accounts` stays 8,192 and a
+  host that raises it draws on exact accounts or grants; a holder's
+  custodian index is one entry rewritten each time the holder gains an
+  account (some 250 KB, journaled twice, at 10,000 accounts); one lease per
+  holder per simulated minute bounds one holder's batches to one a minute; a
+  live bucket holds about four records and is rewritten with each; an
+  operation rewrites its outcome's hot bucket with the record already there;
+  a batch item costs its boundary about 0.5 ms and 13 KB of journal, so the
+  hard bound on batch items per boundary is 2,048; `resource_state`, archive
+  preparation, and restore validation read every bucket
+  ([known limits](proposals/resource-series-scale.md#known-limits)).
+- Reference integrations: the force-supply plugin's acknowledgements of
+  resource and externality outcomes, which other plugins schedule, are
+  checked against the full byte cap, can fill the maintenance reserve, and
+  one that passes the cap still fails its boundary; an externality outcome
+  stays in the economy root while its force-supply saga is open or its
+  terminal receipt hot; one commit still carries one page of at most 512
+  records; superseded lookup pages are reclaimed only from each batch's list
+  ([known limits](proposals/reference-archive-receipts.md#known-limits)).
+- Production: an item of a batch, like an operation, costs one copy and one
+  validation of its root (about 3.5 ms at 1 MB, 170 ms at 13.6 MB), so a
+  root of several megabytes settles items slowly and roots are sized by
+  scope; a key a host-queued resource operation takes after an execution
+  started still strands the execution; roots are installed with the
+  scenario and a run cannot add a scope; production reports keep
+  `KnowledgeRetention::Keep`, so a holder keeps at most
+  `max_observation_records_per_holder` reports for life and later reports
+  wait; an activated lease that never starts an execution never ends; a
+  re-sent operation whose outcome was archived is applied again, and once a
+  cancelled order's residue is archived a re-sent `CreateWorkOrder`
+  recreates the order; a forged folded incident receipt or chain is caught
+  only by exact replay, and a forged activity record is ignored after the
+  domain commit; each observation prune scans the whole rollover table
+  twice, negligible at the canonical limits (64 reports × 8,192 heads) and
+  heavy at the maxima (about 1,024 keys × 65,536 heads × 6 passes in one
+  boundary), until the rollover is indexed by key; a host keeps each root's
+  lookup pages for the heads a restore, replay, or fork passes
+  ([known limits](proposals/production-series-scale.md#known-limits)).
+- Runtime state copies: a fork, or a rollback copy, still costs one copy of
+  the retained journals when both sides keep them and one appends, paid at
+  the first append (about 53 ms at 65,536 records); a save fork alive at the
+  original's next boundary moves that copy onto the original, and a sealed
+  run copies only its tail. What is left of a 662 MB restore, about 29 s, is
+  mostly validation of the evidence itself (about 14 s), the JSON parse and
+  the drop of its tree (about 5 s), the decode (3 s), and the plugins'
+  activation checks (the fiscal plugin's about 3.5 s); a sealed run's
+  continuation checkpoint remains the save for long campaigns. A commitment
+  root of the world, plugin-component, or scheduler domain still collects
+  the domain's values into vectors when the domain is dirty
+  ([what remains](proposals/runtime-state-copies.md#what-remains)).
+- Every limit of the 0.17.0 entry that this release does not touch stands:
+  plugin-scheduled resource work waiting on an archive backlog or on
+  reserved room is retried, at most about once a day once its delay has
+  stopped growing, until the host commits or releases, and the run cannot
+  seal while a deferral waits; an activated lease never expires; a
+  `Requested` acquisition holds its reservation until it is granted or
+  aborted; a production output batch skipped for room, for a taken key, or
+  for an output account that changed revision leaves its execution
+  `CompletedPendingOutputSettlement`; a continuation runtime
+  cannot produce a full snapshot, replay journal, checkpoint journal, or
+  paged checkpoint, and its keyed-draw ledger grows for the life of the run;
+  what a continuation restore verifies without history is covered only by
+  the stored `continuation_hash`; R4 is a plugin obligation; a part of
+  institution rows cites the office version and the number of books it
+  summed; fiscal report retention clears a closed cycle's figures by
+  default, the fiscal knobs are run-bound, an `Interval` report shows the
+  state as of its last due boundary, calendar cadences are not expressible,
+  and domain-entity report holders stay deferred; several dirty cycles owed
+  at once take more than one boundary through the drain packet; the
+  continuation gate proves state equality with the run's own registry; the
+  Ming-validator item; and the `Send` runtime's `Sync` reliance. Dropped
+  from the 0.17.0 and 0.16.0 lists, because this release fixes them: the
+  knowledge ledger inside the 4 MiB envelope page of a paged checkpoint, and
+  the envelope page bounding the compact body (both paged or chunked now); a
+  paged restore allocating what the pages describe with no bound a host can
+  set (the restore budget); the world-scale seal's 30 s of double hashing;
+  the mid-boundary refresh; the plugin that spends the whole budget before
+  information; the engine accepting an unsealable initial declaration; the
+  request index's growth with every command ever settled and the monthly
+  creep it caused; the due instant's uninvestigated heap peak and the
+  fiscal side above its expectation; the whole-state fiscal archive helpers
+  and the host-supplied sealed cut; the reference archive's 8,192-receipt
+  cap and the economy root that stopped there; the never-retired
+  `DelegatedAuthority` records, the quadratic stale-proposal pass, and the
+  4,096-packet provider index; the resource items (the archive commit's
+  per-record bucket rewrite, the whole-root decode per operation boundary,
+  finished leases in the root, the force-supply settlement reading the whole
+  root, and the host `Expire` refusal); the society ledger item (bounded by
+  the opt-in retention); the production items (a re-sent operation whose
+  outcome was archived is still applied again, but a forged plugin-scheduled
+  packet is now a refusal with a trace, refused packets drive no incident or
+  report, and a commit costs its selected records plus one pass over the hot
+  outcomes); and the stable copy of plugin components and core maps for
+  phases 1 to 9, `fork` copying every journal, and the per-command
+  transaction checkpoint.
+
+Headline measurements, each from its proposal and, where one exists, from
+the reports under `benchmarks/baselines/` (release builds, one Windows
+x86-64 machine shared with other builds throughout, so elapsed times show
+the order of magnitude and byte and allocation counts are exact; the `world`
+preset is 200 polities, 50,000 scopes, 4,200 institutions, and 4,000
+observers, courts at `Institution` granularity, monthly `Interval` cadence):
+
+| Measure | Workload | 0.17.0 | 0.18.0 |
+| --- | --- | ---: | ---: |
+| Routing, cold `plan_route` | `routing_scale` grid, 1,296 nodes and 5,040 connections, 72 ferries as 240 slots each | 30.0 ms | 3.5 ms |
+| Routing, plan through a compiled index | the same grid | — | about 0.3 ms (compile about 4 ms, once per network revision) |
+| Routing, recurring ferries and 568 conditions | the same grid; build the set, plan | — | 0.32 ms, 0.57 ms |
+| Routing, rail chain | 512 nodes, 1,021 connections, 10 cold plans | 271.4 ms | 5.8 ms |
+| Routing, snapshot JSON with recurring ferries | the same grid | 1.66 MB (slots) | 1.03 MB (recurring) |
+| Society `Daily` settlement that moves people | 4,000 cohorts, two targets | 0.85 to 0.91 s, 3 to 4 root writes, 53 MB of evidence | 0.23 to 0.31 s, 1 write, 14 to 20 MB |
+| Society queued rebases | 4,000 in one `Monthly` settlement | 32.5 s (66.5 s in month 2) | 0.46 to 0.92 s |
+| Society ledger under `LatestSettlement` | 4,000 rebases a month | 1.4 MB a month for good | 1.40 to 1.42 MB every month |
+| Intergroup revision | 4,096 edges, 1 to 1,024 changed | — | 29 to 41 ms, about 2.1 MB journaled |
+| Law boundary settling one mutation | 1,555 jurisdictions, 1,400 institutions | 100.7 ms | 9.4 ms |
+| Law records at activation | the same plan | 3,118 (plan 917 KB rewritten every boundary; directory 612 KB) | 6 (plan written once; directory 0.9 KB) |
+| Caseload reports | 1,400 reports a monthly boundary, 12 kept periods | — | 60 to 100 ms, flat to month 14; 730 B a period record, 12.3 MB in all |
+| Law boundary per kept provider packet | small plan, 256 / 1,024 / 4,096 packets | 2.8 / 10.0 / 40.0 ms | the same per packet; the default is now 256 |
+| Continuation checkpoint at world scale | after months 1, 5, and 24 (institution courts, interval cadence) | 172 MB, about 221 MB, 293 MB | 171.6 MB, 205.45 MB, 206.30 MB (+0.85 MB from month 5 to 24; request index: one month of outcomes and about two retired ranges a month) |
+| Compact checkpoint dependencies and kept receipts | smoke preset, months 1 to 12 | +2,520 a month | flat at 8,039 |
+| Fiscal due instant, allocation-counting build | 4,000 observers due, 9,603 bodies | 6.52 M allocator calls, 472 MB heap peak, 15.7 MB of payload | 4.26 M, 306 MB, 5.5 MB |
+| Fiscal due instant, elapsed in a fresh process | `--rows interval`, three alternating rounds | 1,827 to 4,054 ms (quiet: 1,259 ms) | 1,259 to 1,858 ms |
+| Fiscal archive commit, host side | 256 and 4,096 books | 6.15 M and 6.90 M allocator calls; 1,402 and 1,813 ms | 98 K and 1.19 M; 166 and 501 ms |
+| Held knowledge after 24 months | world preset | 14,138 bodies, 15.13 MB | 14,138 bodies, 5.67 MB |
+| Mid-boundary ingress over many components | 20,000 components, 64 `SetComponent` + `ScheduleIngress` pairs | 1.8 to 2.1 s | 0.10 to 0.11 s |
+| Resource operation boundary | 16,384 accounts, no backlog | 100 ms, 9.49 MB of journal | 1.27 ms, 8.3 KB |
+| Resource operation boundary | 65,536 accounts, 16,000 hot records | — | 0.72 ms, 10.9 KB |
+| Resource archive commit | 16,054 records beside 16,384 accounts | 713 ms, 30.3 MB | 370 ms, 17.1 MB |
+| Consumption batch | 32 and 256 items, adapter ingress | — | 14 to 28 ms, 432 KB; 105 to 151 ms, 3.26 MB |
+| Household consumptions, live root after | 500 households, one lease each / batches of 256 | 1.85 MB, 500 finished leases left | 262 KB, none left / 2.9 KB |
+| Economy commit chain | settled commits, root size, operation boundary | refused at 8,192; 3.52 MB; 231 ms | 25,600 and flat; 37.3 KB; 3.7 ms |
+| Reference roots after ten simulated years | monthly maintenance | force-supply 89.8 KB, economy 92.8 KB | 53.8 KB, 43.1 KB, flat from year 1 |
+| Production, 64 single commands | `production-archive-profile --preset scale`, 0.99 MB root | 2.39 s apply (956 ms admission) | 188 ms (526 ms) |
+| Production, one `CreateWorkOrder` | the same root: admission / apply | 211 ms / 288 ms | 12 ms / 57 ms |
+| Production, scope batch of 64 items | a 400-scope world of 25,600 sites (13.4 MB of roots): admission / apply / journal | — (a root held at most 2,048 sites) | 1.6 ms / 24 ms / 140 KB; idle boundary 0.14 ms |
+| Production, scope batch of 64 items | 400 scopes of 160 sites (64,000 sites, 31.9 MB) | — | 2.4 ms / 52 ms / 233 KB |
+| Production archive commit, prepare | 1,023 executions beside 8,000 unrelated outcomes | 279 to 384 ms | 108 ms |
+| `fork` | a run of 65,536 records / the unsealed world after a burst | 53.3 ms / 0.77 to 0.93 s | 0.025 ms / 0.1 to 0.2 ms (786,706 → 156 allocations; the first appending boundary after the fork pays 53.5 ms) |
+| World-scale admission boundary, every scope | 4,200 commands | 1.7 to 2.4 s | 0.9 to 1.0 s |
+| Restore of the 662 MB world snapshot | three runs, byte-identical snapshot | 47.7 to 71.4 s | 28.7 to 44.8 s |
+| Continuation restore | month 14 of the continuation profile | 31 to 48 ms | 19 to 23 ms |
+| Seal, about 900,000 index entries | `continuation-profile --seal-months 3 --commands 280 --churn 15000`, whole `seal_evidence` | 30.8 to 59.2 s (index 7 to 15 s, verify 20 to 47 s, receipts 3 to 11 s) | 3.3 to 3.4 s (index 2.3 s, verify 0.24 s, receipts 0.02 s), byte-identical segments |
+| Paged checkpoint with 4,000 report holders | `continuation-profile --report-holders 4000 --report-bytes 2000 --paged`, a 9.8 MB ledger | refused (the envelope page) | 16,347 pages, 12.3 MB, prepared in 89 ms; restored with its prefix at `assembled_bytes` (10.2 MB) in 244 ms; one-day delta 2,328 pages, 1.0 MB, 44 ms |
+
+The hash algorithms are unchanged. The engine version in every checkpoint
+hash changes, first-party plugins that take their plugin version from the
+crate version report a new one, and the exact engine-version check rejects
+0.17.0 saves; retain the 0.17.0 engine to read them.
 
 Version 0.17.0 is a pre-1.0 minor release. Its changes come from one design,
 [fiscal observers at scale](proposals/fiscal-observers-at-scale.md), Phase 3

@@ -92,7 +92,7 @@ Rail, air, telegraph, and relay stations share one algorithm; the differences li
 - Telegraph and other signals: `TransferMode::Signal`. Office hours, latency, risk, and interception come from data or your own extension's policy.
 - Courier networks: relay-station endpoints, `Horse` or `Foot` connections, and custody handoffs between legs.
 
-Each connection has a `TraversalModel`: `Fixed` for a constant duration, `Departures` for scheduled slots, and `Piecewise` for durations that change over time. The default algorithm, `FifoDijkstraV1`, assumes that leaving later never means arriving earlier. When your time-dependent data breaks that rule, set `algorithm: RoutingAlgorithm::BoundedLabelCorrectingV1` in the policy.
+Each connection has a `TraversalModel`: `Fixed` for a constant duration, `Departures` for scheduled slots, `Recurring` for a timetable that repeats (every `period` after the epoch, at each listed offset), and `Piecewise` for durations that change over time. When you plan many queries over one network, compile it once into a `RoutingIndex` and plan through that; see [recurring departures, edge conditions, and the routing index](/en/architecture/routing-movement/#recurring-departures-edge-conditions-and-the-routing-index). The default algorithm, `FifoDijkstraV1`, assumes that leaving later never means arriving earlier. When your time-dependent data breaks that rule, set `algorithm: RoutingAlgorithm::BoundedLabelCorrectingV1` in the policy.
 
 ### Limits and caching
 

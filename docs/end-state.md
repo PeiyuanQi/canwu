@@ -293,7 +293,10 @@ decision-history locations so a host can keep only bounded hot state while
 retaining exact archive receipts. The opt-in compact runtime can seal settled
 live tails into caller-owned segments, with work still in flight, while
 preserving continuation, exact idempotency, commitments, and reconstruction
-through that same contract. Since 0.16.0 a continuation checkpoint is the save
+through that same contract. Since 0.18.0 a tracked command request's exact
+outcome is kept for the run's request outcome retention and then retired,
+its ID still used for the run, so a continuation checkpoint holds one
+window of outcomes instead of every outcome ever settled. Since 0.16.0 a continuation checkpoint is the save
 from which a run continues without its evidence history: it carries the
 current state, the journal frontiers, the pinned evidence the run still
 needs, and every keyed draw under one hash, restores to a runtime that settles,
@@ -320,7 +323,11 @@ revisions, leg execution, custody handoffs, capacity bookings, and an
 arrival-pending completion saga. It does not own the information ledger or the
 simulation scheduler. A route estimate is never the same thing as an
 information deadline: `DeliveryAttempt.due_at` remains the logical completion
-deadline, while ETA can change after a disaster and trigger a reroute.
+deadline, while ETA can change after a disaster and trigger a reroute. Since
+0.18.0 a timetable can be a recurring departure pattern instead of a slot
+per sailing, a host applies edge conditions (closures and adjustments by
+departure instant) without rebuilding the network, and a compiled routing
+index plans a query in about a hundredth of the earlier time.
 
 Since 0.12.0 the transport records also cover a group of people moving as one
 subject (`PersonsGroup`, counted by head count), custody taken by someone
@@ -446,9 +453,19 @@ holder can send fails a resource boundary: a packet whose result has no room,
 whose operation key another request holds, or that fails its settlement
 checks is skipped with a named reason and sent again, scheduled work another
 plugin cannot resend is deferred to the plugin itself, and room is measured on
-the packet's result, so a refusal needs room for its outcome only. The
+the packet's result, so a refusal needs room for its outcome only. Since
+0.18.0 accounts, access grants, definitions, and unit revisions persist in
+live buckets with a custodian index per holder, so a boundary pays nothing
+per account it does not name; a provider settles up to 256 consumptions
+under one lease as a consumption batch; a finished lease leaves the root; and
+a host expires grants only through the expiry tick. The
 production archive keeps the same lookup index, its receipts leave the root,
 and a production output batch the resource plugin deferred still settles.
+Since 0.18.0 production scales by scope roots (one root per host-chosen
+scope, each with its own limits, read and written only when its packets
+name it), settles a holder's monthly operations as one batch command, and
+keeps nothing for life: residues archive, incident receipts fold, and
+rolled-out observation heads are pruned.
 
 `canwu-production` consumes that public resource boundary and exact
 `canwu-technology` evidence. It owns process, site, facility, capacity, work
@@ -541,6 +558,13 @@ at it (every transfer against the state the period's issuers could see, the
 default, or one by one against the state the earlier transfers left), the
 society queue is a head record and one batch record per admitting boundary,
 and a packet that finds the queue full is a recorded outcome, not a drop.
+Since 0.18.0 a settlement writes the root once with its derived views
+materialized, the host may bound the cohort exchange ledger to the latest
+settlement's outcomes, organization relation kinds may be bounded by a
+vocabulary, and the society holds intergroup relations (directed, typed
+relations between two cohort classes in a region) in their own record,
+revised by a public packet and read by the host, which models their causes
+and effects above the engine.
 
 Promotion from this domain extension into core requires an independently
 implemented second domain system needing the same primitive, evidence that the
@@ -572,7 +596,11 @@ references. Only an explicit reactivation may create a new target generation.
 The complete runtime state is snapshot-compatible; with `CulturePlugin` the
 host drives boundary/replay integration, and with `CultureBoundaryPlugin` the
 engine does.
-This is a hot-state optimization, not historical deletion.
+This is a hot-state optimization, not historical deletion. Since 0.18.0 the
+law extension also settles routine justice in aggregate: a plan may declare
+a caseload profile, and a host reports intake, resolutions, and review flows
+per jurisdiction and period into bounded aggregate caseload records with a
+clearance rate, beside the proceedings it follows one by one.
 
 The complete authoring, incremental settlement, lifecycle, and benchmark
 contract is specified in the [culture authoring SDK and lifecycle design](proposals/culture-authoring-sdk-and-lifecycle.md).
@@ -658,8 +686,11 @@ has a cadence (on change, or at aligned interval times) and a granularity
 publishes within its share of the engine's publication budget, superseded
 report records are cleared at publication unless the host keeps them, and
 parked holders are re-checked in rotation; and no fiscal packet fails a
-boundary. The lifetime caps of 0.15.0 are gone: a run is bounded by its hot
-cycles and record byte budgets, not by how long it has run.
+boundary. Since 0.18.0 the host archive helpers read only the records a
+commit needs and take the sealed cut from the run itself, so a sealing host
+seals at each save, and a report part is encoded compactly. The lifetime
+caps of 0.15.0 are gone: a run is bounded by its hot cycles and record byte
+budgets, not by how long it has run.
 
 ## Debug client
 

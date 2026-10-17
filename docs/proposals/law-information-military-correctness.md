@@ -667,6 +667,16 @@ No engine snapshot, commitment, or checkpoint format changes.
 
 - `max_provider_packets` defaults to 4,096 per plan. A host that cites
   provider packets long after they were admitted sizes it for the gap.
+  (Resolved in 0.18.0: the default is 256, since each kept packet costs
+  about 9 µs of every law boundary; see
+  [law aggregate caseload](law-aggregate-caseload.md#provider-index-default-e-25).)
 - `DelegatedAuthority` records are never retired. Retiring them when their
   claim window closes would need a scheduled wake, which blocks 0.15.0 seals;
-  a later package can retire them through archive maintenance.
+  a later package can retire them through archive maintenance. (Resolved in
+  0.18.0 without a wake: one versioned ledger per command grant holds its
+  live delegations with an expiry index, the lifecycle system removes
+  expired delegations at the boundaries it already runs, an interpretation
+  admitted at or after its delegation's `expires_at` is refused even when
+  it is dated inside the window, and a claim already expired at admission
+  is not recorded; see
+  [delegations leave their ledger when they expire](law-aggregate-caseload.md#delegations-leave-their-ledger-when-they-expire-e-25-canwu-information).)

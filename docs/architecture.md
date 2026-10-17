@@ -553,8 +553,14 @@ which a fork shares, so a host takes `fork()` on the simulation thread, moves
 the fork to a worker, and advances, seals, checkpoints, or saves it there
 while the simulation thread keeps settling the original; what the worker
 writes is byte-equal to the same steps on the original thread, and nothing a
-boundary decides depends on the thread it runs on. Four rules keep that
-safe. A save-only fork never loads from the provider (`checkpoint_journal_json`,
+boundary decides depends on the thread it runs on. Since 0.18.0 the current
+state, the scheduler, and the retained journals are persistent, shared
+structures, so `fork()` is constant-time (53 ms to 0.03 ms at 65,536
+records) and copies no journal; the first append on either side while both
+still hold the shared journals copies them instead, so a save fork that is
+still alive at the original's next boundary moves that copy (about 53 ms at
+65,536 records) onto the original's boundary, where the fork paid it before,
+and a sealed run's tail keeps it small. Four rules keep that safe. A save-only fork never loads from the provider (`checkpoint_journal_json`,
 `continuation_checkpoint`, and `seal_evidence` read only the run's own state
 and evidence; a fork that is also advanced, restored, or validated loads at
 the same time as the original). A provider gives every run one answer per
@@ -620,10 +626,17 @@ actually addresses them, so runtime state grows with active relationships and
 edges rather than a dense territory/cohort/target/channel product.
 
 The settlement cadence is an option of the plugin.
-`SocietyPlugin::with_settlement_cadence(cadence)` runs the four settlement
-systems (transitions in phase 7, mobilization candidates in phase 10,
-aggregates in phase 12, and projections in phase 13) on a host-chosen
-`SystemCadence` category; `SocietyPlugin::DAILY` and
+`SocietyPlugin::with_settlement_cadence(cadence)` runs the one settlement
+system, `settle-social-transitions` in phase 7, on a host-chosen
+`SystemCadence` category. Since 0.18.0 that system also materializes the
+derived views its changes cleared (mobilization candidates, aggregates, and
+the projections of observers whose estimates changed) before it writes, so a
+settlement writes the root at most once and journals one record change,
+"Settled society"; the separate phase-10, -12, and -13 systems of earlier
+releases are gone, and a system of another plugin that reads the root in
+phases 8 to 13 of a settling boundary reads the views materialized. A rebase
+or a cohort transfer touches only its cohorts' distributions, and the whole
+root is validated once before the write. `SocietyPlugin::DAILY` and
 `SocietyPlugin::default()` keep `Daily`, and `EventDriven` is refused at
 registration. Canwu keeps no calendar, so a cadence is a category the host
 attaches to boundaries, not a length of time: a `Monthly` society settles
@@ -656,7 +669,35 @@ what each boundary admits, never the queue's length. The queue holds at most
 is refused by the boundary that admits it, with a terminal `queue_full`
 outcome in the cohort exchange ledger and one event, and a
 `revise_society_pressure` command is refused at admission while the queue is
-full.
+full. A third option, `SocietyPlugin::with_outcome_retention`
+(`OutcomeRetention`), bounds the cohort exchange ledger: under `Keep`, the
+default, every outcome stays for the run; under `LatestSettlement` a
+settlement that records rebase or lifecycle delta outcomes first drops those
+recorded at an earlier time, while transfer outcomes (which make a resent
+transfer idempotent) and pressure revision outcomes are kept. Like the
+cadence and the transfer settlement mode, the retention is plugin identity.
+
+Since 0.18.0 the society also holds **intergroup relations**: directed,
+typed relations between two **cohort classes** (`CohortClass { dimension,
+value }`, every cohort whose classification carries that value) in an
+optional region (a territory, a government, or a domain entity), each with
+acceptance, tension, and trust per mille, bounded evidence, and a revision.
+They live in their own record, `canwu.society:intergroup-relations`
+(`IntergroupRelations`, at most 4,096 edges, with a `kinds` vocabulary), so
+a settlement never rewrites them and a revision never rewrites the root. A
+scenario authors the record (`IntergroupRelations::into_record`); run
+creation and every restore check each class an edge names against the
+root's cohorts. The public `intergroup_relation_revision_v1` packet creates
+or revises edges by expected revision and applies as a whole in phase 7 of
+the boundary that admits it; every refusal is a
+`society_intergroup_relation_rejected_v1` event with a stable code and the
+boundary commits. A region is an identifier checked when the edge is created,
+not a record reference, so its owner can still retire or delete it; an edge
+is never removed. The settlement neither reads nor writes the relations:
+`load_intergroup_relations` is the host read, and actors learn of relations
+through knowledge the application publishes. `SocietyState::relation_vocabulary`
+applies the same idea to organization relation kinds: while it is empty any
+canonical kind is admitted, otherwise validation refuses another.
 
 A settlement that changes nothing writes nothing. `last_transition_at` is the
 time of the last settlement in which a transition changed a distribution or a
@@ -786,7 +827,31 @@ prepare/decision/ACK protocol whose ACK proves accepted controller and ticket
 outcomes, so ingress archival does not invalidate recovery. Persistent dirty,
 deadline, scheduled-version, live-culture-dependency, participation, outbox,
 and applicability indexes keep ordinary settlement proportional to due or
-changed work rather than immutable history.
+changed work rather than immutable history. Since 0.18.0 the plan record
+holds only the compiled plan, its hash, and its budgets and is written once;
+the ledger counters live in the coordinator shard and the evidence
+declaration in the directory, and an order or jurisdiction shard exists only
+once it holds something, so a plan of 1,400 jurisdictions starts with six
+law records and a law boundary decodes the plan once. A plan may also
+declare a **caseload profile** (`CaseloadProfileDefinition`: case classes,
+review levels, kept periods, reports per boundary), and a host reports
+routine justice in aggregate with `caseload_intake_v1` packets
+(`enqueue_caseload_intake`): the admission system settles each report into
+an **aggregate caseload** record per jurisdiction and period
+(`AggregateCaseloadRecord`: intake and resolutions per class, the pending
+stock carried from period to period, review queues per level, and the
+**clearance rate**), kept in a fixed ring of slots per jurisdiction and read
+with `load_legal_caseload`. Periods are contiguous, stocks are conserved, a
+repeat of the newest period is idempotent, and every refused report changes
+nothing and is one `canwu.law.caseload_rejected.v1` event with a stable
+code; the records declare no evidence, never load the legal runtime, and are
+bounded when the plan compiles, outside the legal state budget. A case the
+host wants to follow on its own is still a `LegalCase`, counted in its
+class's intake. The legal provider index keeps the newest
+`max_provider_packets` packets (256 by default), and the stale-proposal
+check examines at most `max_mutations_per_boundary` dirty procedures per
+boundary, deferring the rest. See the
+[law aggregate caseload proposal](proposals/law-aggregate-caseload.md).
 
 Procedure stages tally integer vote weights, can require a
 number of unit blocks in the `For` position with a `status-quo` or
@@ -896,29 +961,70 @@ payloads retain canonical policy shape and authenticated demand digests.
 
 The resource root is one `ResourceState` in memory and persists in parts: the
 live root, the domain record `resource:runtime:v1` (`ResourceLiveRootV1`),
-holds everything except the hot terminal records, the root's archive
-candidates, which it only counts in a `ResourceHotTerminalLedgerV1`; each hot
-terminal record is an entry of a bucket record `resource:hot-terminal:{bucket}`
-(`ResourceHotTerminalBucketV1`), chosen by a domain-separated hash of its
-identity among as many buckets as the candidate budget rounded up to a power
-of two. `ResourceState::into_records` persists a state and `from_records`
-restores it, checking that every entry lies in its bucket, that the ledger
-counts exactly the stored entries, and that the whole state validates;
-activation runs the same checks. A boundary reads and writes what it touches:
-before it settles a packet the resource plugin attaches the outcome under
-every key the packet settles under, every hot terminal record the payload
-names, and their closures, and every rule that counts hot terminal records
-reads the ledger, so a partial root settles as the whole root would (every
-debug build settles each boundary again on the whole root and asserts the
-same proposal). It then writes the live root and the buckets whose entries
-changed; a boundary with nothing for the resource plugin reads nothing of
-the root, and one that would write over a hot terminal record it did not
-attach fails with `invalid_boundary`. Another plugin reads the root with
-`resource_root_in_view` or `ResourceRootReader`, naming the hot terminal
-records it needs, or `whole_resource_root_in_view`, and declares the read of
-`resource_hot_terminal_state_key()` beside the live root's; the host's
-`resource_state` reads the whole root. See the
-[resource root write cost proposal](proposals/resource-root-write-cost.md).
+holds open demands with their reservations and allocation legs, active
+transfers, leases, report grants, and observation heads, and only counts, in
+its `ResourceHotTerminalLedgerV1` and (since 0.18.0) `ResourceLiveLedgerV1`,
+what it does not hold: each hot terminal record (the root's archive
+candidates) is an entry of a hot terminal bucket `resource:hot-terminal:{n}`
+(`ResourceHotTerminalBucketV1`, about two records per bucket), and each
+account, access grant, definition, unit revision, and custodian index entry is
+an entry of a live bucket `resource:live:{n}` (`ResourceLiveBucketV1`, about
+four records per bucket), each chosen by a domain-separated hash of its
+identity among a bucket count fixed for the life of the root. Both bucket
+families are one record kind, `canwu.resource` `bucket`
+(`ResourceBucketRecord`). The custodian index
+(`ResourceCustodianAccountsV1`) lists the accounts one holder holds, so a
+holder's stock is read without a scan. `ResourceState::into_records`
+persists a state and `from_records` restores it, checking that every entry
+lies in its bucket, that the ledgers count exactly the stored entries, that
+every account lies in its custodian's index, that every consumption names
+the fulfillment it recorded, and that the whole state validates; activation
+runs the same checks. `into_record` refuses a root that holds hot terminal
+or live records, so a scenario installs opening accounts with
+`into_records`. A boundary reads and writes what it touches: before it
+settles a packet the resource plugin attaches the outcome under every key
+the packet settles under, every hot terminal and live record the payload
+names (a leg's account, a demand's source accounts and access grant, an
+account's definition and unit), and their closures, and every rule that
+counts records, totals balances, or asks whether a floor policy is in use
+reads the attached records and the ledgers together, so a partial root
+settles as the whole root would (every debug build settles each boundary
+again on the whole root and asserts the same proposal). It then writes the
+live root and the buckets whose entries changed: settling one operation
+writes the same records whatever the number of accounts, creating an
+account writes its bucket and its custodian's index, and a pooled demand's
+allocation pass attaches every account. A boundary with nothing for the
+resource plugin reads nothing of the root, and one that would write over a
+hot terminal or live record it did not attach fails with `invalid_boundary`.
+Another plugin reads the root with `resource_root_in_view` or
+`ResourceRootReader`, naming the hot terminal records it needs and the live
+records with `attach_live` or `attach_custodian_accounts`, or
+`whole_resource_root_in_view`, and declares the read of
+`resource_hot_terminal_state_key()` beside the live root's; a reader of a
+consumption follows `ResourceConsumption::fulfillment` to its fulfillment
+without a search; the host's `resource_state` reads the whole root. A
+finished lease (released or expired, its report reservation published)
+leaves the root at once; its receipts stay hot terminal records until an
+archive commit takes them, and an acquisition identity still starts one
+lease for the run. A host expires grants with
+`enqueue_resource_completion_expiry_tick`; `Expire` is refused at enqueue
+because a host cannot know which boundary admits a packet. See the
+[resource root write cost proposal](proposals/resource-root-write-cost.md)
+and the [resource series scale proposal](proposals/resource-series-scale.md).
+
+A provider that settles many small consumptions sends one **consumption
+batch** (`ResourceConsumptionBatchRequestV1`, `ConsumeBatch`): up to 256
+exact allocation-leg consumptions under one completion lease, entering only
+through the provider's adapter ingress with a typed consumption intent per
+item under the item's reserved key (`resource_consumption_batch_item_key`).
+Items settle in order; each is refused alone or consumed with its own
+outcome, several items may draw on one account, the batch outcome totals
+them (`remainder` is the refused quantity), and the lease completes once.
+Room is measured on the whole result, so a batch that does not fit is
+skipped and records nothing (`consumption_batch_can_fit` tells a provider
+what can ever fit); `max_batch_items_per_boundary` (canonical 32, hard 2,048)
+bounds the items a boundary settles, and a batch past it is deferred with
+the `boundary_budget` skip event to the next boundary at the same instant.
 
 Terminal resource records leave the root in archive commits that the host
 application prepares with `prepare_resource_archive`, stores, and queues. One
@@ -1213,10 +1319,35 @@ reserved prefix, one another unsettled execution names, or one a resource
 outcome holds in the root or its archive, more than
 `MAX_PRODUCTION_OUTPUT_BATCH_CREDITS` (64) outputs, and an output set the
 resource root can never hold; a process may declare at most 64 outputs. What
-still fails a production boundary is a forged archive packet from another
-plugin, a failed store read, counter overflow, and the root's 256 MiB byte
-cap. See the
+still fails a production boundary is a failed store read, an engine
+invariant, counter overflow, and a later system's write past the root's
+256 MiB byte cap; since 0.18.0 a forged completion step, witness, archive
+commit, or acknowledgement another plugin schedules is refused with a trace.
+See the
 [production archive volume proposal](proposals/production-archive-volume.md).
+
+Since 0.18.0 production scales by **scope roots**: a host installs one
+`ProductionState` per scope (one per county, say) under
+`canwu.production:runtime:scope:{scope}` beside the unchanged primary root,
+every packet names its root, and the lifecycle system loads, settles,
+writes, and journals only the roots a boundary's packets name, then writes
+a small boundary activity record that tells the later systems which roots
+changed their production lifecycle and by which packet, so a boundary with
+no production work reads one small record and the 64,000-site world
+settles a scope's batch as fast as the 4,096-site one. Each root carries its
+own `ProductionLimitsV1`, fixed by the scenario (canonical 16,384 sites,
+facilities, work orders, executions, and allocations; 4,096 operations and
+1,024 batch items a boundary), and the per-root budgets add up across
+roots. A scope root's lease and output keys begin with `{scope}/` and the
+primary root's hold no `/`, so roots never share a resource-side key. A
+host settles many operations of one holder against one root in one tracked
+`apply_production_batch_v1` command, item by item with per-item outcomes; a
+batch with a stale expected revision, or past the root's operations for the
+boundary, is refused whole and sent again. Nothing a root settles stays for
+life: ended work orders, ended leases, and unclaimed outcomes archive as
+residues, incident receipts fold into a digest chain, and dominated
+rolled-out observation heads are pruned. See the
+[production at series scale proposal](proposals/production-series-scale.md).
 
 `canwu-force-supply-reference` proves that a second independent domain can
 consume the same resource API. It owns force-local recurring demand,
@@ -1226,9 +1357,18 @@ resource archive's lookup index under its own namespace, so a lookup inside a
 boundary reads the head directory, one page per level, and one blob on a hit;
 a reused operation ID is skipped with an `operation_rejected` event; and the
 enqueue helpers refuse, host-side, a commit the root's receipt or handle room
-cannot take. A run makes at most `MAX_PACKAGE_ARCHIVE_MAINTENANCE_RECEIPTS`
-(8,192) package archive commits per reference plugin, because receipts never
-leave that root. It cannot write civilian population, cooperation, harvest, property, or
+cannot take. Since 0.18.0 the acknowledgement of a commit's retention handle
+folds every receipt recorded under it into the root's digest chain
+(`PackageArchiveReceiptChainV1`), so a root keeps only the receipts of
+unacknowledged commits (at most `MAX_PACKAGE_ARCHIVE_MAINTENANCE_RECEIPTS`,
+64) however many commits a run makes; an operation whose outcome finds no
+hot slot, or whose result passes the share of the byte cap operations may
+fill, is skipped with its own `operation_skipped` event (`archive_backlog`
+or `root_limit`), records nothing, and settles under the same ID once an
+archive commit made room; and `force_operation_outcome` and
+`economy_operation_outcome` read a settled outcome hot or archived. See the
+[reference archive receipts proposal](proposals/reference-archive-receipts.md).
+It cannot write civilian population, cooperation, harvest, property, or
 occupation state; the receiving integration applies or rejects those typed
 externality intents at an exact expected revision. In `canwu-economy-reference`
 the exact target is the local economy, which must be unchanged since the
@@ -1363,17 +1503,27 @@ a valid state is refused when a run is created or restored.
 
 `CloseAccountingCycle` closes a cycle's books; closed books leave the hot
 records through fiscal archive commits that the host prepares with
-`FiscalState::prepare_fiscal_archive`, stores, and queues, in the format and
-with the cumulative lookup index of the resource archive under the fiscal
-namespaces, so an archived book or a cycle's institution totals is read by
-key through the head directory, one page per level, and one blob. A commit may
-cite only records whose evidence lies at or below the sealed cut it names.
+`prepare_fiscal_archive(run, book_limit, store)`, stores, and queues
+(`enqueue_fiscal_archive`, `finalize_fiscal_archive_retention`), in the
+format and with the cumulative lookup index of the resource archive under
+the fiscal namespaces, so an archived book or a cycle's institution totals
+is read by key through the head directory, one page per level, and one blob.
+The helpers read only the records a commit needs (the root, the archive
+head, a partial read of every ledger, and the ledgers and offices of the
+books the commit takes), never the whole fiscal state. A commit may cite
+only records whose evidence lies at or below the run's sealed cut, which the
+helpers read from the run itself (`sealed_evidence_cursor`), so a host
+cannot pass a wrong cut; a run that retains all its evidence refuses
+nothing, so a sealing host seals at each save, before it writes a
+continuation checkpoint, if every archived citation is to lie in a sealed
+segment.
 
 An observer's report is held by the observer's knowledge holder, which may be
 a government with no actor, as one summary record and, per hot cycle slot (64
 per observer), parts of `FISCAL_REPORT_ROWS_PER_PART` (16) rows, published as
-version 5 of the `fiscal_report` knowledge schema on stable lines (`1 + slot
-× 1,024 + part`). A binding's `granularity` says what a row is: `Scope`, one
+version 6 of the `fiscal_report` knowledge schema on stable lines (`1 + slot
+× 1,024 + part`); a part lists its rows' institutions once and encodes rows
+and facts as arrays, which `FiscalReportPart` decodes. A binding's `granularity` says what a row is: `Scope`, one
 row per scope of the institutions it sees, or `Institution`, one row per
 visible institution and mechanism, its facts the sums of the institution's
 hot books of the cycle per unit and payment form, rendered at the binding's
@@ -1659,8 +1809,19 @@ byte charge. A publisher that reads the budget and defers what does not fit
 never fails a boundary; one that overshoots fails it with
 `KnowledgeLimitExceeded`, because a publication the kernel cut would leave
 the plugin's own state writes believing the records were published. There is
-no per-system share: fairness between plugins is the host's composition
-problem, and the ordered read makes it deterministic.
+no per-system share by default: fairness between plugins is the host's
+composition problem, and the ordered read makes it deterministic. Since
+0.18.0 a host may give a plugin a **publication reservation**
+(`KnowledgePublicationReservation`, set with
+`PluginRegistrar::reserve_knowledge_publication` or by registering the
+plugin through `KnowledgeReservedPlugin`): a share of every boundary's
+budget, held at each boundary where the plugin's knowledge-writing system is
+due, that systems of other plugins are not shown and cannot take, whatever
+their dispatch order. The reserving plugin reads its share through the same
+`knowledge_publication_budget()`. The reservation is part of the plugin
+descriptor, so of the run's identity; restore validation charges each
+knowledge change by the same rule. Overshooting what a system was shown
+still fails the boundary.
 
 Each registered `PluginKnowledgeSchema` declares a **retention** policy
 (`KnowledgeRetention`), part of the plugin descriptor. Under `Keep` every
@@ -1953,14 +2114,29 @@ most 365 days after it closed; `MovementLimitsV1` bounds orders, pools,
 outcomes, and reports with per-owner and per-holder quotas. The plugin never
 draws randomness.
 
-The router supports fixed, scheduled, and piecewise traversal. Historical
-content can therefore express foot, horse, road, river, sea, 1900/1940 rail,
-air, telegraph, or other signal systems as data. `RoutingPolicy::algorithm`
-selects stable Dijkstra ordering (`FifoDijkstraV1`, the default, for FIFO
-timetables) or a bounded label-correcting search (`BoundedLabelCorrectingV1`)
-for non-FIFO timetables. Capacity is a persistent transport booking, not hidden mutable
-state in a route cache. `RoutingCache` is derived, digest-keyed, rebuildable,
-and excluded from authoritative commitments.
+The router supports fixed, scheduled, recurring, and piecewise traversal.
+Historical content can therefore express foot, horse, road, river, sea,
+1900/1940 rail, air, telegraph, or other signal systems as data: a ferry
+that sails every six hours is one `TraversalModel::Recurring { period,
+offsets, duration }` pattern (departures at `EPOCH + k × period + offset`,
+looked up exactly in integer minutes) rather than a slot per sailing.
+`RoutingPolicy::algorithm` selects stable Dijkstra ordering
+(`FifoDijkstraV1`, the default, for FIFO timetables) or a bounded
+label-correcting search (`BoundedLabelCorrectingV1`) for non-FIFO
+timetables. Since 0.18.0 (`canwu-routing.v2`) a host compiles a
+`PlanningSnapshot` once per network revision into a `RoutingIndex`
+(validated once, the network hashed once, a dense adjacency behind an `Arc`),
+moves it to a new read cut with `reobserve`, and plans through it in about a
+hundredth of the time of a cold `plan_route`; `plan_route` keeps its
+signature and compiles a borrowed index per call. **Edge conditions**
+(`EdgeConditionSet` of `EdgeConditionOverlay`s: a window on one connection
+that is `Closed` or `Adjusted` in duration, resource cost, and risk) apply
+by departure instant through `plan_route_with_conditions` without rebuilding
+the network, and a plan records the set's digest in
+`RoutePlan.edge_conditions_digest`. Capacity is a persistent transport
+booking, not hidden mutable state in a route cache. `RoutingCache` is
+derived, digest-keyed (`index_key` keys plans without hashing the network),
+rebuildable, and excluded from authoritative commitments.
 
 Movement uses the admitted `OrderMovement` intent. Army and person movement are
 implemented by the same command boundary, while persisted movement state keeps
@@ -2219,7 +2395,20 @@ which reads current state and emits only pages that are new to a
 `from_paged_checkpoint_and_journal` with its `_with_plugins` variant, which
 restores from the provider and the contiguous evidence prefix through the
 same validation as a flat snapshot. A compact host's prefix is its sealed
-segments followed by `journal_segment_since` the end of the last one.
+segments followed by `journal_segment_since` the end of the last one. Since
+0.18.0 (paged format 7) every paged restore takes a host-supplied
+**restore budget** (`PagedRestoreBudget`): each value the restore assembles
+from pages is charged against it before it is allocated, and a value past
+it fails with `RestoreBudgetExceeded` before any chunk is read. The budget
+bounds assembled bytes, not heap; a host restoring its own checkpoint
+passes the descriptor's `assembled_bytes`, and for untrusted pages passes
+a budget near the size it expects and authenticates the root page ID.
+The knowledge ledger is paged as two content-addressed maps (bodies by ID,
+holder ledgers by holder) and the compact body and hot decision state are
+chunk pages, so no part of a paged checkpoint is limited to one page and a
+world of thousands of report holders saves as a paged checkpoint; a restore
+rebuilds the knowledge maps and requires the envelope's roots, so one
+ledger has one paged form.
 
 `CompactedSimulation` and `CompactedCanwu` add the explicit live archive
 contract. Entering compact mode preserves the retained history;
@@ -2265,7 +2454,12 @@ first declared after its seal and no longer held, fails the seal with
 record a host cites checks it with `SimulationView::ingress_is_declarable`
 first. A plugin must not declare an initial-scenario record version as
 payload-required: it stays readable after any seal, and the engine refuses
-the declaration. Two-phase sealing prepares immutable, content-addressed
+the declaration; since 0.18.0 an initial-scenario record whose
+payload-required or identity dependencies name an initial-scenario version,
+its own version, or are malformed is refused when the plugin registers
+(`InvalidDomainRecord`) and when a save restores (`InvalidSnapshot`), by the
+same checks the seal applies, instead of starting a run that can never seal.
+Two-phase sealing prepares immutable, content-addressed
 segments, lets the host store them idempotently, then commits only the exact
 prepared token; its commit accepts a pinned `PayloadRequired` item in place of
 a receipted, loadable one. Segment manifests, receipt roots, and dependency
@@ -2286,13 +2480,19 @@ existence is known) reports `EvidenceContentUnavailable`. A boundary decision
 that reads an evidence payload outside the closure is a plugin rule
 violation, and the first-party extensions read none: `canwu-law` keeps a
 bounded legal provider index of the provider packets its boundaries admitted,
-`canwu-information` records delegations in `DelegatedAuthority` records and
-finalizes publications through `knowledge_heads`, `canwu-military` cites the
+`canwu-information` records each command grant's live delegations in one
+`DelegatedAuthority` ledger record with an expiry index (an expired
+delegation authorizes nothing and leaves the ledger at the next lifecycle
+boundary) and finalizes publications through `knowledge_heads`, `canwu-military` cites the
 admitted packet of every keyed draw, and the Ming fiscal validator reads only
 current records, replay-stable versions, and the journal counters.
 
 The runtime keeps compact canonical request commitments and original
-outcomes/receipts for exact idempotency, plus the prior boundary-chain head and
+outcomes/receipts for exact idempotency, for the run's request outcome
+retention (`RunConfiguration::request_outcome_retention`, default 30
+simulated days after the attempt), and the IDs of retired requests as
+canonical ranges (`RequestIndex::retired_commands`) for the life of the run,
+plus the prior boundary-chain head and
 evidence-family flags needed for safe continuation. The five journal
 commitments are resumable BLAKE3 stream hashes (the stream length, the
 chaining values of completed subtrees, and the unfinished chunk), whose
@@ -2486,8 +2686,15 @@ calendar work uses
 controller/ticket/option lifecycle changes, or `drive_decision` to evaluate a
 bound policy and enqueue an authoritative resolution. Accepted and expected-rejected command attempts are
 persisted, hashed, admitted at a boundary, restored by save/load, and regenerated
-by exact replay. Exact retries return the original outcome without new mutation;
-request-ID collisions are fail-closed without creating evidence. The persisted
+by exact replay. Exact retries return the original outcome without new
+mutation while the attempt is inside the run's request outcome retention
+(default 30 simulated days); after that the request is retired, its ID stays
+used, and any request with that ID, an exact retry or not, is refused with
+`RequestOutcomeRetired` without an attempt, a revision, or an event;
+request-ID collisions inside the window are fail-closed
+(`IdempotencyConflict`) without creating evidence. The rule is simulated
+time alone, so unsealed, sealed, continuation-restored, and replayed runs
+answer alike. The persisted
 authoritative revision advances exactly once for every accepted command,
 persisted expected command rejection, and published settlement boundary. Failed
 commands or boundaries and exact retries do not advance it. Bare clock movement,

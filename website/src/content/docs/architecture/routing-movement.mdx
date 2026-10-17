@@ -72,7 +72,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | --- | --- |
 | `PlanningSnapshot` | 某个观察者在某一时刻所知的网络：`observer`、`observed_at`、可选的 `valid_until`、`knowledge_cut`、`topology_version`、可选的 `timetable_version`，以及 `RoutingNetwork` |
 | `RoutingNetwork` | 带版本的 `RoutingEndpoint` 与 `RoutingConnection` 列表。`RoutingNetwork::new` 会排序，并拒绝重复项和无效连接。 |
-| `RoutingConnection` | 一条有向连接，带 `TransferMode`、`TraversalModel`（`Fixed`、`Departures` 或 `Piecewise`）、可选的可用时间窗口、`risk_per_mille` 和 `resource_cost` |
+| `RoutingConnection` | 一条有向连接，带 `TransferMode`、`TraversalModel`（`Fixed`、`Departures`、`Recurring` 或 `Piecewise`）、可选的可用时间窗口、`risk_per_mille` 和 `resource_cost` |
 | `RoutingRequest`、`RoutingPolicy` | 起点、终点和出发时间。策略选择 `FifoDijkstraV1` 或 `BoundedLabelCorrectingV1`，并规定允许的交通方式和搜索上限。 |
 | `RoutePlan` | 选中的 `RouteLeg` 列表及其计划时间、`RouteCost`、预计到达时间、算法与策略版本、快照摘要，以及计划自身的摘要 |
 | `RoutingCache` | 可选的上层应用缓存，以快照摘要和请求为键保存计划 |
@@ -151,6 +151,16 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 每个操作键都有一个持久结果，可以用 `MovementState::operation_outcome` 查询。命令的操作键按持有人区分，事故的操作键按证据记录种类区分，所以任何来源都占用不了别人的键。完全相同的重试不产生变化。命令用同一个键提交不同内容时，会在准入时以 `IdempotencyConflict` 被拒绝；其他冲突的复用（例如来自事故的）会另记一条 `Conflict` 拒绝结果。
 
+### 周期性班次、连接条件与路由索引
+
+三项路由功能让大网络上的规划保持便宜：
+
+- **周期性班次**（`TraversalModel::Recurring { period, offsets, duration }`）描述一张重复的时刻表：从纪元起每隔一个 `period`，在列出的每个偏移时刻（1 到 4,096 个，严格递增，都在一个周期之内）各发一班，每班耗时 `duration`。六小时一班的渡船只需一个模式，不必为每次航行写一个班次，十四个月的时刻表也就不再在每份快照里为每条连接占 1,700 个班次。某时刻之后的下一班按整数分钟精确算出，连接的可用窗口限定航季。`TraversalModel::next_departure(at)` 对每种按班次的模型回答同一个问题。
+- **连接条件**（`EdgeConditionOverlay`）是作用于一条连接的半开时间窗口，附带一种效果：`Closed` 表示封闭，旅行者等窗口结束后的第一班；`Adjusted` 则按比例放大窗口内出发的时长和资源成本（向上取整），并在给出时替换风险。洪水、封冻的河流、泥泞季节都是条件，不必重建网络。你先构建一个校验过的 `EdgeConditionSet`（最多 65,536 条，每条连接最多 1,024 条，ID 唯一；同一连接上的封闭会合并，同一连接上的两条调整不得重叠，否则以 `RoutingError::InvalidConditions` 拒绝），再传给 `RoutingIndex::plan_route_with_conditions`。条件按出发时刻应用，不影响已经在途的通行。指向网络中不存在的连接的条目不起作用，所以一个条件集可以服务多个观察者的网络；`unmatched_conditions` 会列出这些条目，拼错的 ID 也就能查出来。计划把条件集的摘要记在 `RoutePlan.edge_conditions_digest` 中（没有应用条件时为空）。
+- **路由索引**（`RoutingIndex::new(snapshot)`）把规划快照编译一次：网络只校验一次、只哈希一次，邻接表是稠密的，放在 `Arc` 后共享，所以索引复制起来很便宜，而且是 `Send + Sync`。为每个网络版本保留一个索引，用 `reobserve(topology_version, timetable_version, observer, observed_at, valid_until, knowledge_cut)` 把它移到新的读取切面（只哈希切面，版本与索引不符时拒绝），然后通过它规划：一次查询只剩搜索本身的开销，约为冷启动 `plan_route` 的百分之一。`plan_route` 的签名不变，每次调用临时编译一个借用的索引，它本身也比以前更快。通过索引得到的计划和摘要，与在同一快照上调用 `plan_route` 完全相同。`RoutingCache::index_key(index, conditions, request)` 不哈希网络就能给缓存的计划生成键。
+
+`plan_route` 和 `RoutingIndex::new` 会拒绝 `RoutingNetwork::new` 也会拒绝的手工拼装的网络（重复 ID、未知端点、畸形的通行模型），所以请在把连接载荷当作知识发布之前先校验。路线在每个节点都尽早出发，不会主动等待；一条调整可能让一条连接不再满足 FIFO，这与 `Piecewise` 连接同属一类。日历月不是固定周期，请改用班次，或为每种月长各写一个模式。
+
 ## 知识与可见性
 
 规划只读取快照。`PlanningSnapshot` 写明观察者和 `knowledge_cut`，`RoutePlan.planning_snapshot_digest` 则把每份计划绑定到它所依据的快照。有两个辅助函数可以构建快照：
@@ -181,7 +191,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 - 待处理的路段到期输入和报告唤醒都是排队中的规范化输入，所以快照会带上它们，载入后的运行可以从行程中途继续。
 - 已关闭的运输执行会从运行时退休。它的移动命令和运输执行标识仍然保留、不会复用，已消耗的运力也仍计入运力池。已发布的报告留在持有人的知识中，领域记录历史保留运行时的旧版本。
 - 运输值是 serde 数据，保存在其所有者的记录中。`TRANSPORT_SEMANTIC_VERSION` 为 `canwu-transport.v5`。`HandoffKind::Planned` 类型的交接在 JSON 中省略类型字段，所以旧的交接记录保持原有编码。
-- `RoutePlan` 记录 `ROUTING_ALGORITHM_VERSION`（`canwu-routing.v1`）、策略版本和快照摘要。`RoutingCache` 是派生数据，随时可以丢弃重建，重放也用不到它。
+- `RoutePlan` 记录 `ROUTING_ALGORITHM_VERSION`（`canwu-routing.v2`：对每个有效网络，路线、成本和拒绝结果与 v1 相同，但快照摘要和计划摘要由 `RoutingNetwork::digest` 组合而成，与 v1 不同）、策略版本、快照摘要，以及所应用的连接条件的摘要。`RoutingCache` 是派生数据，随时可以丢弃重建，重放也用不到它。
 
 精确重放把记录下来的命令、事故和到期输入重新送入同样的系统，得到同样的运行时。恢复和重放都要求插件名称、版本和语义哈希（`MOVEMENT_SEMANTIC_HASH`）一致。
 
@@ -198,7 +208,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 ## 限制与预算
 
-`RoutingPolicy::default()` 把 `max_expanded_nodes` 设为 10,000，`max_transfers` 设为 64，路线累计风险上限 `max_risk_per_mille` 设为 1,000。单条连接的 `risk_per_mille` 不能超过 1,000。`NoKnownRoute`、`ExpansionBudgetExceeded`、`SearchHorizonExceeded` 等搜索失败都是确定性结果，重放会得到相同的失败。
+`RoutingPolicy::default()` 把 `max_expanded_nodes` 设为 10,000，`max_transfers` 设为 64，路线累计风险上限 `max_risk_per_mille` 设为 1,000。单条连接的 `risk_per_mille` 不能超过 1,000。`NoKnownRoute`、`ExpansionBudgetExceeded`、`SearchHorizonExceeded` 等搜索失败都是确定性结果，重放会得到相同的失败。一个周期性模式最多列出 `MAX_RECURRING_OFFSETS`（4,096）个偏移；一个条件集最多 `MAX_EDGE_CONDITIONS`（65,536）条，每条连接最多 `MAX_EDGE_CONDITIONS_PER_CONNECTION`（1,024）条，调整的 `duration_per_mille` 取值 1 到 `MAX_CONDITION_PER_MILLE`（1,000,000）。`Departures` 的班次数没有上限，`RoutingCache` 也不限大小。
 
 `MovementLimitsV1::CURRENT` 限定移动运行时：
 

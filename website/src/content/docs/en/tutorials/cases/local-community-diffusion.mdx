@@ -210,13 +210,13 @@ assert_eq!(
 
 `settle_day` settles a boundary with `SystemCadence::Daily`, the settlement
 cadence this example registers, which runs the society plugin's settlement
-systems:
+system, `settle-social-transitions`, in phase 7:
 
-- Phase 7, `settle-social-transitions`: `apply_pending_policies` copies the
-  pending decision onto `council-alignment`, then the transition rules run.
-- Phase 10, `evaluate-mobilization-candidates`: none in this run.
-- Phase 12, `aggregate-social-state`: the counts that `main` prints.
-- Phase 13, `materialize-society-projections`: one estimate per observer.
+- `apply_pending_policies` copies the pending decision onto
+  `council-alignment`, then the transition rules run.
+- The same system then materializes what its changes invalidated, in one write
+  of the root: the mobilization candidates (none in this run), the
+  aggregates (the counts that `main` prints), and one estimate per observer.
 
 With enforcement at 800 per mille, `03-public` runs at
 `800 × 300,000 / 1,000 = 240,000` per million, and 5 of the 23 sympathetic

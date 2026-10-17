@@ -1133,8 +1133,8 @@ callers that pass a `Canwu`.
 | --- | --- | --- |
 | Current state (records, knowledge ledger, decisions, components) | yes, as state | yes |
 | Keyed-draw ledger | one entry per address ever drawn | one entry per address |
-| Request index | one entry per tracked request ever | same |
-| Ingress provenance facts | one per pending or declared ingress record; the request index declares the ingress of every tracked request | same |
+| Request index | one entry per tracked request ever (since 0.18.0: one window of outcomes and receipts, plus one canonical range per run of consecutive retired IDs; see [request outcome retention](request-outcome-retention.md)) | same |
+| Ingress provenance facts | one per pending or declared ingress record; the request index declares the ingress of every tracked request (since 0.18.0: of every request inside the retention window) | same |
 | Time index | one entry per distinct instant per journal | same |
 | Segment headers | not carried | one per seal |
 | Boundaries, events, commands, ingress, draws, receipts | only the closure | closure plus tail since the last seal |
@@ -1520,9 +1520,12 @@ Second commit:
   applications that need no replay.
 
 Known limits to state: an undeclared non-current record version and generic
-payloads stay seal-dependent (R1 to R4); the ledger and request index grow for
-ever; module restore wrappers that replay history have no continuation form;
-a continuation runtime cannot produce full-history artifacts.
+payloads stay seal-dependent (R1 to R4); the keyed-draw ledger grows for
+ever, and the request index did until 0.18.0 bounded it to the run's request
+outcome retention for consecutive request IDs
+([request outcome retention](request-outcome-retention.md)); module restore
+wrappers that replay history have no continuation form; a continuation
+runtime cannot produce full-history artifacts.
 
 ## Non-goals
 

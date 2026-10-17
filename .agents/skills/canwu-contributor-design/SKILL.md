@@ -114,7 +114,27 @@ not imply belief, capability, or use.
   plugin whose event-driven system must also run on quiet boundaries adds
   a separate wake system on a host-chosen `SystemCadence`, as fiscal's wake
   cadence (`with_report_cadence`, `wake-fiscal-reports-on-cadence-v1`)
-  does, rather than registering the writer twice in one phase.
+  does, rather than registering the writer twice in one phase. A plugin
+  that must publish whatever runs before it holds a publication reservation
+  (`PluginRegistrar::reserve_knowledge_publication`), part of its
+  descriptor, instead of relying on dispatch order.
+- A plugin that reads the provenance of a command ingress record
+  (`plugin_ingress_matches`) declares it as an identity-only dependency: a
+  retired tracked request (past the run's request outcome retention) cites
+  no dependency, so an undeclared read answers `false` while the record is
+  retained and `EvidenceContentUnavailable` once a seal removed it, which a
+  sealed run and its unsealed twin would decide differently. Never declare
+  an initial-scenario record version as payload-required; registration and
+  restore refuse it.
+- Bound every collection a plugin keeps for the life of a run, and prefer a
+  retention window, a fixed ring of slots, a digest chain of folded
+  receipts, or an opt-in retention knob (as the request index, the law
+  caseload records, the reference archive receipts, and the society ledger
+  do in 0.18.0) over a record that grows with history. Persist what every
+  boundary reads apart from what a boundary names (as the resource live
+  buckets and the law plan record do), so a boundary pays for what it
+  touches, and measure an operation's room on its result so that a refusal
+  is a skip or a recorded rejection, never a failed boundary.
 
 Decision and controller designs must keep this chain visible:
 

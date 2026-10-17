@@ -92,7 +92,7 @@ let plan = plan_route(&planning_snapshot, &request)?;
 - 电报等信号：`TransferMode::Signal`。电报局的营业时间、延迟、风险和截获规则来自数据或你自己扩展的策略。
 - 驿站网络：中继站节点、`Horse` 或 `Foot` 连接，以及路段之间的保管权交接。
 
-每条连接都有一个 `TraversalModel`：`Fixed` 表示固定时长，`Departures` 表示按班次发车，`Piecewise` 表示随时间变化的时长。默认算法 `FifoDijkstraV1` 假设晚出发就不会早到达（FIFO）。如果你的时变数据打破了这个前提，请在策略中设置 `algorithm: RoutingAlgorithm::BoundedLabelCorrectingV1`。
+每条连接都有一个 `TraversalModel`：`Fixed` 表示固定时长，`Departures` 表示按班次发车，`Recurring` 表示重复的时刻表（从纪元起每隔一个 `period`，在列出的每个偏移时刻发车），`Piecewise` 表示随时间变化的时长。要在同一网络上做很多次规划时，先把它编译成一个 `RoutingIndex`，再通过索引规划，见[周期性班次、连接条件与路由索引](/architecture/routing-movement/#周期性班次连接条件与路由索引)。默认算法 `FifoDijkstraV1` 假设晚出发就不会早到达（FIFO）。如果你的时变数据打破了这个前提，请在策略中设置 `algorithm: RoutingAlgorithm::BoundedLabelCorrectingV1`。
 
 ### 限制与缓存
 

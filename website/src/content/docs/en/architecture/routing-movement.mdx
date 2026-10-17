@@ -72,7 +72,7 @@ Planning types, in `canwu-routing`:
 | --- | --- |
 | `PlanningSnapshot` | The network as one observer knows it at one moment: `observer`, `observed_at`, optional `valid_until`, `knowledge_cut`, `topology_version`, optional `timetable_version`, and the `RoutingNetwork` |
 | `RoutingNetwork` | A versioned list of `RoutingEndpoint` and `RoutingConnection` values. `RoutingNetwork::new` sorts them and rejects duplicates and invalid connections. |
-| `RoutingConnection` | One directed link with a `TransferMode`, a `TraversalModel` (`Fixed`, `Departures`, or `Piecewise`), an optional availability window, `risk_per_mille`, and `resource_cost` |
+| `RoutingConnection` | One directed link with a `TransferMode`, a `TraversalModel` (`Fixed`, `Departures`, `Recurring`, or `Piecewise`), an optional availability window, `risk_per_mille`, and `resource_cost` |
 | `RoutingRequest`, `RoutingPolicy` | Origin, destination, and departure time. The policy chooses `FifoDijkstraV1` or `BoundedLabelCorrectingV1`, the allowed modes, and the search limits. |
 | `RoutePlan` | The chosen `RouteLeg` list with planned times, a `RouteCost`, the estimated arrival, the algorithm and policy versions, the snapshot digest, and the plan's own digest |
 | `RoutingCache` | An optional host-side cache of plans keyed by snapshot digest and request |
@@ -151,6 +151,16 @@ A departing leg consumes its confirmed bookings. A leg whose booking failed or e
 
 Every operation key has one durable outcome, which `MovementState::operation_outcome` returns. Keys are scoped per holder for commands and per evidence record kind for incidents, so no source can claim another's keys. An exact retry changes nothing. A command that reuses a key with different input is refused at admission with `IdempotencyConflict`. Other conflicting reuse, such as an incident's, is recorded as a separate `Conflict` rejection.
 
+### Recurring departures, edge conditions, and the routing index
+
+Three routing features keep a large network cheap to plan over:
+
+- A **recurring departure** pattern, `TraversalModel::Recurring { period, offsets, duration }`, describes a timetable that repeats: departures leave at every `period` after the epoch plus each listed offset (1 to 4,096, strictly increasing, inside the period), and each takes `duration`. A ferry every six hours is one pattern instead of a slot per sailing, so a fourteen-month timetable no longer costs 1,700 slots per connection in every snapshot. The next departure at or after any time is found exactly in integer minutes, and the connection's availability window bounds the season. `TraversalModel::next_departure(at)` answers the same question for every scheduled model.
+- An **edge condition** (`EdgeConditionOverlay`) is a half-open window on one connection with an effect: `Closed`, so a traveller waits for the first departure at or after the window ends, or `Adjusted`, which scales the duration and resource cost of a departure inside the window (rounded up) and replaces its risk when given. A flood, a frozen river, or a mud season is a condition, not a new network. You build a validated `EdgeConditionSet` (at most 65,536 overlays, 1,024 per connection, unique IDs; closures on one connection merge, and two adjustments on one connection may not overlap, refused as `RoutingError::InvalidConditions`) and pass it to `RoutingIndex::plan_route_with_conditions`. Conditions apply by departure instant, never to a traversal already under way. An overlay naming a connection the network lacks has no effect, so one set can serve several observers' networks; `unmatched_conditions` lists such overlays so a misspelled ID is caught. The plan records the set's digest in `RoutePlan.edge_conditions_digest` (absent when no conditions applied).
+- A **routing index** (`RoutingIndex::new(snapshot)`) compiles a planning snapshot once: the network is validated once and hashed once, and the adjacency is dense and shared behind an `Arc`, so the index clones cheaply and is `Send + Sync`. Keep one per network revision, move it to a new read cut with `reobserve(topology_version, timetable_version, observer, observed_at, valid_until, knowledge_cut)` (which hashes only the cut and refuses another revision than the index's), and plan through it: a query then costs the search alone, about a hundredth of a cold `plan_route`. `plan_route` keeps its signature, compiles a borrowed index per call, and is itself faster than before. Plans and digests through an index equal `plan_route`'s on the same snapshot. `RoutingCache::index_key(index, conditions, request)` keys a cached plan without hashing the network.
+
+`plan_route` and `RoutingIndex::new` refuse a hand-assembled network that `RoutingNetwork::new` refuses (duplicate IDs, unknown endpoints, a malformed traversal model), so validate connection payloads before you publish them as knowledge. Routes depart as soon as possible at each node: there is no voluntary waiting, and an adjustment can make an edge non-FIFO, the same class as a `Piecewise` edge. A calendar month is not a fixed period; use slots or one pattern per month length.
+
 ## Knowledge and visibility
 
 Planning reads only a snapshot. A `PlanningSnapshot` names its observer and `knowledge_cut`, and `RoutePlan.planning_snapshot_digest` binds each plan to the snapshot it came from. Two helpers build snapshots:
@@ -181,7 +191,7 @@ What persists:
 - Pending leg-due packets and report wakes are queued canonical ingress, so a snapshot carries them and a loaded run continues mid-journey.
 - A closed execution retires from the runtime. Its order and execution identities stay reserved, and its consumed pool capacity stays counted. Published reports remain in holders' knowledge, and the domain-record history keeps earlier runtime versions.
 - Transport values are serde data saved inside their owner's records. `TRANSPORT_SEMANTIC_VERSION` is `canwu-transport.v5`. A `HandoffKind::Planned` handoff omits its kind from JSON, so older handoffs keep their exact encoding.
-- A `RoutePlan` records `ROUTING_ALGORITHM_VERSION` (`canwu-routing.v1`), the policy version, and the snapshot digest. `RoutingCache` is derived data: you can drop and rebuild it at any time, and replay works without it.
+- A `RoutePlan` records `ROUTING_ALGORITHM_VERSION` (`canwu-routing.v2`: the routes, costs, and refusals of v1 for every valid network, but snapshot and plan digests are composed from `RoutingNetwork::digest` and differ from v1's), the policy version, the snapshot digest, and the digest of any edge conditions applied. `RoutingCache` is derived data: you can drop and rebuild it at any time, and replay works without it.
 
 Exact replay feeds the recorded commands, incidents, and due packets through the same systems and reaches the same runtime. Restore and replay require the same plugin name, version, and semantic hash (`MOVEMENT_SEMANTIC_HASH`).
 
@@ -198,7 +208,7 @@ Exact replay feeds the recorded commands, incidents, and due packets through the
 
 ## Limits and budgets
 
-`RoutingPolicy::default()` sets `max_expanded_nodes` to 10,000, `max_transfers` to 64, and `max_risk_per_mille` to 1,000 for the summed risk of a route. A single connection's `risk_per_mille` cannot exceed 1,000. Search failures such as `NoKnownRoute`, `ExpansionBudgetExceeded`, and `SearchHorizonExceeded` are deterministic results, so replay reproduces them.
+`RoutingPolicy::default()` sets `max_expanded_nodes` to 10,000, `max_transfers` to 64, and `max_risk_per_mille` to 1,000 for the summed risk of a route. A single connection's `risk_per_mille` cannot exceed 1,000. Search failures such as `NoKnownRoute`, `ExpansionBudgetExceeded`, and `SearchHorizonExceeded` are deterministic results, so replay reproduces them. A recurring pattern lists at most `MAX_RECURRING_OFFSETS` (4,096) offsets; a condition set holds at most `MAX_EDGE_CONDITIONS` (65,536) overlays and `MAX_EDGE_CONDITIONS_PER_CONNECTION` (1,024) per connection, and an adjustment's `duration_per_mille` runs from 1 to `MAX_CONDITION_PER_MILLE` (1,000,000). `Departures` has no slot cap, and `RoutingCache` is unbounded.
 
 `MovementLimitsV1::CURRENT` bounds the movement runtime:
 
