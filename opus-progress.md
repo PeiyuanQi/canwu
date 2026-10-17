@@ -69,7 +69,7 @@ engine-side, the 0.16.0 contract choices, the continuation gate as a release tes
 run (confirmed 2026-10-16).
 
 Taken in the 0.18.0 run by the orchestrator under the owner's instruction to fix every remaining gap and finding and
-release (2026-10-16); each is recorded in its proposal and the owner may reverse any of them:
+release (2026-10-16), and confirmed by the owner on 2026-10-17; each is recorded in its proposal:
 - G-34 and G-17 were implemented although the ledger filed them as conditional ("second consumer", "profile first").
 - G-33 is a society relation vocabulary (empty = unrestricted); intergroup-relation regions are identifiers, not record
   references, so no edge pins another plugin's entity.
@@ -81,14 +81,14 @@ release (2026-10-16); each is recorded in its proposal and the owner may reverse
 - Paged restores take a required `PagedRestoreBudget` parameter (default 2 GiB for a host's own checkpoints).
 - 0.17.0 was yanked after 0.18.0 was verified on crates.io, following the one-live-version practice.
 
-Open:
-- Confirm the 0.18.0 decisions above.
-- The Chinese terms of the 0.18.0 concepts, as proposed in `docs/terminology.md`: 请求结果保留期 request outcome
-  retention, 已退役请求结果 retired request outcome, 社群结果留存策略 society outcome retention, cohort 类别 cohort
-  class, 群体间关系 intergroup relation, 案件量配置 caseload profile, 汇总案件量 aggregate caseload, 结案率 clearance
-  rate, 发布预留 publication reservation, 委托账 delegation ledger, 活动桶 live bucket, 保管人索引 custodian index,
-  消费批次 consumption batch, 周期性班次 recurring departure, 连接条件 edge condition, 路由索引 routing index, 恢复预算
-  restore budget, 组装字节数 assembled bytes.
+Decided on 2026-10-17 (owner), the Chinese terms of the 0.18.0 concepts, as on `main` in `docs/terminology.md` and
+both website term pages: 请求结果保留期 request outcome retention, 已退役请求结果 retired request outcome, 社群结果留存策略
+society outcome retention, cohort 类别 cohort class, 群体间关系 intergroup relation, 案件量配置 caseload profile, 汇总案件量
+aggregate caseload, 结案率 clearance rate, 发布预留 publication reservation, 委托账 delegation ledger, 活动桶 live bucket,
+保管人索引 custodian index, 消费批次 consumption batch, 周期性班次 recurring departure, 连接条件 edge condition, 路由索引
+routing index, 恢复预算 restore budget, 组装字节数 assembled bytes.
+
+Open: none.
 
 ## 7. Working rules
 
