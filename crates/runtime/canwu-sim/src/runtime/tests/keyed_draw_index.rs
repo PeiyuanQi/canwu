@@ -210,6 +210,7 @@ fn keyed_draw_index_stays_exact_through_commit_rollback_seal_restore_replay_and_
             &pages,
             vec![segment],
             &[&plugin],
+            PagedRestoreBudget::DEFAULT,
         )
     });
     let from_pages = from_pages.expect("the paged checkpoint should restore");

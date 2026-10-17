@@ -18,9 +18,9 @@ use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundaryRequest,
     BoundarySystemContract, Canwu, CanwuError, CompactedCanwu, DomainRecordClass,
     DomainRecordDraft, DomainRecordKind, DomainRecordMutation, DomainRecordRef, DomainRecordSchema,
-    ErrorCode, EvidenceCursor, EvidenceJournalSegment, PluginRegistrar, Scenario, SimDuration,
-    SimTime, SimulationPlugin, SimulationView, StateKey, StatePageBlob, StatePageProvider,
-    StateVisibility, SystemCadence,
+    ErrorCode, EvidenceCursor, EvidenceJournalSegment, PagedRestoreBudget, PluginRegistrar,
+    Scenario, SimDuration, SimTime, SimulationPlugin, SimulationView, StateKey, StatePageBlob,
+    StatePageProvider, StateVisibility, SystemCadence,
 };
 use serde_json::json;
 use std::cell::RefCell;
@@ -230,6 +230,7 @@ fn paged_round_trip() {
         &store,
         live.segments.clone(),
         &[&plugin],
+        PagedRestoreBudget::DEFAULT,
     )
     .expect("restore the first paged checkpoint");
     assert_same_run(&restored, &live.canwu);
@@ -244,6 +245,7 @@ fn paged_round_trip() {
         &store,
         short_prefix,
         &[&plugin],
+        PagedRestoreBudget::DEFAULT,
     )
     .err()
     .expect("a prefix that stops short of the checkpoint cut is rejected");
@@ -303,6 +305,7 @@ fn paged_round_trip() {
         &torn,
         live.segments.clone(),
         &[&plugin],
+        PagedRestoreBudget::DEFAULT,
     )
     .err()
     .expect("a checkpoint whose inner pages are missing is rejected");
@@ -316,6 +319,7 @@ fn paged_round_trip() {
         &store,
         live.segments.clone(),
         &[&plugin],
+        PagedRestoreBudget::DEFAULT,
     )
     .expect("restore the second paged checkpoint");
     assert_same_run(&restored_again, &live.canwu);
@@ -367,6 +371,7 @@ fn paged_round_trip() {
         &compact_store,
         vec![sealed.clone()],
         &[&plugin],
+        PagedRestoreBudget::DEFAULT,
     )
     .err()
     .expect("the sealed segments alone stop short of the checkpoint cut");
@@ -376,6 +381,7 @@ fn paged_round_trip() {
         &compact_store,
         vec![sealed.clone(), tail],
         &[&plugin],
+        PagedRestoreBudget::DEFAULT,
     )
     .expect("restore the compact paged checkpoint");
     assert_eq!(
@@ -424,6 +430,7 @@ fn paged_round_trip() {
         &compact_store,
         vec![sealed, replacement.clone()],
         &[&plugin],
+        PagedRestoreBudget::DEFAULT,
     )
     .err()
     .expect("the earlier sealed segment overlaps its replacement");
@@ -433,6 +440,7 @@ fn paged_round_trip() {
         &compact_store,
         vec![replacement],
         &[&plugin],
+        PagedRestoreBudget::DEFAULT,
     )
     .expect("the replacement alone restores the resealed checkpoint");
     restarted

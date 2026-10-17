@@ -92,7 +92,7 @@ pub use canwu_sim::{
     OwnerAuthorizedParticipantRole, OwnerAuthorizedRecordExpectation,
     PAGED_CHECKPOINT_FORMAT_VERSION, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
     PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FORMAT_VERSION, PLUGIN_DESCRIPTOR_FORMAT_VERSION,
-    PagedSimulationCheckpoint, PatriciaStoreMetrics, PayloadProperty,
+    PagedRestoreBudget, PagedSimulationCheckpoint, PatriciaStoreMetrics, PayloadProperty,
     PayloadRequiredEvidenceContinuationV1, PayloadSchema, PayloadValueType,
     PersistentDomainRecordStore, Person, PersonAvailability, PersonDraft, PersonTransitState,
     PluginActionDescriptor, PluginArchiveObjectProvider, PluginArchiveReachabilityParticipant,
@@ -889,7 +889,13 @@ impl Canwu {
     /// A domain record longer than [`STATE_PAGE_VALUE_CHUNK_BYTES`] is stored
     /// as record-value chunk pages that its leaf names, so a record of any
     /// length up to [`MAX_PAGED_RECORD_BYTES`] can be paged; a longer one
-    /// fails the preparation with `value_out_of_range` and nothing else.
+    /// fails the preparation with `value_out_of_range` and nothing else. The
+    /// knowledge ledger is paged the same way, one leaf per body and one per
+    /// holder ledger, so an unchanged body or holder is not stored again, and
+    /// the compact checkpoint body and the hot decision state are chunk pages
+    /// too: no part of the checkpoint is limited to one page. The returned
+    /// descriptor states the bytes a restore assembles
+    /// ([`PagedSimulationCheckpoint::assembled_bytes`]).
     pub fn prepare_paged_checkpoint(
         &self,
         source: Option<&PagedSimulationCheckpoint>,
@@ -1231,27 +1237,46 @@ impl Canwu {
     /// Continuation stays blocked until every plugin the checkpoint names is
     /// registered; use [`Self::from_paged_checkpoint_and_journal_with_plugins`]
     /// to do both.
+    ///
+    /// A value in a paged checkpoint may name one chunk page many times, so
+    /// what a restore assembles is what the pages describe, not what the
+    /// provider holds. The restore charges each value it assembles to
+    /// `budget` before allocating it and fails with
+    /// [`ErrorCode::RestoreBudgetExceeded`] past it, restoring nothing. A
+    /// host restoring a checkpoint it wrote can pass that checkpoint's
+    /// [`PagedSimulationCheckpoint::assembled_bytes`].
+    ///
+    /// The budget bounds assembled bytes, not heap: decoded JSON can take up
+    /// to about 16 times its text (24 times at its peak), and the restore
+    /// holds several copies of the state while it validates it, so hostile
+    /// pages inside the budget can still peak at some tens of times the
+    /// budget. For pages from an untrusted source, pass a budget near the
+    /// size you expect rather than [`PagedRestoreBudget::DEFAULT`] (2 GiB),
+    /// and authenticate the root page ID against one you recorded first.
     pub fn from_paged_checkpoint_and_journal(
         checkpoint: &PagedSimulationCheckpoint,
         provider: &dyn StatePageProvider,
         segments: Vec<EvidenceJournalSegment>,
+        budget: PagedRestoreBudget,
     ) -> Result<Self, CanwuError> {
         Ok(Self::wrap(Simulation::from_paged_checkpoint_and_journal(
-            checkpoint, provider, segments,
+            checkpoint, provider, segments, budget,
         )?))
     }
 
     /// Restores a paged checkpoint and its evidence prefix, then rehydrates
-    /// the exact executable plugins it names.
+    /// the exact executable plugins it names. `budget` is as for
+    /// [`Self::from_paged_checkpoint_and_journal`].
     pub fn from_paged_checkpoint_and_journal_with_plugins(
         checkpoint: &PagedSimulationCheckpoint,
         provider: &dyn StatePageProvider,
         segments: Vec<EvidenceJournalSegment>,
         plugins: &[&dyn SimulationPlugin],
+        budget: PagedRestoreBudget,
     ) -> Result<Self, CanwuError> {
         Ok(Self::wrap(
             Simulation::from_paged_checkpoint_and_journal_with_plugins(
-                checkpoint, provider, segments, plugins,
+                checkpoint, provider, segments, plugins, budget,
             )?,
         ))
     }
@@ -1749,29 +1774,33 @@ impl CompactedCanwu {
     /// checkpoint hash but gets a different paged root, which a later seal
     /// does not bring back; compare checkpoint hashes instead. A runtime that
     /// has never sealed evidence restores to the same paged root.
+    /// `budget` is as for [`Canwu::from_paged_checkpoint_and_journal`].
     pub fn from_paged_checkpoint_and_journal(
         checkpoint: &PagedSimulationCheckpoint,
         provider: &dyn StatePageProvider,
         segments: Vec<EvidenceJournalSegment>,
+        budget: PagedRestoreBudget,
     ) -> Result<Self, CanwuError> {
         Ok(Self {
             simulation: CompactedSimulation::from_paged_checkpoint_and_journal(
-                checkpoint, provider, segments,
+                checkpoint, provider, segments, budget,
             )?,
         })
     }
 
     /// Restores a paged compact runtime and rehydrates the exact executable
-    /// plugins it names.
+    /// plugins it names. `budget` is as for
+    /// [`Canwu::from_paged_checkpoint_and_journal`].
     pub fn from_paged_checkpoint_and_journal_with_plugins(
         checkpoint: &PagedSimulationCheckpoint,
         provider: &dyn StatePageProvider,
         segments: Vec<EvidenceJournalSegment>,
         plugins: &[&dyn SimulationPlugin],
+        budget: PagedRestoreBudget,
     ) -> Result<Self, CanwuError> {
         Ok(Self {
             simulation: CompactedSimulation::from_paged_checkpoint_and_journal_with_plugins(
-                checkpoint, provider, segments, plugins,
+                checkpoint, provider, segments, plugins, budget,
             )?,
         })
     }

@@ -52,10 +52,202 @@ pub const STATE_PAGE_VALUE_CHUNK_BYTES: usize = 1024 * 1024;
 /// with a longer record fails with `value_out_of_range`, which a host can tell
 /// apart from a corrupt page (`invalid_snapshot`); writing the record, a
 /// boundary, and the flat checkpoint and snapshot paths do not check it. A
-/// restore allocates up to this much per record whatever the provider holds,
-/// since a leaf may name one chunk page many times; restore pages from an
-/// untrusted source only after authenticating the checkpoint.
+/// leaf may name one chunk page many times, so a record's length is what its
+/// leaf describes, not what the provider holds; a restore charges it to its
+/// [`PagedRestoreBudget`] before allocating it.
 pub const MAX_PAGED_RECORD_BYTES: usize = 512 * 1024 * 1024;
+
+/// How many bytes a paged-checkpoint restore may assemble from state pages.
+///
+/// A paged checkpoint names each value it pages by its length and the page
+/// IDs of its chunks, and a value may name one chunk page many times, so what
+/// a restore assembles is bounded by what the pages describe, not by the
+/// distinct bytes the provider holds. Before a restore allocates a value it
+/// charges the value's canonical length to this budget; a value that would
+/// take the restore past it fails with `restore_budget_exceeded` before
+/// anything is allocated for it, and nothing is restored. The charged values
+/// are every domain-record index value, every paged knowledge body and holder
+/// ledger, the compact checkpoint body, and the hot decision state; together
+/// they are [`super::PagedSimulationCheckpoint::assembled_bytes`] of an honest
+/// checkpoint. Patricia keys and the single-page decision manifest and
+/// directory pages are not charged: each is bounded by a page the provider
+/// holds and is decoded once. A descriptor that states more than the budget
+/// is refused before any page is read.
+///
+/// The budget bounds the bytes a restore assembles, not the heap it uses. A
+/// restore holds the assembled values, the state decoded from them, and
+/// copies of that state while it validates it and builds the runtime, and
+/// decoded JSON can take many times its text: an array of small numbers,
+/// the worst case, about 16 times while held and 24 times at its peak. A
+/// restore of hostile pages that stay inside the budget can therefore peak
+/// at some tens of times the budget. For pages from a source it does not
+/// trust, a host passes a budget near the size it expects (the
+/// `assembled_bytes` of the checkpoints it writes, with headroom) and
+/// authenticates the root page ID against one it recorded before restoring.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PagedRestoreBudget {
+    /// Most bytes of values one restore assembles.
+    pub max_assembled_bytes: u64,
+}
+
+impl PagedRestoreBudget {
+    /// 2 GiB: a ceiling for restoring a host's own checkpoints, four times
+    /// the paged record ceiling and about ten times the current state of the
+    /// world-scale fiscal profile. It is not a bound for pages from an
+    /// untrusted source (see the type's documentation). A host whose own
+    /// checkpoints are larger passes their `assembled_bytes`, or more.
+    pub const DEFAULT: Self = Self::new(2 * 1024 * 1024 * 1024);
+
+    /// A budget of `max_assembled_bytes`.
+    #[must_use]
+    pub const fn new(max_assembled_bytes: u64) -> Self {
+        Self {
+            max_assembled_bytes,
+        }
+    }
+}
+
+impl Default for PagedRestoreBudget {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// One restore's running charge against its [`PagedRestoreBudget`].
+pub(super) struct RestoreMeter {
+    budget: u64,
+    assembled: u64,
+}
+
+impl RestoreMeter {
+    pub(super) const fn new(budget: PagedRestoreBudget) -> Self {
+        Self {
+            budget: budget.max_assembled_bytes,
+            assembled: 0,
+        }
+    }
+
+    /// Charges `len` bytes that are about to be allocated, or refuses them.
+    pub(super) fn charge(&mut self, len: usize) -> Result<(), CanwuError> {
+        let total = u64::try_from(len)
+            .ok()
+            .and_then(|len| self.assembled.checked_add(len))
+            .filter(|total| *total <= self.budget)
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::RestoreBudgetExceeded,
+                    format!(
+                        "the paged checkpoint describes more than the restore budget of {} assembled bytes",
+                        self.budget
+                    ),
+                )
+            })?;
+        self.assembled = total;
+        Ok(())
+    }
+
+    /// The bytes charged so far.
+    pub(super) const fn assembled(&self) -> u64 {
+        self.assembled
+    }
+}
+
+/// A byte string stored as record-value chunk pages: its length and the page
+/// ID of each chunk, cut at every [`STATE_PAGE_VALUE_CHUNK_BYTES`] bytes, so
+/// every chunk but the last is full and one string has one encoding. A paged
+/// checkpoint stores its compact body and its hot decision state this way,
+/// so neither is limited to one page.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PagedBytes {
+    pub(super) bytes: u64,
+    pub(super) chunks: Vec<String>,
+}
+
+impl PagedBytes {
+    /// Cuts `bytes` into chunk pages.
+    pub(super) fn of(bytes: &[u8]) -> Result<(Self, Vec<StatePageBlob>), CanwuError> {
+        let pages = bytes
+            .chunks(STATE_PAGE_VALUE_CHUNK_BYTES)
+            .map(|chunk| StatePageBlob::new(value_chunk_page_bytes(chunk)))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((
+            Self {
+                bytes: u64::try_from(bytes.len())
+                    .map_err(|_| page_error("paged byte string length is not representable"))?,
+                chunks: pages.iter().map(|page| page.page_id.clone()).collect(),
+            },
+            pages,
+        ))
+    }
+
+    /// Loads and joins the chunks after charging the length to `meter`.
+    /// Fails with `state_page_unavailable` for a chunk the provider does not
+    /// hold and with `invalid_snapshot` for a chunk count, chunk page, or
+    /// chunk length that is not the canonical split of the length.
+    pub(super) fn load(
+        &self,
+        provider: &dyn StatePageProvider,
+        meter: &mut RestoreMeter,
+        label: &str,
+    ) -> Result<Vec<u8>, CanwuError> {
+        let len = usize::try_from(self.bytes).map_err(|_| {
+            CanwuError::new(
+                ErrorCode::RestoreBudgetExceeded,
+                format!("the paged {label} is longer than this platform can address"),
+            )
+        })?;
+        if self.chunks.len() != len.div_ceil(STATE_PAGE_VALUE_CHUNK_BYTES) {
+            return Err(snapshot_error(format!(
+                "the paged {label} does not name the canonical number of chunks"
+            )));
+        }
+        meter.charge(len)?;
+        let mut bytes = Vec::with_capacity(len);
+        for (index, chunk_id) in self.chunks.iter().enumerate() {
+            if validate_hash(chunk_id, "chunk page ID").is_err() {
+                return Err(snapshot_error(format!(
+                    "the paged {label} names a malformed chunk page ID"
+                )));
+            }
+            let page = provider.load_state_page(chunk_id)?.ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::StatePageUnavailable,
+                    format!("a chunk page of the paged {label} is unavailable"),
+                )
+            })?;
+            page.validate()
+                .map_err(|error| snapshot_error(error.message))?;
+            if page.page_id != *chunk_id {
+                return Err(snapshot_error(format!(
+                    "the provider returned the wrong chunk page of the paged {label}"
+                )));
+            }
+            let Ok(DecodedBinaryPage::Chunk(payload)) = decode_binary_page(&page.bytes) else {
+                return Err(snapshot_error(format!(
+                    "the paged {label} names a page that is not a chunk page"
+                )));
+            };
+            let expected = if index + 1 == self.chunks.len() {
+                len - index * STATE_PAGE_VALUE_CHUNK_BYTES
+            } else {
+                STATE_PAGE_VALUE_CHUNK_BYTES
+            };
+            if payload.len() != expected {
+                return Err(snapshot_error(format!(
+                    "a chunk of the paged {label} is not the canonical split of its length"
+                )));
+            }
+            bytes.extend_from_slice(payload);
+        }
+        Ok(bytes)
+    }
+}
+
+fn snapshot_error(message: impl Into<String>) -> CanwuError {
+    CanwuError::new(ErrorCode::InvalidSnapshot, message)
+}
 /// Leading bytes of every binary state page.
 pub(super) const BINARY_PAGE_MAGIC: [u8; 4] = *b"\0cwp";
 const PAGE_KIND_PATRICIA_LEAF: u8 = 1;
@@ -817,9 +1009,22 @@ fn json_page_children(value: &serde_json::Value) -> Result<Vec<String>, CanwuErr
         return Ok(Vec::new());
     };
     let mut children = Vec::new();
-    if object.contains_key("checkpoint_without_paged_state")
-        && object.contains_key("domain_records")
-    {
+    // The chunk page IDs of a paged byte string, `{ "bytes", "chunks" }`.
+    let chunks_of = |value: Option<&serde_json::Value>, label: &str| {
+        value
+            .and_then(|value| value.get("chunks"))
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| page_error(format!("paged {label} chunks are malformed")))
+            .map(|chunks| {
+                chunks
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+    };
+    if object.contains_key("body") && object.contains_key("domain_records") {
+        children.extend(chunks_of(object.get("body"), "checkpoint body")?);
         let records = object
             .get("domain_records")
             .and_then(serde_json::Value::as_object)
@@ -834,17 +1039,23 @@ fn json_page_children(value: &serde_json::Value) -> Result<Vec<String>, CanwuErr
                 children.push(page_id.to_owned());
             }
         }
+        let knowledge = object
+            .get("knowledge")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| page_error("paged checkpoint knowledge roots are malformed"))?;
+        for field in ["bodies", "holders"] {
+            if let Some(page_id) = knowledge.get(field).and_then(serde_json::Value::as_str) {
+                children.push(page_id.to_owned());
+            }
+        }
         if let Some(page_id) = object
             .get("decision_manifest_page_id")
             .and_then(serde_json::Value::as_str)
         {
             children.push(page_id.to_owned());
         }
-    } else if let Some(page_id) = object
-        .get("hot_page_id")
-        .and_then(serde_json::Value::as_str)
-    {
-        children.push(page_id.to_owned());
+    } else if object.contains_key("hot_state") {
+        children.extend(chunks_of(object.get("hot_state"), "hot decision state")?);
         if let Some(pages) = object
             .get("archive_directory_page_ids")
             .and_then(serde_json::Value::as_array)
@@ -991,4 +1202,81 @@ fn validate_hash(value: &str, label: &str) -> Result<(), CanwuError> {
 
 fn page_error(message: impl Into<String>) -> CanwuError {
     CanwuError::new(ErrorCode::InvalidArchive, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Pages(std::cell::RefCell<BTreeMap<String, StatePageBlob>>);
+
+    impl Pages {
+        fn hold(&self, page: StatePageBlob) {
+            self.0.borrow_mut().insert(page.page_id.clone(), page);
+        }
+    }
+
+    impl StatePageProvider for Pages {
+        fn load_state_page(&self, page_id: &str) -> Result<Option<StatePageBlob>, CanwuError> {
+            Ok(self.0.borrow().get(page_id).cloned())
+        }
+    }
+
+    /// A paged byte string loads only within the budget, only from chunk
+    /// pages the provider holds, and only in the canonical split of the
+    /// length it states.
+    #[test]
+    fn paged_bytes_load_only_their_canonical_split() {
+        let bytes = vec![7_u8; STATE_PAGE_VALUE_CHUNK_BYTES + 10];
+        let len = u64::try_from(bytes.len()).expect("length");
+        let (paged, chunk_pages) = PagedBytes::of(&bytes).expect("chunk pages");
+        assert_eq!(paged.chunks.len(), 2);
+        let store = Pages::default();
+        for page in chunk_pages {
+            store.hold(page);
+        }
+        let load = |paged: &PagedBytes, budget: u64| {
+            paged.load(
+                &store,
+                &mut RestoreMeter::new(PagedRestoreBudget::new(budget)),
+                "fixture",
+            )
+        };
+        assert_eq!(load(&paged, len).expect("canonical chunks"), bytes);
+        assert_eq!(
+            load(&paged, len - 1).expect_err("over budget").code,
+            ErrorCode::RestoreBudgetExceeded
+        );
+
+        let mut extra = paged.clone();
+        extra.chunks.push(extra.chunks[1].clone());
+        assert_eq!(
+            load(&extra, u64::MAX).expect_err("a chunk too many").code,
+            ErrorCode::InvalidSnapshot
+        );
+        let mut short = paged.clone();
+        short.bytes -= 1;
+        let error = load(&short, u64::MAX).expect_err("a last chunk of the wrong length");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(
+            error.message.contains("canonical split"),
+            "{}",
+            error.message
+        );
+        let not_a_chunk = StatePageBlob::new(b"{}".to_vec()).expect("page");
+        let mut wrong_kind = paged.clone();
+        wrong_kind.chunks[1].clone_from(&not_a_chunk.page_id);
+        store.hold(not_a_chunk);
+        let error = load(&wrong_kind, u64::MAX).expect_err("a page that is not a chunk");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        let mut missing = paged;
+        missing.chunks[1] = "1".repeat(64);
+        assert_eq!(
+            load(&missing, u64::MAX)
+                .expect_err("a chunk the provider lacks")
+                .code,
+            ErrorCode::StatePageUnavailable
+        );
+    }
 }

@@ -1,3 +1,7 @@
+use super::page_store::{PagedBytes, RestoreMeter};
+use super::records::{
+    PAGED_KNOWLEDGE_BODIES_DOMAIN, PAGED_KNOWLEDGE_HOLDERS_DOMAIN, PagedValueMap,
+};
 use super::state::{ArchivedCommandRequestOutcome, ArchivedIngressRequest};
 use super::{
     ADMISSION_CURSOR_FORMAT_VERSION, BoundaryReceipt, BoundaryRecord, BoundaryRequest, CanwuError,
@@ -6,8 +10,9 @@ use super::{
     DecisionArchiveBucketPage, DecisionArchiveProvider, DecisionHistoryKey,
     DecisionHistoryLocation, DecisionState, DeterministicRng, DomainRecord, DomainRecordPageRoots,
     DomainRecordRef, DomainRecordSchema, DomainRecordType, DomainRecordVersionRef,
-    DomainRecordVersionSource, ENGINE_VERSION, ErrorCode, EvidenceRef, IngressPayload,
-    IngressReceipt, IngressRecord, KnowledgeSnapshot, OutboxEntry, PayloadProperty, PayloadSchema,
+    DomainRecordVersionSource, ENGINE_VERSION, ErrorCode, EvidenceRef, HolderEntry, HolderLedgers,
+    IngressPayload, IngressReceipt, IngressRecord, KnowledgeHolderRef, KnowledgeRecordId,
+    KnowledgeSnapshot, OutboxEntry, PagedRestoreBudget, PayloadProperty, PayloadSchema,
     PayloadValueType, PluginComponentRecord, PluginDescriptor, PluginIngressRequest,
     PreparedDecisionArchive, PreparedStateDelta, RandomDrawRecord, RandomStreamState,
     RunConfigurationSnapshot, RunManifest, RuntimeEvidence, SNAPSHOT_FORMAT_VERSION,
@@ -176,21 +181,54 @@ pub struct SimulationSnapshot {
     pub(super) next_person_id: u64,
 }
 
-/// Format of the paged-checkpoint envelope and of the decision pages it
-/// names. Format 5 names domain-record pages in state-page codec
+/// Format of the paged-checkpoint descriptor and envelope and of the decision
+/// pages they name. Format 5 names domain-record pages in state-page codec
 /// `raw-canonical-v2`, whose records may span record-value chunk pages, and
 /// embeds a `SimulationCheckpoint` without keyed-draw reservations. Format 6
 /// embeds snapshot format 9, whose generic knowledge is bodies and holder
-/// entries; the knowledge ledger stays inside the envelope page.
-pub const PAGED_CHECKPOINT_FORMAT_VERSION: u32 = 6;
+/// entries. Format 7 pages everything the envelope page held: the compact
+/// checkpoint body and the hot decision state are record-value chunk pages,
+/// and the knowledge ledger is two Patricia maps (bodies by ID, holder
+/// ledgers by holder) paged as the record store pages its indexes; the
+/// descriptor states the bytes a restore assembles.
+pub const PAGED_CHECKPOINT_FORMAT_VERSION: u32 = 7;
 const MAX_PAGED_DECISION_DIRECTORY_ENTRIES: usize = 1_024;
 
+/// What a host records to restore a paged checkpoint: its root page and the
+/// checkpoint hash of the state it holds.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PagedSimulationCheckpoint {
     pub format_version: u32,
     pub root_page_id: String,
     pub checkpoint_hash: String,
+    /// The bytes a restore of this checkpoint assembles and charges to its
+    /// [`PagedRestoreBudget`]: every domain-record index value, every paged
+    /// knowledge value, the compact body, and the hot decision state. A host
+    /// restoring a checkpoint it wrote itself can pass it as the budget. A
+    /// restore refuses a descriptor whose count differs from what its pages
+    /// assemble.
+    pub assembled_bytes: u64,
+}
+
+/// The roots of the two Patricia maps that page the knowledge ledger; `None`
+/// for an empty map.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PagedKnowledgeRoots {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bodies: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holders: Option<String>,
+}
+
+/// The value of one holder in the paged holder map: the holder's ledger as
+/// the knowledge snapshot encodes it, entries in local order.
+#[derive(Serialize)]
+struct PagedHolderLedger<'a> {
+    holder: &'a KnowledgeHolderRef,
+    next_local: u64,
+    entries: Vec<&'a HolderEntry>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -239,12 +277,226 @@ impl ArchiveReachabilityManifest {
     }
 }
 
+/// Builds the two maps that page a knowledge ledger: each body under its ID,
+/// and each listed holder under its reference with its next local ID and its
+/// entries in local order. Unchanged bodies and holders keep their leaf
+/// pages from one checkpoint to the next.
+fn paged_knowledge_maps(
+    ledgers: &HolderLedgers,
+) -> Result<(PagedValueMap, PagedValueMap), CanwuError> {
+    let mut bodies = PagedValueMap::new(PAGED_KNOWLEDGE_BODIES_DOMAIN);
+    for body in ledgers.bodies() {
+        bodies.insert(&body.id, body.as_ref())?;
+    }
+    let mut holders = PagedValueMap::new(PAGED_KNOWLEDGE_HOLDERS_DOMAIN);
+    for (holder, ledger) in ledgers {
+        let mut entries = ledger.entries().map(|(entry, _)| entry).collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|entry| entry.local);
+        holders.insert(
+            holder,
+            &PagedHolderLedger {
+                holder,
+                next_local: ledger.next_local().get(),
+                entries,
+            },
+        )?;
+    }
+    Ok((bodies, holders))
+}
+
+/// Rebuilds a knowledge ledger from its two loaded maps. The ledger's own
+/// decoder checks it as it checks a snapshot's: bodies in ascending ID
+/// order, each held, every entry naming a held body in local order below its
+/// holder's next local ID, every relation resolving within its holder. The
+/// maps' keys must then be exactly the ledger's body IDs and holders, so each
+/// value sits under its own key.
+fn assemble_paged_knowledge(
+    bodies: &PagedValueMap,
+    holders: &PagedValueMap,
+) -> Result<HolderLedgers, CanwuError> {
+    let mut body_entries = bodies
+        .entries()?
+        .into_iter()
+        .map(|(key, value)| canonical_paged_key::<KnowledgeRecordId>(key).map(|id| (id, value)))
+        .collect::<Result<Vec<_>, _>>()?;
+    body_entries.sort_unstable_by_key(|(id, _)| *id);
+    let mut holder_entries = holders
+        .entries()?
+        .into_iter()
+        .map(|(key, value)| {
+            canonical_paged_key::<KnowledgeHolderRef>(key).map(|holder| (holder, value))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    holder_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    let ledgers = HolderLedgers::deserialize(PagedLedgerWire {
+        bodies: body_entries.iter().map(|(_, value)| *value).collect(),
+        holders: holder_entries.iter().map(|(_, value)| *value).collect(),
+    })
+    .map_err(|error| invalid_snapshot_error(format!("invalid paged knowledge ledger: {error}")))?;
+    if ledgers.body_count() != body_entries.len()
+        || !ledgers
+            .bodies()
+            .zip(&body_entries)
+            .all(|(body, (id, _))| body.id == *id)
+        || ledgers.len() != holder_entries.len()
+        || !ledgers
+            .keys()
+            .zip(&holder_entries)
+            .all(|(holder, (key, _))| holder == key)
+    {
+        return Err(invalid_snapshot_error(
+            "a paged knowledge value is filed under another key",
+        ));
+    }
+    Ok(ledgers)
+}
+
+/// Rebuilds a knowledge ledger from its two loaded maps, as
+/// [`assemble_paged_knowledge`] does, then rebuilds the maps from that ledger
+/// and requires their roots to be `roots`. The ledger's decoder accepts
+/// encodings a checkpoint never writes (fields in another order, unknown
+/// fields, a tree branching at a later bit than it must), so, as the record
+/// store does with its indexes, one ledger is accepted under one root only.
+fn restore_paged_knowledge(
+    roots: &PagedKnowledgeRoots,
+    bodies: PagedValueMap,
+    holders: PagedValueMap,
+) -> Result<HolderLedgers, CanwuError> {
+    let ledgers = assemble_paged_knowledge(&bodies, &holders)?;
+    drop((bodies, holders));
+    let (bodies, holders) = paged_knowledge_maps(&ledgers)?;
+    if bodies.root_page_id() != roots.bodies || holders.root_page_id() != roots.holders {
+        return Err(invalid_snapshot_error(
+            "paged knowledge pages are not the canonical encoding of the ledger they hold",
+        ));
+    }
+    Ok(ledgers)
+}
+
+/// Decodes a paged knowledge key, which must be the canonical encoding of
+/// what it decodes to, so one body or holder has one key.
+fn canonical_paged_key<T: serde::de::DeserializeOwned + Serialize>(
+    key: &[u8],
+) -> Result<T, CanwuError> {
+    let decoded = serde_json::from_slice::<T>(key)
+        .map_err(|error| invalid_snapshot_error(format!("invalid paged knowledge key: {error}")))?;
+    if serde_json::to_vec(&decoded).ok().as_deref() != Some(key) {
+        return Err(invalid_snapshot_error(
+            "a paged knowledge key is not in canonical form",
+        ));
+    }
+    Ok(decoded)
+}
+
+/// Presents separately encoded bodies and holder ledgers to the knowledge
+/// ledger's decoder as its wire form, `{ "bodies": [...], "holders": [...] }`,
+/// decoding each element from its own bytes, so no whole-ledger text is
+/// assembled.
+struct PagedLedgerWire<'de> {
+    bodies: Vec<&'de [u8]>,
+    holders: Vec<&'de [u8]>,
+}
+
+impl<'de> serde::Deserializer<'de> for PagedLedgerWire<'de> {
+    type Error = serde_json::Error;
+
+    fn deserialize_any<V: serde::de::Visitor<'de>>(
+        self,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        visitor.visit_map(PagedLedgerFields {
+            fields: [("bodies", self.bodies), ("holders", self.holders)].into_iter(),
+            pending: None,
+        })
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
+        byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map
+        struct enum identifier ignored_any
+    }
+}
+
+struct PagedLedgerFields<'de> {
+    fields: std::array::IntoIter<(&'static str, Vec<&'de [u8]>), 2>,
+    pending: Option<Vec<&'de [u8]>>,
+}
+
+impl<'de> serde::de::MapAccess<'de> for PagedLedgerFields<'de> {
+    type Error = serde_json::Error;
+
+    fn next_key_seed<K: serde::de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, Self::Error> {
+        let Some((name, elements)) = self.fields.next() else {
+            return Ok(None);
+        };
+        self.pending = Some(elements);
+        seed.deserialize(serde::de::value::BorrowedStrDeserializer::new(name))
+            .map(Some)
+    }
+
+    fn next_value_seed<V: serde::de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: V,
+    ) -> Result<V::Value, Self::Error> {
+        let elements = self.pending.take().unwrap_or_default();
+        seed.deserialize(PagedElements(elements.into_iter()))
+    }
+}
+
+/// A sequence whose elements are decoded each from its own JSON text.
+struct PagedElements<'de>(std::vec::IntoIter<&'de [u8]>);
+
+impl<'de> serde::Deserializer<'de> for PagedElements<'de> {
+    type Error = serde_json::Error;
+
+    fn deserialize_any<V: serde::de::Visitor<'de>>(
+        self,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        visitor.visit_seq(self)
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
+        byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map
+        struct enum identifier ignored_any
+    }
+}
+
+impl<'de> serde::de::SeqAccess<'de> for PagedElements<'de> {
+    type Error = serde_json::Error;
+
+    fn next_element_seed<T: serde::de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: T,
+    ) -> Result<Option<T::Value>, Self::Error> {
+        let Some(bytes) = self.0.next() else {
+            return Ok(None);
+        };
+        let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+        let value = seed.deserialize(&mut deserializer)?;
+        deserializer.end()?;
+        Ok(Some(value))
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.0.len())
+    }
+}
+
+/// The root page of a paged checkpoint. `body` is the canonical JSON of the
+/// compact checkpoint without its domain records, decisions, and knowledge
+/// ledger, which the other fields page.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PagedCheckpointEnvelope {
     format_version: u32,
-    checkpoint_without_paged_state: SimulationCheckpoint,
+    body: PagedBytes,
     domain_records: DomainRecordPageRoots,
+    knowledge: PagedKnowledgeRoots,
     decision_manifest_page_id: String,
 }
 
@@ -252,7 +504,8 @@ struct PagedCheckpointEnvelope {
 #[serde(deny_unknown_fields)]
 struct PagedDecisionManifest {
     format_version: u32,
-    hot_page_id: String,
+    /// The canonical JSON of the hot decision state.
+    hot_state: PagedBytes,
     archive_receipt_root: String,
     archive_receipt_count: u64,
     archive_directory_page_ids: Vec<String>,
@@ -296,7 +549,11 @@ fn validate_paged_decision_manifest(manifest: &PagedDecisionManifest) -> Result<
         .iter()
         .collect::<BTreeSet<_>>();
     if manifest.format_version != PAGED_CHECKPOINT_FORMAT_VERSION
-        || !is_canonical_hash(&manifest.hot_page_id)
+        || manifest
+            .hot_state
+            .chunks
+            .iter()
+            .any(|page_id| !is_canonical_hash(page_id))
         || !is_canonical_hash(&manifest.archive_receipt_root)
         || manifest
             .archive_directory_page_ids
@@ -1101,9 +1358,8 @@ pub(super) struct ArchivedRequestTables {
 /// [`Simulation::receipt_required_references`] for which ones must have one.
 fn retain_reachable_archived_evidence_receipts(
     receipts: &mut im::OrdMap<EvidenceRef, Arc<ArchivedEvidenceReceipt>>,
-    dependencies: &[EvidenceDependency],
+    reachable: &BTreeSet<EvidenceRef>,
 ) {
-    let reachable = reachable_archived_receipt_references(dependencies);
     if receipts
         .keys()
         .all(|reference| reachable.contains(reference))
@@ -1200,8 +1456,18 @@ fn add_command_outcome_dependencies(
 }
 
 fn archive_leaf(entry: &EvidenceIndexEntry) -> Result<[u8; 32], CanwuError> {
-    let hash = super::canonical_hash(
-        "canwu.evidence.index.leaf.v2",
+    archive_leaf_with(entry, &mut Vec::new())
+}
+
+/// `canonical_hash("canwu.evidence.index.leaf.v2", leaf material)` as raw
+/// bytes, encoding the material into `buffer`.
+fn archive_leaf_with(
+    entry: &EvidenceIndexEntry,
+    buffer: &mut Vec<u8>,
+) -> Result<[u8; 32], CanwuError> {
+    buffer.clear();
+    serde_json::to_writer(
+        &mut *buffer,
         &EvidenceIndexLeafMaterial {
             format_version: 2,
             reference: &entry.reference,
@@ -1209,129 +1475,317 @@ fn archive_leaf(entry: &EvidenceIndexEntry) -> Result<[u8; 32], CanwuError> {
             item_commitment: &entry.item_commitment,
             plugin_ingress_provenance: &entry.plugin_ingress_provenance,
         },
-    )?;
-    decode_hash(&hash, "evidence-index leaf")
+    )
+    .map_err(|error| {
+        CanwuError::new(
+            ErrorCode::InvalidSnapshot,
+            format!("could not encode deterministic hash material: {error}"),
+        )
+    })?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"canwu.evidence.index.leaf.v2");
+    hasher.update(&[0]);
+    hasher.update(buffer);
+    Ok(*hasher.finalize().as_bytes())
 }
 
-fn archive_merkle(
-    entries: &[EvidenceIndexEntry],
-) -> Result<(String, Vec<Vec<String>>), CanwuError> {
-    if entries.is_empty() {
-        return Ok((archive_empty_root(), Vec::new()));
+/// The levels of the evidence-index Merkle tree over `leaves`, leaves first
+/// and the root last. A level's last node pairs with itself when the level
+/// is odd. Empty for no leaves.
+fn archive_merkle_levels(leaves: Vec<[u8; 32]>) -> Vec<Vec<[u8; 32]>> {
+    if leaves.is_empty() {
+        return Vec::new();
     }
-    let mut level: Vec<[u8; 32]> = entries.iter().map(archive_leaf).collect::<Result<_, _>>()?;
-    let mut positions: Vec<usize> = (0..entries.len()).collect();
-    let mut proofs = vec![Vec::new(); entries.len()];
-    while level.len() > 1 {
-        for (leaf, position) in positions.iter().copied().enumerate() {
-            let sibling = if position % 2 == 0 {
-                (position + 1).min(level.len() - 1)
-            } else {
-                position - 1
-            };
-            proofs[leaf].push(
-                blake3::Hash::from_bytes(level[sibling])
-                    .to_hex()
-                    .to_string(),
-            );
-        }
-        let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        for pair in level.chunks(2) {
-            next.push(archive_node(pair[0], *pair.get(1).unwrap_or(&pair[0])));
-        }
-        level = next;
-        for position in &mut positions {
-            *position /= 2;
-        }
+    let mut levels = vec![leaves];
+    while let Some(level) = levels.last().filter(|level| level.len() > 1) {
+        let next = level
+            .chunks(2)
+            .map(|pair| archive_node(pair[0], *pair.get(1).unwrap_or(&pair[0])))
+            .collect();
+        levels.push(next);
     }
-    Ok((
-        blake3::Hash::from_bytes(level[0]).to_hex().to_string(),
-        proofs,
-    ))
+    levels
 }
 
-fn item_commitment<T: Serialize>(
-    journal: EvidenceJournalKind,
-    item: &T,
-) -> Result<String, CanwuError> {
-    let domain = match journal {
+/// The root of the levels [`archive_merkle_levels`] built.
+fn archive_merkle_root(levels: &[Vec<[u8; 32]>]) -> String {
+    levels
+        .last()
+        .and_then(|root| root.first())
+        .map_or_else(archive_empty_root, |root| {
+            blake3::Hash::from_bytes(*root).to_hex().to_string()
+        })
+}
+
+/// The Merkle path of one leaf: its sibling on every level below the root.
+fn archive_merkle_path(levels: &[Vec<[u8; 32]>], leaf: usize) -> Vec<String> {
+    let mut position = leaf;
+    let mut path = Vec::with_capacity(levels.len().saturating_sub(1));
+    for level in levels.iter().take(levels.len().saturating_sub(1)) {
+        let sibling = if position.is_multiple_of(2) {
+            (position + 1).min(level.len() - 1)
+        } else {
+            position - 1
+        };
+        path.push(
+            blake3::Hash::from_bytes(level[sibling])
+                .to_hex()
+                .to_string(),
+        );
+        position /= 2;
+    }
+    path
+}
+
+const fn item_commitment_domain(journal: EvidenceJournalKind) -> &'static str {
+    match journal {
         EvidenceJournalKind::Event => "canwu.evidence.item.event.v1",
         EvidenceJournalKind::Command => "canwu.evidence.item.command.v1",
         EvidenceJournalKind::CommandAttempt => "canwu.evidence.item.command_attempt.v1",
         EvidenceJournalKind::Ingress => "canwu.evidence.item.ingress.v1",
         EvidenceJournalKind::Boundary => "canwu.evidence.item.boundary.v1",
         EvidenceJournalKind::RandomDraw => "canwu.evidence.item.random_draw.v1",
-    };
-    super::canonical_hash(domain, item)
+    }
 }
 
+/// Hashes one journal in a single pass: each item is encoded once, and its
+/// bytes feed both its item commitment and the journal root. The results
+/// equal `canonical_hash(item domain, item)` for each item and
+/// `canonical_hash(root_domain, items)`, since a JSON array is its items'
+/// encodings between brackets, separated by commas.
+fn hash_journal<T: Serialize>(
+    root_domain: &str,
+    journal: EvidenceJournalKind,
+    items: &[T],
+) -> Result<(String, Vec<String>), CanwuError> {
+    let item_domain = item_commitment_domain(journal);
+    let mut root = blake3::Hasher::new();
+    root.update(root_domain.as_bytes());
+    root.update(&[0]);
+    root.update(b"[");
+    let mut commitments = Vec::with_capacity(items.len());
+    let mut buffer = Vec::with_capacity(TWO_HASH_WRITER_BUFFER_BYTES);
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            root.update(b",");
+        }
+        let mut item_hasher = blake3::Hasher::new();
+        item_hasher.update(item_domain.as_bytes());
+        item_hasher.update(&[0]);
+        let mut writer = TwoHashWriter {
+            root: &mut root,
+            item: item_hasher,
+            buffer: &mut buffer,
+        };
+        serde_json::to_writer(&mut writer, item).map_err(|error| {
+            CanwuError::new(
+                ErrorCode::InvalidSnapshot,
+                format!("could not encode deterministic hash material: {error}"),
+            )
+        })?;
+        commitments.push(writer.finish().to_hex().to_string());
+    }
+    root.update(b"]");
+    Ok((root.finalize().to_hex().to_string(), commitments))
+}
+
+/// The bytes a [`TwoHashWriter`] buffers before it hashes them: enough for
+/// BLAKE3 to hash many 1 KiB chunks of one update in parallel.
+const TWO_HASH_WRITER_BUFFER_BYTES: usize = 64 * 1024;
+
+/// Streams one item's encoding through a bounded buffer, reused across the
+/// items of a journal, into both its item hasher and its journal's root
+/// hasher, so no item's whole encoding is held in memory, as
+/// `canonical_hash` streams one value.
+struct TwoHashWriter<'a> {
+    root: &'a mut blake3::Hasher,
+    item: blake3::Hasher,
+    buffer: &'a mut Vec<u8>,
+}
+
+impl TwoHashWriter<'_> {
+    fn drain(&mut self) {
+        self.root.update(self.buffer);
+        self.item.update(self.buffer);
+        self.buffer.clear();
+    }
+
+    /// Feeds what is buffered to both hashers and returns the item's hash.
+    fn finish(mut self) -> blake3::Hash {
+        self.drain();
+        self.item.finalize()
+    }
+}
+
+impl std::io::Write for TwoHashWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.buffer.len() + bytes.len() > TWO_HASH_WRITER_BUFFER_BYTES {
+            self.drain();
+            if bytes.len() >= TWO_HASH_WRITER_BUFFER_BYTES {
+                self.root.update(bytes);
+                self.item.update(bytes);
+                return Ok(bytes.len());
+            }
+        }
+        self.buffer.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    // Every write takes all its bytes, so the default retry loop is skipped.
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.write(bytes).map(|_| ())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Builds a segment's evidence index and the receipt of every entry. The
+/// segment's own `archive` is not read.
 pub(crate) fn evidence_archive_index(
     segment: &EvidenceJournalSegment,
 ) -> Result<(EvidenceArchiveIndex, Vec<ArchivedEvidenceReceipt>), CanwuError> {
-    let roots = EvidenceJournalRoots {
-        events: super::canonical_hash("canwu.evidence.journal.events.v1", &segment.events)?,
-        commands: super::canonical_hash("canwu.evidence.journal.commands.v1", &segment.commands)?,
-        command_attempts: super::canonical_hash(
-            "canwu.evidence.journal.command_attempts.v1",
-            &segment.command_attempts,
-        )?,
-        ingress: super::canonical_hash("canwu.evidence.journal.ingress.v1", &segment.ingress)?,
-        boundaries: super::canonical_hash(
-            "canwu.evidence.journal.boundaries.v1",
-            &segment.boundaries,
-        )?,
-        random_draws: super::canonical_hash(
-            "canwu.evidence.journal.random_draws.v1",
-            &segment.random_draws,
-        )?,
-    };
-    let mut entries = Vec::new();
-    let mut add = |reference: EvidenceRef,
-                   journal,
-                   absolute_index,
-                   nested,
-                   commitment: String,
-                   plugin_ingress_provenance| {
-        entries.push(EvidenceIndexEntry {
-            reference,
-            item: EvidenceItemLocator {
-                journal,
-                absolute_index,
-                nested,
-            },
-            item_commitment: commitment,
-            plugin_ingress_provenance,
-        });
-    };
-    for (offset, event) in segment.events.iter().enumerate() {
-        add(
-            EvidenceRef::Event(event.id),
-            EvidenceJournalKind::Event,
-            segment.start.event_count + offset as u64 + 1,
-            EvidenceNestedLocator::None,
-            item_commitment(EvidenceJournalKind::Event, event)?,
-            None,
-        );
+    evidence_archive_index_with_receipts(segment, ReceiptSelection::All)
+}
+
+/// Which entries of an evidence index get a receipt.
+#[derive(Clone, Copy)]
+enum ReceiptSelection<'a> {
+    All,
+    /// The entries whose reference is in the set.
+    Kept(&'a BTreeSet<EvidenceRef>),
+}
+
+impl ReceiptSelection<'_> {
+    /// The positions of the selected entries of `entries`, which are in
+    /// strictly ascending reference order, in that order.
+    fn positions(self, entries: &[EvidenceIndexEntry]) -> Vec<usize> {
+        match self {
+            Self::All => (0..entries.len()).collect(),
+            Self::Kept(references) => references
+                .iter()
+                .filter_map(|reference| {
+                    entries
+                        .binary_search_by(|entry| entry.reference.cmp(reference))
+                        .ok()
+                })
+                .collect(),
+        }
     }
-    for (offset, command) in segment.commands.iter().enumerate() {
-        add(
+}
+
+/// Builds a segment's evidence index and the receipts of the entries whose
+/// `selection` selects, in index order. The segment's own
+/// `archive` is not read. Every journal item is encoded and hashed once.
+fn evidence_archive_index_with_receipts(
+    segment: &EvidenceJournalSegment,
+    selection: ReceiptSelection<'_>,
+) -> Result<(EvidenceArchiveIndex, Vec<ArchivedEvidenceReceipt>), CanwuError> {
+    let (events_root, event_commitments) = hash_journal(
+        "canwu.evidence.journal.events.v1",
+        EvidenceJournalKind::Event,
+        &segment.events,
+    )?;
+    let (commands_root, command_commitments) = hash_journal(
+        "canwu.evidence.journal.commands.v1",
+        EvidenceJournalKind::Command,
+        &segment.commands,
+    )?;
+    let (attempts_root, attempt_commitments) = hash_journal(
+        "canwu.evidence.journal.command_attempts.v1",
+        EvidenceJournalKind::CommandAttempt,
+        &segment.command_attempts,
+    )?;
+    let (ingress_root, ingress_commitments) = hash_journal(
+        "canwu.evidence.journal.ingress.v1",
+        EvidenceJournalKind::Ingress,
+        &segment.ingress,
+    )?;
+    let (boundaries_root, boundary_commitments) = hash_journal(
+        "canwu.evidence.journal.boundaries.v1",
+        EvidenceJournalKind::Boundary,
+        &segment.boundaries,
+    )?;
+    let (draws_root, draw_commitments) = hash_journal(
+        "canwu.evidence.journal.random_draws.v1",
+        EvidenceJournalKind::RandomDraw,
+        &segment.random_draws,
+    )?;
+    let roots = EvidenceJournalRoots {
+        events: events_root,
+        commands: commands_root,
+        command_attempts: attempts_root,
+        ingress: ingress_root,
+        boundaries: boundaries_root,
+        random_draws: draws_root,
+    };
+    let entry = |reference: EvidenceRef,
+                 journal,
+                 absolute_index,
+                 nested,
+                 item_commitment: String,
+                 plugin_ingress_provenance| EvidenceIndexEntry {
+        reference,
+        item: EvidenceItemLocator {
+            journal,
+            absolute_index,
+            nested,
+        },
+        item_commitment,
+        plugin_ingress_provenance,
+    };
+    // Ordinal entries in reference order (commands, attempts, events,
+    // ingress, boundaries, draws, each journal in ID order); record versions,
+    // the last reference kind, are sorted on their own and appended.
+    let record_change_count = segment
+        .boundaries
+        .iter()
+        .map(|boundary| boundary.record_changes.len())
+        .sum::<usize>();
+    let ordinal_count = segment.events.len()
+        + segment.commands.len()
+        + segment.command_attempts.len()
+        + segment.ingress.len()
+        + segment.boundaries.len()
+        + segment.random_draws.len();
+    let mut entries = Vec::with_capacity(ordinal_count + record_change_count);
+    for (offset, (command, commitment)) in
+        segment.commands.iter().zip(command_commitments).enumerate()
+    {
+        entries.push(entry(
             EvidenceRef::Command(command.id),
             EvidenceJournalKind::Command,
             segment.start.command_count + offset as u64 + 1,
             EvidenceNestedLocator::None,
-            item_commitment(EvidenceJournalKind::Command, command)?,
+            commitment,
             None,
-        );
+        ));
     }
-    for (offset, attempt) in segment.command_attempts.iter().enumerate() {
-        add(
+    for (offset, (attempt, commitment)) in segment
+        .command_attempts
+        .iter()
+        .zip(attempt_commitments)
+        .enumerate()
+    {
+        entries.push(entry(
             EvidenceRef::CommandAttempt(attempt.id),
             EvidenceJournalKind::CommandAttempt,
             segment.start.command_attempt_count + offset as u64 + 1,
             EvidenceNestedLocator::None,
-            item_commitment(EvidenceJournalKind::CommandAttempt, attempt)?,
+            commitment,
             None,
-        );
+        ));
+    }
+    for (offset, (event, commitment)) in segment.events.iter().zip(event_commitments).enumerate() {
+        entries.push(entry(
+            EvidenceRef::Event(event.id),
+            EvidenceJournalKind::Event,
+            segment.start.event_count + offset as u64 + 1,
+            EvidenceNestedLocator::None,
+            commitment,
+            None,
+        ));
     }
     let cancelled_ingress: BTreeSet<_> = segment
         .ingress
@@ -1341,7 +1795,20 @@ pub(crate) fn evidence_archive_index(
             _ => None,
         })
         .collect();
-    for (offset, ingress) in segment.ingress.iter().enumerate() {
+    // Which plugin each boundary of the segment generated each packet for.
+    let generated: BTreeSet<(super::BoundaryId, super::IngressId, &str)> = segment
+        .boundaries
+        .iter()
+        .flat_map(|boundary| {
+            boundary
+                .generated_ingress
+                .iter()
+                .map(|generation| (boundary.id, generation.ingress, generation.plugin.as_str()))
+        })
+        .collect();
+    for (offset, (ingress, commitment)) in
+        segment.ingress.iter().zip(ingress_commitments).enumerate()
+    {
         let plugin_ingress_provenance = match (&ingress.payload, ingress.cause.as_ref()) {
             (
                 IngressPayload::Plugin {
@@ -1351,12 +1818,7 @@ pub(crate) fn evidence_archive_index(
                 },
                 Some(CauseRef::Boundary(producer_boundary)),
             ) if !cancelled_ingress.contains(&ingress.id)
-                && segment.boundaries.iter().any(|boundary| {
-                    boundary.id == *producer_boundary
-                        && boundary.generated_ingress.iter().any(|generation| {
-                            generation.ingress == ingress.id && generation.plugin == *plugin
-                        })
-                }) =>
+                && generated.contains(&(*producer_boundary, ingress.id, plugin.as_str())) =>
             {
                 Some(ArchivedPluginIngressProvenance {
                     plugin: plugin.clone(),
@@ -1366,28 +1828,25 @@ pub(crate) fn evidence_archive_index(
             }
             _ => None,
         };
-        add(
+        entries.push(entry(
             EvidenceRef::Ingress(ingress.id),
             EvidenceJournalKind::Ingress,
             segment.start.ingress_count + offset as u64 + 1,
             EvidenceNestedLocator::None,
-            item_commitment(EvidenceJournalKind::Ingress, ingress)?,
+            commitment,
             plugin_ingress_provenance,
-        );
+        ));
     }
-    for (offset, boundary) in segment.boundaries.iter().enumerate() {
+    let mut record_versions = Vec::with_capacity(record_change_count);
+    for (offset, (boundary, commitment)) in segment
+        .boundaries
+        .iter()
+        .zip(boundary_commitments)
+        .enumerate()
+    {
         let absolute_index = segment.start.boundary_count + offset as u64 + 1;
-        let commitment = item_commitment(EvidenceJournalKind::Boundary, boundary)?;
-        add(
-            EvidenceRef::Boundary(boundary.id),
-            EvidenceJournalKind::Boundary,
-            absolute_index,
-            EvidenceNestedLocator::None,
-            commitment.clone(),
-            None,
-        );
         for (change_index, change) in boundary.record_changes.iter().enumerate() {
-            add(
+            record_versions.push(entry(
                 EvidenceRef::DomainRecordVersion(DomainRecordVersionRef {
                     record: change.current.reference.clone(),
                     version: change.current.version,
@@ -1403,29 +1862,59 @@ pub(crate) fn evidence_archive_index(
                 },
                 commitment.clone(),
                 None,
-            );
+            ));
         }
+        entries.push(entry(
+            EvidenceRef::Boundary(boundary.id),
+            EvidenceJournalKind::Boundary,
+            absolute_index,
+            EvidenceNestedLocator::None,
+            commitment,
+            None,
+        ));
     }
-    for (offset, draw) in segment.random_draws.iter().enumerate() {
-        add(
+    for (offset, (draw, commitment)) in segment
+        .random_draws
+        .iter()
+        .zip(draw_commitments)
+        .enumerate()
+    {
+        entries.push(entry(
             EvidenceRef::RandomDraw(draw.id),
             EvidenceJournalKind::RandomDraw,
             segment.start.random_draw_count + offset as u64 + 1,
             EvidenceNestedLocator::None,
-            item_commitment(EvidenceJournalKind::RandomDraw, draw)?,
+            commitment,
             None,
-        );
-    }
-    entries.sort();
-    if entries
-        .windows(2)
-        .any(|window| window[0].reference == window[1].reference)
-    {
-        return Err(archive_error(
-            "evidence archive contains duplicate references",
         ));
     }
-    let (evidence_index_root, proofs) = archive_merkle(&entries)?;
+    record_versions.sort_unstable_by(|left, right| left.reference.cmp(&right.reference));
+    entries.append(&mut record_versions);
+    if entries
+        .windows(2)
+        .any(|window| window[0].reference >= window[1].reference)
+    {
+        // Journal IDs are dense and ascending, so only a segment whose
+        // records carry out-of-order IDs reaches here.
+        entries.sort();
+        if entries
+            .windows(2)
+            .any(|window| window[0].reference == window[1].reference)
+        {
+            return Err(archive_error(
+                "evidence archive contains duplicate references",
+            ));
+        }
+    }
+    let mut leaf_buffer = Vec::new();
+    let levels = archive_merkle_levels(
+        entries
+            .iter()
+            .map(|entry| archive_leaf_with(entry, &mut leaf_buffer))
+            .collect::<Result<_, _>>()?,
+    );
+    drop(leaf_buffer);
+    let evidence_index_root = archive_merkle_root(&levels);
     let entry_count = u64::try_from(entries.len())
         .map_err(|_| archive_error("evidence-index entry count exceeds u64"))?;
     let segment_id = super::canonical_hash(
@@ -1446,11 +1935,11 @@ pub(crate) fn evidence_archive_index(
         evidence_index_root,
         evidence_index_entry_count: entry_count,
     };
-    let receipts = entries
-        .iter()
-        .zip(proofs)
-        .enumerate()
-        .map(|(index, (entry, merkle_path))| ArchivedEvidenceReceipt {
+    let receipts = selection
+        .positions(&entries)
+        .into_iter()
+        .map(|index| (index, &entries[index]))
+        .map(|(index, entry)| ArchivedEvidenceReceipt {
             evidence: entry.reference.clone(),
             locator: ArchivedEvidenceLocator {
                 segment_id: segment_id.clone(),
@@ -1459,9 +1948,9 @@ pub(crate) fn evidence_archive_index(
             evidence_index_leaf: index as u64,
             item_commitment: entry.item_commitment.clone(),
             plugin_ingress_provenance: entry.plugin_ingress_provenance.clone(),
-            merkle_path,
+            merkle_path: archive_merkle_path(&levels, index),
         })
-        .collect();
+        .collect::<Vec<ArchivedEvidenceReceipt>>();
     Ok((EvidenceArchiveIndex { header, entries }, receipts))
 }
 
@@ -1567,9 +2056,7 @@ pub(crate) fn verify_archived_segment(
         .archive
         .as_ref()
         .ok_or_else(|| archive_error("archived segment is missing its evidence index"))?;
-    let mut plain = segment.clone();
-    plain.archive = None;
-    let (rebuilt, receipts) = evidence_archive_index(&plain)?;
+    let (rebuilt, receipts) = evidence_archive_index(segment)?;
     if &rebuilt != stored {
         return Err(archive_error(
             "archived segment header or evidence index does not match its journal content",
@@ -2874,13 +3361,15 @@ impl CompactedSimulation {
     /// Restores a paged checkpoint plus its contiguous evidence prefix, then
     /// enters the compact interface with that evidence retained until the
     /// caller seals it. The next seal starts at the zero cut and replaces the
-    /// supplied segments.
+    /// supplied segments. See [`Simulation::from_paged_checkpoint_and_journal`]
+    /// for `budget`.
     pub fn from_paged_checkpoint_and_journal(
         checkpoint: &PagedSimulationCheckpoint,
         provider: &dyn StatePageProvider,
         segments: Vec<EvidenceJournalSegment>,
+        budget: PagedRestoreBudget,
     ) -> Result<Self, CanwuError> {
-        Simulation::from_paged_checkpoint_and_journal(checkpoint, provider, segments)?
+        Simulation::from_paged_checkpoint_and_journal(checkpoint, provider, segments, budget)?
             .into_compacted()
     }
 
@@ -2891,9 +3380,10 @@ impl CompactedSimulation {
         provider: &dyn StatePageProvider,
         segments: Vec<EvidenceJournalSegment>,
         plugins: &[&dyn SimulationPlugin],
+        budget: PagedRestoreBudget,
     ) -> Result<Self, CanwuError> {
         Simulation::from_paged_checkpoint_and_journal_with_plugins(
-            checkpoint, provider, segments, plugins,
+            checkpoint, provider, segments, plugins, budget,
         )?
         .into_compacted()
     }
@@ -3308,9 +3798,21 @@ impl Simulation {
                 return Err(error);
             }
         };
-        let (archive, receipts) = evidence_archive_index(&segment)?;
-        segment.archive = Some(archive.clone());
-        verify_archived_segment(&segment)?;
+        // The seal builds the index once, from the records it seals, and
+        // makes receipts only for the evidence the run keeps receipts of:
+        // the current dependencies, as the retention below leaves them. The
+        // index is a function of the segment, so rebuilding it to compare
+        // would hash every record again for nothing; each kept receipt's
+        // Merkle path is still checked against the header it will be
+        // verified against when its segment is loaded.
+        let reachable = reachable_archived_receipt_references(&dependencies);
+        let (archive, receipts) =
+            evidence_archive_index_with_receipts(&segment, ReceiptSelection::Kept(&reachable))?;
+        for receipt in &receipts {
+            verify_archive_receipt(receipt, &archive.header)?;
+        }
+        let header = archive.header.clone();
+        segment.archive = Some(archive);
         let (legacy, tracked, unqueued) = self.history_flags_of(
             &segment.commands,
             &segment.command_attempts,
@@ -3346,7 +3848,11 @@ impl Simulation {
         evidence.random_draws.clear();
         self.state.scheduler.cancelled_ingress.clear();
         let evidence = &mut self.state.evidence;
-        evidence.archived_segment_headers.push_back(archive.header);
+        evidence.archived_segment_headers.push_back(header);
+        retain_reachable_archived_evidence_receipts(
+            &mut evidence.archived_evidence_receipts,
+            &reachable,
+        );
         for receipt in receipts {
             if evidence
                 .archived_evidence_receipts
@@ -3356,10 +3862,6 @@ impl Simulation {
                 return Err(archive_error("archived evidence receipt was duplicated"));
             }
         }
-        retain_reachable_archived_evidence_receipts(
-            &mut evidence.archived_evidence_receipts,
-            &dependencies,
-        );
         evidence.pinned = pins;
         Ok(Some(segment))
     }
@@ -3405,7 +3907,14 @@ impl Simulation {
                 .map(|(person, availability)| (*person, availability.clone()))
                 .collect(),
             created_persons: self.state.current.created_persons.iter().cloned().collect(),
-            knowledge: KnowledgeSnapshot::clone(&self.state.current.knowledge),
+            knowledge: if include_paged_payloads {
+                KnowledgeSnapshot::clone(&self.state.current.knowledge)
+            } else {
+                KnowledgeSnapshot {
+                    actors: self.state.current.knowledge.actors.clone(),
+                    records: HolderLedgers::new(),
+                }
+            },
             events: Vec::new(),
             commands: Vec::new(),
             command_attempts: Vec::new(),
@@ -3491,10 +4000,11 @@ impl Simulation {
         };
         let decisions = &self.state.current.decisions;
         let hot_decisions = decisions.paged_checkpoint_hot_state();
-        let hot_decision_page =
-            StatePageBlob::new(serde_json::to_vec(&hot_decisions).map_err(|error| {
-                invalid_snapshot_error(format!("cannot encode paged hot decision state: {error}"))
-            })?)?;
+        let hot_decision_bytes = serde_json::to_vec(&hot_decisions).map_err(|error| {
+            invalid_snapshot_error(format!("cannot encode paged hot decision state: {error}"))
+        })?;
+        drop(hot_decisions);
+        let (hot_state, hot_decision_pages) = PagedBytes::of(&hot_decision_bytes)?;
         let decision_bucket_pages = decisions
             .decision_archive_bucket_page_ids()
             .iter()
@@ -3564,7 +4074,7 @@ impl Simulation {
         let decision_manifest_page = StatePageBlob::new(
             serde_json::to_vec(&PagedDecisionManifest {
                 format_version: PAGED_CHECKPOINT_FORMAT_VERSION,
-                hot_page_id: hot_decision_page.page_id.clone(),
+                hot_state,
                 archive_receipt_root: self
                     .state
                     .current
@@ -3578,11 +4088,41 @@ impl Simulation {
                 invalid_snapshot_error(format!("cannot encode paged decision manifest: {error}"))
             })?,
         )?;
+        let (knowledge_bodies, knowledge_holders) =
+            paged_knowledge_maps(&self.state.current.knowledge.records)?;
+        let mut knowledge_pages = BTreeMap::new();
+        let knowledge = PagedKnowledgeRoots {
+            bodies: knowledge_bodies.pages(provider, &mut knowledge_pages)?,
+            holders: knowledge_holders.pages(provider, &mut knowledge_pages)?,
+        };
         let checkpoint_without_paged_state = self.checkpoint_with_paged_payloads(false)?;
+        let checkpoint_hash = checkpoint_without_paged_state.state.checkpoint_hash.clone();
+        let body_bytes = serde_json::to_vec(&checkpoint_without_paged_state).map_err(|error| {
+            invalid_snapshot_error(format!("cannot encode paged checkpoint body: {error}"))
+        })?;
+        drop(checkpoint_without_paged_state);
+        let (body, body_pages) = PagedBytes::of(&body_bytes)?;
+        let assembled_bytes = [
+            body.bytes,
+            hot_decision_bytes.len() as u64,
+            self.state.current.domain_records.paged_value_bytes(),
+            knowledge_bodies.value_bytes(),
+            knowledge_holders.value_bytes(),
+        ]
+        .into_iter()
+        .try_fold(0_u64, u64::checked_add)
+        .ok_or_else(|| invalid_snapshot_error("paged checkpoint byte count exceeds u64"))?;
+        drop((
+            body_bytes,
+            hot_decision_bytes,
+            knowledge_bodies,
+            knowledge_holders,
+        ));
         let envelope = PagedCheckpointEnvelope {
             format_version: PAGED_CHECKPOINT_FORMAT_VERSION,
-            checkpoint_without_paged_state,
+            body,
             domain_records,
+            knowledge,
             decision_manifest_page_id: decision_manifest_page.page_id.clone(),
         };
         let envelope_page =
@@ -3592,24 +4132,29 @@ impl Simulation {
         let checkpoint = PagedSimulationCheckpoint {
             format_version: PAGED_CHECKPOINT_FORMAT_VERSION,
             root_page_id: envelope_page.page_id.clone(),
-            checkpoint_hash: envelope
-                .checkpoint_without_paged_state
-                .state
-                .checkpoint_hash
-                .clone(),
+            checkpoint_hash,
+            assembled_bytes,
         };
         let mut pages = BTreeMap::new();
-        for page in domain_pages.into_iter().chain(decision_pages).chain([
-            hot_decision_page,
-            decision_manifest_page,
-            envelope_page,
-        ]) {
-            if let Some(existing) = pages.insert(page.page_id.clone(), page.clone())
-                && existing != page
-            {
-                return Err(invalid_snapshot_error(
-                    "one state-page ID resolved to conflicting canonical bytes",
-                ));
+        for page in domain_pages
+            .into_iter()
+            .chain(knowledge_pages.into_values())
+            .chain(decision_pages)
+            .chain(hot_decision_pages)
+            .chain(body_pages)
+            .chain([decision_manifest_page, envelope_page])
+        {
+            match pages.entry(page.page_id.clone()) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(page);
+                }
+                std::collections::btree_map::Entry::Occupied(existing) => {
+                    if *existing.get() != page {
+                        return Err(invalid_snapshot_error(
+                            "one state-page ID resolved to conflicting canonical bytes",
+                        ));
+                    }
+                }
             }
         }
         Ok((checkpoint, pages.into_values().collect()))
@@ -3679,26 +4224,49 @@ impl Simulation {
 
     /// Restores a simulation from a verified paged checkpoint. Current domain
     /// records are reconstructed from the committed Patricia roots; missing
-    /// pages fail closed instead of being interpreted as absent state.
+    /// pages fail closed instead of being interpreted as absent state. See
+    /// [`Self::from_paged_checkpoint_and_journal`] for `budget`.
     pub fn from_paged_checkpoint(
         checkpoint: &PagedSimulationCheckpoint,
         provider: &dyn StatePageProvider,
+        budget: PagedRestoreBudget,
     ) -> Result<Self, CanwuError> {
-        Self::from_paged_checkpoint_and_journal(checkpoint, provider, Vec::new())
+        Self::from_paged_checkpoint_and_journal(checkpoint, provider, Vec::new(), budget)
     }
 
     /// Restores a paged current-state checkpoint after proving the contiguous
     /// evidence prefix named by its compact checkpoint metadata.
+    ///
+    /// Every value the restore assembles from pages (the compact body, the
+    /// hot decision state, each domain-record index value, each knowledge
+    /// body and holder ledger) is charged to `budget` before it is
+    /// allocated; a restore that would pass the budget fails with
+    /// `restore_budget_exceeded` and restores nothing. A descriptor whose
+    /// `assembled_bytes` differs from what its pages assemble is refused as
+    /// an invalid snapshot.
     pub fn from_paged_checkpoint_and_journal(
         checkpoint: &PagedSimulationCheckpoint,
         provider: &dyn StatePageProvider,
         segments: Vec<EvidenceJournalSegment>,
+        budget: PagedRestoreBudget,
     ) -> Result<Self, CanwuError> {
         if checkpoint.format_version != PAGED_CHECKPOINT_FORMAT_VERSION {
             return Err(invalid_snapshot_error(
                 "paged checkpoint uses an unsupported format",
             ));
         }
+        // A descriptor that states more than the budget is refused before
+        // any page is read; one that states less is caught by the meter.
+        if checkpoint.assembled_bytes > budget.max_assembled_bytes {
+            return Err(CanwuError::new(
+                ErrorCode::RestoreBudgetExceeded,
+                format!(
+                    "the paged checkpoint states {} assembled bytes, more than the restore budget of {}",
+                    checkpoint.assembled_bytes, budget.max_assembled_bytes
+                ),
+            ));
+        }
+        let mut meter = RestoreMeter::new(budget);
         let root_page = provider
             .load_state_page(&checkpoint.root_page_id)?
             .ok_or_else(|| {
@@ -3717,22 +4285,24 @@ impl Simulation {
             serde_json::from_slice(&root_page.bytes).map_err(|error| {
                 invalid_snapshot_error(format!("invalid paged checkpoint envelope: {error}"))
             })?;
-        if envelope.format_version != PAGED_CHECKPOINT_FORMAT_VERSION
-            || envelope
-                .checkpoint_without_paged_state
-                .state
-                .checkpoint_hash
-                != checkpoint.checkpoint_hash
-            || !envelope
-                .checkpoint_without_paged_state
-                .state
-                .domain_records
-                .is_empty()
-            || !envelope
-                .checkpoint_without_paged_state
-                .state
-                .decisions
-                .is_empty()
+        drop(root_page);
+        if envelope.format_version != PAGED_CHECKPOINT_FORMAT_VERSION {
+            return Err(invalid_snapshot_error(
+                "paged checkpoint envelope uses an unsupported format",
+            ));
+        }
+        let body = envelope
+            .body
+            .load(provider, &mut meter, "checkpoint body")?;
+        let mut compact_checkpoint: SimulationCheckpoint =
+            serde_json::from_slice(&body).map_err(|error| {
+                invalid_snapshot_error(format!("invalid paged checkpoint body: {error}"))
+            })?;
+        drop(body);
+        if compact_checkpoint.state.checkpoint_hash != checkpoint.checkpoint_hash
+            || !compact_checkpoint.state.domain_records.is_empty()
+            || !compact_checkpoint.state.decisions.is_empty()
+            || !compact_checkpoint.state.knowledge.records.is_empty()
         {
             return Err(invalid_snapshot_error(
                 "paged checkpoint envelope metadata is inconsistent",
@@ -3757,24 +4327,15 @@ impl Simulation {
                 invalid_snapshot_error(format!("invalid paged decision manifest: {error}"))
             })?;
         validate_paged_decision_manifest(&decision_manifest)?;
-        let hot_decision_page = provider
-            .load_state_page(&decision_manifest.hot_page_id)?
-            .ok_or_else(|| {
-                CanwuError::new(
-                    ErrorCode::StatePageUnavailable,
-                    "paged hot decision state is unavailable",
-                )
-            })?;
-        hot_decision_page.validate()?;
-        if hot_decision_page.page_id != decision_manifest.hot_page_id {
-            return Err(invalid_snapshot_error(
-                "paged decision provider returned the wrong hot-state page",
-            ));
-        }
-        let hot_decisions: DecisionState = serde_json::from_slice(&hot_decision_page.bytes)
-            .map_err(|error| {
+        let hot_decision_bytes =
+            decision_manifest
+                .hot_state
+                .load(provider, &mut meter, "hot decision state")?;
+        let hot_decisions: DecisionState =
+            serde_json::from_slice(&hot_decision_bytes).map_err(|error| {
                 invalid_snapshot_error(format!("invalid paged hot decision state: {error}"))
             })?;
+        drop(hot_decision_bytes);
         let mut directory_pages =
             Vec::with_capacity(decision_manifest.archive_directory_page_ids.len());
         for directory_page_id in &decision_manifest.archive_directory_page_ids {
@@ -3853,28 +4414,50 @@ impl Simulation {
             resident_dependency_pages,
         )
         .map_err(|error| invalid_snapshot_error(error.to_string()))?;
-        let domain_records = super::PersistentDomainRecordStore::from_state_pages(
+        let domain_records = super::PersistentDomainRecordStore::from_state_pages_metered(
             &envelope.domain_records,
             provider,
+            &mut meter,
         )?;
-        let mut compact_checkpoint = envelope.checkpoint_without_paged_state;
+        let knowledge_bodies = PagedValueMap::load(
+            PAGED_KNOWLEDGE_BODIES_DOMAIN,
+            envelope.knowledge.bodies.as_deref(),
+            provider,
+            &mut meter,
+        )?;
+        let knowledge_holders = PagedValueMap::load(
+            PAGED_KNOWLEDGE_HOLDERS_DOMAIN,
+            envelope.knowledge.holders.as_deref(),
+            provider,
+            &mut meter,
+        )?;
+        if meter.assembled() != checkpoint.assembled_bytes {
+            return Err(invalid_snapshot_error(
+                "paged checkpoint descriptor states other assembled bytes than its pages hold",
+            ));
+        }
+        let knowledge =
+            restore_paged_knowledge(&envelope.knowledge, knowledge_bodies, knowledge_holders)?;
         compact_checkpoint.state.domain_records = domain_records.values().cloned().collect();
         compact_checkpoint.state.decisions = decisions;
+        compact_checkpoint.state.knowledge.records = knowledge;
         let mut simulation = Self::from_checkpoint_and_journal(compact_checkpoint, segments)?;
         simulation.state.current.domain_records = domain_records;
         Ok(simulation)
     }
 
     /// Restores a paged checkpoint and its contiguous evidence prefix, then
-    /// rehydrates its exact executable plugin contracts.
+    /// rehydrates its exact executable plugin contracts. See
+    /// [`Self::from_paged_checkpoint_and_journal`] for `budget`.
     pub fn from_paged_checkpoint_and_journal_with_plugins(
         checkpoint: &PagedSimulationCheckpoint,
         provider: &dyn StatePageProvider,
         segments: Vec<EvidenceJournalSegment>,
         plugins: &[&dyn SimulationPlugin],
+        budget: PagedRestoreBudget,
     ) -> Result<Self, CanwuError> {
         let mut simulation =
-            Self::from_paged_checkpoint_and_journal(checkpoint, provider, segments)?;
+            Self::from_paged_checkpoint_and_journal(checkpoint, provider, segments, budget)?;
         for plugin in plugins {
             simulation.register_plugin(*plugin)?;
         }
@@ -3882,21 +4465,31 @@ impl Simulation {
         Ok(simulation)
     }
 
+    /// Restores a self-contained paged checkpoint. See
+    /// [`Self::from_paged_checkpoint_and_journal`] for `budget`: the pages
+    /// are already in memory, but a value may still name one of them many
+    /// times.
     pub fn from_portable_paged_checkpoint(
         portable: PortablePagedSimulationCheckpoint,
+        budget: PagedRestoreBudget,
     ) -> Result<Self, CanwuError> {
         let mut provider = EmbeddedPageProvider::default();
         for page in portable.pages {
             page.validate()?;
-            if let Some(existing) = provider.pages.insert(page.page_id.clone(), page.clone())
-                && existing != page
-            {
-                return Err(invalid_snapshot_error(
-                    "portable paged checkpoint contains conflicting duplicate pages",
-                ));
+            match provider.pages.entry(page.page_id.clone()) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(page);
+                }
+                std::collections::btree_map::Entry::Occupied(existing) => {
+                    if *existing.get() != page {
+                        return Err(invalid_snapshot_error(
+                            "portable paged checkpoint contains conflicting duplicate pages",
+                        ));
+                    }
+                }
             }
         }
-        Self::from_paged_checkpoint(&portable.checkpoint, &provider)
+        Self::from_paged_checkpoint(&portable.checkpoint, &provider, budget)
     }
 
     /// Returns the current monotonic cut through every append-only journal.
@@ -4347,9 +4940,17 @@ pub fn format8_paged_checkpoint_scale_probe(
     let manifest: PagedDecisionManifest = serde_json::from_slice(&manifest_page.bytes)
         .map_err(|error| invalid_snapshot_error(format!("invalid scale manifest: {error}")))?;
 
-    let restored = Simulation::from_paged_checkpoint(&prepared.checkpoint, &store)?;
-    let replayed =
-        Simulation::from_paged_checkpoint_and_journal(&prepared.checkpoint, &store, Vec::new())?;
+    let restored = Simulation::from_paged_checkpoint(
+        &prepared.checkpoint,
+        &store,
+        super::PagedRestoreBudget::DEFAULT,
+    )?;
+    let replayed = Simulation::from_paged_checkpoint_and_journal(
+        &prepared.checkpoint,
+        &store,
+        Vec::new(),
+        super::PagedRestoreBudget::DEFAULT,
+    )?;
     let samples = [
         1_usize,
         decision_count.saturating_div(2).max(1),
@@ -4502,6 +5103,311 @@ mod tests {
         }
     }
 
+    fn knowledge_body(id: u64) -> canwu_knowledge::KnowledgeRecordBody {
+        canwu_knowledge::KnowledgeRecordBody {
+            id: KnowledgeRecordId::new(id),
+            schema: KnowledgeSchemaId::new(KnowledgeRecordKind::new("fixture.paged", "note"), 1),
+            subjects: Vec::new(),
+            payload: json!({ "note": id }),
+            as_of: None,
+            learned_at: SimTime::EPOCH,
+            confidence_per_mille: 1_000,
+            origin: KnowledgeOrigin {
+                method: "fixture".to_owned(),
+                evidence: Vec::new(),
+            },
+        }
+    }
+
+    /// Bodies 1 and 2, held by persons 1 and 2.
+    fn two_holder_ledgers() -> HolderLedgers {
+        let mut ledgers = HolderLedgers::new();
+        for id in 1..=2 {
+            let holder = KnowledgeHolderRef::Person(PersonId::new(id));
+            let entry = HolderEntry {
+                record: KnowledgeRecordId::new(id),
+                local: super::super::HolderKnowledgeRecordId::new(1),
+                supersedes: Vec::new(),
+                contradicts: Vec::new(),
+            };
+            ledgers.insert(canwu_knowledge::KnowledgeRecord::assemble(
+                &holder,
+                &entry,
+                &knowledge_body(id),
+            ));
+        }
+        ledgers
+    }
+
+    /// A paged knowledge map binds each value to its key: a value filed
+    /// under another body ID or holder is refused even when the ledger it
+    /// decodes to is well formed.
+    #[test]
+    fn paged_knowledge_values_must_sit_under_their_own_keys() {
+        let ledgers = two_holder_ledgers();
+        let (bodies, holders) = paged_knowledge_maps(&ledgers).expect("paged maps");
+        assert_eq!(
+            assemble_paged_knowledge(&bodies, &holders).expect("honest maps"),
+            ledgers
+        );
+
+        // Body 2 filed under ID 3: the bodies decode in order and are held,
+        // but key 3 names body 2.
+        let mut moved = PagedValueMap::new(PAGED_KNOWLEDGE_BODIES_DOMAIN);
+        moved
+            .insert(&KnowledgeRecordId::new(1), &knowledge_body(1))
+            .expect("insert");
+        moved
+            .insert(&KnowledgeRecordId::new(3), &knowledge_body(2))
+            .expect("insert");
+        let error = assemble_paged_knowledge(&moved, &holders).expect_err("a moved body");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        // Person 2's ledger filed under person 3.
+        let holder_values = paged_knowledge_maps(&ledgers)
+            .expect("paged maps")
+            .1
+            .entries()
+            .expect("entries")
+            .into_iter()
+            .map(|(key, value)| (key.to_vec(), value.to_vec()))
+            .collect::<Vec<_>>();
+        let mut misfiled = PagedValueMap::new(PAGED_KNOWLEDGE_HOLDERS_DOMAIN);
+        for (key, value) in &holder_values {
+            let holder: KnowledgeHolderRef = serde_json::from_slice(key).expect("holder key");
+            let filed = if holder == KnowledgeHolderRef::Person(PersonId::new(2)) {
+                KnowledgeHolderRef::Person(PersonId::new(3))
+            } else {
+                holder
+            };
+            let value: Value = serde_json::from_slice(value).expect("holder value");
+            misfiled.insert(&filed, &value).expect("insert");
+        }
+        let error = assemble_paged_knowledge(&bodies, &misfiled).expect_err("a misfiled holder");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    }
+
+    /// The single-pass index builder equals the documented definition: each
+    /// journal root is `canonical_hash` of the journal array, each item
+    /// commitment `canonical_hash` of its item, each leaf `canonical_hash` of
+    /// its leaf material, entries ascend by reference (record versions
+    /// included, whatever order their boundary lists them in), and a kept
+    /// receipt equals the full builder's.
+    #[test]
+    fn evidence_index_matches_its_canonical_definition() {
+        use super::super::canonical_hash;
+        let (mut simulation, _) = Simulation::demo(73).expect("demo");
+        for minutes in [60, 120, 180] {
+            simulation
+                .settle_boundary(BoundaryRequest::at(SimTime::from_minutes(minutes)))
+                .expect("boundary");
+        }
+        let mut segment = simulation
+            .journal_segment_since(EvidenceCursor::default())
+            .expect("segment");
+        // Record changes listed out of reference order, which the index
+        // sorts among the record versions.
+        let boundary = segment.boundaries.last_mut().expect("a boundary");
+        for id in ["item-c", "item-a", "item-b"] {
+            boundary
+                .record_changes
+                .push(super::super::DomainRecordChange {
+                    plugin: "fixture".to_owned(),
+                    system: "fixture-system".to_owned(),
+                    operation: super::super::DomainRecordOperation::Created,
+                    previous: None,
+                    current: Arc::new(DomainRecord {
+                        reference: DomainRecordRef {
+                            kind: DomainRecordKind::new("fixture.index", "item"),
+                            id: id.to_owned(),
+                        },
+                        owner: "fixture".to_owned(),
+                        class: DomainRecordClass::Record,
+                        version: 1,
+                        lifecycle: super::super::DomainRecordLifecycle::Active,
+                        payload: json!({ "id": id }),
+                        references: Vec::new(),
+                    }),
+                    visibility: StateVisibility::NextBoundary,
+                    summary: "fixture change".to_owned(),
+                });
+        }
+        let (index, receipts) = evidence_archive_index(&segment).expect("index");
+        let roots = &index.header.journal_roots;
+        for (actual, domain, expected) in [
+            (
+                &roots.events,
+                "canwu.evidence.journal.events.v1",
+                canonical_hash("canwu.evidence.journal.events.v1", &segment.events),
+            ),
+            (
+                &roots.commands,
+                "canwu.evidence.journal.commands.v1",
+                canonical_hash("canwu.evidence.journal.commands.v1", &segment.commands),
+            ),
+            (
+                &roots.command_attempts,
+                "canwu.evidence.journal.command_attempts.v1",
+                canonical_hash(
+                    "canwu.evidence.journal.command_attempts.v1",
+                    &segment.command_attempts,
+                ),
+            ),
+            (
+                &roots.ingress,
+                "canwu.evidence.journal.ingress.v1",
+                canonical_hash("canwu.evidence.journal.ingress.v1", &segment.ingress),
+            ),
+            (
+                &roots.boundaries,
+                "canwu.evidence.journal.boundaries.v1",
+                canonical_hash("canwu.evidence.journal.boundaries.v1", &segment.boundaries),
+            ),
+            (
+                &roots.random_draws,
+                "canwu.evidence.journal.random_draws.v1",
+                canonical_hash(
+                    "canwu.evidence.journal.random_draws.v1",
+                    &segment.random_draws,
+                ),
+            ),
+        ] {
+            assert_eq!(*actual, expected.expect("journal hash"), "{domain}");
+        }
+        assert!(
+            index
+                .entries
+                .windows(2)
+                .all(|pair| pair[0].reference < pair[1].reference)
+        );
+        let start = segment.start;
+        for entry in &index.entries {
+            let at = |base: u64| usize::try_from(entry.item.absolute_index - base - 1).unwrap();
+            let domain = item_commitment_domain(entry.item.journal);
+            let expected = match entry.item.journal {
+                EvidenceJournalKind::Event => {
+                    canonical_hash(domain, &segment.events[at(start.event_count)])
+                }
+                EvidenceJournalKind::Command => {
+                    canonical_hash(domain, &segment.commands[at(start.command_count)])
+                }
+                EvidenceJournalKind::CommandAttempt => canonical_hash(
+                    domain,
+                    &segment.command_attempts[at(start.command_attempt_count)],
+                ),
+                EvidenceJournalKind::Ingress => {
+                    canonical_hash(domain, &segment.ingress[at(start.ingress_count)])
+                }
+                EvidenceJournalKind::Boundary => {
+                    canonical_hash(domain, &segment.boundaries[at(start.boundary_count)])
+                }
+                EvidenceJournalKind::RandomDraw => {
+                    canonical_hash(domain, &segment.random_draws[at(start.random_draw_count)])
+                }
+            }
+            .expect("item hash");
+            assert_eq!(entry.item_commitment, expected);
+            let leaf = canonical_hash(
+                "canwu.evidence.index.leaf.v2",
+                &EvidenceIndexLeafMaterial {
+                    format_version: 2,
+                    reference: &entry.reference,
+                    item: &entry.item,
+                    item_commitment: &entry.item_commitment,
+                    plugin_ingress_provenance: &entry.plugin_ingress_provenance,
+                },
+            )
+            .expect("leaf hash");
+            assert_eq!(
+                archive_leaf(entry).expect("leaf"),
+                decode_hash(&leaf, "leaf").expect("hex leaf")
+            );
+        }
+        let first = index.entries.first().expect("entries").reference.clone();
+        let last = index.entries.last().expect("entries").reference.clone();
+        let kept = [
+            first,
+            last,
+            EvidenceRef::Event(canwu_core::EventId::new(u64::MAX)),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        let (kept_index, kept_receipts) =
+            evidence_archive_index_with_receipts(&segment, ReceiptSelection::Kept(&kept))
+                .expect("kept index");
+        assert_eq!(kept_index, index);
+        let expected = receipts
+            .into_iter()
+            .filter(|receipt| kept.contains(&receipt.evidence))
+            .collect::<Vec<_>>();
+        assert_eq!(kept_receipts.len(), 2);
+        assert_eq!(kept_receipts, expected);
+    }
+
+    /// `map` with every value re-encoded as a JSON object with its fields in
+    /// another order and one unknown field.
+    fn reencoded<K: serde::de::DeserializeOwned + Serialize>(
+        map: &PagedValueMap,
+        domain: &'static str,
+    ) -> PagedValueMap {
+        let mut other = PagedValueMap::new(domain);
+        for (key, value) in map.entries().expect("entries") {
+            let key: K = serde_json::from_slice(key).expect("key");
+            let mut value: Map<String, Value> =
+                serde_json::from_slice(value).expect("an object value");
+            value.insert("unknown".to_owned(), json!(1));
+            other.insert(&key, &value).expect("insert");
+        }
+        other
+    }
+
+    /// The ledger's decoder accepts encodings no checkpoint writes; the
+    /// restore accepts one ledger only under the roots its own maps have.
+    #[test]
+    fn paged_knowledge_restores_only_from_its_canonical_encoding() {
+        let ledgers = two_holder_ledgers();
+        let canonical = |ledgers: &HolderLedgers| {
+            let (bodies, holders) = paged_knowledge_maps(ledgers).expect("paged maps");
+            let roots = PagedKnowledgeRoots {
+                bodies: bodies.root_page_id(),
+                holders: holders.root_page_id(),
+            };
+            (roots, bodies, holders)
+        };
+        let (roots, bodies, holders) = canonical(&ledgers);
+        assert_eq!(
+            restore_paged_knowledge(&roots, bodies, holders).expect("canonical maps"),
+            ledgers
+        );
+
+        // The same ledger with every value re-encoded as a JSON object with
+        // its fields in another order and one unknown field.
+        let (_, bodies, holders) = canonical(&ledgers);
+        let holders_reencoded =
+            reencoded::<KnowledgeHolderRef>(&holders, PAGED_KNOWLEDGE_HOLDERS_DOMAIN);
+        assert_eq!(
+            assemble_paged_knowledge(&bodies, &holders_reencoded).expect("the decoder accepts it"),
+            ledgers
+        );
+        let roots_as_stored = PagedKnowledgeRoots {
+            bodies: bodies.root_page_id(),
+            holders: holders_reencoded.root_page_id(),
+        };
+        let error = restore_paged_knowledge(&roots_as_stored, bodies, holders_reencoded)
+            .expect_err("a re-encoded holder ledger is refused");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        let (_, bodies, holders) = canonical(&ledgers);
+        let bodies_reencoded =
+            reencoded::<KnowledgeRecordId>(&bodies, PAGED_KNOWLEDGE_BODIES_DOMAIN);
+        let roots_as_stored = PagedKnowledgeRoots {
+            bodies: bodies_reencoded.root_page_id(),
+            holders: holders.root_page_id(),
+        };
+        let error = restore_paged_knowledge(&roots_as_stored, bodies_reencoded, holders)
+            .expect_err("a re-encoded body is refused");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    }
+
     #[test]
     fn paged_decision_directory_rejects_noncanonical_cross_page_encodings() {
         let first = decision_directory_page(0, MAX_PAGED_DECISION_DIRECTORY_ENTRIES);
@@ -4517,7 +5423,10 @@ mod tests {
         let duplicate_id = canonical_byte_hash("canwu.test.duplicate-directory.v1", b"same");
         let manifest = PagedDecisionManifest {
             format_version: PAGED_CHECKPOINT_FORMAT_VERSION,
-            hot_page_id: canonical_byte_hash("canwu.test.hot.v1", b"hot"),
+            hot_state: PagedBytes {
+                bytes: 3,
+                chunks: vec![canonical_byte_hash("canwu.test.hot.v1", b"hot")],
+            },
             archive_receipt_root: canonical_byte_hash("canwu.test.archive.v1", b"archive"),
             archive_receipt_count: 1,
             archive_directory_page_ids: vec![duplicate_id.clone(), duplicate_id],
@@ -4544,7 +5453,9 @@ mod tests {
                 .to_owned(),
             plugin_ingress_provenance: Some(provenance.clone()),
         };
-        let (root, proofs) = archive_merkle(std::slice::from_ref(&entry)).expect("build proof");
+        let levels = archive_merkle_levels(vec![archive_leaf(&entry).expect("leaf")]);
+        let root = archive_merkle_root(&levels);
+        let proofs = vec![archive_merkle_path(&levels, 0)];
         let header = ArchivedSegmentHeader {
             segment_id: "0202020202020202020202020202020202020202020202020202020202020202"
                 .to_owned(),

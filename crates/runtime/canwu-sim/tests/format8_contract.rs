@@ -10,9 +10,9 @@ use canwu_sim::{
     DomainRecordSchema, ErrorCode, Issuer, MaintenanceDisposition,
     OwnerAuthorizedMaintenanceRequest, OwnerAuthorizedMutation, OwnerAuthorizedParticipantDraft,
     OwnerAuthorizedParticipantProposal, OwnerAuthorizedParticipantRole,
-    OwnerAuthorizedRecordExpectation, PLUGIN_DESCRIPTOR_FORMAT_VERSION, PayloadSchema,
-    PersistentDomainRecordStore, PreparedStateDelta, Scenario, Simulation, SimulationPlugin,
-    SimulationView, StatePageBlob, StatePageProvider, StatePageRetentionLedger,
+    OwnerAuthorizedRecordExpectation, PLUGIN_DESCRIPTOR_FORMAT_VERSION, PagedRestoreBudget,
+    PayloadSchema, PersistentDomainRecordStore, PreparedStateDelta, Scenario, Simulation,
+    SimulationPlugin, SimulationView, StatePageBlob, StatePageProvider, StatePageRetentionLedger,
     StatePageRetentionPhase, StatePageStore, StateVisibility, SystemCadence, canonical_hash,
     prepare_state_delta, state_page_id, verify_state_delta,
 };
@@ -410,8 +410,12 @@ fn domain_record_store_commits_primary_and_reverse_indexes() {
     for page in &pages {
         provider.store_state_page(page).expect("store state page");
     }
-    let rebuilt = PersistentDomainRecordStore::from_state_pages(&page_roots, &provider)
-        .expect("reconstruct store");
+    let rebuilt = PersistentDomainRecordStore::from_state_pages(
+        &page_roots,
+        &provider,
+        PagedRestoreBudget::DEFAULT,
+    )
+    .expect("reconstruct store");
     assert_eq!(rebuilt.materialize(), records);
     assert_eq!(rebuilt.roots(), store.roots());
 }
@@ -478,8 +482,12 @@ fn paged_checkpoint_round_trips_and_emits_only_missing_pages() {
         .store_and_verify(&provider)
         .expect("store paged checkpoint");
 
-    let restored = Simulation::from_paged_checkpoint(&prepared.checkpoint, &provider)
-        .expect("restore paged checkpoint");
+    let restored = Simulation::from_paged_checkpoint(
+        &prepared.checkpoint,
+        &provider,
+        PagedRestoreBudget::DEFAULT,
+    )
+    .expect("restore paged checkpoint");
     assert_eq!(
         restored.authoritative_state_hash().expect("restored hash"),
         simulation.authoritative_state_hash().expect("source hash")
@@ -496,7 +504,8 @@ fn paged_checkpoint_round_trips_and_emits_only_missing_pages() {
         .portable_paged_checkpoint()
         .expect("portable pages");
     let portable_restored =
-        Simulation::from_portable_paged_checkpoint(portable).expect("restore portable pages");
+        Simulation::from_portable_paged_checkpoint(portable, PagedRestoreBudget::DEFAULT)
+            .expect("restore portable pages");
     assert_eq!(
         portable_restored
             .authoritative_state_hash()
@@ -807,6 +816,7 @@ fn decision_archive_commit_is_replay_visible_maintenance_ingress() {
         &checkpoint.checkpoint,
         &pages,
         vec![evidence],
+        PagedRestoreBudget::DEFAULT,
     )
     .expect("root-only decision restore");
     assert!(matches!(

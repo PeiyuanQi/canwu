@@ -19,10 +19,10 @@ use canwu_api::{
     DomainRecordCommitmentRoots, DomainRecordDraft, DomainRecordKind, DomainRecordLifecycle,
     DomainRecordMutation, DomainRecordPageRoots, DomainRecordRef, DomainRecordSchema, ErrorCode,
     EvidenceCursor, EvidenceJournalSegment, MAX_PAGED_RECORD_BYTES, MAX_STATE_PAGE_BYTES,
-    PersistentDomainRecordStore, PluginRegistrar, STATE_PAGE_CODEC, STATE_PAGE_VALUE_CHUNK_BYTES,
-    Scenario, SimDuration, SimTime, SimulationPlugin, SimulationView, StateKey, StatePageBlob,
-    StatePageProvider, StatePageRetentionLedger, StatePageStore, StateVisibility, SystemCadence,
-    canonical_byte_hash,
+    PagedRestoreBudget, PersistentDomainRecordStore, PluginRegistrar, STATE_PAGE_CODEC,
+    STATE_PAGE_VALUE_CHUNK_BYTES, Scenario, SimDuration, SimTime, SimulationPlugin, SimulationView,
+    StateKey, StatePageBlob, StatePageProvider, StatePageRetentionLedger, StatePageStore,
+    StateVisibility, SystemCadence, canonical_byte_hash,
 };
 use serde_json::json;
 use std::cell::RefCell;
@@ -230,6 +230,7 @@ fn restore(
         store,
         segments.to_vec(),
         &[&ArchivePlugin],
+        PagedRestoreBudget::DEFAULT,
     )
 }
 
@@ -266,7 +267,9 @@ fn records_longer_than_a_page_round_trip_through_paged_checkpoints_and_deltas() 
         .iter()
         .filter(|page| is_chunk_page(page))
         .count();
-    assert_eq!(first_chunks, 5, "the large record spans five chunk pages");
+    // The large record spans five chunk pages; the compact checkpoint body
+    // and the hot decision state are one chunk page each.
+    assert_eq!(first_chunks, 7, "the large record spans five chunk pages");
     first
         .store_and_verify(&store)
         .expect("store the first paged checkpoint");
@@ -313,7 +316,9 @@ fn records_longer_than_a_page_round_trip_through_paged_checkpoints_and_deltas() 
         .iter()
         .filter(|page| is_chunk_page(page))
         .count();
-    assert_eq!(second_chunks, 2, "only the changed chunks are new");
+    // Two of the record's chunks changed, and the body's chunk with the
+    // checkpoint hash and counters; the hot decision state did not.
+    assert_eq!(second_chunks, 3, "only the changed chunks are new");
     second
         .store_and_verify(&store)
         .expect("store the second paged checkpoint");
@@ -465,21 +470,91 @@ fn record(reference: &DomainRecordRef, text: &str) -> DomainRecord {
 fn load_hostile_leaf(root: Vec<u8>, pages: &[StatePageBlob]) -> CanwuError {
     let root = StatePageBlob::new(root).expect("root page");
     let store = page_store(pages.iter().chain([&root]));
+    PersistentDomainRecordStore::from_state_pages(
+        &hostile_roots(&root),
+        &store,
+        PagedRestoreBudget::DEFAULT,
+    )
+    .expect_err("the hostile page graph is refused")
+}
+
+/// The page roots of a one-leaf primary index whose root page is `root`.
+fn hostile_roots(root: &StatePageBlob) -> DomainRecordPageRoots {
     let unused = "0".repeat(64);
-    let roots = DomainRecordPageRoots {
+    DomainRecordPageRoots {
         primary: Some(root.page_id.clone()),
         reverse_references: None,
         successor_of: None,
         predecessors_of: None,
         commitment_roots: DomainRecordCommitmentRoots {
-            primary: root.page_id,
+            primary: root.page_id.clone(),
             reverse_references: unused.clone(),
             successor_of: unused.clone(),
             predecessors_of: unused,
         },
+    }
+}
+
+/// A provider that counts how often each page is read.
+struct CountingStore {
+    store: PageStore,
+    reads: RefCell<BTreeMap<String, usize>>,
+}
+
+impl StatePageProvider for CountingStore {
+    fn load_state_page(&self, page_id: &str) -> Result<Option<StatePageBlob>, CanwuError> {
+        *self
+            .reads
+            .borrow_mut()
+            .entry(page_id.to_owned())
+            .or_default() += 1;
+        self.store.load_state_page(page_id)
+    }
+}
+
+/// A leaf may name one chunk page many times, so a few distinct bytes can
+/// describe a long value. The restore charges the length a leaf describes to
+/// its budget before it reads a chunk or allocates the value, and refuses a
+/// value that would pass the budget; at exactly the budget it goes on to the
+/// usual checks.
+#[test]
+fn the_restore_budget_refuses_a_described_value_before_reading_it() {
+    let reference = volume("amplified");
+    let full = chunk_page(&vec![b'a'; STATE_PAGE_VALUE_CHUNK_BYTES]);
+    let repeats = 8;
+    let ids = std::iter::repeat_n(hex_bytes(&full.page_id), repeats)
+        .flatten()
+        .collect::<Vec<_>>();
+    let described = u64::try_from(repeats * STATE_PAGE_VALUE_CHUNK_BYTES).expect("length");
+    let root = StatePageBlob::new(leaf_page(&reference, described, &ids)).expect("root page");
+    let provider = CountingStore {
+        store: page_store([&full, &root]),
+        reads: RefCell::default(),
     };
-    PersistentDomainRecordStore::from_state_pages(&roots, &store)
-        .expect_err("the hostile page graph is refused")
+
+    let error = PersistentDomainRecordStore::from_state_pages(
+        &hostile_roots(&root),
+        &provider,
+        PagedRestoreBudget::new(described - 1),
+    )
+    .expect_err("a value longer than the budget is refused");
+    assert_eq!(error.code, ErrorCode::RestoreBudgetExceeded);
+    assert_eq!(
+        provider.reads.borrow().get(&full.page_id),
+        None,
+        "no chunk of the refused value was read"
+    );
+
+    // At exactly its length the value is assembled from eight reads of one
+    // chunk, and then refused only because it is not a record.
+    let error = PersistentDomainRecordStore::from_state_pages(
+        &hostile_roots(&root),
+        &provider,
+        PagedRestoreBudget::new(described),
+    )
+    .expect_err("eight mebibytes of one byte are not a record");
+    assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    assert_eq!(provider.reads.borrow().get(&full.page_id), Some(&repeats));
 }
 
 #[test]
@@ -531,8 +606,12 @@ fn record_pages_load_only_in_their_canonical_bounded_form() {
                 .chain(chunks.iter())
                 .chain([&leaf]),
         );
-        let loaded = PersistentDomainRecordStore::from_state_pages(&roots, &hand_built)
-            .expect("hand-built canonical pages load");
+        let loaded = PersistentDomainRecordStore::from_state_pages(
+            &roots,
+            &hand_built,
+            PagedRestoreBudget::DEFAULT,
+        )
+        .expect("hand-built canonical pages load");
         assert_eq!(loaded.materialize(), store.materialize());
     }
 
@@ -647,9 +726,10 @@ mod threshold {
         BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundaryRequest,
         BoundarySystemContract, Canwu, CanwuError, CompactedCanwu, DomainRecord, DomainRecordClass,
         DomainRecordDraft, DomainRecordKind, DomainRecordLifecycle, DomainRecordMutation,
-        DomainRecordRef, DomainRecordSchema, EvidenceCursor, PagedSimulationCheckpoint,
-        PluginRegistrar, STATE_PAGE_VALUE_CHUNK_BYTES, Scenario, SimDuration, SimTime,
-        SimulationPlugin, SimulationView, StatePageRetentionLedger, StateVisibility, SystemCadence,
+        DomainRecordRef, DomainRecordSchema, EvidenceCursor, PagedRestoreBudget,
+        PagedSimulationCheckpoint, PluginRegistrar, STATE_PAGE_VALUE_CHUNK_BYTES, Scenario,
+        SimDuration, SimTime, SimulationPlugin, SimulationView, StatePageRetentionLedger,
+        StateVisibility, SystemCadence,
     };
     use serde_json::json;
 
@@ -867,6 +947,7 @@ mod threshold {
                 &closure,
                 segments.clone(),
                 &plugins,
+                PagedRestoreBudget::DEFAULT,
             )
             .expect("restore from the retention closure alone");
             assert_eq!(
@@ -933,6 +1014,7 @@ mod threshold {
                 &sealed_store,
                 sealed_segments.clone(),
                 &plugins,
+                PagedRestoreBudget::DEFAULT,
             )
             .expect("paged restore from sealed segments");
             assert_eq!(paged.checkpoint_hash(), hash);

@@ -30,9 +30,9 @@ use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundaryRequest,
     BoundarySystemContract, Canwu, CanwuError, DomainRecordClass, DomainRecordDraft,
     DomainRecordKind, DomainRecordMutation, DomainRecordRef, DomainRecordSchema, ENGINE_VERSION,
-    EvidenceCursor, EvidenceJournalSegment, PluginRegistrar, Scenario, SimDuration, SimTime,
-    SimulationPlugin, SimulationView, StatePageBlob, StatePageProvider, StatePageStore,
-    StateVisibility, SystemCadence,
+    EvidenceCursor, EvidenceJournalSegment, PagedRestoreBudget, PluginRegistrar, Scenario,
+    SimDuration, SimTime, SimulationPlugin, SimulationView, StatePageBlob, StatePageProvider,
+    StatePageStore, StateVisibility, SystemCadence,
 };
 use serde_json::{Value, json};
 #[cfg(feature = "allocation-counting")]
@@ -571,6 +571,7 @@ fn measure_paged(sizes: &[usize], options: &Options) -> Result<Value, Box<dyn Er
                 &store,
                 run.segments.clone(),
                 &[&RecordPlugin],
+                PagedRestoreBudget::new(prepared.checkpoint.assembled_bytes),
             )
         })?;
         if restored.checkpoint_hash() != run.canwu.checkpoint_hash() {

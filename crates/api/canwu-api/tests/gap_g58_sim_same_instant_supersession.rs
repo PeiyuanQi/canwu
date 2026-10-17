@@ -21,10 +21,10 @@ use canwu_api::{
     ErrorCode, EvidenceCursor, KnowledgeHolderRef, KnowledgeOrigin, KnowledgeQuery,
     KnowledgeRecord, KnowledgeRecordDraft, KnowledgeRecordId, KnowledgeRecordKind,
     KnowledgeSchemaId, KnowledgeSubject, KnowledgeSubjectSchema, KnowledgeSubjectTarget,
-    KnowledgeSubjectTargetKind, KnowledgeWriteGrant, OrganizationId, PayloadSchema, PersonId,
-    PluginKnowledgeSchema, PluginRegistrar, Scenario, SimDuration, SimTime, SimulationPlugin,
-    SimulationSnapshot, SimulationView, StateKey, StatePageBlob, StatePageProvider, StatePageStore,
-    StateVisibility, SystemCadence,
+    KnowledgeSubjectTargetKind, KnowledgeWriteGrant, OrganizationId, PagedRestoreBudget,
+    PayloadSchema, PersonId, PluginKnowledgeSchema, PluginRegistrar, Scenario, SimDuration,
+    SimTime, SimulationPlugin, SimulationSnapshot, SimulationView, StateKey, StatePageBlob,
+    StatePageProvider, StatePageStore, StateVisibility, SystemCadence,
 };
 use serde_json::json;
 use std::cell::RefCell;
@@ -374,6 +374,7 @@ fn gap_g58_sim_same_instant_supersession() {
         &store,
         vec![journal],
         &[&plugin],
+        PagedRestoreBudget::DEFAULT,
     )
     .expect("paged checkpoint restore");
     assert_eq!(from_pages.snapshot(), snapshot);

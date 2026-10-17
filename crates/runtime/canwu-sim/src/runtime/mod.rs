@@ -108,11 +108,11 @@ pub use maintenance::{
 };
 pub use manifest::{ArtifactManifest, RUN_MANIFEST_FORMAT_VERSION, RunManifest};
 pub use page_store::{
-    MAX_PAGED_RECORD_BYTES, MAX_STATE_DELTA_PAGES, MAX_STATE_PAGE_BYTES, PreparedStateDelta,
-    STATE_PAGE_CODEC, STATE_PAGE_FORMAT_VERSION, STATE_PAGE_RETENTION_FORMAT_VERSION,
-    STATE_PAGE_VALUE_CHUNK_BYTES, StatePageBlob, StatePageProvider, StatePageRetentionHandle,
-    StatePageRetentionLedger, StatePageRetentionPhase, StatePageStore, prepare_state_delta,
-    state_page_id, verify_state_delta,
+    MAX_PAGED_RECORD_BYTES, MAX_STATE_DELTA_PAGES, MAX_STATE_PAGE_BYTES, PagedRestoreBudget,
+    PreparedStateDelta, STATE_PAGE_CODEC, STATE_PAGE_FORMAT_VERSION,
+    STATE_PAGE_RETENTION_FORMAT_VERSION, STATE_PAGE_VALUE_CHUNK_BYTES, StatePageBlob,
+    StatePageProvider, StatePageRetentionHandle, StatePageRetentionLedger, StatePageRetentionPhase,
+    StatePageStore, prepare_state_delta, state_page_id, verify_state_delta,
 };
 pub use persistence::{
     ArchiveProvider, ArchiveReachabilityManifest, ArchiveStore, ArchiveStoreOutcome,

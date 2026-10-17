@@ -26,24 +26,31 @@
 //! run holds when it seals every month against the unsealed run that never
 //! seals, each built alone under the allocation counter.
 //!
+//! With `--seal-months N`, each series also runs a compact run that seals
+//! every month for `N` months and reports, per month, the time of
+//! `CompactedCanwu::seal_evidence` (one month of evidence), the time to drop
+//! the segment it returns, and the segment's evidence-index entries.
+//!
 //! Elapsed time and allocation traffic are collected in separate release
 //! builds: `--mode elapsed` without the `allocation-counting` feature,
 //! `--mode allocations` with it.
 
 use canwu_api::{
-    BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundaryRequest,
-    BoundarySystemContract, Canwu, CanwuError, Command, CommandContext, CommandEnvelope,
-    CommandRequest, CommandRequestId, CompactedCanwu, ContinuationCheckpoint, DomainRecordClass,
-    DomainRecordDraft, DomainRecordKind, DomainRecordMutation, DomainRecordRef, DomainRecordSchema,
-    ENGINE_VERSION, EntityRef, EvidenceRef, IDENTITY_EVIDENCE_DEPENDENCIES_FIELD,
-    IdentityEvidenceDependenciesV1, IngressClass, IngressPayload, Issuer, KnowledgeHolderRef,
-    KnowledgeOrigin, KnowledgeRecordDraft, KnowledgeRecordKind, KnowledgeSchemaId,
-    KnowledgeSubject, KnowledgeSubjectSchema, KnowledgeSubjectTarget, KnowledgeSubjectTargetKind,
-    KnowledgeWriteGrant, OrganizationId, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
+    ArchiveStoreOutcome, BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal,
+    BoundaryRequest, BoundarySystemContract, Canwu, CanwuError, Command, CommandContext,
+    CommandEnvelope, CommandRequest, CommandRequestId, CompactedCanwu, ContinuationCheckpoint,
+    DomainRecordClass, DomainRecordDraft, DomainRecordKind, DomainRecordMutation, DomainRecordRef,
+    DomainRecordSchema, ENGINE_VERSION, EntityRef, EvidenceCursor, EvidenceRef,
+    IDENTITY_EVIDENCE_DEPENDENCIES_FIELD, IdentityEvidenceDependenciesV1, IngressClass,
+    IngressPayload, Issuer, KnowledgeHolderRef, KnowledgeOrigin, KnowledgeRecordDraft,
+    KnowledgeRecordKind, KnowledgeSchemaId, KnowledgeSubject, KnowledgeSubjectSchema,
+    KnowledgeSubjectTarget, KnowledgeSubjectTargetKind, KnowledgeWriteGrant, OrganizationId,
+    PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD, PagedRestoreBudget, PagedSimulationCheckpoint,
     PayloadRequiredEvidenceContinuationV1, PayloadSchema, PersonId, PluginActionDescriptor,
     PluginIngressDescriptor, PluginKnowledgeSchema, PluginRegistrar, RandomOperationTarget,
     RandomStreamKey, Scenario, SimDuration, SimTime, SimulationPlugin, SimulationView, StateKey,
-    StateVisibility, SystemCadence, SystemDirective, identity_evidence_dependencies_property_v1,
+    StatePageBlob, StatePageProvider, StatePageStore, StateVisibility, SystemCadence,
+    SystemDirective, identity_evidence_dependencies_property_v1,
     payload_required_evidence_continuation_property_v1,
 };
 use serde_json::{Value, json};
@@ -51,6 +58,8 @@ use serde_json::{Value, json};
 use std::alloc::{GlobalAlloc, Layout, System};
 #[cfg(feature = "allocation-counting")]
 use std::cell::Cell;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -67,6 +76,10 @@ const DAYS_PER_MONTH: i64 = 30;
 static KEYED_DRAWS: AtomicUsize = AtomicUsize::new(0);
 /// Records the churn system moves every day; set once from `--churn`.
 static CHURN_RECORDS: AtomicUsize = AtomicUsize::new(0);
+/// Holders of a monthly report; set once from `--report-holders`.
+static REPORT_HOLDERS: AtomicUsize = AtomicUsize::new(0);
+/// Payload text bytes of each report; set once from `--report-bytes`.
+static REPORT_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "allocation-counting")]
 struct CountingAllocator;
@@ -399,6 +412,92 @@ fn know(
     })
 }
 
+fn report_kind() -> KnowledgeRecordKind {
+    KnowledgeRecordKind::new("profile.continuation", "report")
+}
+
+fn report_schema() -> KnowledgeSchemaId {
+    KnowledgeSchemaId::new(report_kind(), 1)
+}
+
+/// Report holder `index`; person 1 is the standing record's holder.
+fn report_holder(index: usize) -> PersonId {
+    PersonId::new(u64::try_from(index).unwrap_or(u64::MAX - 2) + 2)
+}
+
+/// Publishes the monthly report of every report holder whose day of the
+/// month it is, superseding (and so retiring) the holder's last one: about
+/// a thirtieth of the holders each day, the ledger about one body per holder.
+fn report(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+) -> Result<BoundaryProposal, CanwuError> {
+    let holders = REPORT_HOLDERS.load(Ordering::Relaxed);
+    let text_bytes = REPORT_BYTES.load(Ordering::Relaxed);
+    let day = usize::try_from(context.at.day()).unwrap_or_default();
+    let due = (0..holders)
+        .filter(|index| index % 30 == day % 30)
+        .collect::<Vec<_>>();
+    let mut directives = Vec::new();
+    let mut budget = view.knowledge_publication_budget();
+    for chunk in due.chunks(
+        budget
+            .records_per_batch
+            .min(budget.holder_entries_per_batch),
+    ) {
+        let groups = chunk
+            .iter()
+            .map(|index| canwu_api::KnowledgePublicationGroup {
+                holders: vec![KnowledgeHolderRef::Person(report_holder(*index))],
+                records: vec![KnowledgeRecordDraft {
+                    schema: report_schema(),
+                    subjects: vec![KnowledgeSubject {
+                        role: "about".to_owned(),
+                        target: KnowledgeSubjectTarget::Entity(EntityRef::Person(report_holder(
+                            *index,
+                        ))),
+                    }],
+                    payload: json!({
+                        "day": day,
+                        "text": format!("{index:06}-{day:04}-").repeat(text_bytes / 12),
+                    }),
+                    as_of: Some(context.at),
+                    confidence_per_mille: 900,
+                    origin: KnowledgeOrigin {
+                        method: "profile.continuation".to_owned(),
+                        evidence: Vec::new(),
+                    },
+                    supersedes: Vec::new(),
+                    contradicts: Vec::new(),
+                }],
+            })
+            .collect::<Vec<_>>();
+        let payload_bytes = groups
+            .iter()
+            .flat_map(|group| &group.records)
+            .map(|draft| draft.payload_bytes().unwrap_or(usize::MAX))
+            .sum::<usize>();
+        // A publisher stays inside the boundary's publication budget.
+        if !budget.admits(groups.len(), groups.len(), payload_bytes) {
+            break;
+        }
+        budget.records -= groups.len();
+        budget.holder_entries -= groups.len();
+        budget.payload_bytes -= payload_bytes;
+        directives.push(BoundaryDirective::PublishKnowledge {
+            visibility: StateVisibility::SameBoundary,
+            producer_correlation: None,
+            supersession: canwu_api::KnowledgeSupersession::CurrentOnSubjects,
+            groups,
+            summary: "The day's reports".to_owned(),
+        });
+    }
+    Ok(BoundaryProposal {
+        directives,
+        ..BoundaryProposal::default()
+    })
+}
+
 struct ContinuationProfilePlugin;
 
 impl SimulationPlugin for ContinuationProfilePlugin {
@@ -500,18 +599,48 @@ impl SimulationPlugin for ContinuationProfilePlugin {
             schema: knowledge_schema(),
             visibilities: vec![StateVisibility::SameBoundary],
         }];
-        registrar.register_boundary_system(knowing, know)
+        registrar.register_boundary_system(knowing, know)?;
+        if REPORT_HOLDERS.load(Ordering::Relaxed) > 0 {
+            registrar.register_knowledge_schema(PluginKnowledgeSchema {
+                id: report_schema(),
+                schema_hash: "00000000000000000000000000000000000000000000000000000000000c0a73"
+                    .to_owned(),
+                writable: true,
+                payload_schema: PayloadSchema::Any,
+                subjects: vec![KnowledgeSubjectSchema {
+                    role: "about".to_owned(),
+                    targets: vec![KnowledgeSubjectTargetKind::AnyEntity],
+                    required: true,
+                    multiple: false,
+                }],
+                retention: canwu_api::KnowledgeRetention::RetireWhenSuperseded,
+            })?;
+            let mut reporting = BoundarySystemContract::new(
+                "report",
+                BoundaryPhase::PerspectiveAndReportMaterialization,
+                SystemCadence::Daily,
+            );
+            reporting.reads = vec![StateKey::core_knowledge()];
+            reporting.knowledge_writes = vec![KnowledgeWriteGrant {
+                schema: report_schema(),
+                visibilities: vec![StateVisibility::SameBoundary],
+            }];
+            registrar.register_boundary_system(reporting, report)?;
+        }
+        Ok(())
     }
 }
 
 fn scenario() -> Scenario {
-    Scenario::new(
-        SimTime::EPOCH,
-        vec![
-            EntityRef::Person(PersonId::new(1)),
-            EntityRef::Organization(OrganizationId::new(10)),
-        ],
-    )
+    let mut entities = vec![
+        EntityRef::Person(PersonId::new(1)),
+        EntityRef::Organization(OrganizationId::new(10)),
+    ];
+    entities.extend(
+        (0..REPORT_HOLDERS.load(Ordering::Relaxed))
+            .map(|index| EntityRef::Person(report_holder(index))),
+    );
+    Scenario::new(SimTime::EPOCH, entities)
 }
 
 fn plugins() -> [&'static dyn SimulationPlugin; 1] {
@@ -608,6 +737,10 @@ struct Options {
     commands: u64,
     churn: usize,
     samples: usize,
+    seal_months: i64,
+    report_holders: usize,
+    report_bytes: usize,
+    paged: bool,
     output: Option<PathBuf>,
     machine: String,
     recorded_on: String,
@@ -621,6 +754,10 @@ fn options() -> Result<Options, Box<dyn Error>> {
         commands: 8,
         churn: 140,
         samples: 3,
+        seal_months: 0,
+        report_holders: 0,
+        report_bytes: 2_000,
+        paged: false,
         output: None,
         machine: "local-machine".to_owned(),
         recorded_on: "unspecified".to_owned(),
@@ -655,6 +792,10 @@ fn options() -> Result<Options, Box<dyn Error>> {
             "--commands" => options.commands = value()?.parse()?,
             "--churn" => options.churn = value()?.parse()?,
             "--samples" => options.samples = value()?.parse()?,
+            "--seal-months" => options.seal_months = value()?.parse()?,
+            "--report-holders" => options.report_holders = value()?.parse()?,
+            "--report-bytes" => options.report_bytes = value()?.parse()?,
+            "--paged" => options.paged = true,
             "--output" => options.output = Some(PathBuf::from(value()?)),
             "--machine" => options.machine = value()?,
             "--recorded-on" => options.recorded_on = value()?,
@@ -762,6 +903,135 @@ fn run_heap(days: i64, options: &Options, seal_monthly: bool) -> Result<i128, Bo
     Ok(net)
 }
 
+/// A content-addressed page store, as a host backs it.
+#[derive(Default)]
+struct PageStore(RefCell<BTreeMap<String, StatePageBlob>>);
+
+impl StatePageProvider for PageStore {
+    fn load_state_page(&self, page_id: &str) -> Result<Option<StatePageBlob>, CanwuError> {
+        Ok(self.0.borrow().get(page_id).cloned())
+    }
+}
+
+impl StatePageStore for PageStore {
+    fn store_state_page(&self, page: &StatePageBlob) -> Result<ArchiveStoreOutcome, CanwuError> {
+        let mut pages = self.0.borrow_mut();
+        if pages.contains_key(&page.page_id) {
+            return Ok(ArchiveStoreOutcome::AlreadyPresent);
+        }
+        pages.insert(page.page_id.clone(), page.clone());
+        Ok(ArchiveStoreOutcome::Stored)
+    }
+}
+
+/// Samples the paged checkpoint of the unsealed run at the end of day `d`:
+/// preparing it whole into an empty store, restoring it with its evidence
+/// prefix, the delta after one more day (on a fork) into the store that
+/// holds it, and the delta from the previous sampled month's checkpoint
+/// into a store that holds every earlier one.
+fn sample_paged(
+    canwu: &Canwu,
+    d: i64,
+    options: &Options,
+    pages: &PageStore,
+    previous: &mut Option<PagedSimulationCheckpoint>,
+) -> Result<Value, Box<dyn Error>> {
+    let ledger_bytes = encoded_len(&canwu.knowledge().records)?;
+    let fresh = PageStore::default();
+    let started = Instant::now();
+    let whole = canwu.prepare_paged_checkpoint(None, &fresh)?;
+    let prepare_ns = nanos(started);
+    whole.store_and_verify(&fresh)?;
+    let segments = vec![canwu.journal_segment_since(EvidenceCursor::default())?];
+    let started = Instant::now();
+    let restored = Canwu::from_paged_checkpoint_and_journal_with_plugins(
+        &whole.checkpoint,
+        &fresh,
+        segments,
+        &plugins(),
+        PagedRestoreBudget::new(whole.checkpoint.assembled_bytes),
+    )?;
+    let restore_ns = nanos(started);
+    if restored.checkpoint_hash() != canwu.checkpoint_hash() {
+        return Err("the paged restore differs from the run it was written from".into());
+    }
+    drop(black_box(restored));
+    let mut next_day = canwu.fork();
+    run_day(&mut next_day, d + 1, options.commands)?;
+    let started = Instant::now();
+    let one_day = next_day.prepare_paged_checkpoint(Some(&whole.checkpoint), &fresh)?;
+    let one_day_ns = nanos(started);
+    drop(next_day);
+    let started = Instant::now();
+    let delta = canwu.prepare_paged_checkpoint(previous.as_ref(), pages)?;
+    let delta_ns = nanos(started);
+    delta.store_and_verify(pages)?;
+    let page_bytes =
+        |pages: &[StatePageBlob]| pages.iter().map(|page| page.bytes.len()).sum::<usize>();
+    let row = json!({
+        "knowledge_bodies": canwu.knowledge().records.body_count(),
+        "knowledge_entries": canwu.knowledge().records.entry_count(),
+        "knowledge_ledger_json_bytes": ledger_bytes,
+        "pages": whole.delta.new_pages.len(),
+        "page_bytes": page_bytes(&whole.delta.new_pages),
+        "largest_page_bytes": whole.delta.new_pages.iter().map(|page| page.bytes.len()).max(),
+        "assembled_bytes": whole.checkpoint.assembled_bytes,
+        "prepare_ns": prepare_ns,
+        "restore_ns": restore_ns,
+        "delta_after_one_day": {
+            "pages": one_day.delta.new_pages.len(),
+            "page_bytes": page_bytes(&one_day.delta.new_pages),
+            "prepare_ns": one_day_ns,
+        },
+        "delta_from_previous": {
+            "pages": delta.delta.new_pages.len(),
+            "page_bytes": page_bytes(&delta.delta.new_pages),
+            "prepare_ns": delta_ns,
+        },
+    });
+    *previous = Some(delta.checkpoint);
+    Ok(row)
+}
+
+/// Seals a compact run every month for `months` months and reports each
+/// seal: its time, the time to drop the segment it returns, and the
+/// segment's evidence-index entries.
+fn monthly_seals(months: i64, options: &Options) -> Result<Vec<Value>, Box<dyn Error>> {
+    let mut run = Canwu::new_with_plugins(1_701, scenario(), &plugins())?.into_compacted()?;
+    let mut rows = Vec::new();
+    for month in 1..=months {
+        for d in (month - 1) * DAYS_PER_MONTH + 1..=month * DAYS_PER_MONTH {
+            run_day(&mut run, d, options.commands)?;
+        }
+        let started = Instant::now();
+        let segment = run.seal_evidence()?.ok_or("nothing to seal")?;
+        let seal_ns = nanos(started);
+        let entries = segment
+            .archive
+            .as_ref()
+            .map_or(0, |archive| archive.header.evidence_index_entry_count);
+        let record_changes: usize = segment
+            .boundaries
+            .iter()
+            .map(|boundary| boundary.record_changes.len())
+            .sum();
+        let started = Instant::now();
+        drop(black_box(segment));
+        let drop_ns = nanos(started);
+        eprintln!(
+            "seal month {month:>2}: {entries:>8} entries ({record_changes:>8} record changes), seal {seal_ns:>12} ns, drop {drop_ns:>11} ns"
+        );
+        rows.push(json!({
+            "month": month,
+            "index_entries": entries,
+            "record_changes": record_changes,
+            "seal_ns": seal_ns,
+            "drop_ns": drop_ns,
+        }));
+    }
+    Ok(rows)
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let options = options()?;
     if cfg!(debug_assertions) {
@@ -774,12 +1044,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
     CHURN_RECORDS.store(options.churn, Ordering::Relaxed);
+    REPORT_HOLDERS.store(options.report_holders, Ordering::Relaxed);
+    REPORT_BYTES.store(options.report_bytes, Ordering::Relaxed);
     let mut series = Vec::new();
     for &keyed in &options.keyed {
         KEYED_DRAWS.store(keyed, Ordering::Relaxed);
         let mut canwu = Canwu::new_with_plugins(1_701, scenario(), &plugins())?;
         let mut samples = Vec::new();
         let mut d = 0;
+        let pages = PageStore::default();
+        let mut previous = None;
         for &month in &options.months {
             while d < month * DAYS_PER_MONTH {
                 d += 1;
@@ -787,6 +1061,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             let mut sample = sample_month(&canwu, &options)?;
             sample["month"] = json!(month);
+            if options.paged {
+                sample["paged"] = sample_paged(&canwu, d, &options, &pages, &mut previous)?;
+                eprintln!(
+                    "keyed {keyed:>2} month {month:>2}: paged {}",
+                    sample["paged"]
+                );
+            }
             eprintln!(
                 "keyed {keyed:>2} month {month:>2}: full save {:>11} B, continuation {:>9} B ({:>8} B non-state), restore {:>10} ns against {:>12} ns",
                 sample["full_save"]["bytes"],
@@ -798,6 +1079,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             samples.push(sample);
         }
         let mut entry = json!({ "keyed_draws_per_packet": keyed, "months": samples });
+        if options.seal_months > 0 {
+            entry["monthly_seals"] = json!(monthly_seals(options.seal_months, &options)?);
+        }
         if options.mode == "allocations" {
             let days = options.months.last().copied().unwrap_or(1) * DAYS_PER_MONTH;
             entry["heap_bytes_unsealed"] = json!(run_heap(days, &options, false)?);
@@ -829,6 +1113,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             "continuation": "continuation_checkpoint and to_json of the unsealed run, and CompactedCanwu::from_continuation_checkpoint_json_verified of it",
             "part_bytes": "the JSON length of each part of the continuation checkpoint",
             "heap": "allocation build only: net bytes held by a run built alone to the last month, unsealed or sealing every month",
+            "monthly_seals": "with --seal-months: a compact run that seals every month; seal_evidence time, the time to drop its segment, and the segment's evidence-index entries",
         },
         "series": series,
     });

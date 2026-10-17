@@ -82,6 +82,11 @@ pub enum ErrorCode {
     QueryBudgetExceeded,
     ReplayMismatch,
     ReplayEnvironmentMismatch,
+    /// A paged-checkpoint restore would assemble more bytes than its
+    /// [`crate::PagedRestoreBudget`] allows. Nothing was restored. A host
+    /// that trusts the checkpoint restores it again with a larger budget,
+    /// such as the checkpoint's `assembled_bytes`.
+    RestoreBudgetExceeded,
     SimulationRevisionConflict,
     SimulationTimeConflict,
     StaleSealToken,
@@ -219,6 +224,7 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::QueryBudgetExceeded => "query_budget_exceeded",
         ErrorCode::ReplayMismatch => "replay_mismatch",
         ErrorCode::ReplayEnvironmentMismatch => "replay_environment_mismatch",
+        ErrorCode::RestoreBudgetExceeded => "restore_budget_exceeded",
         ErrorCode::SimulationRevisionConflict => "simulation_revision_conflict",
         ErrorCode::SimulationTimeConflict => "simulation_time_conflict",
         ErrorCode::StaleSealToken => "stale_seal_token",

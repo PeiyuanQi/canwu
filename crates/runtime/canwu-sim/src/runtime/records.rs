@@ -1,12 +1,12 @@
 use super::page_store::{
-    DecodedBinaryPage, DecodedLeafValue, LeafEntryEncoding, PageIdHasher, PageSink,
+    DecodedBinaryPage, DecodedLeafValue, LeafEntryEncoding, PageIdHasher, PageSink, RestoreMeter,
     decode_binary_page, encode_patricia_branch, encode_patricia_leaf, page_id_hex,
     record_value_chunk_count, value_chunk_page_bytes, value_chunk_page_id,
 };
 use super::{
-    CanwuError, ErrorCode, MAX_PAGED_RECORD_BYTES, MAX_STATE_DELTA_PAGES, PayloadSchema,
-    STATE_PAGE_VALUE_CHUNK_BYTES, StateKey, StatePageBlob, StatePageProvider, StateVisibility,
-    canonical_byte_hash, canonical_hash,
+    CanwuError, ErrorCode, MAX_PAGED_RECORD_BYTES, MAX_STATE_DELTA_PAGES, PagedRestoreBudget,
+    PayloadSchema, STATE_PAGE_VALUE_CHUNK_BYTES, StateKey, StatePageBlob, StatePageProvider,
+    StateVisibility, canonical_byte_hash, canonical_hash,
 };
 use canwu_core::{
     CoreEntityKind, DomainEntityType, DomainKindClass, DomainRecordKind, DomainRecordRef,
@@ -273,6 +273,20 @@ impl PersistentDomainRecordStore {
         self.primary.metrics()
     }
 
+    /// The bytes a restore of the four indexes' pages assembles: the length
+    /// of every index value, inline or chunked.
+    pub(super) fn paged_value_bytes(&self) -> u64 {
+        [
+            &self.primary,
+            &self.reverse_references,
+            &self.successor_of,
+            &self.predecessors_of,
+        ]
+        .into_iter()
+        .map(PersistentPatricia::value_bytes)
+        .sum()
+    }
+
     /// Rebuilds the store from its page roots, loading each record's value
     /// chunks, and checks that the rebuilt indexes reproduce every committed
     /// root.
@@ -285,19 +299,26 @@ impl PersistentDomainRecordStore {
     /// [`MAX_PAGED_RECORD_BYTES`], or a root that the rebuilt indexes do not
     /// reproduce.
     ///
-    /// The load allocates what the pages describe: each record value up to
-    /// [`MAX_PAGED_RECORD_BYTES`], however few distinct bytes the provider
-    /// holds, because a leaf may name one chunk page many times (a value with
-    /// long runs of one byte does). A value grows only by chunks that matched
-    /// their IDs and their slice of the split, but the number of records is
-    /// bounded only by the page-count limit, so the whole restore is bounded
-    /// only by that limit times the ceiling. A host that
-    /// restores pages from an untrusted source authenticates the checkpoint
-    /// (for example, its root page ID against one it recorded) before
-    /// restoring it.
+    /// The load allocates what the pages describe, not what the provider
+    /// holds: a leaf may name one chunk page many times (a value with long
+    /// runs of one byte does), so a value of up to [`MAX_PAGED_RECORD_BYTES`]
+    /// can come from one chunk page. Before it allocates a value of any of
+    /// the four indexes, inline or chunked, the load charges the value's
+    /// length to `budget`, and a value that would pass it fails with
+    /// `restore_budget_exceeded` before it is allocated.
     pub fn from_state_pages(
         roots: &DomainRecordPageRoots,
         provider: &dyn StatePageProvider,
+        budget: PagedRestoreBudget,
+    ) -> Result<Self, CanwuError> {
+        Self::from_state_pages_metered(roots, provider, &mut RestoreMeter::new(budget))
+    }
+
+    /// [`Self::from_state_pages`], charging one restore's meter.
+    pub(super) fn from_state_pages_metered(
+        roots: &DomainRecordPageRoots,
+        provider: &dyn StatePageProvider,
+        meter: &mut RestoreMeter,
     ) -> Result<Self, CanwuError> {
         let mut cache = BTreeMap::new();
         let primary = load_patricia_root(
@@ -305,24 +326,28 @@ impl PersistentDomainRecordStore {
             roots.primary.as_deref(),
             provider,
             &mut cache,
+            meter,
         )?;
         let reverse_references = load_patricia_root(
             "canwu.format8.domain-record.reverse.v1",
             roots.reverse_references.as_deref(),
             provider,
             &mut cache,
+            meter,
         )?;
         let successor_of = load_patricia_root(
             "canwu.format8.domain-record.successor.v1",
             roots.successor_of.as_deref(),
             provider,
             &mut cache,
+            meter,
         )?;
         let predecessors_of = load_patricia_root(
             "canwu.format8.domain-record.predecessors.v1",
             roots.predecessors_of.as_deref(),
             provider,
             &mut cache,
+            meter,
         )?;
         let mut materialized = BTreeMap::new();
         if let Some(root) = &primary.root {
@@ -750,6 +775,27 @@ impl PersistentPatricia {
 
     fn entry_count(&self) -> usize {
         self.root.as_ref().map_or(0, |root| root.entry_count())
+    }
+
+    /// The total length of the tree's values.
+    fn value_bytes(&self) -> u64 {
+        let mut total = 0_u64;
+        let mut stack: Vec<&PatriciaNode> = self.root.as_deref().into_iter().collect();
+        while let Some(node) = stack.pop() {
+            match node {
+                PatriciaNode::Leaf { entries, .. } => {
+                    total += entries
+                        .iter()
+                        .map(|entry| entry.value.bytes.len() as u64)
+                        .sum::<u64>();
+                }
+                PatriciaNode::Branch { left, right, .. } => {
+                    stack.push(left);
+                    stack.push(right);
+                }
+            }
+        }
+        total
     }
 
     fn metrics(&self) -> PatriciaStoreMetrics {
@@ -1590,7 +1636,7 @@ fn patricia_node_page(domain: &str, node: &Arc<PatriciaNode>) -> Result<StatePag
                 return Err(CanwuError::new(
                     ErrorCode::ValueOutOfRange,
                     format!(
-                        "a {}-byte domain record exceeds the {MAX_PAGED_RECORD_BYTES}-byte paged record ceiling",
+                        "a {}-byte paged value exceeds the {MAX_PAGED_RECORD_BYTES}-byte paged record ceiling",
                         entry.value.bytes.len()
                     ),
                 ));
@@ -1635,37 +1681,56 @@ fn load_patricia_root(
     page_id: Option<&str>,
     provider: &dyn StatePageProvider,
     cache: &mut BTreeMap<String, Arc<PatriciaNode>>,
+    meter: &mut RestoreMeter,
 ) -> Result<PersistentPatricia, CanwuError> {
     let Some(page_id) = page_id else {
         return Ok(PersistentPatricia::new(domain));
     };
     let mut active = BTreeSet::new();
-    let root = load_patricia_node(domain, page_id, provider, cache, &mut active, None, 0)?;
+    let root = load_patricia_node(
+        domain,
+        page_id,
+        provider,
+        &mut PatriciaLoad {
+            cache,
+            active: &mut active,
+            meter,
+        },
+        None,
+        0,
+    )?;
     Ok(PersistentPatricia {
         domain,
         root: Some(root),
     })
 }
 
+/// What one Patricia load carries down the tree: the nodes already loaded,
+/// the pages on the current path, and the restore's meter.
+struct PatriciaLoad<'a> {
+    cache: &'a mut BTreeMap<String, Arc<PatriciaNode>>,
+    active: &'a mut BTreeSet<String>,
+    meter: &'a mut RestoreMeter,
+}
+
 fn load_patricia_node(
     domain: &'static str,
     page_id: &str,
     provider: &dyn StatePageProvider,
-    cache: &mut BTreeMap<String, Arc<PatriciaNode>>,
-    active: &mut BTreeSet<String>,
+    load: &mut PatriciaLoad<'_>,
     parent_bit: Option<u16>,
     depth: usize,
 ) -> Result<Arc<PatriciaNode>, CanwuError> {
-    if depth > 256 || cache.len() >= MAX_STATE_DELTA_PAGES {
+    if depth > 256 || load.cache.len() >= MAX_STATE_DELTA_PAGES {
         return Err(invalid_record_page(
             "Patricia page graph exceeds its depth or page budget",
         ));
     }
-    if let Some(node) = cache.get(page_id) {
+    if let Some(node) = load.cache.get(page_id) {
         validate_child_bit(node, parent_bit)?;
         return Ok(Arc::clone(node));
     }
-    if !active.insert(page_id.to_owned()) {
+    if !load.active.insert(page_id.to_owned()) {
         return Err(invalid_record_page("Patricia page graph contains a cycle"));
     }
     let page = load_required_page(provider, page_id)?;
@@ -1685,8 +1750,12 @@ fn load_patricia_node(
                     ));
                 }
                 let value = match entry.value {
-                    DecodedLeafValue::Inline(bytes) => PatriciaValue::new(bytes.to_vec()),
+                    DecodedLeafValue::Inline(bytes) => {
+                        load.meter.charge(bytes.len())?;
+                        PatriciaValue::new(bytes.to_vec())
+                    }
                     DecodedLeafValue::Chunked { len, chunk_ids } => {
+                        load.meter.charge(len)?;
                         load_record_value(provider, len, chunk_ids)?
                     }
                 };
@@ -1732,8 +1801,7 @@ fn load_patricia_node(
                 domain,
                 &page_id_hex(&branch.left_page),
                 provider,
-                cache,
-                active,
+                load,
                 Some(branch.bit),
                 depth + 1,
             )?;
@@ -1741,8 +1809,7 @@ fn load_patricia_node(
                 domain,
                 &page_id_hex(&branch.right_page),
                 provider,
-                cache,
-                active,
+                load,
                 Some(branch.bit),
                 depth + 1,
             )?;
@@ -1751,6 +1818,23 @@ fn load_patricia_node(
             {
                 return Err(invalid_record_page(
                     "Patricia children occupy the wrong discriminating slots",
+                ));
+            }
+            // A page graph that names one subtree from several parents can
+            // claim more entries than any tree holds; its sums are refused
+            // rather than wrapped or overflowed.
+            if left
+                .entry_count()
+                .checked_add(right.entry_count())
+                .is_none()
+                || left
+                    .structural_bytes()
+                    .checked_add(right.structural_bytes())
+                    .and_then(|bytes| bytes.checked_add(2 + 64 + 16))
+                    .is_none()
+            {
+                return Err(invalid_record_page(
+                    "Patricia branch counts exceed the addressable range",
                 ));
             }
             let rebuilt = patricia_branch(domain, usize::from(branch.bit), left, right);
@@ -1771,24 +1855,24 @@ fn load_patricia_node(
         }
     };
     validate_child_bit(&node, parent_bit)?;
-    active.remove(page_id);
-    cache.insert(page_id.to_owned(), Arc::clone(&node));
+    load.active.remove(page_id);
+    load.cache.insert(page_id.to_owned(), Arc::clone(&node));
     Ok(node)
 }
 
-/// Assembles one chunked record value. Decoding the leaf already bounded
-/// `len` by the paged record ceiling and the number of chunk IDs by `len`.
-/// Each chunk must match its ID and be exactly the slice of the value that
-/// the canonical split puts in it. The value grows only by chunks that
-/// passed, up to `len`; a leaf may name one chunk many times, so `len`, not
-/// the distinct bytes the provider holds, bounds the allocation.
+/// Assembles one chunked record value, whose length the caller has charged
+/// to the restore's meter. Decoding the leaf already bounded `len` by the
+/// paged record ceiling and the number of chunk IDs by `len`. Each chunk
+/// must match its ID and be exactly the slice of the value that the
+/// canonical split puts in it; a leaf may name one chunk many times, so
+/// `len`, not the distinct bytes the provider holds, is the allocation.
 fn load_record_value(
     provider: &dyn StatePageProvider,
     len: usize,
     chunk_ids: &[[u8; 32]],
 ) -> Result<PatriciaValue, CanwuError> {
     let count = record_value_chunk_count(len);
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(len);
     let mut ids = Vec::with_capacity(chunk_ids.len());
     for (index, chunk_id) in chunk_ids.iter().enumerate() {
         let page = load_required_page(provider, &page_id_hex(chunk_id))?;
@@ -1867,6 +1951,112 @@ fn collect_primary_records(
         }
     }
     Ok(())
+}
+
+/// Patricia domain of the paged knowledge bodies: body ID to body.
+pub(super) const PAGED_KNOWLEDGE_BODIES_DOMAIN: &str = "canwu.paged-checkpoint.knowledge.bodies.v1";
+/// Patricia domain of the paged knowledge holder ledgers: holder to the
+/// holder's next local ID and entries.
+pub(super) const PAGED_KNOWLEDGE_HOLDERS_DOMAIN: &str =
+    "canwu.paged-checkpoint.knowledge.holders.v1";
+
+/// One entry of a [`PagedValueMap`]: its key and value bytes.
+pub(super) type PagedEntry<'a> = (&'a [u8], &'a [u8]);
+
+/// A map from canonical JSON keys to canonical JSON values, paged as the
+/// record store pages its indexes: binary Patricia nodes, a value longer
+/// than [`STATE_PAGE_VALUE_CHUNK_BYTES`] in chunk pages, unchanged subtrees
+/// and chunks shared with an earlier checkpoint. A paged checkpoint builds
+/// one for state the record store does not hold, and a restore loads it
+/// with the record store's checks.
+pub(super) struct PagedValueMap {
+    tree: PersistentPatricia,
+}
+
+impl PagedValueMap {
+    pub(super) const fn new(domain: &'static str) -> Self {
+        Self {
+            tree: PersistentPatricia::new(domain),
+        }
+    }
+
+    /// Adds one entry, replacing any with the same key.
+    pub(super) fn insert<K: Serialize, V: Serialize>(
+        &mut self,
+        key: &K,
+        value: &V,
+    ) -> Result<(), CanwuError> {
+        self.tree.insert(key, value).map(|_| ())
+    }
+
+    /// The total length of the values, which a restore of the map charges.
+    pub(super) fn value_bytes(&self) -> u64 {
+        self.tree.value_bytes()
+    }
+
+    /// The root page ID, `None` for an empty map.
+    pub(super) fn root_page_id(&self) -> Option<String> {
+        self.tree.root.as_ref().map(|root| root.hash().to_hex())
+    }
+
+    /// Adds the map's pages to `pages`: every page, or with a provider only
+    /// the paths of pages it does not hold. Returns the root page ID, `None`
+    /// for an empty map. Fails with `value_out_of_range` for a value longer
+    /// than [`MAX_PAGED_RECORD_BYTES`].
+    pub(super) fn pages(
+        &self,
+        provider: Option<&dyn StatePageProvider>,
+        pages: &mut BTreeMap<String, StatePageBlob>,
+    ) -> Result<Option<String>, CanwuError> {
+        match provider {
+            Some(provider) => collect_missing_patricia_pages(&self.tree, provider, pages),
+            None => collect_patricia_pages(&self.tree, pages),
+        }
+    }
+
+    /// Loads a map from its root page with the checks of
+    /// [`PersistentDomainRecordStore::from_state_pages`], charging every
+    /// value to `meter` before allocating it.
+    pub(super) fn load(
+        domain: &'static str,
+        root: Option<&str>,
+        provider: &dyn StatePageProvider,
+        meter: &mut RestoreMeter,
+    ) -> Result<Self, CanwuError> {
+        let mut cache = BTreeMap::new();
+        Ok(Self {
+            tree: load_patricia_root(domain, root, provider, &mut cache, meter)?,
+        })
+    }
+
+    /// Every entry's key and value bytes, in tree order.
+    ///
+    /// Fails with `invalid_snapshot` when a loaded page graph names one node
+    /// page in two places, which no built map does: the walk visits each
+    /// node once, so a graph that repeats subtrees cannot multiply it.
+    pub(super) fn entries(&self) -> Result<Vec<PagedEntry<'_>>, CanwuError> {
+        let mut entries = Vec::new();
+        let mut visited = BTreeSet::new();
+        let mut stack: Vec<&PatriciaNode> = self.tree.root.as_deref().into_iter().collect();
+        while let Some(node) = stack.pop() {
+            if !visited.insert(std::ptr::from_ref(node)) {
+                return Err(invalid_record_page(
+                    "a paged map names one Patricia node page in two places",
+                ));
+            }
+            match node {
+                PatriciaNode::Leaf { entries: leaf, .. } => entries.extend(
+                    leaf.iter()
+                        .map(|entry| (entry.key_bytes.as_slice(), entry.value.bytes.as_slice())),
+                ),
+                PatriciaNode::Branch { left, right, .. } => {
+                    stack.push(right);
+                    stack.push(left);
+                }
+            }
+        }
+        Ok(entries)
+    }
 }
 
 /// Every defect the record store finds in a page, whether it writes the page
@@ -3449,5 +3639,140 @@ mod tests {
         ));
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].current.reference, second_ref);
+    }
+
+    /// A provider over hand-built pages.
+    #[derive(Default)]
+    struct HandBuiltPages(std::cell::RefCell<BTreeMap<String, StatePageBlob>>);
+
+    impl StatePageProvider for HandBuiltPages {
+        fn load_state_page(&self, page_id: &str) -> Result<Option<StatePageBlob>, CanwuError> {
+            Ok(self.0.borrow().get(page_id).cloned())
+        }
+    }
+
+    /// A node of a hand-built page graph: its page ID, the routing hash of its
+    /// leftmost leaf, and the counts its page states.
+    #[derive(Clone, Copy)]
+    struct HandBuiltNode {
+        hash: CompactHash,
+        sample: CompactHash,
+        entries: u64,
+        structural_bytes: u64,
+    }
+
+    /// Stores a one-entry leaf of the paged body map whose key's routing hash
+    /// has each listed bit, trying keys from `next_key` on.
+    fn leaf_with_bits(
+        pages: &HandBuiltPages,
+        bits: &[(usize, u8)],
+        next_key: &mut u64,
+    ) -> HandBuiltNode {
+        let domain = PAGED_KNOWLEDGE_BODIES_DOMAIN;
+        loop {
+            *next_key += 1;
+            let entry = PatriciaEntry::new(next_key, &json!(null)).unwrap();
+            let key_hash = patricia_key_hash(domain, &entry.key_bytes);
+            if bits
+                .iter()
+                .all(|(bit, value)| bit_at(key_hash, *bit) == *value)
+            {
+                let leaf = patricia_leaf(domain, key_hash, vec![entry]);
+                let page = patricia_node_page(domain, &leaf).unwrap();
+                pages.0.borrow_mut().insert(page.page_id.clone(), page);
+                return HandBuiltNode {
+                    hash: leaf.hash(),
+                    sample: key_hash,
+                    entries: leaf.entry_count() as u64,
+                    structural_bytes: leaf.structural_bytes() as u64,
+                };
+            }
+        }
+    }
+
+    /// Stores a branch page over two nodes, stating the counts a tree would
+    /// (wrapped where they overflow, as a hostile page can).
+    fn branch_over(
+        pages: &HandBuiltPages,
+        bit: u16,
+        left: HandBuiltNode,
+        right: HandBuiltNode,
+    ) -> HandBuiltNode {
+        let entries = left.entries.wrapping_add(right.entries);
+        let structural_bytes = left
+            .structural_bytes
+            .wrapping_add(right.structural_bytes)
+            .wrapping_add(2 + 64 + 16);
+        let mut bytes = Vec::new();
+        encode_patricia_branch(
+            &mut bytes,
+            PAGED_KNOWLEDGE_BODIES_DOMAIN,
+            bit,
+            &left.hash.0,
+            &right.hash.0,
+            entries,
+            structural_bytes,
+        );
+        let page = StatePageBlob::new(bytes).unwrap();
+        let hash = CompactHash(*blake3::Hash::from_hex(&page.page_id).unwrap().as_bytes());
+        pages.0.borrow_mut().insert(page.page_id.clone(), page);
+        HandBuiltNode {
+            hash,
+            sample: left.sample,
+            entries,
+            structural_bytes,
+        }
+    }
+
+    /// A page graph of `levels` levels in which every level's node is named
+    /// by two parents, so the tree it describes has 2^levels paths in about
+    /// five pages a level. Level i branches at bit 2i and its two children at
+    /// bit 2i + 1, each over its own leaf and the next level, every child in
+    /// the slot its leftmost key's bit names.
+    fn shared_subtree_graph(pages: &HandBuiltPages, levels: usize) -> HandBuiltNode {
+        let mut next_key = 0;
+        let below_bit = |level: usize| 2 * level + 1;
+        let mut node = leaf_with_bits(pages, &[(below_bit(levels - 1), 1)], &mut next_key);
+        for level in (0..levels).rev() {
+            let (at, below) = (2 * level, below_bit(level));
+            let mut left_bits = vec![(at, 0), (below, 0)];
+            if level > 0 {
+                left_bits.push((below_bit(level - 1), 1));
+            }
+            let left_leaf = leaf_with_bits(pages, &left_bits, &mut next_key);
+            let right_leaf = leaf_with_bits(pages, &[(at, 1), (below, 0)], &mut next_key);
+            let below = u16::try_from(below).unwrap();
+            let left = branch_over(pages, below, left_leaf, node);
+            let right = branch_over(pages, below, right_leaf, node);
+            node = branch_over(pages, u16::try_from(at).unwrap(), left, right);
+        }
+        node
+    }
+
+    /// A page graph that names one subtree from two parents describes more
+    /// paths than it has pages. Its counts are refused when they pass the
+    /// addressable range, without overflowing, and a graph whose counts fit
+    /// loads but is refused by the walk before it can multiply.
+    #[test]
+    fn a_page_graph_naming_one_subtree_twice_is_refused() {
+        for (levels, refusal) in [(20, "in two places"), (70, "addressable range")] {
+            let pages = HandBuiltPages::default();
+            let root = shared_subtree_graph(&pages, levels);
+            let mut meter = RestoreMeter::new(PagedRestoreBudget::DEFAULT);
+            let error = PagedValueMap::load(
+                PAGED_KNOWLEDGE_BODIES_DOMAIN,
+                Some(&root.hash.to_hex()),
+                &pages,
+                &mut meter,
+            )
+            .and_then(|map| map.entries().map(|entries| entries.len()))
+            .expect_err("the shared-subtree graph is refused");
+            assert_eq!(error.code, ErrorCode::InvalidSnapshot, "{levels} levels");
+            assert!(
+                error.message.contains(refusal),
+                "{levels} levels: {}",
+                error.message
+            );
+        }
     }
 }
