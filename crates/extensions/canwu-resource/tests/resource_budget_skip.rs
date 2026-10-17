@@ -1596,9 +1596,16 @@ fn a_plugin_scheduled_completion_step_bound_to_its_boundary_is_skipped_not_defer
     let archive = MemoryArchive::default();
     let mut canwu = production_run(resource, &certificate, 1, &archive);
     let full = state(&canwu);
+    // The dispatch settles at the next boundary and the expiry at the one
+    // after it, which the expiry must name.
+    let settling = canwu
+        .boundaries()
+        .last()
+        .map_or(0, |boundary| boundary.id.get())
+        + 2;
     let expire = ResourceCompletionOperationV1::Expire(ExpireCompletionCapacityV1 {
         at: SimTime::EPOCH,
-        current_boundary: 1,
+        current_boundary: settling,
         candidate_limit: 1,
     });
 

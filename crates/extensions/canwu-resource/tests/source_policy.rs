@@ -121,7 +121,7 @@ fn scenario(requester_first: bool) -> Scenario {
             EntityRef::Person(OTHER_CUSTODIAN),
         ],
     )
-    .with_domain_records(vec![resource.into_record().unwrap()])
+    .with_domain_records(resource.into_records().unwrap())
 }
 
 fn new_simulation(plugin: &ResourcePlugin, requester_first: bool) -> Canwu {

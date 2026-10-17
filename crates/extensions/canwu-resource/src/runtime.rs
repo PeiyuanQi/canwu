@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const RESOURCE_STATE_FORMAT_VERSION: u32 = 3;
+pub const RESOURCE_STATE_FORMAT_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceAllocationRequestV1 {
@@ -60,6 +60,147 @@ pub struct ResourceConsumptionRequestV1 {
     pub consumer_evidence: DomainRecordVersionRef,
     pub at: SimTime,
     pub completion_certificate: CompletionLeaseActivationCertificateV1,
+}
+
+/// One item of a [`ResourceConsumptionBatchRequestV1`]: one exact allocation
+/// leg to consume, with the demand it belongs to.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceConsumptionBatchItemV1 {
+    pub consumption_id: ResourceConsumptionId,
+    pub allocation: ResourceAllocationLegVersionV1,
+    /// The demand the leg was allocated to, at the revision the leg records.
+    pub demand: ResourceDemandId,
+    pub demand_revision: ResourceRevision,
+    pub expected_account_revision: ResourceRevision,
+}
+
+/// Several exact allocation-leg consumptions under one completion lease, with
+/// one outcome per item.
+///
+/// The lease certifies the batch as one operation: its certificate binds
+/// `operation_key` and locks exactly [`Self::locked_targets`], every item's
+/// account, allocation leg, and demand and the one consumer evidence. The
+/// batch settles item by item. An item that fails its checks (a stale leg,
+/// account, or demand revision, a leg that is no longer reserved, a
+/// consumption identity that exists, a granted leg whose grant is not
+/// current) is refused alone: its outcome, under
+/// [`Self::item_operation_key`], records the refusal and the root keeps its
+/// leg reserved. Every other item consumes its leg and records an applied
+/// outcome. Several items may draw on one account: an item that expects the
+/// revision the batch found draws on the account as the batch's earlier
+/// items left it. The batch outcome under `operation_key` totals the
+/// consumed quantity (`quantity`) and the quantity of the refused items
+/// (`remainder`), and the lease completes once, with one receipt, whatever
+/// the items did: a batch whose every item is refused is applied with
+/// quantity zero, and its lease finishes and leaves the root.
+///
+/// A refusal of the batch itself (an empty batch, more items than
+/// [`MAX_RESOURCE_CONSUMPTION_BATCH_ITEMS`] or than
+/// `max_batch_items_per_boundary`, a certificate that does not bind exactly
+/// these targets, an item key already recorded) is one rejected batch
+/// outcome; it records no item outcome and leaves the lease active. A batch
+/// key under a reserved prefix is refused by the ingress call, and skipped
+/// with `reserved_operation_key` if it reaches settlement. Room is measured
+/// on the batch's whole result: a batch whose records do not fit the root
+/// records nothing and is skipped, and its lease stays active
+/// ([`crate::ResourceState::consumption_batch_can_fit`] tells a provider
+/// what can ever fit).
+///
+/// A batch enters through the adapter ingress of its provider, which
+/// authorizes every item with a typed consumption intent whose operation key
+/// is the item's key.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceConsumptionBatchRequestV1 {
+    pub operation_key: ResourceOperationKey,
+    pub items: Vec<ResourceConsumptionBatchItemV1>,
+    pub consumer_evidence: DomainRecordVersionRef,
+    pub at: SimTime,
+    pub completion_certificate: CompletionLeaseActivationCertificateV1,
+}
+
+/// Most items one consumption batch carries.
+pub const MAX_RESOURCE_CONSUMPTION_BATCH_ITEMS: usize = 256;
+
+/// Hot terminal records one consumption batch item leaves when it consumes
+/// the one leg of its demand: its outcome, consumption, and fulfillment, and
+/// the demand it finishes with that leg and its reservation. A leg that
+/// finishes a demand of several legs also leaves the demand's other legs and
+/// reservations; a refused item leaves its outcome only.
+pub const RESOURCE_CONSUMPTION_BATCH_ITEM_RECORDS: usize = 6;
+
+/// Hot terminal records a consumption batch leaves beside its items: the
+/// batch outcome and its lease's completion receipt.
+pub const RESOURCE_CONSUMPTION_BATCH_RECORDS: usize = 2;
+
+/// Prefix of the operation keys of consumption batch items. An operation key
+/// under it is reserved for the item outcomes of a batch: any request that
+/// names one is refused.
+pub const RESOURCE_CONSUMPTION_BATCH_ITEM_KEY_PREFIX: &str = "resource:consume-batch:";
+
+/// The operation key of item `index` of the consumption batch whose key is
+/// `batch`: what [`ResourceConsumptionBatchRequestV1::item_operation_key`]
+/// returns, for a provider that authorizes the items before the batch is
+/// built.
+#[must_use]
+pub fn resource_consumption_batch_item_key(
+    batch: &ResourceOperationKey,
+    index: usize,
+) -> ResourceOperationKey {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"canwu.resource.consume-batch-item.v1");
+    hasher.update(&[0]);
+    hasher.update(batch.as_str().as_bytes());
+    let digest = hasher.finalize().to_hex();
+    ResourceOperationKey::new(format!(
+        "{RESOURCE_CONSUMPTION_BATCH_ITEM_KEY_PREFIX}{}:{index}",
+        &digest[..32]
+    ))
+    .expect("a digest and an index always form a valid operation key")
+}
+
+impl ResourceConsumptionBatchRequestV1 {
+    /// The operation key of item `index`:
+    /// `resource:consume-batch:{digest}:{index}`, where the digest names the
+    /// batch's operation key. It is reserved, so only this batch records an
+    /// outcome under it, and a batch key is used once, so item keys are
+    /// unique for the run.
+    #[must_use]
+    pub fn item_operation_key(&self, index: usize) -> ResourceOperationKey {
+        resource_consumption_batch_item_key(&self.operation_key, index)
+    }
+
+    /// The exact targets the batch's completion lease locks: every item's
+    /// account at its expected revision, allocation leg, and demand, and the
+    /// consumer evidence, sorted and without duplicates.
+    #[must_use]
+    pub fn locked_targets(&self) -> Vec<CompletionLockedTargetV1> {
+        let mut targets: Vec<_> = self
+            .items
+            .iter()
+            .flat_map(|item| {
+                [
+                    CompletionLockedTargetV1::Account {
+                        id: item.allocation.account.clone(),
+                        revision: item.expected_account_revision,
+                    },
+                    CompletionLockedTargetV1::AllocationLeg {
+                        id: item.allocation.id.clone(),
+                        revision: item.allocation.revision,
+                    },
+                    CompletionLockedTargetV1::Demand {
+                        id: item.demand.clone(),
+                        revision: item.demand_revision,
+                    },
+                ]
+            })
+            .chain(std::iter::once(CompletionLockedTargetV1::ExternalRecord {
+                version: self.consumer_evidence.clone(),
+            }))
+            .collect();
+        targets.sort();
+        targets.dedup();
+        targets
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -524,6 +665,38 @@ impl ResourceCompletionOperationV1 {
             .expect("a digest always forms a valid operation key")
         })
     }
+
+    /// For an operation that starts a lease, the key the other way of
+    /// starting one takes for the same acquisition identity: an `Acquire`'s
+    /// single-step key `resource:completion:lease:{id}`, a single step's
+    /// `resource:completion:acquire:{id}`. An identity is used once for the
+    /// run: a lease leaves the root when it finishes, so the outcome under
+    /// either key, hot or archived, is what refuses a second lease of that
+    /// identity. A key the identity cannot form was never taken.
+    #[must_use]
+    pub(crate) fn sibling_lease_operation_key(&self) -> Option<ResourceOperationKey> {
+        let prefix = RESOURCE_COMPLETION_OPERATION_KEY_PREFIX;
+        match self {
+            Self::Acquire(value) => {
+                ResourceOperationKey::new(format!("{prefix}lease:{}", value.id.as_str())).ok()
+            }
+            Self::SingleStepLease(value) => {
+                ResourceOperationKey::new(format!("{prefix}acquire:{}", value.lease.id.as_str()))
+                    .ok()
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The refusal of a lease start whose acquisition identity an earlier lease
+/// took ([`ResourceCompletionOperationV1::sibling_lease_operation_key`]): an
+/// applied outcome under the sibling key. A refused lease start took
+/// nothing.
+pub(crate) fn lease_identity_taken() -> ResourceError {
+    ResourceError::IdempotencyConflict(
+        "completion lease acquisition identity was already used by another lease".to_owned(),
+    )
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -548,6 +721,7 @@ pub enum ResourceOperationRequestV1 {
     BeginExchange(ResourceExchangeStartRequestV1),
     IssueAccessGrant(ResourceIssueAccessGrantRequestV1),
     RevokeAccessGrant(ResourceRevokeAccessGrantRequestV1),
+    ConsumeBatch(ResourceConsumptionBatchRequestV1),
 }
 
 impl ResourceOperationRequestV1 {
@@ -558,6 +732,7 @@ impl ResourceOperationRequestV1 {
             Self::BeginExchange(value) => value.operation_key.clone(),
             Self::IssueAccessGrant(value) => value.operation_key.clone(),
             Self::RevokeAccessGrant(value) => value.operation_key.clone(),
+            Self::ConsumeBatch(value) => value.operation_key.clone(),
             Self::CreateAccount(value) => value.operation_key.clone(),
             Self::SubmitDemand(value) => value.operation_key.clone(),
             Self::AmendDemand(value) => value.operation_key.clone(),
@@ -598,6 +773,7 @@ impl ResourceOperationRequestV1 {
             Self::BeginExchange(_) => ResourceOperationKind::BeginExchange,
             Self::IssueAccessGrant(_) => ResourceOperationKind::IssueAccessGrant,
             Self::RevokeAccessGrant(_) => ResourceOperationKind::RevokeAccessGrant,
+            Self::ConsumeBatch(_) => ResourceOperationKind::ConsumeBatch,
         }
     }
 
@@ -612,15 +788,17 @@ impl ResourceOperationRequestV1 {
 
     /// Whether this request names an operation key it may not use: a key
     /// under [`RESOURCE_COMPLETION_OPERATION_KEY_PREFIX`] on a request that is
-    /// not a completion operation. Such a request is refused wherever it
-    /// enters and never settles.
+    /// not a completion operation, or under
+    /// [`RESOURCE_CONSUMPTION_BATCH_ITEM_KEY_PREFIX`] on any request. Such a
+    /// request is refused wherever it enters and never settles.
     #[must_use]
     pub fn names_reserved_operation_key(&self) -> bool {
-        !matches!(self, Self::Completion(_))
-            && self
-                .operation_key()
+        let key = self.operation_key();
+        (!matches!(self, Self::Completion(_))
+            && key
                 .as_str()
-                .starts_with(RESOURCE_COMPLETION_OPERATION_KEY_PREFIX)
+                .starts_with(RESOURCE_COMPLETION_OPERATION_KEY_PREFIX))
+            || is_batch_item_key(key.as_str())
     }
 
     /// Transfer identities an outcome of this request must cite. Only an
@@ -636,6 +814,39 @@ impl ResourceOperationRequestV1 {
             _ => Vec::new(),
         }
     }
+}
+
+/// Whether `key` lies under [`RESOURCE_CONSUMPTION_BATCH_ITEM_KEY_PREFIX`].
+pub(crate) fn is_batch_item_key(key: &str) -> bool {
+    key.starts_with(RESOURCE_CONSUMPTION_BATCH_ITEM_KEY_PREFIX)
+}
+
+/// Whether a free-form operation key, such as a production credit's, lies
+/// under a prefix that only completion operations and consumption batch
+/// items may use.
+pub(crate) fn is_reserved_operation_key(key: &str) -> bool {
+    key.starts_with(RESOURCE_COMPLETION_OPERATION_KEY_PREFIX) || is_batch_item_key(key)
+}
+
+/// What one consumption settles under: its consumer evidence, its lease,
+/// its operation key, and whether it is a batch item, whose caller measures
+/// room on the batch's whole result.
+#[derive(Clone, Copy)]
+struct ConsumptionSettlement<'a> {
+    consumer_evidence: &'a DomainRecordVersionRef,
+    acquisition: &'a CompletionLeaseAcquisitionId,
+    operation_key: &'a ResourceOperationKey,
+    in_batch: bool,
+}
+
+/// How one consumption batch item settled.
+enum BatchItemOutcome {
+    Applied {
+        quantity: u64,
+        remainder: u64,
+        consumption: ResourceConsumptionId,
+    },
+    Rejected(ResourceError),
 }
 
 struct AppliedOperation {
@@ -787,6 +998,8 @@ impl ResourceState {
             conservation: ConservationTotalsV1::default(),
             next_admitted_sequence: 1,
             hot_terminal: crate::ResourceHotTerminalLedgerV1::default(),
+            live: crate::ResourceLiveLedgerV1::default(),
+            custodian_accounts: BTreeMap::new(),
         })
     }
 
@@ -810,7 +1023,7 @@ impl ResourceState {
         &mut self,
         definition: ResourceDefinitionRevision,
     ) -> Result<(), ResourceError> {
-        if self.definitions.len() >= self.limits.max_definitions
+        if self.definition_count() >= self.limits.max_definitions
             || self.definitions.contains_key(&definition.id)
         {
             return Err(ResourceError::LimitExceeded(
@@ -831,7 +1044,7 @@ impl ResourceState {
     }
 
     pub fn install_unit(&mut self, unit: ResourceUnitRevision) -> Result<(), ResourceError> {
-        if self.units.len() >= self.limits.max_unit_revisions
+        if self.unit_count() >= self.limits.max_unit_revisions
             || self.units.contains_key(&unit.id)
             || unit.scale_numerator == 0
             || unit.scale_denominator == 0
@@ -894,7 +1107,7 @@ impl ResourceState {
         &mut self,
         account: ResourceAccount,
     ) -> Result<(), ResourceError> {
-        if self.accounts.len() >= self.limits.max_accounts
+        if self.account_count() >= self.limits.max_accounts
             || self.accounts.contains_key(&account.id)
         {
             return Err(ResourceError::LimitExceeded(
@@ -907,6 +1120,12 @@ impl ResourceState {
             .opening_balances
             .checked_add(u128::from(account.balance))
             .ok_or(ResourceError::Overflow)?;
+        // The resource plugin attaches the custodian's index before it
+        // settles an account's creation.
+        self.custodian_accounts
+            .entry(account.custodian.clone())
+            .or_default()
+            .insert(account.id.clone());
         self.accounts.insert(account.id.clone(), account);
         Ok(())
     }
@@ -1052,6 +1271,7 @@ impl ResourceState {
     fn mark_terminal_demand_closure(
         &mut self,
         demand_id: &ResourceDemandId,
+        room_is_measured_after: bool,
     ) -> Result<(), ResourceError> {
         let demand = self.demands.get(demand_id).ok_or_else(|| {
             ResourceError::NotFound("terminal resource demand is unavailable".to_owned())
@@ -1105,7 +1325,10 @@ impl ResourceState {
             .hot_terminal_records()
             .checked_add(keys.len())
             .ok_or(ResourceError::Overflow)?;
-        if projected > self.limits.max_archive_candidates {
+        // A consumption batch measures room on its whole result instead
+        // ([`Self::room_shortage`]), so a closure it cannot hold is a skip
+        // that records nothing, not a refusal of the batch.
+        if !room_is_measured_after && projected > self.limits.max_archive_candidates {
             return Err(ResourceError::LimitExceeded(
                 "resource terminal demand closure requires archive progress".to_owned(),
             ));
@@ -1356,6 +1579,32 @@ impl ResourceState {
                     .checked_add(reservation.quantity)
                     .ok_or(ResourceError::Overflow)
             })?;
+        Ok(self.quantities_with_reserved(account, reserved))
+    }
+
+    /// What each account has reserved by its active reservations, in one pass
+    /// over the reservations.
+    fn reserved_by_account(&self) -> Result<BTreeMap<ResourceAccountId, u64>, ResourceError> {
+        let mut reserved = BTreeMap::<ResourceAccountId, u64>::new();
+        for reservation in self
+            .reservations
+            .values()
+            .filter(|reservation| reservation.status == ReservationStatus::Active)
+        {
+            let total = reserved.entry(reservation.account.clone()).or_default();
+            *total = total
+                .checked_add(reservation.quantity)
+                .ok_or(ResourceError::Overflow)?;
+        }
+        Ok(reserved)
+    }
+
+    /// The quantities of `account` given what its active reservations hold.
+    fn quantities_with_reserved(
+        &self,
+        account: &ResourceAccount,
+        reserved: u64,
+    ) -> crate::AccountQuantitiesV1 {
         let protected = account
             .protected_floor_policy
             .as_ref()
@@ -1365,12 +1614,12 @@ impl ResourceState {
             .balance
             .saturating_sub(reserved)
             .saturating_sub(protected);
-        Ok(crate::AccountQuantitiesV1 {
+        crate::AccountQuantitiesV1 {
             authoritative_balance: account.balance,
             available,
             reserved,
             protected,
-        })
+        }
     }
 
     /// Applies one operation to this root and records its outcome.
@@ -1404,6 +1653,27 @@ impl ResourceState {
     ) -> Result<OperationSettlement, ResourceError> {
         let request_digest = canonical_digest("canwu.resource.operation-request.v1", request)?;
         self.settle_operation_with_context(request, request_digest, None, None, None)
+    }
+
+    /// Settles an operation that the plugin settles in a boundary, at
+    /// `settled_at` when it is time-bound, with `external_refusal`, what the
+    /// plugin found against the simulation view, as its recorded rejection.
+    /// Only a lease start reads such a refusal (an archived outcome that took
+    /// its identity).
+    pub(crate) fn settle_operation_refused_by(
+        &mut self,
+        request: &ResourceOperationRequestV1,
+        settled_at: Option<SimTime>,
+        external_refusal: Option<&ResourceError>,
+    ) -> Result<OperationSettlement, ResourceError> {
+        let request_digest = canonical_digest("canwu.resource.operation-request.v1", request)?;
+        self.settle_operation_with_context(
+            request,
+            request_digest,
+            None,
+            external_refusal,
+            settled_at,
+        )
     }
 
     /// Settles an operation that the plugin settles in a boundary at
@@ -1448,6 +1718,42 @@ impl ResourceState {
         (1..=MAX_PRODUCTION_OUTPUT_BATCH_CREDITS).contains(&credits)
             && credits.saturating_add(1) <= self.limits.max_archive_candidates
             && credits <= self.limits.max_operation_outcomes
+    }
+
+    /// Whether a hot outcome of this root shows that the lease start
+    /// `operation` would reuse an acquisition identity another lease took
+    /// ([`ResourceCompletionOperationV1::sibling_lease_operation_key`]).
+    fn lease_identity_taken_in_root(&self, operation: &ResourceCompletionOperationV1) -> bool {
+        operation.sibling_lease_operation_key().is_some_and(|key| {
+            self.outcomes
+                .get(&key)
+                .is_some_and(|outcome| outcome.status == ResourceOperationStatus::Applied)
+        })
+    }
+
+    /// Whether a consumption batch of `items` items, each consuming the one
+    /// leg of its demand, can ever settle in this root: it carries at most
+    /// [`MAX_RESOURCE_CONSUMPTION_BATCH_ITEMS`] items and at most
+    /// `max_batch_items_per_boundary`, and with an empty archive backlog and
+    /// every reservation free its records
+    /// ([`RESOURCE_CONSUMPTION_BATCH_ITEM_RECORDS`] an item and
+    /// [`RESOURCE_CONSUMPTION_BATCH_RECORDS`]), its outcomes, and the receipt
+    /// of the archive commit that emptied the backlog fit the root's limits.
+    ///
+    /// A provider checks it before it takes the batch's lease. A batch
+    /// larger than either bound is refused whole when it settles; one whose
+    /// records do not fit is skipped and records nothing, so its lease stays
+    /// active until it is released or expires.
+    #[must_use]
+    pub fn consumption_batch_can_fit(&self, items: usize) -> bool {
+        (1..=MAX_RESOURCE_CONSUMPTION_BATCH_ITEMS).contains(&items)
+            && items <= self.limits.max_batch_items_per_boundary
+            && items
+                .saturating_mul(RESOURCE_CONSUMPTION_BATCH_ITEM_RECORDS)
+                .saturating_add(RESOURCE_CONSUMPTION_BATCH_RECORDS)
+                .saturating_add(1)
+                <= self.limits.max_archive_candidates
+            && items.saturating_add(1) <= self.limits.max_operation_outcomes
     }
 
     /// Settles one production output batch on a detached candidate, so the
@@ -1649,11 +1955,19 @@ impl ResourceState {
         // whole operation back; a rejection restores it at once and is taken
         // back from its recorded position instead.
         let mut before = Some(self.clone());
-        let applied = self.apply_inner(request, allocation_requester, external_refusal, settled_at);
+        let applied = self.apply_inner(
+            request,
+            &request_digest,
+            allocation_requester,
+            external_refusal,
+            settled_at,
+        );
         if applied.is_err() {
             *self = before
                 .take()
                 .expect("the root before the operation is kept");
+        } else {
+            self.retire_finished_leases();
         }
         if measure
             && let Some(shortage) =
@@ -1841,11 +2155,15 @@ impl ResourceState {
     fn apply_inner(
         &mut self,
         request: &ResourceOperationRequestV1,
+        request_digest: &str,
         allocation_requester: Option<&canwu_api::KnowledgeHolderRef>,
         external_refusal: Option<&ResourceError>,
         settled_at: Option<SimTime>,
     ) -> Result<AppliedOperation, ResourceError> {
         match request {
+            ResourceOperationRequestV1::ConsumeBatch(value) => {
+                self.consume_batch(value, request_digest, settled_at)
+            }
             ResourceOperationRequestV1::CreateAccount(value) => self.create_account(value),
             ResourceOperationRequestV1::SubmitDemand(value) => self.submit_demand(value),
             ResourceOperationRequestV1::AmendDemand(value) => self.amend_demand(value),
@@ -1927,6 +2245,15 @@ impl ResourceState {
                     return Err(ResourceError::IdempotencyConflict(
                         "completion lease acquisition already exists".to_owned(),
                     ));
+                }
+                // A finished lease of this identity has left the root; the
+                // outcome of its single step still names it. The plugin
+                // finds an archived one (`external_refusal`).
+                if let Some(refusal) = external_refusal {
+                    return Err(refusal.clone());
+                }
+                if self.lease_identity_taken_in_root(operation) {
+                    return Err(lease_identity_taken());
                 }
                 let exact_evidence = request.eligibility_envelope.exact_evidence.clone();
                 let acquisition = self
@@ -2090,6 +2417,9 @@ impl ResourceState {
             ResourceCompletionOperationV1::SingleStepLease(request) => {
                 if let Some(refusal) = external_refusal {
                     return Err(refusal.clone());
+                }
+                if self.lease_identity_taken_in_root(operation) {
+                    return Err(lease_identity_taken());
                 }
                 let certificate = self.lease_single_step(request)?;
                 (
@@ -2525,6 +2855,9 @@ impl ResourceState {
             .values()
             .filter(|reservation| reservation.status == ReservationStatus::Active)
             .count();
+        // One pass over the reservations for the whole pass, kept current as
+        // the pass reserves.
+        let mut reserved_by_account = self.reserved_by_account()?;
         for (_, _, _, _, demand_id) in candidates {
             let demand = self.demands.get(&demand_id).cloned().ok_or_else(|| {
                 ResourceError::NotFound("allocation demand disappeared".to_owned())
@@ -2535,6 +2868,8 @@ impl ResourceState {
             if needed == 0 {
                 continue;
             }
+            // A pooled demand draws on every account of its resource; the
+            // resource plugin attaches them all before such a pass.
             let mut accounts: Vec<_> = match &demand.source_policy {
                 ResourceDemandSourcePolicyV1::Pooled => self
                     .accounts
@@ -2552,7 +2887,11 @@ impl ResourceState {
             accounts.sort();
             let mut total_available = accounts.iter().try_fold(0_u64, |total, account| {
                 total
-                    .checked_add(self.available_for_source(account, &demand)?)
+                    .checked_add(self.available_for_source(
+                        account,
+                        &demand,
+                        reserved_by_account.get(account).copied().unwrap_or(0),
+                    )?)
                     .ok_or(ResourceError::Overflow)
             })?;
             // A granted demand is bounded by its grant before scarcity
@@ -2597,7 +2936,7 @@ impl ResourceState {
                         ids.remove(&demand.id);
                     }
                     self.dirty_demands.remove(&demand.id);
-                    self.mark_terminal_demand_closure(&demand.id)?;
+                    self.mark_terminal_demand_closure(&demand.id, false)?;
                 }
                 continue;
             }
@@ -2606,7 +2945,11 @@ impl ResourceState {
                 if remaining == 0 {
                     break;
                 }
-                let available = self.available_for_source(&account_id, &demand)?;
+                let available = self.available_for_source(
+                    &account_id,
+                    &demand,
+                    reserved_by_account.get(&account_id).copied().unwrap_or(0),
+                )?;
                 let quantity = remaining.min(available);
                 if quantity == 0 {
                     continue;
@@ -2656,6 +2999,12 @@ impl ResourceState {
                     .entry(demand.id.clone())
                     .or_default()
                     .insert(reservation_id.clone());
+                let reserved = reserved_by_account
+                    .entry(reservation.account.clone())
+                    .or_default();
+                *reserved = reserved
+                    .checked_add(quantity)
+                    .ok_or(ResourceError::Overflow)?;
                 self.reservations.insert(reservation_id, reservation);
                 self.allocation_legs.insert(leg_id.clone(), leg);
                 if let Some(grant_id) = demand.source_policy.access_grant() {
@@ -2750,39 +3099,17 @@ impl ResourceState {
                 &local_targets,
             )?
         };
-        self.consume_leg(&leg, request.expected_account_revision)?;
-        let terminal_sequence = self.next_sequence()?;
-        let mut consumption = ResourceConsumption {
-            id: request.consumption_id.clone(),
-            revision: ResourceRevision::INITIAL,
-            account: leg.account.clone(),
-            allocation_leg: leg.id.clone(),
-            demand: leg.demand.clone(),
-            resource_revision: leg.resource_revision.clone(),
-            unit_revision: leg.unit_revision.clone(),
-            quantity: leg.quantity,
-            consumer_evidence: request.consumer_evidence.clone(),
-            completion_acquisition: acquisition.clone(),
-            status: ConsumptionStatus::Settled,
-            operation_key: request.operation_key.clone(),
-            semantic_digest: String::new(),
-            terminal_sequence,
-        };
-        consumption.semantic_digest =
-            canonical_digest("canwu.resource.consumption.v1", &consumption)?;
-        self.consumptions
-            .insert(consumption.id.clone(), consumption.clone());
-        self.add_hot_candidate(
-            consumption.terminal_sequence,
-            crate::ResourceTerminalRecordKeyV1::Consumption(consumption.id.clone()),
+        let (consumption, fulfillment) = self.settle_consumption(
+            &leg,
+            &request.consumption_id,
+            request.expected_account_revision,
+            &ConsumptionSettlement {
+                consumer_evidence: &request.consumer_evidence,
+                acquisition: &acquisition,
+                operation_key: &request.operation_key,
+                in_batch: false,
+            },
         )?;
-        self.conservation.admitted_consumption = self
-            .conservation
-            .admitted_consumption
-            .checked_add(u128::from(leg.quantity))
-            .ok_or(ResourceError::Overflow)?;
-        let fulfillment = self.record_fulfillment(&leg, request.operation_key.clone())?;
-        self.mark_terminal_demand_closure(&leg.demand)?;
         if external_participant {
             self.external_completion_participants.complete(
                 &crate::CompleteExternalCompletionParticipantGrantV1 {
@@ -2808,6 +3135,378 @@ impl ResourceState {
             result_ref: Some(ResourceRecordRefV1::Consumption(consumption.id)),
             exact_evidence: vec![request.consumer_evidence.clone()],
         })
+    }
+
+    /// Debits one exact allocation leg and records its consumption and the
+    /// fulfillment of its demand, which the consumption names, and marks a
+    /// demand that this finishes as terminal. The caller has checked the
+    /// leg and the certificate.
+    fn settle_consumption(
+        &mut self,
+        leg: &ResourceAllocationLeg,
+        consumption_id: &ResourceConsumptionId,
+        expected_account_revision: ResourceRevision,
+        settlement: &ConsumptionSettlement<'_>,
+    ) -> Result<(ResourceConsumption, crate::ResourceFulfillment), ResourceError> {
+        let ConsumptionSettlement {
+            consumer_evidence,
+            acquisition,
+            operation_key,
+            in_batch,
+        } = *settlement;
+        self.consume_leg(leg, expected_account_revision)?;
+        let terminal_sequence = self.next_sequence()?;
+        self.conservation.admitted_consumption = self
+            .conservation
+            .admitted_consumption
+            .checked_add(u128::from(leg.quantity))
+            .ok_or(ResourceError::Overflow)?;
+        let fulfillment = self.record_fulfillment(leg, operation_key.clone())?;
+        let mut consumption = ResourceConsumption {
+            id: consumption_id.clone(),
+            revision: ResourceRevision::INITIAL,
+            account: leg.account.clone(),
+            allocation_leg: leg.id.clone(),
+            demand: leg.demand.clone(),
+            resource_revision: leg.resource_revision.clone(),
+            unit_revision: leg.unit_revision.clone(),
+            quantity: leg.quantity,
+            consumer_evidence: consumer_evidence.clone(),
+            completion_acquisition: acquisition.clone(),
+            status: ConsumptionStatus::Settled,
+            operation_key: operation_key.clone(),
+            fulfillment: fulfillment.id.clone(),
+            semantic_digest: String::new(),
+            terminal_sequence,
+        };
+        consumption.semantic_digest =
+            canonical_digest("canwu.resource.consumption.v1", &consumption)?;
+        self.consumptions
+            .insert(consumption.id.clone(), consumption.clone());
+        self.add_hot_candidate(
+            consumption.terminal_sequence,
+            crate::ResourceTerminalRecordKeyV1::Consumption(consumption.id.clone()),
+        )?;
+        self.mark_terminal_demand_closure(&leg.demand, in_batch)?;
+        Ok((consumption, fulfillment))
+    }
+
+    /// Settles a consumption batch: the certificate once for the whole batch,
+    /// then each item, refused alone or applied, then the lease's completion.
+    /// An error refuses the batch as a whole; the caller restores the root.
+    /// The terminal closures of finished demands are not checked against the
+    /// archive budget as they are added: the caller measures room on the
+    /// whole result, so a batch that does not fit is a skip.
+    fn consume_batch(
+        &mut self,
+        request: &ResourceConsumptionBatchRequestV1,
+        request_digest: &str,
+        settled_at: Option<SimTime>,
+    ) -> Result<AppliedOperation, ResourceError> {
+        if request.items.is_empty() || request.items.len() > MAX_RESOURCE_CONSUMPTION_BATCH_ITEMS {
+            return Err(ResourceError::LimitExceeded(format!(
+                "a resource consumption batch carries 1 to {MAX_RESOURCE_CONSUMPTION_BATCH_ITEMS} items"
+            )));
+        }
+        // A batch larger than a boundary settles could never settle.
+        if request.items.len() > self.limits.max_batch_items_per_boundary {
+            return Err(ResourceError::LimitExceeded(
+                "a resource consumption batch carries more items than one boundary settles"
+                    .to_owned(),
+            ));
+        }
+        if settled_at.is_some_and(|at| at != request.at) {
+            return Err(ResourceError::Authority(
+                "a resource consumption batch settles at its certified time".to_owned(),
+            ));
+        }
+        let certificate = &request.completion_certificate;
+        if self
+            .external_completion_participants
+            .participant(&certificate.acquisition)
+            .is_some()
+        {
+            return Err(ResourceError::InvalidLifecycle(
+                "a resource consumption batch runs under a local completion lease".to_owned(),
+            ));
+        }
+        let (acquisition, grant) = self.consume_completion_certificate(
+            certificate,
+            request.at,
+            &request.operation_key,
+            &request.locked_targets(),
+        )?;
+        let mut consumed = 0_u64;
+        let mut refused = 0_u64;
+        // The account revisions this batch's own debits produced, by account:
+        // the revision the batch found (which its certificate locks) and the
+        // one its last debit left. An item that expects the revision the
+        // batch found draws on the account as the batch left it, so one batch
+        // consumes several legs of one account.
+        let mut debited =
+            BTreeMap::<ResourceAccountId, (ResourceRevision, ResourceRevision)>::new();
+        for (index, item) in request.items.iter().enumerate() {
+            let key = request.item_operation_key(index);
+            if self.outcomes.contains_key(&key) {
+                return Err(ResourceError::IdempotencyConflict(
+                    "a resource consumption batch item key is already recorded".to_owned(),
+                ));
+            }
+            let expected_account_revision = match debited.get(&item.allocation.account) {
+                Some((found, current)) if *found == item.expected_account_revision => *current,
+                _ => item.expected_account_revision,
+            };
+            // Only the checks refuse an item. Once they pass, settling it
+            // fails for nothing an item can cause, so an error there refuses
+            // the batch, and the caller restores the root.
+            let outcome =
+                match self.check_batch_item(item, expected_account_revision, request, settled_at) {
+                    Err(error) => {
+                        refused = refused
+                            .checked_add(item.allocation.quantity)
+                            .ok_or(ResourceError::Overflow)?;
+                        BatchItemOutcome::Rejected(error)
+                    }
+                    Ok(leg) => {
+                        let (consumption, fulfillment) = self.settle_consumption(
+                            &leg,
+                            &item.consumption_id,
+                            expected_account_revision,
+                            &ConsumptionSettlement {
+                                consumer_evidence: &request.consumer_evidence,
+                                acquisition: &acquisition,
+                                operation_key: &key,
+                                in_batch: true,
+                            },
+                        )?;
+                        let revision = self
+                            .accounts
+                            .get(&leg.account)
+                            .ok_or_else(|| {
+                                ResourceError::InvalidDefinition(
+                                    "a consumed batch item lost its account".to_owned(),
+                                )
+                            })?
+                            .revision;
+                        debited
+                            .entry(leg.account.clone())
+                            .and_modify(|(_, current)| *current = revision)
+                            .or_insert((item.expected_account_revision, revision));
+                        consumed = consumed
+                            .checked_add(leg.quantity)
+                            .ok_or(ResourceError::Overflow)?;
+                        BatchItemOutcome::Applied {
+                            quantity: leg.quantity,
+                            remainder: fulfillment.remainder,
+                            consumption: consumption.id,
+                        }
+                    }
+                };
+            self.record_batch_item_outcome(
+                key,
+                request_digest,
+                &request.consumer_evidence,
+                item.allocation.quantity,
+                outcome,
+            )?;
+        }
+        self.completion_leases
+            .complete_grant(&acquisition, &grant)?;
+        self.record_completed_completion(request.operation_key.clone(), acquisition, grant)?;
+        Ok(AppliedOperation {
+            quantity: consumed,
+            remainder: refused,
+            result_ref: None,
+            exact_evidence: vec![request.consumer_evidence.clone()],
+        })
+    }
+
+    /// The checks one batch item must pass before its leg is debited; their
+    /// refusal is the item's recorded rejection. They are the checks a
+    /// single consumption makes of its leg, account, demand, and grant.
+    fn check_batch_item(
+        &self,
+        item: &ResourceConsumptionBatchItemV1,
+        expected_account_revision: ResourceRevision,
+        request: &ResourceConsumptionBatchRequestV1,
+        settled_at: Option<SimTime>,
+    ) -> Result<ResourceAllocationLeg, ResourceError> {
+        let leg = self.exact_allocation(&item.allocation)?.clone();
+        if leg.demand != item.demand || leg.demand_revision != item.demand_revision {
+            return Err(ResourceError::VersionConflict(
+                "resource consumption batch item names another demand revision".to_owned(),
+            ));
+        }
+        if self.consumptions.contains_key(&item.consumption_id) {
+            return Err(ResourceError::IdempotencyConflict(
+                "resource consumption identity already exists".to_owned(),
+            ));
+        }
+        if leg.status != AllocationLegStatus::Reserved || leg.quantity == 0 {
+            return Err(ResourceError::InvalidLifecycle(
+                "resource allocation leg is not consumable".to_owned(),
+            ));
+        }
+        let reservation = self.reservations.get(&leg.reservation).ok_or_else(|| {
+            ResourceError::InvalidDefinition("allocation leg lost its reservation".to_owned())
+        })?;
+        if reservation.status != ReservationStatus::Active
+            || reservation.account != leg.account
+            || reservation.quantity != leg.quantity
+        {
+            return Err(ResourceError::InvalidLifecycle(
+                "allocation reservation is unavailable or differs".to_owned(),
+            ));
+        }
+        let account = self.accounts.get(&leg.account).ok_or_else(|| {
+            ResourceError::NotFound("allocation account is unavailable".to_owned())
+        })?;
+        if account.revision != expected_account_revision
+            || account.resource_revision != leg.resource_revision
+            || account.unit_revision != leg.unit_revision
+        {
+            return Err(ResourceError::VersionConflict(
+                "allocation consumer expected stale account/resource/unit revisions".to_owned(),
+            ));
+        }
+        if account.balance < leg.quantity {
+            return Err(ResourceError::Conservation(
+                "resource account balance is below its reserved allocation".to_owned(),
+            ));
+        }
+        let demand = self.demands.get(&leg.demand).ok_or_else(|| {
+            ResourceError::InvalidDefinition("allocation leg lost its demand".to_owned())
+        })?;
+        if demand
+            .fulfilled
+            .checked_add(leg.quantity)
+            .is_none_or(|fulfilled| fulfilled > demand.requested)
+        {
+            return Err(ResourceError::Conservation(
+                "resource demand fulfillment would exceed its requested quantity".to_owned(),
+            ));
+        }
+        self.granted_debit_authority(
+            &leg,
+            request.at,
+            settled_at,
+            &request.completion_certificate,
+        )?;
+        Ok(leg)
+    }
+
+    /// Records the outcome of one batch item under its reserved key, as a
+    /// consumption outcome of the batch's request.
+    fn record_batch_item_outcome(
+        &mut self,
+        operation_key: ResourceOperationKey,
+        request_digest: &str,
+        consumer_evidence: &DomainRecordVersionRef,
+        allocated: u64,
+        outcome: BatchItemOutcome,
+    ) -> Result<(), ResourceError> {
+        let (status, quantity, remainder, result_ref, exact_evidence, rejection) = match outcome {
+            BatchItemOutcome::Applied {
+                quantity,
+                remainder,
+                consumption,
+            } => (
+                ResourceOperationStatus::Applied,
+                quantity,
+                remainder,
+                Some(ResourceRecordRefV1::Consumption(consumption)),
+                vec![consumer_evidence.clone()],
+                None,
+            ),
+            BatchItemOutcome::Rejected(error) => (
+                ResourceOperationStatus::Rejected,
+                0,
+                allocated,
+                None,
+                Vec::new(),
+                Some(error),
+            ),
+        };
+        let id = outcome_id(&operation_key, request_digest)?;
+        let mut outcome = ResourceOperationOutcome {
+            id,
+            revision: ResourceRevision::INITIAL,
+            operation_key,
+            request_digest: request_digest.to_owned(),
+            kind: ResourceOperationKind::Consume,
+            status,
+            quantity,
+            remainder,
+            result_ref,
+            cited_transfers: Vec::new(),
+            rejection_code: rejection.as_ref().map(|error| error.code().to_owned()),
+            rejection_reason: rejection.as_ref().map(ToString::to_string),
+            exact_evidence,
+            semantic_digest: String::new(),
+            sequence: self.next_sequence()?,
+        };
+        outcome.semantic_digest =
+            canonical_digest("canwu.resource.operation-outcome.v1", &outcome)?;
+        self.add_hot_candidate(
+            outcome.sequence,
+            crate::ResourceTerminalRecordKeyV1::Outcome(outcome.operation_key.clone()),
+        )?;
+        self.outcomes.insert(outcome.operation_key.clone(), outcome);
+        Ok(())
+    }
+
+    /// Takes every completion lease that has finished out of the root: an
+    /// acquisition released or expired whose named report reservation, if
+    /// any, has published, with its grants and certificate. Their receipts
+    /// stay hot terminal records until an archive commit takes them, and the
+    /// operation outcomes under their keys answer a resend; nothing else
+    /// reads a finished lease.
+    pub(crate) fn retire_finished_leases(&mut self) {
+        let finished: Vec<_> = self
+            .completion_leases
+            .acquisitions
+            .values()
+            .filter(|acquisition| {
+                matches!(
+                    acquisition.state,
+                    crate::CompletionLeaseAcquisitionStateV1::Released
+                        | crate::CompletionLeaseAcquisitionStateV1::Expired
+                ) && !self
+                    .completion_report_reservations
+                    .contains_key(&acquisition.id)
+                    && !self.completion_report_ready.contains_key(&acquisition.id)
+            })
+            .map(|acquisition| acquisition.id.clone())
+            .collect();
+        if finished.is_empty() {
+            return;
+        }
+        let leases = &mut self.completion_leases;
+        for id in &finished {
+            leases.acquisitions.remove(id);
+            leases.certificates.remove(id);
+        }
+        let retired: BTreeSet<_> = finished.into_iter().collect();
+        let grants: Vec<_> = leases
+            .grants
+            .values()
+            .filter(|grant| retired.contains(&grant.acquisition))
+            .map(|grant| grant.id.clone())
+            .collect();
+        for grant_id in &grants {
+            if let Some(grant) = leases.grants.remove(grant_id) {
+                for target in grant.target_versions {
+                    if leases.target_locks.get(&target) == Some(grant_id) {
+                        leases.target_locks.remove(&target);
+                    }
+                }
+            }
+        }
+        let grants: BTreeSet<_> = grants.into_iter().collect();
+        for due in leases.expiry_due.values_mut() {
+            due.retain(|grant| !grants.contains(grant));
+        }
+        leases.expiry_due.retain(|_, due| !due.is_empty());
     }
 
     fn begin_transfer(
@@ -3403,7 +4102,7 @@ impl ResourceState {
                 ResourceError::InvalidDefinition("transfer lost its allocation leg".to_owned())
             })?;
         let fulfillment = self.record_fulfillment(&leg, request.operation_key.clone())?;
-        self.mark_terminal_demand_closure(&leg.demand)?;
+        self.mark_terminal_demand_closure(&leg.demand, false)?;
         let terminal_sequence = self.next_sequence()?;
         let transfer = self
             .transfers
@@ -3799,12 +4498,13 @@ impl ResourceState {
         if candidates.is_empty() {
             return;
         }
-        // Hot terminal demands refer to policies too; the ledger knows which
-        // whether or not they are attached.
+        // Hot terminal demands and accounts that are not attached refer to
+        // policies too; their ledgers know which.
         let referenced: BTreeSet<_> = self
             .accounts
             .values()
             .filter_map(|account| account.protected_floor_policy.as_ref())
+            .chain(self.live.account_floor_policies.keys())
             .chain(
                 self.demands
                     .values()
@@ -3895,7 +4595,7 @@ impl ResourceState {
         self.demand_due_index.retain(|_, ids| !ids.is_empty());
         self.demand_expiry_index.retain(|_, ids| !ids.is_empty());
         self.dirty_demands.remove(&request.demand);
-        self.mark_terminal_demand_closure(&request.demand)?;
+        self.mark_terminal_demand_closure(&request.demand, false)?;
         Ok(AppliedOperation {
             quantity: 0,
             remainder,
@@ -4149,6 +4849,10 @@ impl ResourceState {
                     .certificate(&request.completion_certificate.acquisition)
                     == Some(&request.completion_certificate)
             }
+            // A batch leaves more terminal records than its lease reserves,
+            // so it must leave the reservations of every other lease free;
+            // its own lease has finished by the time room is measured.
+            ResourceOperationRequestV1::ConsumeBatch(_) => false,
             ResourceOperationRequestV1::BeginTransfer(request) => {
                 self.completion_leases
                     .certificate(&request.completion_certificate.acquisition)
@@ -4500,7 +5204,7 @@ impl ResourceState {
                 "resource access grant identity already exists".to_owned(),
             ));
         }
-        if self.access_grants.len() >= crate::MAX_RESOURCE_ACCESS_GRANTS {
+        if self.access_grant_count() >= crate::MAX_RESOURCE_ACCESS_GRANTS {
             return Err(ResourceError::LimitExceeded(
                 "resource access grant capacity is exhausted".to_owned(),
             ));
@@ -4806,15 +5510,18 @@ impl ResourceState {
         }
     }
 
+    /// What the active reservations of a demand hold. A live demand's
+    /// reservations are all in the root, indexed by demand.
     fn active_reserved_for_demand(
         &self,
         demand_id: &ResourceDemandId,
     ) -> Result<u64, ResourceError> {
-        self.reservations
-            .values()
-            .filter(|reservation| {
-                &reservation.demand == demand_id && reservation.status == ReservationStatus::Active
-            })
+        self.reservation_by_demand
+            .get(demand_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.reservations.get(id))
+            .filter(|reservation| reservation.status == ReservationStatus::Active)
             .try_fold(0_u64, |total, reservation| {
                 total
                     .checked_add(reservation.quantity)
@@ -4830,6 +5537,7 @@ impl ResourceState {
         &self,
         account_id: &ResourceAccountId,
         demand: &ResourceDemand,
+        reserved: u64,
     ) -> Result<u64, ResourceError> {
         if demand.source_policy.access_grant().is_some()
             && self.accounts.get(account_id).is_some_and(|account| {
@@ -4838,16 +5546,20 @@ impl ResourceState {
         {
             return Ok(0);
         }
-        self.available_for_demand(account_id, demand)
+        self.available_for_demand(account_id, demand, reserved)
     }
 
     fn available_for_demand(
         &self,
         account_id: &ResourceAccountId,
         demand: &ResourceDemand,
+        reserved: u64,
     ) -> Result<u64, ResourceError> {
-        let quantities = self.account_quantities(account_id)?;
-        let account = &self.accounts[account_id];
+        let account = self
+            .accounts
+            .get(account_id)
+            .ok_or_else(|| ResourceError::NotFound("resource account is unavailable".to_owned()))?;
+        let quantities = self.quantities_with_reserved(account, reserved);
         if demand.protected_floor_policy != account.protected_floor_policy {
             return Err(ResourceError::VersionConflict(
                 "resource demand protected-floor policy revision differs from its account"
@@ -4951,7 +5663,7 @@ impl ResourceState {
                 ids.remove(&demand_id);
             }
             self.dirty_demands.remove(&demand_id);
-            self.mark_terminal_demand_closure(&demand_id)?;
+            self.mark_terminal_demand_closure(&demand_id, false)?;
         }
         self.demand_due_index.retain(|_, ids| !ids.is_empty());
         self.demand_expiry_index.retain(|_, ids| !ids.is_empty());
@@ -4989,14 +5701,28 @@ impl ResourceState {
         &self,
         demand: &ResourceDemand,
     ) -> Result<(), ResourceError> {
+        self.validate_demand_sources_within(demand, false)
+    }
+
+    /// [`Self::validate_demand_sources`]; with `partial`, a source account or
+    /// grant that is not attached to a partial state is not checked.
+    fn validate_demand_sources_within(
+        &self,
+        demand: &ResourceDemand,
+        partial: bool,
+    ) -> Result<(), ResourceError> {
         demand.source_policy.validate_shape()?;
+        let skip_accounts = partial && self.live.accounts > 0;
         if let ResourceDemandSourcePolicyV1::ExactAccounts(accounts) = &demand.source_policy {
             for id in accounts {
-                let account = self.accounts.get(id).ok_or_else(|| {
-                    ResourceError::NotFound(
+                let Some(account) = self.accounts.get(id) else {
+                    if skip_accounts {
+                        continue;
+                    }
+                    return Err(ResourceError::NotFound(
                         "resource demand source account is unavailable".to_owned(),
-                    )
-                })?;
+                    ));
+                };
                 if account.custodian != demand.requester {
                     return Err(ResourceError::Authority(
                         "resource demand source account is not custodied by its requester"
@@ -5015,9 +5741,14 @@ impl ResourceState {
         }
         if let ResourceDemandSourcePolicyV1::Granted { grant_id, accounts } = &demand.source_policy
         {
-            let record = self.access_grants.get(grant_id).ok_or_else(|| {
-                ResourceError::NotFound("resource demand access grant is unavailable".to_owned())
-            })?;
+            let Some(record) = self.access_grants.get(grant_id) else {
+                if partial && self.live.access_grants > 0 {
+                    return Ok(());
+                }
+                return Err(ResourceError::NotFound(
+                    "resource demand access grant is unavailable".to_owned(),
+                ));
+            };
             let grant = &record.grant;
             if grant.grantee != demand.requester {
                 return Err(ResourceError::Authority(
@@ -5034,11 +5765,14 @@ impl ResourceState {
                 ));
             }
             for id in accounts {
-                let account = self.accounts.get(id).ok_or_else(|| {
-                    ResourceError::NotFound(
+                let Some(account) = self.accounts.get(id) else {
+                    if skip_accounts {
+                        continue;
+                    }
+                    return Err(ResourceError::NotFound(
                         "resource demand source account is unavailable".to_owned(),
-                    )
-                })?;
+                    ));
+                };
                 if account.custodian != grant.grantor_custodian {
                     return Err(ResourceError::Authority(
                         "resource demand granted account is not custodied by the grantor"
@@ -5086,13 +5820,28 @@ impl ResourceState {
     }
 
     fn validate_demand_contract(&self, demand: &ResourceDemand) -> Result<(), ResourceError> {
-        self.validate_demand_sources(demand)?;
+        self.validate_demand_contract_within(demand, false)
+    }
+
+    /// [`Self::validate_demand_contract`]; with `partial`, a source account,
+    /// grant, definition, or unit that is not attached to a partial state is
+    /// not checked.
+    fn validate_demand_contract_within(
+        &self,
+        demand: &ResourceDemand,
+        partial: bool,
+    ) -> Result<(), ResourceError> {
+        self.validate_demand_sources_within(demand, partial)?;
+        let definition_known = self.definitions.contains_key(&demand.resource_revision)
+            || (partial && self.live.definitions > 0);
+        let unit_known =
+            self.units.contains_key(&demand.unit_revision) || (partial && self.live.units > 0);
         if demand.requested == 0
             || demand.minimum_useful == 0
             || demand.minimum_useful > demand.requested
             || demand.due_at >= demand.expires_at
-            || !self.definitions.contains_key(&demand.resource_revision)
-            || !self.units.contains_key(&demand.unit_revision)
+            || !definition_known
+            || !unit_known
             || demand
                 .protected_floor_policy
                 .as_ref()
@@ -5165,10 +5914,10 @@ impl ResourceState {
             .values()
             .filter(|leg| leg.status == AllocationLegStatus::Reserved)
             .count();
-        if self.definitions.len() > self.limits.max_definitions
-            || self.units.len() > self.limits.max_unit_revisions
+        if self.definition_count() > self.limits.max_definitions
+            || self.unit_count() > self.limits.max_unit_revisions
             || self.protected_floor_policies.len() > crate::MAX_PROTECTED_FLOOR_POLICY_REVISIONS
-            || self.accounts.len() > self.limits.max_accounts
+            || self.account_count() > self.limits.max_accounts
             || active_demands > self.limits.max_demands
             || active_reservations > self.limits.max_demands
             || active_allocation_legs > self.limits.max_demands
@@ -5181,6 +5930,13 @@ impl ResourceState {
             ));
         }
 
+        // A partial state validates its live root and its attached records.
+        // A reference from a live-root record to a bucketed record that is
+        // not attached is not checked here: that record is unchanged since it
+        // was last written, and a whole state checks every reference
+        // (activation, restore, `resource_state`, and the debug-build
+        // equivalence check).
+        let reserved_by_account = self.reserved_by_account()?;
         for (id, account) in &self.accounts {
             if id != &account.id {
                 return Err(ResourceError::InvalidDefinition(
@@ -5188,10 +5944,34 @@ impl ResourceState {
                 ));
             }
             self.validate_account_contract(account)?;
-            let quantities = self.account_quantities(id)?;
-            if quantities.reserved > account.balance {
+            if reserved_by_account.get(id).copied().unwrap_or(0) > account.balance {
                 return Err(ResourceError::Conservation(
                     "resource reservations exceed the authoritative account balance".to_owned(),
+                ));
+            }
+        }
+        // The custodian index lists exactly each custodian's accounts, as far
+        // as both are attached.
+        for (id, account) in &self.accounts {
+            let indexed = match self.custodian_accounts.get(&account.custodian) {
+                Some(accounts) => accounts.contains(id),
+                None => self.live.custodians > 0,
+            };
+            if !indexed {
+                return Err(ResourceError::InvalidDefinition(
+                    "resource account is missing from its custodian's index".to_owned(),
+                ));
+            }
+        }
+        for (holder, accounts) in &self.custodian_accounts {
+            if accounts.is_empty()
+                || accounts.iter().any(|id| match self.accounts.get(id) {
+                    Some(account) => &account.custodian != holder,
+                    None => self.live.accounts == 0,
+                })
+            {
+                return Err(ResourceError::InvalidDefinition(
+                    "resource custodian index differs from its accounts".to_owned(),
                 ));
             }
         }
@@ -5201,7 +5981,7 @@ impl ResourceState {
                     "resource demand identity or fulfillment is invalid".to_owned(),
                 ));
             }
-            self.validate_demand_contract(demand)?;
+            self.validate_demand_contract_within(demand, true)?;
         }
         let expected_due: BTreeSet<_> = self
             .demands
@@ -5378,6 +6158,27 @@ impl ResourceState {
                     "resource consumption semantic digest is forged".to_owned(),
                 ));
             }
+            // The fulfillment a consumption names is the one it recorded: a
+            // reader attaches it by that name. A fulfillment is recorded
+            // after its consumption and archived after it, so a whole root
+            // that holds the consumption holds the fulfillment too.
+            match self.fulfillments.get(&consumption.fulfillment) {
+                Some(fulfillment) => {
+                    if !consumption_names_its_fulfillment(consumption, fulfillment) {
+                        return Err(ResourceError::InvalidDefinition(
+                            "resource consumption names a fulfillment of another consumption"
+                                .to_owned(),
+                        ));
+                    }
+                }
+                None if self.hot_terminal_records_attached() => {
+                    return Err(ResourceError::InvalidDefinition(
+                        "resource consumption names a fulfillment the root does not hold"
+                            .to_owned(),
+                    ));
+                }
+                None => {}
+            }
         }
         for fulfillment in self.fulfillments.values() {
             let mut detached = fulfillment.clone();
@@ -5475,10 +6276,15 @@ impl ResourceState {
                     .iter()
                     .any(|value| !grant.accounts.contains(&value.account))
                 || head.stock.iter().any(|value| {
-                    self.accounts
-                        .get(&value.account)
-                        .and_then(|account| self.definitions.get(&account.resource_revision))
-                        .is_none_or(|definition| definition.scope != value.scope)
+                    match self.accounts.get(&value.account) {
+                        Some(account) => self
+                            .definitions
+                            .get(&account.resource_revision)
+                            .is_none_or(|definition| definition.scope != value.scope),
+                        // Checked when the head was recorded, with the
+                        // account attached.
+                        None => self.live.accounts == 0,
+                    }
                 })
                 || head
                     .demands
@@ -5558,7 +6364,7 @@ impl ResourceState {
     /// its cap. While a transfer's allocation leg and demand are hot, the
     /// transfer names exactly the grant that demand drew on.
     fn validate_access_grants(&self) -> Result<(), ResourceError> {
-        if self.access_grants.len() > crate::MAX_RESOURCE_ACCESS_GRANTS {
+        if self.access_grant_count() > crate::MAX_RESOURCE_ACCESS_GRANTS {
             return Err(ResourceError::LimitExceeded(
                 "resource access grants exceed their bound".to_owned(),
             ));
@@ -5596,7 +6402,7 @@ impl ResourceState {
                 ));
             }
             if let Some(grant_id) = &transfer.access_grant {
-                if !self.access_grants.contains_key(grant_id) {
+                if !self.access_grants.contains_key(grant_id) && self.live.access_grants == 0 {
                     return Err(ResourceError::InvalidDefinition(
                         "resource transfer names an unavailable access grant".to_owned(),
                     ));
@@ -5645,11 +6451,8 @@ impl ResourceState {
     }
 
     pub fn validate_conservation(&self) -> Result<(), ResourceError> {
-        let balances = self.accounts.values().try_fold(0_u128, |total, account| {
-            total
-                .checked_add(u128::from(account.balance))
-                .ok_or(ResourceError::Overflow)
-        })?;
+        // Accounts that are not attached count through the live ledger.
+        let balances = self.total_account_balance()?;
         let escrow = self
             .transfers
             .values()
@@ -5710,6 +6513,20 @@ fn debit_account(account: &mut ResourceAccount, quantity: u64) -> Result<(), Res
     Ok(())
 }
 
+/// Whether `fulfillment` is the one `consumption` recorded: of its demand,
+/// under its operation key, and fulfilled by its leg.
+pub(crate) fn consumption_names_its_fulfillment(
+    consumption: &ResourceConsumption,
+    fulfillment: &crate::ResourceFulfillment,
+) -> bool {
+    fulfillment.id == consumption.fulfillment
+        && fulfillment.demand == consumption.demand
+        && fulfillment.operation_key == consumption.operation_key
+        && fulfillment
+            .allocation_legs
+            .contains(&consumption.allocation_leg)
+}
+
 fn outcome_id(
     operation_key: &ResourceOperationKey,
     request_digest: &str,
@@ -5722,6 +6539,13 @@ fn request_remainder(state: &ResourceState, request: &ResourceOperationRequestV1
         ResourceOperationRequestV1::SubmitDemand(value) => value.demand.requested,
         ResourceOperationRequestV1::AmendDemand(value) => value.replacement.remainder(),
         ResourceOperationRequestV1::Consume(value) => value.allocation.quantity,
+        // A batch outcome's remainder is the quantity its refused items did
+        // not consume: a batch refused whole, every item's.
+        ResourceOperationRequestV1::ConsumeBatch(value) => {
+            value.items.iter().fold(0_u64, |total, item| {
+                total.saturating_add(item.allocation.quantity)
+            })
+        }
         ResourceOperationRequestV1::BeginTransfer(value) => value.allocation.quantity,
         ResourceOperationRequestV1::Credit(value) => value.quantity,
         ResourceOperationRequestV1::ExternalOutflow(value) => value.quantity,

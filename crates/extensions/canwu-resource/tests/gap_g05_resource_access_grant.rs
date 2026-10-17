@@ -182,18 +182,22 @@ fn scenario() -> Scenario {
             .map(|value| EntityRef::Person(PersonId::new(value)))
             .to_vec(),
     )
-    .with_domain_records(vec![
-        state.into_record().expect("resource record"),
-        DomainRecord {
-            reference: evidence.record.clone(),
-            owner: "test-provider".to_owned(),
-            class: DomainRecordClass::Record,
-            version: 1,
-            lifecycle: DomainRecordLifecycle::Active,
-            payload: serde_json::json!({ "accepted": "requisition" }),
-            references: Vec::new(),
-        },
-    ])
+    .with_domain_records(
+        state
+            .into_records()
+            .expect("resource records")
+            .into_iter()
+            .chain([DomainRecord {
+                reference: evidence.record.clone(),
+                owner: "test-provider".to_owned(),
+                class: DomainRecordClass::Record,
+                version: 1,
+                lifecycle: DomainRecordLifecycle::Active,
+                payload: serde_json::json!({ "accepted": "requisition" }),
+                references: Vec::new(),
+            }])
+            .collect(),
+    )
 }
 
 fn state(canwu: &Canwu) -> ResourceState {

@@ -978,6 +978,29 @@ evidence each boundary appends to the journal is reported as encoded JSON.
 `--mode allocations`, in a build with `--features allocation-counting`,
 reports allocator calls and requested bytes instead of time.
 
+`--accounts` (default `0`) crosses every backlog with roots that also hold
+that many accounts of other custodians, and reports `live_root_bytes` for
+each case. `--households` (default none) adds one lease case per count: a
+root with one account and one allocated demand per household, settled in
+memory (`apply_operation`) once with one single-step lease and one
+consumption per household (`per_household`) and once as consumption batches
+of at most 256 items under one lease each (`batch`); each reports the lease
+and settlement times, the live root's size before, with the leases active,
+and after, the finished leases left in the root, and the hot terminal
+records added per consumption. The scale options time single boundaries
+that raised limits allow, on fresh roots under the canonical limits:
+`--pooled` one allocation pass of a pooled demand beside that many accounts
+(which reads every account), `--due` one allocation pass over that many due
+demands, and `--boundary-batch` one consumption batch of that many items
+through a provider's adapter ingress under a four-step lease. The 0.18.0
+reports,
+[`before`](baselines/2026-10-16-resource-root-0.18.0-before-elapsed.json) (the
+base `8fb922e` with these options) and
+[`after`](baselines/2026-10-16-resource-root-0.18.0-after-elapsed.json), and the
+[scale cases](baselines/2026-10-16-resource-root-0.18.0-after-scale-elapsed.json), are
+interpreted in
+[`docs/proposals/resource-series-scale.md`](../docs/proposals/resource-series-scale.md).
+
 ```console
 cargo run --release \
   --manifest-path benchmarks/performance-harness/Cargo.toml \

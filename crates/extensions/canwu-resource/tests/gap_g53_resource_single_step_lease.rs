@@ -15,7 +15,11 @@
 //!
 //! The second fixture counts, in a plugin-owned run with an archive, what a
 //! same-place transfer leaves and reads with each path: 27 terminal records
-//! and 15 archive lookups with four-step leases, 15 and 9 with single steps.
+//! and 17 archive lookups with four-step leases, 15 and 11 with single steps.
+//! Each lease start also looks up the key of the other way of starting the
+//! same lease, so an acquisition identity is used once for the run: a
+//! finished lease's identity is refused to a later `Acquire`, hot or
+//! archived.
 //! A refusal the simulation view finds settles as a recorded rejection without
 //! failing its boundary, a tracked command cannot carry the single step, an
 //! archive commit and a single step settle in one boundary, a resend changes
@@ -1172,11 +1176,13 @@ fn same_place_transfer(run: &mut Run, name: &str, at: SimTime, single: bool) -> 
         settled.transfers[&transfer].state,
         ResourceTransferState::Accepted
     );
-    // Both leases are complete and hold nothing.
+    // Both leases are complete: they left the root and hold nothing.
     for suffix in [format!("start-{name}"), format!("accept-{name}")] {
-        assert_eq!(
-            settled.completion_leases.acquisitions[&acquisition(&suffix)].state,
-            CompletionLeaseAcquisitionStateV1::Released
+        assert!(
+            !settled
+                .completion_leases
+                .acquisitions
+                .contains_key(&acquisition(&suffix))
         );
     }
     assert!(settled.completion_leases.target_locks.is_empty());
@@ -1190,7 +1196,7 @@ fn same_place_transfer(run: &mut Run, name: &str, at: SimTime, single: bool) -> 
 }
 
 #[test]
-fn same_place_transfer_leaves_fifteen_records_and_nine_lookups() {
+fn same_place_transfer_leaves_fifteen_records_and_eleven_lookups() {
     let handovers = [evidence("four", 1), evidence("single", 1)];
     let resource_plugin =
         ResourcePlugin::new([DomainRecordKind::new(EVIDENCE_NAMESPACE, "evidence")]);
@@ -1247,18 +1253,18 @@ fn same_place_transfer_leaves_fifteen_records_and_nine_lookups() {
         four,
         TransferCost {
             lease_records: 16,
-            lease_lookups: 8,
+            lease_lookups: 10,
             records: 27,
-            lookups: 15,
+            lookups: 17,
         }
     );
     assert_eq!(
         single,
         TransferCost {
             lease_records: 4,
-            lease_lookups: 2,
+            lease_lookups: 4,
             records: 15,
-            lookups: 9,
+            lookups: 11,
         }
     );
     // A lease also leaves one receipt when its operation completes, on
@@ -1282,18 +1288,40 @@ fn same_place_transfer_leaves_fifteen_records_and_nine_lookups() {
     assert_eq!(settled.accounts[&account("destination")].balance, 20);
     assert_eq!(settled.accounts[&account("source")].balance, 80);
 
-    // The four-step path never resumes a lease the single step created, and
-    // not a complete one either. The start lease of the settled transfer is
-    // released. Its holder's tracked acquire for the same lease is admitted
-    // and settles as a recorded rejection, so no receipt is added that would
-    // keep the lease in the root after its records are archived.
+    // A finished lease leaves the root at once: the start lease of the
+    // settled transfer is gone, with its grant and certificate, and only its
+    // receipts and the outcome under its key remain, as hot terminal records.
     let ResourceCompletionOperationV1::SingleStepLease(start) = run.single_steps[0].clone() else {
         unreachable!("only single steps are recorded")
     };
-    assert_eq!(
-        settled.completion_leases.acquisitions[&start.lease.id].state,
-        CompletionLeaseAcquisitionStateV1::Released
+    assert!(
+        !settled
+            .completion_leases
+            .acquisitions
+            .contains_key(&start.lease.id)
     );
+    assert!(
+        !settled
+            .completion_leases
+            .grants
+            .contains_key(&start.grant_id)
+    );
+    assert!(
+        !settled
+            .completion_leases
+            .certificates
+            .contains_key(&start.lease.id)
+    );
+    assert!(
+        settled
+            .completion_leases
+            .receipts
+            .values()
+            .any(|receipt| receipt.acquisition == start.lease.id)
+    );
+    // Its identity stays used: its holder's tracked acquire for the same
+    // lease is admitted and settles as a recorded rejection, refused by the
+    // outcome of the single step that took the identity.
     let acquire = completion(ResourceCompletionOperationV1::Acquire(start.lease));
     let admitted = run.command(SOURCE_CUSTODIAN, minute(2), acquire.clone());
     assert!(
@@ -1308,6 +1336,36 @@ fn same_place_transfer_leaves_fifteen_records_and_nine_lookups() {
         Some("idempotency_conflict")
     );
     assert_eq!(after.completion_leases, settled.completion_leases);
+    // So does the identity of a lease whose single step is archived.
+    let ResourceCompletionOperationV1::SingleStepLease(accept) = run.single_steps[1].clone() else {
+        unreachable!("only single steps are recorded")
+    };
+    run.archive_all();
+    let KnowledgeHolderRef::Person(accept_holder) = accept.lease.holder.clone() else {
+        unreachable!("the fixture's holders are persons")
+    };
+    let single_step_key =
+        ResourceCompletionOperationV1::SingleStepLease(accept.clone()).operation_key();
+    assert!(!state(&run.canwu).outcomes.contains_key(&single_step_key));
+    let acquire = completion(ResourceCompletionOperationV1::Acquire(accept.lease));
+    let admitted = run.command(accept_holder.get(), minute(2), acquire.clone());
+    assert!(
+        matches!(admitted, CommandAttemptOutcome::Accepted { .. }),
+        "{admitted:?}"
+    );
+    let after = state(&run.canwu);
+    let recorded = &after.outcomes[&acquire.operation_key()];
+    assert_eq!(recorded.status, ResourceOperationStatus::Rejected);
+    assert_eq!(
+        recorded.rejection_code.as_deref(),
+        Some("idempotency_conflict")
+    );
+    assert!(
+        !after
+            .completion_leases
+            .acquisitions
+            .contains_key(&acquisition("accept-single"))
+    );
 
     // A tracked command cannot carry the single step: like the grant,
     // prepare, and activate steps it enters through the plugin's own ingress.
@@ -1670,11 +1728,14 @@ fn same_place_transfer_leaves_fifteen_records_and_nine_lookups() {
             reason: "stray acquisition".to_owned(),
         }),
     );
-    // The grant started an expiry clock; let its tick settle.
+    // The grant started an expiry clock; let its tick settle. The released
+    // acquisition has left the root.
     settle(&mut run.canwu, at);
-    assert_eq!(
-        state(&run.canwu).completion_leases.acquisitions[&stray.id].state,
-        CompletionLeaseAcquisitionStateV1::Released
+    assert!(
+        !state(&run.canwu)
+            .completion_leases
+            .acquisitions
+            .contains_key(&stray.id)
     );
 
     // Restore audits the archive; exact replay settles the same.

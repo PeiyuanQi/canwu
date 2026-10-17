@@ -1,0 +1,674 @@
+{
+  "benchmark": "resource-root-profile",
+  "cases": [
+    {
+      "archive_commit": {
+        "archived_records": 54,
+        "boundary": {
+          "journal_bytes": 100180,
+          "ms": 1.4028,
+          "raw_ms": [
+            1.4028
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 18404,
+        "ms": 0.8841,
+        "raw_ms": [
+          0.8841,
+          0.7596,
+          0.9057,
+          0.7874,
+          1.0460999999999998
+        ]
+      },
+      "hot_terminal_records": 0,
+      "idle": {
+        "journal_bytes": 798,
+        "ms": 0.0507,
+        "raw_ms": [
+          0.0502,
+          0.050899999999999994,
+          0.0507,
+          0.0376,
+          0.0628
+        ]
+      },
+      "installed_resource_record_bytes": 2308,
+      "live_accounts": 0,
+      "live_root_bytes": 2316,
+      "operation": {
+        "journal_bytes": 8227,
+        "ms": 0.2809,
+        "raw_ms": [
+          0.3074,
+          0.2809,
+          0.266,
+          0.257,
+          0.3887
+        ]
+      }
+    },
+    {
+      "archive_commit": {
+        "archived_records": 4054,
+        "boundary": {
+          "journal_bytes": 4318040,
+          "ms": 63.9728,
+          "raw_ms": [
+            63.9728
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 36687,
+        "ms": 1.0291000000000001,
+        "raw_ms": [
+          1.1669,
+          1.0291000000000001,
+          1.0112999999999999,
+          0.9742999999999999,
+          1.2476
+        ]
+      },
+      "hot_terminal_records": 4000,
+      "idle": {
+        "journal_bytes": 798,
+        "ms": 0.037700000000000004,
+        "raw_ms": [
+          0.037,
+          0.037700000000000004,
+          0.036399999999999995,
+          0.0443,
+          0.0408
+        ]
+      },
+      "installed_resource_record_bytes": 2433381,
+      "live_accounts": 0,
+      "live_root_bytes": 2324,
+      "operation": {
+        "journal_bytes": 10861,
+        "ms": 0.4371,
+        "raw_ms": [
+          0.4173,
+          0.4351,
+          0.5982000000000001,
+          0.4666,
+          0.4371
+        ]
+      }
+    },
+    {
+      "archive_commit": {
+        "archived_records": 16054,
+        "boundary": {
+          "journal_bytes": 17106055,
+          "ms": 315.351,
+          "raw_ms": [
+            315.351
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 36518,
+        "ms": 1.2482000000000002,
+        "raw_ms": [
+          1.1016000000000001,
+          1.099,
+          1.5889,
+          1.6026,
+          1.2482000000000002
+        ]
+      },
+      "hot_terminal_records": 16000,
+      "idle": {
+        "journal_bytes": 798,
+        "ms": 0.0608,
+        "raw_ms": [
+          0.0654,
+          0.0419,
+          0.0608,
+          0.061500000000000006,
+          0.055
+        ]
+      },
+      "installed_resource_record_bytes": 9772496,
+      "live_accounts": 0,
+      "live_root_bytes": 2330,
+      "operation": {
+        "journal_bytes": 10877,
+        "ms": 0.5695,
+        "raw_ms": [
+          0.5695,
+          0.4335,
+          0.5513,
+          0.6143000000000001,
+          0.6464
+        ]
+      }
+    },
+    {
+      "archive_commit": {
+        "archived_records": 54,
+        "boundary": {
+          "journal_bytes": 100228,
+          "ms": 2.7279,
+          "raw_ms": [
+            2.7279
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 18452,
+        "ms": 1.3607,
+        "raw_ms": [
+          1.302,
+          1.0667,
+          1.3607,
+          1.3841999999999999,
+          1.5456
+        ]
+      },
+      "hot_terminal_records": 0,
+      "idle": {
+        "journal_bytes": 798,
+        "ms": 0.058499999999999996,
+        "raw_ms": [
+          0.0515,
+          0.0816,
+          0.058499999999999996,
+          0.052500000000000005,
+          0.0639
+        ]
+      },
+      "installed_resource_record_bytes": 4978291,
+      "live_accounts": 8192,
+      "live_root_bytes": 2340,
+      "operation": {
+        "journal_bytes": 8275,
+        "ms": 0.5981,
+        "raw_ms": [
+          0.5783999999999999,
+          0.6467,
+          0.5981,
+          0.6416,
+          0.5962
+        ]
+      }
+    },
+    {
+      "archive_commit": {
+        "archived_records": 4054,
+        "boundary": {
+          "journal_bytes": 4318088,
+          "ms": 81.6794,
+          "raw_ms": [
+            81.6794
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 36735,
+        "ms": 1.6754,
+        "raw_ms": [
+          1.6118000000000001,
+          1.5943,
+          1.6754,
+          1.8436,
+          1.7725
+        ]
+      },
+      "hot_terminal_records": 4000,
+      "idle": {
+        "journal_bytes": 798,
+        "ms": 0.0576,
+        "raw_ms": [
+          0.0573,
+          0.0559,
+          0.060399999999999995,
+          0.0576,
+          0.0621
+        ]
+      },
+      "installed_resource_record_bytes": 7409364,
+      "live_accounts": 8192,
+      "live_root_bytes": 2348,
+      "operation": {
+        "journal_bytes": 10909,
+        "ms": 0.6809999999999999,
+        "raw_ms": [
+          0.6809999999999999,
+          0.646,
+          0.6307,
+          0.7135,
+          0.7172
+        ]
+      }
+    },
+    {
+      "archive_commit": {
+        "archived_records": 16054,
+        "boundary": {
+          "journal_bytes": 17106103,
+          "ms": 724.8428,
+          "raw_ms": [
+            724.8428
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 36566,
+        "ms": 1.8956000000000002,
+        "raw_ms": [
+          1.8956000000000002,
+          1.7702,
+          1.6611,
+          11.9837,
+          3.3571
+        ]
+      },
+      "hot_terminal_records": 16000,
+      "idle": {
+        "journal_bytes": 798,
+        "ms": 0.0696,
+        "raw_ms": [
+          0.06559999999999999,
+          0.0583,
+          0.0713,
+          0.1086,
+          0.0696
+        ]
+      },
+      "installed_resource_record_bytes": 14748479,
+      "live_accounts": 8192,
+      "live_root_bytes": 2354,
+      "operation": {
+        "journal_bytes": 10925,
+        "ms": 0.7489,
+        "raw_ms": [
+          0.6074,
+          0.7014,
+          0.7489,
+          1.6671,
+          3.1944
+        ]
+      }
+    },
+    {
+      "archive_commit": {
+        "archived_records": 54,
+        "boundary": {
+          "journal_bytes": 100238,
+          "ms": 13.2229,
+          "raw_ms": [
+            13.2229
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 18462,
+        "ms": 15.9756,
+        "raw_ms": [
+          20.5159,
+          15.9756,
+          4.2011,
+          30.7983,
+          11.5198
+        ]
+      },
+      "hot_terminal_records": 0,
+      "idle": {
+        "journal_bytes": 798,
+        "ms": 0.0909,
+        "raw_ms": [
+          0.3357,
+          0.0848,
+          0.0777,
+          0.1711,
+          0.0909
+        ]
+      },
+      "installed_resource_record_bytes": 9977551,
+      "live_accounts": 16384,
+      "live_root_bytes": 2345,
+      "operation": {
+        "journal_bytes": 8285,
+        "ms": 1.2699,
+        "raw_ms": [
+          1.2699,
+          5.4055,
+          3.6711,
+          0.9806999999999999,
+          1.0205
+        ]
+      }
+    },
+    {
+      "archive_commit": {
+        "archived_records": 4054,
+        "boundary": {
+          "journal_bytes": 4318098,
+          "ms": 272.548,
+          "raw_ms": [
+            272.548
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 36745,
+        "ms": 3.0834,
+        "raw_ms": [
+          2.3958999999999997,
+          16.3787,
+          3.0834,
+          2.1292,
+          3.139
+        ]
+      },
+      "hot_terminal_records": 4000,
+      "idle": {
+        "journal_bytes": 798,
+        "ms": 0.0687,
+        "raw_ms": [
+          0.0687,
+          0.08339999999999999,
+          0.0606,
+          0.0687,
+          0.0955
+        ]
+      },
+      "installed_resource_record_bytes": 12408624,
+      "live_accounts": 16384,
+      "live_root_bytes": 2353,
+      "operation": {
+        "journal_bytes": 10919,
+        "ms": 1.4215,
+        "raw_ms": [
+          1.2371999999999999,
+          1.4215,
+          0.9034,
+          11.6607,
+          5.916099999999999
+        ]
+      }
+    },
+    {
+      "archive_commit": {
+        "archived_records": 16054,
+        "boundary": {
+          "journal_bytes": 17106113,
+          "ms": 370.4434,
+          "raw_ms": [
+            370.4434
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 36576,
+        "ms": 1.96,
+        "raw_ms": [
+          2.0214,
+          1.96,
+          2.6987,
+          1.8848999999999998,
+          1.6797
+        ]
+      },
+      "hot_terminal_records": 16000,
+      "idle": {
+        "journal_bytes": 798,
+        "ms": 0.0607,
+        "raw_ms": [
+          0.0543,
+          0.0613,
+          0.0686,
+          0.0607,
+          0.055
+        ]
+      },
+      "installed_resource_record_bytes": 19747739,
+      "live_accounts": 16384,
+      "live_root_bytes": 2359,
+      "operation": {
+        "journal_bytes": 10935,
+        "ms": 1.02,
+        "raw_ms": [
+          6.1056,
+          1.02,
+          1.0882,
+          0.7691,
+          0.5556
+        ]
+      }
+    },
+    {
+      "archive_commit": {
+        "archived_records": 54,
+        "boundary": {
+          "journal_bytes": 100240,
+          "ms": 2.0690999999999997,
+          "raw_ms": [
+            2.0690999999999997
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 18464,
+        "ms": 1.5418999999999998,
+        "raw_ms": [
+          1.5554,
+          1.5728,
+          1.3857,
+          1.5418999999999998,
+          1.5204000000000002
+        ]
+      },
+      "hot_terminal_records": 0,
+      "idle": {
+        "journal_bytes": 798,
+        "ms": 0.0589,
+        "raw_ms": [
+          0.0589,
+          0.063,
+          0.041,
+          0.0648,
+          0.0522
+        ]
+      },
+      "installed_resource_record_bytes": 38804696,
+      "live_accounts": 65536,
+      "live_root_bytes": 2346,
+      "operation": {
+        "journal_bytes": 8287,
+        "ms": 0.6768,
+        "raw_ms": [
+          0.6759999999999999,
+          0.655,
+          0.7081000000000001,
+          0.6768,
+          0.6882
+        ]
+      }
+    },
+    {
+      "archive_commit": {
+        "archived_records": 4054,
+        "boundary": {
+          "journal_bytes": 4318100,
+          "ms": 93.4033,
+          "raw_ms": [
+            93.4033
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 36747,
+        "ms": 1.7079,
+        "raw_ms": [
+          1.7079,
+          1.7133999999999998,
+          1.6911,
+          1.8231,
+          1.3544
+        ]
+      },
+      "hot_terminal_records": 4000,
+      "idle": {
+        "journal_bytes": 798,
+        "ms": 0.054200000000000005,
+        "raw_ms": [
+          0.054200000000000005,
+          0.0569,
+          0.0522,
+          0.0555,
+          0.0422
+        ]
+      },
+      "installed_resource_record_bytes": 41235769,
+      "live_accounts": 65536,
+      "live_root_bytes": 2354,
+      "operation": {
+        "journal_bytes": 10921,
+        "ms": 0.7002,
+        "raw_ms": [
+          0.7002,
+          0.6769999999999999,
+          0.7135,
+          0.5488,
+          0.7353000000000001
+        ]
+      }
+    },
+    {
+      "archive_commit": {
+        "archived_records": 16054,
+        "boundary": {
+          "journal_bytes": 17106115,
+          "ms": 423.5546,
+          "raw_ms": [
+            423.5546
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 36578,
+        "ms": 1.8381,
+        "raw_ms": [
+          1.8553,
+          1.3432,
+          1.7603,
+          1.9567999999999999,
+          1.8381
+        ]
+      },
+      "hot_terminal_records": 16000,
+      "idle": {
+        "journal_bytes": 798,
+        "ms": 0.0562,
+        "raw_ms": [
+          0.0553,
+          0.052,
+          0.0562,
+          0.061900000000000004,
+          0.061900000000000004
+        ]
+      },
+      "installed_resource_record_bytes": 48574884,
+      "live_accounts": 65536,
+      "live_root_bytes": 2360,
+      "operation": {
+        "journal_bytes": 10937,
+        "ms": 0.7177,
+        "raw_ms": [
+          0.6981,
+          0.7177,
+          0.747,
+          0.5651,
+          0.7412
+        ]
+      }
+    }
+  ],
+  "label": "after-r18",
+  "lease_cases": [
+    {
+      "batch": {
+        "batch_ms": 6.1151,
+        "batch_ms_per_item": 0.061151,
+        "batches": 1,
+        "finished_leases_kept_in_live_root": 0,
+        "hot_terminal_records_added": 604,
+        "hot_terminal_records_per_consumption": 6.04,
+        "households": 100,
+        "lease_ms_per_batch": 2.0100000000000002,
+        "live_root_bytes_after_consumptions": 2859,
+        "live_root_bytes_before": 160458,
+        "live_root_bytes_with_an_active_batch_lease": 234538,
+        "refused_items": 0
+      },
+      "households": 100,
+      "per_household": {
+        "candidate_budget": 16384,
+        "consume_ms": 4.607544000000001,
+        "finished_leases_kept_in_live_root": 0,
+        "hot_terminal_records_added": 900,
+        "hot_terminal_records_per_consumption": 9.0,
+        "households": 100,
+        "lease_ms": 2.791678,
+        "leases_that_fit": 100,
+        "live_root_bytes_after_consumptions": 54028,
+        "live_root_bytes_before": 193118,
+        "live_root_bytes_per_active_lease": 3559.11,
+        "live_root_bytes_with_active_leases": 549029
+      }
+    },
+    {
+      "batch": {
+        "batch_ms": 22.68545,
+        "batch_ms_per_item": 0.0907418,
+        "batches": 2,
+        "finished_leases_kept_in_live_root": 0,
+        "hot_terminal_records_added": 3008,
+        "hot_terminal_records_per_consumption": 6.016,
+        "households": 500,
+        "lease_ms_per_batch": 11.89525,
+        "live_root_bytes_after_consumptions": 2864,
+        "live_root_bytes_before": 792467,
+        "live_root_bytes_with_an_active_batch_lease": 977934,
+        "refused_items": 0
+      },
+      "households": 500,
+      "per_household": {
+        "candidate_budget": 16384,
+        "consume_ms": 24.225465,
+        "finished_leases_kept_in_live_root": 0,
+        "hot_terminal_records_added": 4500,
+        "hot_terminal_records_per_consumption": 9.0,
+        "households": 500,
+        "lease_ms": 14.2033688,
+        "leases_that_fit": 500,
+        "live_root_bytes_after_consumptions": 262036,
+        "live_root_bytes_before": 957928,
+        "live_root_bytes_per_active_lease": 3563.832,
+        "live_root_bytes_with_active_leases": 2739844
+      }
+    }
+  ],
+  "machine": "local-7800X3D-shared",
+  "mode": "elapsed",
+  "recorded_on": "2026-10-16",
+  "samples": 5,
+  "scale_cases": {
+    "boundary_batch": [],
+    "due": [],
+    "pooled": []
+  },
+  "source": {
+    "content_hash": "6746402c2a17c83b4f129e00495e939dbe92d132f3014fb989e34afe64e2e2bb",
+    "git_commit": "ee7aa6921fe26319d059b39f2ce6f6bd79735d49",
+    "git_dirty": true,
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.0\nLLVM version: 23.1.1"
+  },
+  "warmup": 1
+}

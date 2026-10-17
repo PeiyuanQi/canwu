@@ -43,7 +43,7 @@ pub const RESOURCE_REPORT_WAKE_INGRESS: &str = "resource_report_wake_v1";
 pub const RESOURCE_DEFERRED_INGRESS: &str = "resource_deferred_packet_v1";
 pub const RESOURCE_REPORT_KNOWLEDGE: &str = "resource_report";
 pub const RESOURCE_SEMANTIC_HASH: &str =
-    "da2564d428dd3342631561045e2e4238e50f3c7110a777928168d5a6e52fc86e";
+    "56b1daef8b4a6a39b04f9454a5a7911d4b59ecbc1f3d4321ef5fce725e6a6778";
 
 const RESOURCE_REPORT_SCHEMA_HASH: &str =
     "2e271b9ea79404e662ba51360ce8061421ae896c1e70b09e99feb8d0de01a007";
@@ -375,13 +375,45 @@ fn operation_key_holder(
     )
 }
 
+/// The refusal of a lease start whose acquisition identity an earlier lease
+/// took under the other way of starting a lease, hot or archived
+/// ([`crate::ResourceCompletionOperationV1::sibling_lease_operation_key`]).
+fn lease_identity_refusal(
+    view: &SimulationView<'_>,
+    state: &crate::ResourceState,
+    operation: &crate::ResourceCompletionOperationV1,
+) -> Result<Option<crate::ResourceError>, CanwuError> {
+    let Some(key) = operation.sibling_lease_operation_key() else {
+        return Ok(None);
+    };
+    // A refused lease start took nothing; only an applied one used the
+    // identity.
+    let applied = |outcome: &crate::ResourceOperationOutcome| {
+        outcome.status == crate::ResourceOperationStatus::Applied
+    };
+    let taken = match state.outcomes.get(&key) {
+        Some(outcome) => applied(outcome),
+        None => {
+            state.archive_head.directory_root.is_some()
+                && crate::archived_resource_operation_outcome(
+                    state,
+                    &ViewResourceArchiveProvider(view),
+                    &key,
+                )
+                .map_err(resource_canwu_error)?
+                .is_some_and(|outcome| applied(&outcome))
+        }
+    };
+    Ok(taken.then(crate::lease_identity_taken))
+}
+
 /// Refuses a request that names an operation key reserved for completion
 /// operations, before it can be queued.
 fn reject_reserved_operation_key(request: &ResourceOperationRequestV1) -> Result<(), CanwuError> {
     if request.names_reserved_operation_key() {
         return Err(CanwuError::new(
             ErrorCode::InvalidAuthority,
-            "operation keys under `resource:completion:` are reserved for completion operations",
+            RESERVED_OPERATION_KEY_DETAIL,
         ));
     }
     Ok(())
@@ -523,7 +555,7 @@ impl SimulationPlugin for ResourcePlugin {
     fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
         registrar.register_record_schema(resource_record_schema())?;
         registrar.register_record_schema(DomainRecordSchema::for_record::<
-            crate::ResourceHotTerminalBucketRecord,
+            crate::ResourceBucketRecord,
         >())?;
         registrar.register_knowledge_schema(resource_report_knowledge_schema())?;
         registrar.register_event_audience(
@@ -873,12 +905,13 @@ struct LifecycleSettlement {
     directives: Vec<BoundaryDirective>,
     /// Whether this boundary already schedules a completion expiry tick.
     expiry_tick: bool,
+    /// Consumption batch items this boundary has settled.
+    batch_items: usize,
 }
 
 const OPERATION_KEY_TAKEN_DETAIL: &str =
     "another request holds the operation key; the outcome under the key is that request's";
-const RESERVED_OPERATION_KEY_DETAIL: &str =
-    "operation keys under `resource:completion:` are reserved for completion operations";
+const RESERVED_OPERATION_KEY_DETAIL: &str = "operation keys under `resource:completion:` are reserved for completion operations, and keys under `resource:consume-batch:` for consumption batch items";
 
 /// Most doublings of the delay before deferred work is settled again: the
 /// delay grows from one minute to 1,024 minutes and stays there.
@@ -911,8 +944,9 @@ impl PacketOrigin {
 /// it did not fit the root, as the packet it queues to itself.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ResourceDeferredPacketV1 {
-    /// [`RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS`] or
-    /// [`RESOURCE_COMPLETION_INGRESS`].
+    /// [`RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS`],
+    /// [`RESOURCE_COMPLETION_INGRESS`], or, for a consumption batch past the
+    /// boundary's batch budget, [`RESOURCE_ADAPTER_INGRESS`].
     packet_type: String,
     payload: Value,
     /// The times the work has been deferred, this deferral included.
@@ -1190,6 +1224,48 @@ impl LifecycleSettlement {
         Ok(())
     }
 
+    /// Settles nothing of a consumption batch the boundary has no batch
+    /// budget left for, and queues it to the resource plugin itself for the
+    /// next boundary at this instant, as a [`RESOURCE_DEFERRED_INGRESS`]
+    /// packet with no delay: the batch's time and certificate bind it to this
+    /// instant, and the kernel settles no later boundary before it. That
+    /// boundary settles it, since a boundary always settles a batch that fits
+    /// the budget alone, so the deferral never repeats without end. The event
+    /// names the instant.
+    fn defer_to_next_boundary(
+        &mut self,
+        ingress: IngressId,
+        at: SimTime,
+        packet: &ResourceAdapterOperationV1,
+        deferrals: u32,
+        operation_key: &crate::ResourceOperationKey,
+    ) -> Result<(), CanwuError> {
+        self.directives
+            .push(BoundaryDirective::SchedulePluginIngress {
+                target_plugin: PLUGIN_NAME.to_owned(),
+                after: canwu_api::SimDuration::ZERO,
+                packet_type: RESOURCE_DEFERRED_INGRESS.to_owned(),
+                priority: 0,
+                payload: encode(&ResourceDeferredPacketV1 {
+                    packet_type: RESOURCE_ADAPTER_INGRESS.to_owned(),
+                    payload: encode(packet)?,
+                    deferrals: deferrals.saturating_add(1),
+                })?,
+                affected: Vec::new(),
+            });
+        self.emit_skip(
+            crate::ResourceIngressSkipV1 {
+                ingress,
+                reason: crate::ResourceIngressSkipReasonV1::BoundaryBudget,
+                operation_key: Some(operation_key.clone()),
+                deferred_until: Some(at),
+            },
+            "the boundary has settled as many consumption batch items as its budget allows; the batch settles in the next boundary at this instant",
+            EventHolder::Nobody,
+        );
+        Ok(())
+    }
+
     /// Schedules one completion expiry tick in this boundary, however many
     /// settlements ask for one.
     fn schedule_expiry_tick(&mut self) {
@@ -1294,18 +1370,59 @@ fn settle_resource_lifecycle(
     Ok(proposal)
 }
 
+/// The live demands an allocation pass of `packet` may read: the requester's
+/// demands that are due or dirty by its time, or that expire by it.
+fn allocation_demands(
+    state: &crate::ResourceState,
+    packet: &ResourceAuthorizedAllocationV1,
+) -> std::collections::BTreeSet<crate::ResourceDemandId> {
+    let at = packet.request.at;
+    state
+        .demand_due_index
+        .range(..=at)
+        .chain(state.demand_expiry_index.range(..=at))
+        .flat_map(|(_, ids)| ids.iter())
+        .chain(state.dirty_demands.iter())
+        .filter(|id| {
+            state
+                .demands
+                .get(*id)
+                .is_some_and(|demand| demand.requester == packet.requester)
+        })
+        .cloned()
+        .collect()
+}
+
 /// The operation keys a resource packet of `packet_type` settles under, as
 /// far as its payload decodes; a packet that does not decode settles none.
 fn packet_operation_keys(packet_type: &str, payload: &Value) -> Vec<crate::ResourceOperationKey> {
     fn decoded<T: serde::de::DeserializeOwned>(payload: &Value) -> Option<T> {
         T::deserialize(payload).ok()
     }
+    // A lease start also reads the key the other way of starting a lease
+    // takes for its identity.
+    let with_sibling = |request: &ResourceOperationRequestV1| {
+        let mut keys = vec![request.operation_key()];
+        if let ResourceOperationRequestV1::Completion(operation) = request {
+            keys.extend(operation.sibling_lease_operation_key());
+        }
+        keys
+    };
     match packet_type {
         RESOURCE_COMMAND_INGRESS => decoded::<AdmittedResourceCommandV1>(payload)
-            .map(|admitted| vec![admitted.value.request.operation_key()])
+            .map(|admitted| with_sibling(&admitted.value.request))
             .unwrap_or_default(),
+        // A consumption batch also settles under each item's reserved key.
         RESOURCE_ADAPTER_INGRESS => decoded::<ResourceAdapterOperationV1>(payload)
-            .map(|packet| vec![packet.request.operation_key()])
+            .map(|packet| {
+                let mut keys = vec![packet.request.operation_key()];
+                if let ResourceOperationRequestV1::ConsumeBatch(batch) = &packet.request {
+                    keys.extend(
+                        (0..batch.items.len()).map(|index| batch.item_operation_key(index)),
+                    );
+                }
+                keys
+            })
             .unwrap_or_default(),
         RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS => {
             decoded::<ResourceProductionOutputBatchV1>(payload)
@@ -1322,9 +1439,7 @@ fn packet_operation_keys(packet_type: &str, payload: &Value) -> Vec<crate::Resou
             .map(|packet| vec![packet.request.operation_key])
             .unwrap_or_default(),
         RESOURCE_COMPLETION_INGRESS => decoded::<crate::ResourceCompletionOperationV1>(payload)
-            .map(|operation| {
-                vec![ResourceOperationRequestV1::Completion(operation).operation_key()]
-            })
+            .map(|operation| with_sibling(&ResourceOperationRequestV1::Completion(operation)))
             .unwrap_or_default(),
         RESOURCE_DEFERRED_INGRESS => decoded::<ResourceDeferredPacketV1>(payload)
             .map(|deferred| packet_operation_keys(&deferred.packet_type, &deferred.payload))
@@ -1379,15 +1494,49 @@ fn settle_lifecycle_on<S: crate::HotTerminalSource + ?Sized>(
             work.attach_named(payload)?;
         }
         match packet_type.as_str() {
+            // An archive commit settles on the work: the records it selects
+            // leave their buckets without being decoded.
             RESOURCE_ARCHIVE_COMMIT_INGRESS => {
-                if let Ok(commit) = crate::VerifiedResourceArchiveCommitV1::deserialize(payload)
-                    && work
-                        .state
-                        .archive_source_root()
-                        .map_err(resource_canwu_error)?
-                        == commit.expected_source_root
+                let commit: crate::VerifiedResourceArchiveCommitV1 =
+                    decode(payload, "verified resource archive commit")?;
+                let receipt = work.apply_archive_commit(&commit)?;
+                // An expiry skipped for want of room resumes once a commit
+                // makes room. A skipped expiry schedules no successor, so
+                // this cannot spin.
+                if receipt.disposition == crate::ResourceArchiveMaintenanceDispositionV1::Applied
+                    && expiry_overdue(&work.state, context.boundary_id.get())
                 {
-                    work.attach(commit.selected)?;
+                    settlement.schedule_expiry_tick();
+                }
+                settlement.changed = true;
+                continue;
+            }
+            // An allocation pass reads the source accounts and grants of the
+            // requester's demands it may settle, and every account when one
+            // of them draws on the pool.
+            RESOURCE_ALLOCATION_INGRESS => {
+                if let Ok(packet) = ResourceAuthorizedAllocationV1::deserialize(payload) {
+                    let demands = allocation_demands(&work.state, &packet);
+                    work.attach_demand_sources(&demands)?;
+                }
+            }
+            // An account's creation adds it to its custodian's index. Only
+            // a consumption batch is ever deferred, so a creation is always
+            // one of these packets, never a deferred one.
+            RESOURCE_COMMAND_INGRESS | RESOURCE_ADAPTER_INGRESS => {
+                let request = if packet_type == RESOURCE_COMMAND_INGRESS {
+                    AdmittedResourceCommandV1::deserialize(payload)
+                        .ok()
+                        .map(|admitted| admitted.value.request)
+                } else {
+                    ResourceAdapterOperationV1::deserialize(payload)
+                        .ok()
+                        .map(|packet| packet.request)
+                };
+                if let Some(ResourceOperationRequestV1::CreateAccount(request)) = request {
+                    work.attach_live([crate::ResourceLiveRecordKeyV1::Custodian(
+                        request.account.custodian,
+                    )])?;
                 }
             }
             RESOURCE_ARCHIVE_RETENTION_ACK_INGRESS => {
@@ -1410,7 +1559,17 @@ fn settle_lifecycle_on<S: crate::HotTerminalSource + ?Sized>(
                 settle_command_packet(view, context, ingress, payload, state, &mut settlement)?;
             }
             RESOURCE_ADAPTER_INGRESS => {
-                settle_adapter_packet(view, context, ingress, payload, state, &mut settlement)?;
+                settle_adapter_packet(
+                    view,
+                    context,
+                    Admitted {
+                        ingress,
+                        payload,
+                        origin,
+                    },
+                    state,
+                    &mut settlement,
+                )?;
             }
             RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS => settle_output_batch_packet(
                 view,
@@ -1443,22 +1602,6 @@ fn settle_lifecycle_on<S: crate::HotTerminalSource + ?Sized>(
             RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS => {
                 settle_expiry_tick(view, context, ingress.id, state, &mut settlement)?;
             }
-            RESOURCE_ARCHIVE_COMMIT_INGRESS => {
-                let commit: crate::VerifiedResourceArchiveCommitV1 =
-                    decode(payload, "verified resource archive commit")?;
-                let receipt = state
-                    .apply_archive_commit(&commit)
-                    .map_err(resource_canwu_error)?;
-                // An expiry skipped for want of room resumes once a commit
-                // makes room. A skipped expiry schedules no successor, so
-                // this cannot spin.
-                if receipt.disposition == crate::ResourceArchiveMaintenanceDispositionV1::Applied
-                    && expiry_overdue(state, context.boundary_id.get())
-                {
-                    settlement.schedule_expiry_tick();
-                }
-                settlement.changed = true;
-            }
             RESOURCE_ARCHIVE_RETENTION_ACK_INGRESS => {
                 let acknowledgement: ResourceArchiveRetentionAcknowledgementV1 =
                     decode(payload, "resource archive retention acknowledgement")?;
@@ -1483,6 +1626,7 @@ fn settle_lifecycle_on<S: crate::HotTerminalSource + ?Sized>(
         affected,
         mut directives,
         expiry_tick: _,
+        batch_items: _,
     } = settlement;
     if !changed {
         return Ok(BoundaryProposal {
@@ -1575,7 +1719,7 @@ fn settle_command_packet(
     // makes of the same operation: an acquisition's eligibility time, its
     // report reservation, and the currency of the evidence it persists.
     if let ResourceOperationRequestV1::Completion(operation) = request
-        && let Err(error) = validate_completion_ingress(view, context.at, operation, state)
+        && let Err(error) = validate_completion_ingress(view, context, operation, state)
     {
         out.skip(
             ingress.id,
@@ -1586,8 +1730,14 @@ fn settle_command_packet(
         );
         return Ok(());
     }
+    let refusal = match request {
+        ResourceOperationRequestV1::Completion(operation) => {
+            lease_identity_refusal(view, state, operation)?
+        }
+        _ => None,
+    };
     match state
-        .settle_operation_at(request, context.at)
+        .settle_operation_refused_by(request, Some(context.at), refusal.as_ref())
         .map_err(resource_canwu_error)?
     {
         crate::OperationSettlement::Settled(_) => {
@@ -1607,17 +1757,21 @@ fn settle_command_packet(
 ///
 /// A plugin that schedules adapter packets, as the force-supply reference
 /// does, dispatches again every consumption that has no outcome, so a
-/// skipped one is sent again and is never deferred: a deferred copy would
-/// settle beside the one sent again.
+/// packet skipped for room is sent again and is never deferred: a deferred
+/// copy would settle beside the one sent again. The one deferral is of a
+/// consumption batch past the boundary's batch budget, to the next boundary
+/// at the same instant ([`LifecycleSettlement::defer_to_next_boundary`]); a
+/// copy sent again beside it is a resend of the same request.
 fn settle_adapter_packet(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
-    ingress: &IngressRecord,
-    payload: &Value,
+    admitted: Admitted<'_>,
     state: &mut crate::ResourceState,
     out: &mut LifecycleSettlement,
 ) -> Result<(), CanwuError> {
-    let Ok(packet) = decode::<ResourceAdapterOperationV1>(payload, "resource adapter operation")
+    let ingress = admitted.ingress;
+    let Ok(packet) =
+        decode::<ResourceAdapterOperationV1>(admitted.payload, "resource adapter operation")
     else {
         out.skip_undecodable(ingress.id, "resource adapter operation");
         return Ok(());
@@ -1659,11 +1813,43 @@ fn settle_adapter_packet(
         );
         return Ok(());
     }
+    // A boundary settles at most `max_batch_items_per_boundary` batch items.
+    // A batch that fits that budget alone but not beside the batches the
+    // boundary applied waits for the next boundary at this instant, where it
+    // settles: a boundary always settles the first batch that fits alone,
+    // and the batch's time and certificate bind it to this instant. One that
+    // never fits is the state's recorded refusal.
+    let batch_items = match &packet.request {
+        ResourceOperationRequestV1::ConsumeBatch(batch) => batch.items.len(),
+        _ => 0,
+    };
+    if batch_items > 0
+        && batch_items <= state.limits.max_batch_items_per_boundary
+        && out.batch_items.saturating_add(batch_items) > state.limits.max_batch_items_per_boundary
+    {
+        let deferrals = match admitted.origin {
+            PacketOrigin::Plugin { deferrals } => deferrals,
+            PacketOrigin::Host => 0,
+        };
+        return out.defer_to_next_boundary(
+            ingress.id,
+            context.at,
+            &packet,
+            deferrals,
+            &operation_key,
+        );
+    }
     match state
         .settle_operation_at(&packet.request, context.at)
         .map_err(resource_canwu_error)?
     {
-        crate::OperationSettlement::Settled(_) => out.changed = true,
+        crate::OperationSettlement::Settled(outcome) => {
+            // A batch refused whole consumed nothing of the budget.
+            if outcome.status == crate::ResourceOperationStatus::Applied {
+                out.batch_items = out.batch_items.saturating_add(batch_items);
+            }
+            out.changed = true;
+        }
         crate::OperationSettlement::NoRoom(shortage) => {
             out.skip_for_room(
                 ingress.id,
@@ -1717,12 +1903,11 @@ fn settle_output_batch_packet(
         .as_ref()
         .map_or(EventHolder::Nobody, EventHolder::Participant);
     // A credit may not take a completion operation's key.
-    if let Some(reserved) = packet.requests.iter().find(|request| {
-        request
-            .operation_key
-            .as_str()
-            .starts_with(crate::RESOURCE_COMPLETION_OPERATION_KEY_PREFIX)
-    }) {
+    if let Some(reserved) = packet
+        .requests
+        .iter()
+        .find(|request| crate::is_reserved_operation_key(request.operation_key.as_str()))
+    {
         out.skip(
             ingress.id,
             crate::ResourceIngressSkipReasonV1::ReservedOperationKey,
@@ -1993,7 +2178,7 @@ fn settle_completion_packet(
         }
         return Ok(());
     }
-    if let Err(error) = validate_completion_ingress(view, context.at, &operation, state) {
+    if let Err(error) = validate_completion_ingress(view, context, &operation, state) {
         skip_failed(out, &error);
         return Ok(());
     }
@@ -2008,6 +2193,10 @@ fn settle_completion_packet(
                     }
                 };
             state.settle_prepare_with_external_revalidation(request, external_targets_current)
+        }
+        crate::ResourceCompletionOperationV1::Acquire(_) => {
+            let refusal = lease_identity_refusal(view, state, &operation)?;
+            state.settle_operation_refused_by(&request, None, refusal.as_ref())
         }
         _ => state.settle_operation(&request),
     }
@@ -2115,6 +2304,8 @@ fn settle_deferred_packet(
         RESOURCE_COMPLETION_INGRESS => {
             settle_completion_packet(view, context, admitted, state, out)
         }
+        // Only a consumption batch past the boundary's batch budget.
+        RESOURCE_ADAPTER_INGRESS => settle_adapter_packet(view, context, admitted, state, out),
         _ => {
             out.skip(
                 ingress.id,
@@ -2222,6 +2413,7 @@ fn settle_expiry_tick(
             state.completion_report_reservations.remove(&acquisition);
             state.completion_report_ready.remove(&acquisition);
         }
+        state.retire_finished_leases();
         out.changed = true;
     }
     let [local, external] = expiry_tick_operations(context);
@@ -2573,6 +2765,15 @@ fn materialize_reports_on<S: crate::HotTerminalSource + ?Sized>(
     for head in &heads {
         work.attach_named(head)?;
     }
+    // A report reads the accounts of its grant.
+    let accounts = grants_by_holder
+        .values()
+        .flatten()
+        .filter_map(|(grant_id, _)| work.state.report_grants.get(grant_id))
+        .flat_map(|grant| grant.accounts.iter().cloned())
+        .map(crate::ResourceLiveRecordKeyV1::Account)
+        .collect::<Vec<_>>();
+    work.attach_live(accounts)?;
     let state = &mut work.state;
     for (batch_ordinal, (holder, grant_ids)) in grants_by_holder.into_iter().enumerate() {
         let mut records = Vec::with_capacity(grant_ids.len());
@@ -2656,6 +2857,7 @@ fn materialize_reports_on<S: crate::HotTerminalSource + ?Sized>(
         });
     }
     if changed {
+        state.retire_finished_leases();
         state.state_revision = crate::ResourceRevision::new(
             work.live_version
                 .checked_add(1)
@@ -2759,6 +2961,14 @@ fn validate_adapter_packet(
     resource_state: &crate::ResourceState,
 ) -> Result<(), CanwuError> {
     reject_adapter_production_credit(&packet.request)?;
+    if packet.provider_plugin == "canwu-force-supply-reference"
+        && matches!(packet.request, ResourceOperationRequestV1::ConsumeBatch(_))
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "force supply consumptions settle one at a time, not as a batch",
+        ));
+    }
     // Only the live body is read, and a provider must cite its current
     // version, whose body that is. A force consumption may also cite an
     // earlier version of the force runtime, which the resource does not
@@ -2800,16 +3010,25 @@ fn validate_adapter_packet(
             "resource irreversible adapter operation must use its canonical boundary time",
         ));
     }
-    if let ResourceOperationRequestV1::Consume(request) = &packet.request
-        && packet.provider_plugin != "canwu-force-supply-reference"
+    let typed_consumption = match &packet.request {
+        ResourceOperationRequestV1::Consume(request)
+            if packet.provider_plugin != "canwu-force-supply-reference" =>
+        {
+            Some((&request.operation_key, &request.completion_certificate))
+        }
+        ResourceOperationRequestV1::ConsumeBatch(request) => {
+            Some((&request.operation_key, &request.completion_certificate))
+        }
+        _ => None,
+    };
+    if let Some((operation_key, certificate)) = typed_consumption
         && (source.lifecycle != canwu_api::DomainRecordLifecycle::Active
-            || request.operation_key != request.completion_certificate.operation_key
-            || !request
-                .completion_certificate
-                .locked_target_versions
-                .contains(&crate::CompletionLockedTargetV1::ExternalRecord {
+            || operation_key != &certificate.operation_key
+            || !certificate.locked_target_versions.contains(
+                &crate::CompletionLockedTargetV1::ExternalRecord {
                     version: packet.provider_source.clone(),
-                }))
+                },
+            ))
     {
         return Err(CanwuError::new(
             ErrorCode::InvalidAuthority,
@@ -3021,6 +3240,7 @@ fn validate_local_provider_participant(
 ) -> Result<(), CanwuError> {
     let certificate = match &packet.request {
         ResourceOperationRequestV1::Consume(value) => Some(&value.completion_certificate),
+        ResourceOperationRequestV1::ConsumeBatch(value) => Some(&value.completion_certificate),
         ResourceOperationRequestV1::Credit(value)
             if !matches!(value.source, crate::ResourceCreditSourceV1::Production(_)) =>
         {
@@ -3038,6 +3258,12 @@ fn validate_local_provider_participant(
         .grants
         .get(&certificate.acquisition)
     {
+        if matches!(packet.request, ResourceOperationRequestV1::ConsumeBatch(_)) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "a resource consumption batch runs under a local completion lease",
+            ));
+        }
         if participant.coordinator_plugin != packet.provider_plugin
             || participant.coordinator_source.record != packet.provider_source.record
             || participant.coordinator_source.version > packet.provider_source.version
@@ -3134,6 +3360,21 @@ fn validate_local_provider_participant(
             ));
         }
     }
+    // Every item's demand belongs to the lease holder. An item whose leg or
+    // demand is gone is refused alone when the batch settles.
+    if let ResourceOperationRequestV1::ConsumeBatch(request) = &packet.request
+        && request.items.iter().any(|item| {
+            state
+                .demands
+                .get(&item.demand)
+                .is_some_and(|demand| demand.requester != acquisition.holder)
+        })
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "a resource consumption batch names a demand its lease holder did not request",
+        ));
+    }
     if grant.acquisition != certificate.acquisition
         || grant.owner_plugin != packet.provider_plugin
         || grant.state != crate::CompletionGrantStateV1::Prepared
@@ -3168,8 +3409,98 @@ fn authoritative_provider_operation(
         ResourceOperationRequestV1::Consume(request) => {
             authoritative_typed_consumption(payload, packet, request, resource_state)
         }
+        ResourceOperationRequestV1::ConsumeBatch(request) => {
+            authoritative_typed_batch(payload, packet, request, resource_state)
+        }
         _ => Ok(()),
     }
+}
+
+/// Checks that the provider authorizes every item of a consumption batch
+/// with exactly one typed consumption intent under the item's key. The
+/// intent names the item's request; whether the leg, account, and demand are
+/// still those revisions is the item's own check when it settles.
+fn authoritative_typed_batch(
+    payload: &Value,
+    packet: &ResourceAdapterOperationV1,
+    request: &crate::ResourceConsumptionBatchRequestV1,
+    state: &crate::ResourceState,
+) -> Result<(), CanwuError> {
+    if request.consumer_evidence != packet.provider_source {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "consumption evidence is not the exact provider payload version",
+        ));
+    }
+    let intents = payload
+        .get("resource_consumption_intents")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::InvalidDomainRecord,
+                "provider has no typed resource consumption intents",
+            )
+        })?;
+    if intents.len() > state.limits.max_operation_outcomes {
+        return Err(CanwuError::new(
+            ErrorCode::ValueOutOfRange,
+            "resource consumption intent map exceeds max_operation_outcomes",
+        ));
+    }
+    let mut authorized = std::collections::BTreeMap::<
+        crate::ResourceOperationKey,
+        Vec<crate::ResourceConsumptionIntentV1>,
+    >::new();
+    for (map_id, value) in intents {
+        let intent: crate::ResourceConsumptionIntentV1 = serde_json::from_value(value.clone())
+            .map_err(|error| {
+                CanwuError::new(
+                    ErrorCode::InvalidDomainRecord,
+                    format!("resource consumption intent cannot be decoded: {error}"),
+                )
+            })?;
+        intent.validate().map_err(resource_canwu_error)?;
+        if map_id != intent.id.as_str() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidDomainRecord,
+                "resource consumption intent map key differs from its identity",
+            ));
+        }
+        if intent.status == crate::ResourceConsumptionIntentStatusV1::Authorized
+            && intent.provider_plugin == packet.provider_plugin
+        {
+            authorized
+                .entry(intent.operation_key.clone())
+                .or_default()
+                .push(intent);
+        }
+    }
+    for (index, item) in request.items.iter().enumerate() {
+        let key = request.item_operation_key(index);
+        let matching = authorized
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .filter(|intent| {
+                intent.demand == item.demand
+                    && intent.demand_revision == item.demand_revision
+                    && intent.allocation == item.allocation
+                    && intent.account == item.allocation.account
+                    && intent.expected_account_revision == item.expected_account_revision
+                    && intent.consumption_id == item.consumption_id
+                    && intent.quantity == item.allocation.quantity
+            })
+            .count();
+        if matching != 1 {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                format!(
+                    "provider payload does not uniquely authorize consumption batch item {index} (matches={matching})"
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn authoritative_force_consumption(
@@ -3305,6 +3636,7 @@ fn authoritative_typed_consumption(
 const fn request_time(request: &ResourceOperationRequestV1) -> Option<SimTime> {
     match request {
         ResourceOperationRequestV1::Consume(value) => Some(value.at),
+        ResourceOperationRequestV1::ConsumeBatch(value) => Some(value.at),
         ResourceOperationRequestV1::BeginTransfer(value) => Some(value.at),
         ResourceOperationRequestV1::CancelTransfer(value) => Some(value.at),
         ResourceOperationRequestV1::CompleteTransfer(value) => Some(value.at),
@@ -3317,10 +3649,12 @@ const fn request_time(request: &ResourceOperationRequestV1) -> Option<SimTime> {
 
 fn validate_completion_ingress(
     view: &SimulationView<'_>,
-    at: SimTime,
+    context: &BoundaryContext,
     operation: &crate::ResourceCompletionOperationV1,
     state: &crate::ResourceState,
 ) -> Result<(), CanwuError> {
+    let at = context.at;
+    let boundary = context.boundary_id.get();
     match operation {
         crate::ResourceCompletionOperationV1::Acquire(request) => {
             if request.eligibility_time != at {
@@ -3359,10 +3693,10 @@ fn validate_completion_ingress(
             }
         }
         crate::ResourceCompletionOperationV1::Expire(request) => {
-            if request.at != at {
+            if request.at != at || request.current_boundary != boundary {
                 return Err(CanwuError::new(
                     ErrorCode::InvalidAuthority,
-                    "completion expiry must use the canonical boundary simulation time",
+                    "completion expiry must name its settling boundary and that boundary's simulation time",
                 ));
             }
         }
@@ -3466,10 +3800,10 @@ fn validate_completion_ingress(
             )?;
         }
         crate::ResourceCompletionOperationV1::ExpireExternalParticipants(request) => {
-            if request.at != at {
+            if request.at != at || request.current_boundary != boundary {
                 return Err(CanwuError::new(
                     ErrorCode::InvalidAuthority,
-                    "external participant expiry must use canonical boundary time",
+                    "external participant expiry must name its settling boundary and that boundary's simulation time",
                 ));
             }
         }
@@ -3533,6 +3867,13 @@ fn single_step_lease_refusal(
     state: &crate::ResourceState,
 ) -> Result<Option<crate::ResourceError>, CanwuError> {
     let lease = &request.lease;
+    if let Some(refusal) = lease_identity_refusal(
+        view,
+        state,
+        &crate::ResourceCompletionOperationV1::SingleStepLease(request.clone()),
+    )? {
+        return Ok(Some(refusal));
+    }
     if lease.eligibility_time != at {
         return Ok(Some(crate::ResourceError::Authority(
             "single-step completion lease eligibility time must equal its canonical boundary"
@@ -3855,6 +4196,7 @@ fn validate_request_certificate_evidence(
 ) -> Result<(), CanwuError> {
     let certificates = match request {
         ResourceOperationRequestV1::Consume(value) => vec![&value.completion_certificate],
+        ResourceOperationRequestV1::ConsumeBatch(value) => vec![&value.completion_certificate],
         ResourceOperationRequestV1::BeginTransfer(value) => vec![&value.completion_certificate],
         ResourceOperationRequestV1::CompleteTransfer(value) => vec![&value.completion_certificate],
         ResourceOperationRequestV1::Credit(value) => vec![&value.completion_certificate],
@@ -3970,6 +4312,9 @@ fn adapter_source_matches(packet: &ResourceAdapterOperationV1) -> bool {
             } else {
                 value.consumer_evidence == packet.provider_source
             }
+        }
+        ResourceOperationRequestV1::ConsumeBatch(value) => {
+            value.consumer_evidence == packet.provider_source
         }
         ResourceOperationRequestV1::Credit(value) => match &value.source {
             crate::ResourceCreditSourceV1::Production(source)
@@ -4168,6 +4513,7 @@ fn validate_resource_authority(
             .map(|acquisition| acquisition.holder.clone()),
         ResourceOperationRequestV1::Allocate(_)
         | ResourceOperationRequestV1::Consume(_)
+        | ResourceOperationRequestV1::ConsumeBatch(_)
         | ResourceOperationRequestV1::AdvanceTransfer(_)
         | ResourceOperationRequestV1::Credit(_)
         | ResourceOperationRequestV1::RecordObservation(_)
@@ -4271,7 +4617,7 @@ fn validate_resource_activation_records(records: &[DomainRecord]) -> Result<(), 
         record
             .reference
             .kind
-            .matches_type::<crate::ResourceHotTerminalBucketRecord>()
+            .matches_type::<crate::ResourceBucketRecord>()
     });
     match resource_records.first() {
         // The whole root: the live root, every bucket, and the ledger that
@@ -4413,6 +4759,20 @@ pub fn enqueue_resource_completion_operation<H: canwu_api::CanwuRun + ?Sized>(
     operation: &crate::ResourceCompletionOperationV1,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
     reject_invalid_completion_identity(operation)?;
+    // An expiry names the boundary that settles it, which a host cannot know
+    // when it queues the packet: other ingress may open boundaries first, at
+    // the same instant or before it. The expiry tick names no boundary; the
+    // boundary that settles it derives the expiry from its own identity.
+    if matches!(
+        operation,
+        crate::ResourceCompletionOperationV1::Expire(_)
+            | crate::ResourceCompletionOperationV1::ExpireExternalParticipants(_)
+    ) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPayload,
+            "a completion expiry names its settling boundary, which a host cannot know when it queues it; queue enqueue_resource_completion_expiry_tick instead",
+        ));
+    }
     let permit = RESOURCE_COMPLETION_INGRESS_PERMIT.get().ok_or_else(|| {
         CanwuError::new(
             ErrorCode::PluginNotActive,
@@ -4644,7 +5004,7 @@ fn resource_state_key() -> StateKey {
 /// `runtime`).
 #[must_use]
 pub fn resource_hot_terminal_state_key() -> StateKey {
-    DomainRecordSchema::for_record::<crate::ResourceHotTerminalBucketRecord>().state_key()
+    DomainRecordSchema::for_record::<crate::ResourceBucketRecord>().state_key()
 }
 
 fn decode<T: serde::de::DeserializeOwned>(value: &Value, label: &str) -> Result<T, CanwuError> {

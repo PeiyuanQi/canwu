@@ -866,10 +866,15 @@ fn validate_force_observation_source(
                 {
                     false
                 } else {
-                    // Account stock is in the live root.
-                    let resource = record
-                        .decode_payload::<ResourceRuntimeRecord>()?
-                        .into_live();
+                    // Account stock is in the resource account buckets: the
+                    // force holder's accounts, read through the custodian
+                    // index of the current root, which is the cited version.
+                    let mut reader =
+                        canwu_resource::ResourceRootReader::load(view)?.ok_or_else(|| {
+                            invalid("force resource observation source is unavailable")
+                        })?;
+                    reader.attach_custodian_accounts(&force.holder)?;
+                    let resource = reader.into_state();
                     resource.validate().map_err(|error| {
                         invalid(format!(
                             "force resource observation source is invalid: {error}"

@@ -360,6 +360,11 @@ pub fn resource_operation_outcome_by_id<H: canwu_api::CanwuRun + ?Sized>(
 }
 
 /// The completion certificate of a lease. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+///
+/// A lease leaves the root when it finishes (completed, released, expired,
+/// or aborted, with any report it reserved published), so this finds only an
+/// unfinished lease: a finished one's receipts and outcomes are its record,
+/// and its acquisition identity starts no other lease.
 #[must_use]
 pub fn resource_completion_certificate<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &H,
@@ -372,6 +377,11 @@ pub fn resource_completion_certificate<H: canwu_api::CanwuRun + ?Sized>(
 }
 
 /// A completion capacity grant. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+///
+/// A lease leaves the root when it finishes (completed, released, expired,
+/// or aborted, with any report it reserved published), so this finds only an
+/// unfinished lease: a finished one's receipts and outcomes are its record,
+/// and its acquisition identity starts no other lease.
 #[must_use]
 pub fn resource_completion_grant<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &H,
@@ -384,6 +394,11 @@ pub fn resource_completion_grant<H: canwu_api::CanwuRun + ?Sized>(
 }
 
 /// The status of a completion lease acquisition. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+///
+/// A lease leaves the root when it finishes (completed, released, expired,
+/// or aborted, with any report it reserved published), so this finds only an
+/// unfinished lease: a finished one's receipts and outcomes are its record,
+/// and its acquisition identity starts no other lease.
 pub fn resource_completion_status<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &H,
     holder: &KnowledgeHolderRef,

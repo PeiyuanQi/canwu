@@ -1,0 +1,157 @@
+{
+  "benchmark": "resource-root-profile",
+  "cases": [
+    {
+      "archive_commit": {
+        "archived_records": 36,
+        "boundary": {
+          "journal_bytes": 69739,
+          "ms": 0.9504999999999999,
+          "raw_ms": [
+            0.9504999999999999
+          ]
+        }
+      },
+      "batch_of_8": {
+        "journal_bytes": 18386,
+        "ms": 0.5789000000000001,
+        "raw_ms": [
+          0.5789000000000001,
+          0.5962,
+          0.5675
+        ]
+      },
+      "hot_terminal_records": 0,
+      "idle": {
+        "journal_bytes": 794,
+        "ms": 0.0336,
+        "raw_ms": [
+          0.0336,
+          0.0348,
+          0.0335
+        ]
+      },
+      "installed_resource_record_bytes": 2308,
+      "live_accounts": 0,
+      "live_root_bytes": 2315,
+      "operation": {
+        "journal_bytes": 8216,
+        "ms": 0.185,
+        "raw_ms": [
+          0.2044,
+          0.185,
+          0.1783
+        ]
+      }
+    }
+  ],
+  "label": "after-r18-scale",
+  "lease_cases": [],
+  "machine": "local-7800X3D-shared",
+  "mode": "elapsed",
+  "recorded_on": "2026-10-16",
+  "samples": 3,
+  "scale_cases": {
+    "boundary_batch": [
+      {
+        "batch": {
+          "journal_bytes": 431569,
+          "ms": 19.1204,
+          "raw_ms": [
+            19.1204,
+            27.4715,
+            13.6793
+          ]
+        },
+        "hot_terminal_records_added": 194,
+        "items": 32
+      },
+      {
+        "batch": {
+          "journal_bytes": 3263897,
+          "ms": 124.471,
+          "raw_ms": [
+            105.2681,
+            124.471,
+            151.1604
+          ]
+        },
+        "hot_terminal_records_added": 1538,
+        "items": 256
+      }
+    ],
+    "due": [
+      {
+        "demands": 2048,
+        "live_root_bytes_after": 3147904,
+        "pass": {
+          "journal_bytes": 4539199,
+          "ms": 221.41240000000002,
+          "raw_ms": [
+            221.41240000000002,
+            248.0329,
+            125.73110000000001
+          ]
+        }
+      },
+      {
+        "demands": 8192,
+        "live_root_bytes_after": 12635929,
+        "pass": {
+          "journal_bytes": 18186716,
+          "ms": 805.7852,
+          "raw_ms": [
+            1018.632,
+            794.5953,
+            805.7852
+          ]
+        }
+      }
+    ],
+    "pooled": [
+      {
+        "accounts": 8192,
+        "pass": {
+          "journal_bytes": 17592,
+          "ms": 187.4589,
+          "raw_ms": [
+            221.81500000000003,
+            187.4589,
+            159.0302
+          ]
+        }
+      },
+      {
+        "accounts": 16384,
+        "pass": {
+          "journal_bytes": 17602,
+          "ms": 506.6982,
+          "raw_ms": [
+            506.6982,
+            484.9634,
+            533.2327
+          ]
+        }
+      },
+      {
+        "accounts": 65536,
+        "pass": {
+          "journal_bytes": 17604,
+          "ms": 2015.6491999999998,
+          "raw_ms": [
+            1913.8736999999999,
+            2015.6491999999998,
+            2437.5349
+          ]
+        }
+      }
+    ]
+  },
+  "source": {
+    "content_hash": "15a050c0ff92a8b34a3e8b32aa0c7ed6d5fd8b44d86406ffe8be36c0550a88e6",
+    "git_commit": "ee7aa6921fe26319d059b39f2ce6f6bd79735d49",
+    "git_dirty": true,
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.0\nLLVM version: 23.1.1"
+  },
+  "warmup": 1
+}

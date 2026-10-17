@@ -597,6 +597,7 @@ impl PreparedResourceArchiveBatchV1 {
                 validate_resource_terminal_archive_record(record)?;
                 selected_keys.push(record.key.clone());
             }
+            validate_archived_consumption_links(&blob.records)?;
             pages_bind_their_blobs &= !blob.records.is_empty()
                 && blob.records.len() <= MAX_RESOURCE_ARCHIVE_PAGE_ENTRIES
                 && blob.expected_source_root == self.expected_source_root
@@ -896,46 +897,27 @@ impl ResourceState {
         })
     }
 
-    /// Settles one verified archive commit against this root and records its
-    /// maintenance receipt and retention handle.
+    /// Records how one verified archive commit settled against this root:
+    /// its maintenance receipt and retention handle, and, for a commit
+    /// prepared from this root (`applied`), the archive head it moves to.
+    /// The resource plugin has already taken the selected records out of the
+    /// root ([`crate::ResourceRootWork`]); a stale commit changes nothing
+    /// else.
     ///
-    /// A commit prepared from the current root is applied: its records leave
-    /// the root and the archive head moves to its directory. Any other commit
-    /// is stale and changes nothing else. Neither can fail for capacity. An
-    /// applied commit archives at least one candidate before its own receipt
-    /// becomes one, so the candidate budget holds. The receipt of a stale
-    /// commit is not an archive candidate: it stays in the root, outside the
-    /// candidate and receipt budgets, until the host application acknowledges
-    /// the commit's retention ([`Self::acknowledge_archive_retention`]). A
-    /// stale commit therefore always terminates, and a commit queued beside
-    /// it against a full root still applies.
-    pub(crate) fn apply_archive_commit(
+    /// Neither disposition can fail for capacity. An applied commit archives
+    /// at least one candidate before its own receipt becomes one, so the
+    /// candidate budget holds. The receipt of a stale commit is not an
+    /// archive candidate: it stays in the root, outside the candidate and
+    /// receipt budgets, until the host application acknowledges the commit's
+    /// retention ([`Self::acknowledge_archive_retention`]). A stale commit
+    /// therefore always terminates, and a commit queued beside it against a
+    /// full root still applies.
+    pub(crate) fn record_archive_commit(
         &mut self,
         commit: &VerifiedResourceArchiveCommitV1,
+        applied: bool,
     ) -> Result<ResourceArchiveMaintenanceReceiptV1, ResourceError> {
-        commit.validate()?;
-        let disposition = if self.archive_source_root()? == commit.expected_source_root {
-            // One pass over the candidate index for the whole batch, so a
-            // commit of thousands of records stays linear in the candidates.
-            // Every selected record is a hot candidate of this root, and the
-            // resource plugin attaches each before it applies the commit.
-            let archived: BTreeSet<_> = commit.selected.iter().collect();
-            let attached = self
-                .terminal_archive_candidates
-                .values()
-                .filter(|candidate| archived.contains(candidate))
-                .count();
-            if attached != archived.len() || archived.len() != commit.selected.len() {
-                return Err(ResourceError::InvalidDefinition(
-                    "an applied resource archive commit selects a record that is not an attached hot candidate"
-                        .to_owned(),
-                ));
-            }
-            for key in &commit.selected {
-                self.remove_hot_terminal(key)?;
-            }
-            self.terminal_archive_candidates
-                .retain(|_, candidate| !archived.contains(candidate));
+        let disposition = if applied {
             self.archive_head.revision = self
                 .archive_head
                 .revision
@@ -1372,10 +1354,9 @@ impl ResourceState {
     }
 
     /// Archives the attached hot terminal record `key`: takes it out of the
-    /// ledger and the root, with what archiving it does to the live root (the
-    /// last receipt of a finished lease retires the lease). The caller
-    /// removes its candidate entry.
-    fn remove_hot_terminal(
+    /// ledger and the root, with what archiving it does to the live root. The
+    /// caller removes its candidate entry.
+    pub(crate) fn remove_hot_terminal(
         &mut self,
         key: &ResourceTerminalRecordKeyV1,
     ) -> Result<(), ResourceError> {
@@ -1418,60 +1399,10 @@ impl ResourceState {
                     .terminal_grants
                     .remove(acquisition);
             }
+            // A finished lease leaves the root when it finishes
+            // (`ResourceState::retire_finished_leases`), not with its receipts.
             ResourceTerminalRecordKeyV1::LeaseReceipt(sequence) => {
-                let removed = self.completion_leases.receipts.remove(sequence);
-                if let Some(receipt) = removed
-                    && matches!(
-                        receipt.action,
-                        crate::CompletionLeaseReceiptActionV1::Completed
-                            | crate::CompletionLeaseReceiptActionV1::Released
-                            | crate::CompletionLeaseReceiptActionV1::Expired
-                            | crate::CompletionLeaseReceiptActionV1::Aborted
-                    )
-                    // Every receipt is a hot terminal record, attached or
-                    // not, so the ledger knows whether another remains.
-                    && !self
-                        .hot_terminal
-                        .lease_receipt_acquisitions
-                        .contains_key(&receipt.acquisition)
-                    && self
-                        .completion_leases
-                        .acquisitions
-                        .get(&receipt.acquisition)
-                        .is_some_and(|acquisition| {
-                            matches!(
-                                acquisition.state,
-                                crate::CompletionLeaseAcquisitionStateV1::Released
-                                    | crate::CompletionLeaseAcquisitionStateV1::Expired
-                            )
-                        })
-                {
-                    let grant_ids = self
-                        .completion_leases
-                        .acquisitions
-                        .get(&receipt.acquisition)
-                        .map(|acquisition| acquisition.grants.values().cloned().collect::<Vec<_>>())
-                        .unwrap_or_default();
-                    for grant_id in grant_ids {
-                        if let Some(grant) = self.completion_leases.grants.remove(&grant_id) {
-                            for target in grant.target_versions {
-                                self.completion_leases.target_locks.remove(&target);
-                            }
-                        }
-                        for grants in self.completion_leases.expiry_due.values_mut() {
-                            grants.remove(&grant_id);
-                        }
-                    }
-                    self.completion_leases
-                        .expiry_due
-                        .retain(|_, grants| !grants.is_empty());
-                    self.completion_leases
-                        .certificates
-                        .remove(&receipt.acquisition);
-                    self.completion_leases
-                        .acquisitions
-                        .remove(&receipt.acquisition);
-                }
+                self.completion_leases.receipts.remove(sequence);
             }
             ResourceTerminalRecordKeyV1::ArchiveMaintenanceReceipt(sequence) => {
                 self.archive_maintenance_receipts.remove(sequence);
@@ -1544,6 +1475,7 @@ fn authenticate_resource_archive_directory_closure(
             ));
         }
         source_root.get_or_insert_with(|| blob.expected_source_root.clone());
+        validate_archived_consumption_links(&blob.records)?;
         for (ordinal, record) in blob.records.iter().enumerate() {
             validate_resource_terminal_archive_record(record)?;
             let ordinal = u16::try_from(ordinal).map_err(|_| ResourceError::Overflow)?;
@@ -2204,6 +2136,33 @@ pub fn collect_resource_archive_lookup_pages(
             complete,
             pages,
         )?;
+    }
+    Ok(())
+}
+
+/// Checks, within one archive blob, that every consumption whose
+/// fulfillment the blob also holds names the fulfillment it recorded
+/// ([`crate::consumption_names_its_fulfillment`]).
+fn validate_archived_consumption_links(
+    records: &[ResourceTerminalArchiveRecordV1],
+) -> Result<(), ResourceError> {
+    let fulfillments: BTreeMap<_, _> = records
+        .iter()
+        .filter_map(|record| match &record.payload {
+            ResourceTerminalArchivePayloadV1::Fulfillment(value) => Some((&value.id, value)),
+            _ => None,
+        })
+        .collect();
+    for record in records {
+        if let ResourceTerminalArchivePayloadV1::Consumption(consumption) = &record.payload
+            && let Some(fulfillment) = fulfillments.get(&consumption.fulfillment)
+            && !crate::consumption_names_its_fulfillment(consumption, fulfillment)
+        {
+            return Err(ResourceError::InvalidDefinition(
+                "archived resource consumption names a fulfillment of another consumption"
+                    .to_owned(),
+            ));
+        }
     }
     Ok(())
 }

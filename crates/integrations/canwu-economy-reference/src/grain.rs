@@ -700,11 +700,16 @@ impl GrainHarness {
                 EntityRef::Person(PersonId::new(4)),
             ],
         )
-        .with_domain_records(vec![
-            resources.into_record()?,
-            economy_state.into_initial_record()?,
-            force_state.into_initial_record()?,
-        ]);
+        .with_domain_records(
+            resources
+                .into_records()?
+                .into_iter()
+                .chain([
+                    economy_state.into_initial_record()?,
+                    force_state.into_initial_record()?,
+                ])
+                .collect(),
+        );
         let mut canwu = new_canwu(0x0047_5241_494e, scenario)?;
         let archive_store = Arc::new(GrainArchiveStore::default());
         canwu.set_plugin_archive_object_provider(archive_store.clone());

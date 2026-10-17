@@ -1,10 +1,15 @@
-//! The resource root persists as its live root and one record per hot
-//! terminal bucket, and a boundary writes what it changes.
+//! The resource root persists as its live root, one record per hot terminal
+//! bucket, and one per live bucket of accounts, grants, definitions, and
+//! units, and a boundary writes what it changes.
 //!
 //! The first fixture settles the same operation against a root without hot
-//! terminal records and against one with a backlog of several hundred: the
-//! boundary writes the live root and the one bucket the new outcome lands in,
-//! and its journal grows by the same few kilobytes whatever the backlog.
+//! terminal records or other accounts and against one with a backlog of
+//! several hundred and a thousand accounts of other custodians: the boundary
+//! writes the live root and the one bucket the new outcome lands in, and its
+//! journal grows by the same few kilobytes whatever the backlog and the
+//! accounts. An account's creation writes its own live bucket and its
+//! custodian's index, and an archive commit of the backlog rewrites each hot
+//! bucket it empties once.
 //!
 //! The second settles operations of several kinds (outcomes, and the closure
 //! of a cancelled demand), archives part of the backlog in a commit that
@@ -18,7 +23,8 @@
 //! canonical encoding are refused when the root is installed.
 
 use canwu_api::{
-    BoundaryRequest, Canwu, CompactedCanwu, DomainRecord, EntityRef, IngressClass,
+    BoundaryRequest, Canwu, CommandAttemptOutcome, CommandEnvelope, CommandRequest,
+    CommandRequestId, CompactedCanwu, DomainRecord, EntityRef, IngressClass, Issuer,
     KnowledgeHolderRef, PayloadSchema, PersonId, PluginIngressDescriptor, PluginIngressRequest,
     PluginRegistrar, Scenario, SimDuration, SimTime, SimulationPlugin,
 };
@@ -321,9 +327,29 @@ fn measured_boundary(canwu: &mut Canwu) -> (BTreeSet<String>, usize) {
     (written, journal)
 }
 
+fn hot_bucket(key: &ResourceTerminalRecordKeyV1, limits: &ResourceLimitsV1) -> String {
+    resource_hot_terminal_bucket_reference(resource_hot_terminal_bucket(
+        key,
+        resource_hot_terminal_bucket_count(limits),
+    ))
+    .into_untyped()
+    .to_string()
+}
+
+fn live_bucket(key: &ResourceLiveRecordKeyV1, limits: &ResourceLimitsV1) -> String {
+    resource_live_bucket_reference(resource_live_bucket(
+        key,
+        resource_live_bucket_count(limits),
+    ))
+    .into_untyped()
+    .to_string()
+}
+
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_boundary_writes_the_live_root_and_the_buckets_it_changes_whatever_the_backlog() {
     const BACKLOG: usize = 600;
+    const ACCOUNTS: usize = 1_000;
     let mut limits = ResourceLimitsV1::canonical();
     limits.max_archive_candidates = 1_024;
     limits.max_archive_maintenance_receipts = 1_024;
@@ -331,33 +357,56 @@ fn a_boundary_writes_the_live_root_and_the_buckets_it_changes_whatever_the_backl
     let plugin = ResourcePlugin::default();
     let plugins: [&dyn SimulationPlugin; 2] = [&tick, &plugin];
     let mut measured = Vec::new();
-    for backlog in [0, BACKLOG] {
+    for (backlog, accounts) in [(0, 0), (BACKLOG, ACCOUNTS)] {
         let mut state = world(limits);
+        for index in 0..accounts {
+            state
+                .install_opening_account(ResourceAccount {
+                    id: account(&format!("world:{index}")),
+                    revision: ResourceRevision::INITIAL,
+                    custodian: KnowledgeHolderRef::Person(PersonId::new(index as u64 + 2)),
+                    resource_revision: resource(),
+                    unit_revision: unit(),
+                    balance: 7,
+                    capacity: None,
+                    protected_floor_policy: None,
+                    closed: false,
+                    place_scope: None,
+                })
+                .expect("account");
+        }
         for index in 0..backlog {
             reject(&mut state, "backlog", index);
         }
         assert_eq!(state.hot_terminal_records(), backlog);
         let records = state.into_records().expect("the root persists");
-        // The live root and one record per bucket that holds an entry: a
-        // root of 1,024 candidates has 1,024 buckets.
-        assert!(records.len() <= 1 + backlog.min(1_024));
+        // One record per hot bucket that holds an entry: a budget of 1,024
+        // candidates has 512 buckets, about two records each.
+        assert_eq!(resource_hot_terminal_bucket_count(&limits), 512);
+        let hot_buckets = records
+            .iter()
+            .filter(|record| record.reference.id.starts_with("resource:hot-terminal:"))
+            .count();
+        assert!(
+            hot_buckets <= backlog.min(resource_hot_terminal_bucket_count(&limits) as usize),
+            "{hot_buckets} hot buckets"
+        );
         let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
             .with_domain_records(records);
         let mut canwu = Canwu::new_with_plugins(7, scenario, &plugins).expect("runtime");
+        let archive = MemoryArchive::default();
+        canwu.set_plugin_archive_object_provider(Arc::new(archive.clone()));
 
         enqueue_pass(&mut canwu, "fixture:pass:measured");
         let (written, journal) = measured_boundary(&mut canwu);
-        let bucket = resource_hot_terminal_bucket(
-            &ResourceTerminalRecordKeyV1::Outcome(key("fixture:pass:measured")),
-            resource_hot_terminal_bucket_count(&limits),
-        );
         assert_eq!(
             written,
             BTreeSet::from([
                 resource_runtime_reference().into_untyped().to_string(),
-                resource_hot_terminal_bucket_reference(bucket)
-                    .into_untyped()
-                    .to_string(),
+                hot_bucket(
+                    &ResourceTerminalRecordKeyV1::Outcome(key("fixture:pass:measured")),
+                    &limits
+                ),
             ]),
             "the boundary writes the live root and the new outcome's bucket"
         );
@@ -365,6 +414,7 @@ fn a_boundary_writes_the_live_root_and_the_buckets_it_changes_whatever_the_backl
             .expect("resource query")
             .expect("resource root");
         assert_eq!(root.hot_terminal_records(), backlog + 1);
+        assert_eq!(root.account_count(), accounts + 2);
         assert!(root.outcomes.contains_key(&key("fixture:pass:measured")));
 
         // A boundary with nothing due for the resource plugin writes nothing
@@ -380,12 +430,104 @@ fn a_boundary_writes_the_live_root_and_the_buckets_it_changes_whatever_the_backl
         let (idle_written, _) = measured_boundary(&mut canwu);
         assert!(idle_written.is_empty());
         measured.push(journal);
+
+        // Creating an account writes its own live bucket and its custodian's
+        // index, beside the live root and the outcome's bucket.
+        let created = account("created");
+        let at = canwu.time();
+        canwu
+            .enqueue_command(
+                at,
+                0,
+                CommandRequest::new(
+                    CommandRequestId::new(1),
+                    canwu.revision(),
+                    CommandEnvelope::new(
+                        Issuer::Actor(PersonId::new(CUSTODIAN)),
+                        resource_command(&ResourceCommandV1 {
+                            subject: holder(),
+                            request: ResourceOperationRequestV1::CreateAccount(
+                                ResourceCreateAccountRequestV1 {
+                                    operation_key: key("fixture:create"),
+                                    account: ResourceAccount {
+                                        id: created.clone(),
+                                        revision: ResourceRevision::INITIAL,
+                                        custodian: holder(),
+                                        resource_revision: resource(),
+                                        unit_revision: unit(),
+                                        balance: 0,
+                                        capacity: None,
+                                        protected_floor_policy: None,
+                                        closed: false,
+                                        place_scope: None,
+                                    },
+                                },
+                            ),
+                        })
+                        .expect("command"),
+                    )
+                    .at_time(at),
+                ),
+            )
+            .expect("tracked command");
+        canwu
+            .settle_boundary(BoundaryRequest::at(at))
+            .expect("admission");
+        assert!(matches!(
+            canwu.command_attempts().last().expect("attempt").outcome,
+            CommandAttemptOutcome::Accepted { .. }
+        ));
+        let (written, _) = measured_boundary(&mut canwu);
+        let expected = BTreeSet::from([
+            resource_runtime_reference().into_untyped().to_string(),
+            hot_bucket(
+                &ResourceTerminalRecordKeyV1::Outcome(key("fixture:create")),
+                &limits,
+            ),
+            live_bucket(&ResourceLiveRecordKeyV1::Account(created.clone()), &limits),
+            live_bucket(&ResourceLiveRecordKeyV1::Custodian(holder()), &limits),
+        ]);
+        assert_eq!(written, expected);
+        let (_, root) = resource_state(&canwu)
+            .expect("resource query")
+            .expect("resource root");
+        assert!(root.custodian_accounts[&holder()].contains(&created));
+
+        // An archive commit of every hot record rewrites each hot bucket it
+        // empties once: one write per stored bucket, not one per record.
+        let candidates = root.terminal_archive_candidates.len();
+        let stored_hot_buckets = resource_records(&canwu)
+            .keys()
+            .filter(|reference| reference.contains("resource:hot-terminal:"))
+            .count();
+        let prepared = root
+            .prepare_resource_archive(candidates, &archive)
+            .expect("prepare");
+        enqueue_resource_archive(&mut canwu, &prepared, &archive).expect("commit");
+        let (written, _) = measured_boundary(&mut canwu);
+        let hot_written = written
+            .iter()
+            .filter(|reference| reference.contains("resource:hot-terminal:"))
+            .count();
+        assert!(
+            // Its own receipt may land in a bucket that held nothing.
+            hot_written <= stored_hot_buckets + 1 && (backlog == 0 || hot_written < candidates),
+            "{hot_written} hot buckets written for {candidates} archived records in {stored_hot_buckets} buckets"
+        );
+        let (_, root) = resource_state(&canwu)
+            .expect("resource query")
+            .expect("resource root");
+        assert_eq!(root.archive_head.archived_record_count, candidates as u64);
+        assert_eq!(root.hot_terminal_records(), 1, "the commit's own receipt");
+        assert!(root.outcomes.is_empty());
     }
-    // Without the split, each hot record added about 1.1 KB to the journal of
-    // every boundary that wrote the root: some 660 KB here.
+    // Without the split each hot record, and each account, added a few
+    // hundred bytes to the journal of every boundary that wrote the root:
+    // some 1.2 MB here. What remains is the outcome's bucket, which shares
+    // it with about five records of the backlog.
     assert!(
-        measured[1].abs_diff(measured[0]) < 4_096,
-        "journal bytes of one operation boundary: {} without a backlog, {} with {BACKLOG} hot records",
+        measured[1].abs_diff(measured[0]) < 16_384,
+        "journal bytes of one operation boundary: {} without a backlog, {} with {BACKLOG} hot records and {ACCOUNTS} accounts",
         measured[0],
         measured[1]
     );

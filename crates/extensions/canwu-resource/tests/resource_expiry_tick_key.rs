@@ -1,17 +1,20 @@
-//! An expiry tick settles its expiries under keys that name the instant and
-//! the boundary, which a host application's completion operation can take
-//! first.
+//! A completion expiry names the boundary that settles it.
 //!
-//! A host queues `Expire` for the next boundary, and a grant then falls due
-//! at that boundary. The expiry tick the grant scheduled settles there and
-//! finds the key taken: by the same expiry (a resend, which settles nothing)
-//! or by an expiry of another candidate limit (skipped with an event naming
-//! the key). Neither fails the boundary or writes over the host's outcome,
-//! the whole root stays readable, and the tick, scheduled again, expires the
-//! grant at the next boundary under that boundary's key.
+//! A host application cannot know which boundary will admit a packet it
+//! queues, so `enqueue_resource_completion_operation` refuses an `Expire`
+//! and an `ExpireExternalParticipants` from it, whatever boundary they name:
+//! the expiry tick, which names no boundary, is the host's way to expire
+//! grants. An expiry another plugin schedules is checked when it settles: one
+//! that names a later boundary than the one settling it would expire grants
+//! early, so it settles nothing, with an event, and the grant expires on time
+//! through the tick.
 
 use canwu_api::{
-    BoundaryRequest, Canwu, EntityRef, KnowledgeHolderRef, PersonId, Scenario, SimEvent, SimTime,
+    BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundaryRequest,
+    BoundarySystemContract, Canwu, CanwuError, EntityRef, IngressClass, IngressPayload,
+    KnowledgeHolderRef, PayloadSchema, PersonId, PluginIngressDescriptor, PluginIngressRequest,
+    PluginIngressTarget, PluginRegistrar, Scenario, SimDuration, SimEvent, SimTime,
+    SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence,
 };
 use canwu_resource::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -164,88 +167,191 @@ fn last_boundary(canwu: &Canwu) -> u64 {
         .map_or(0, |boundary| boundary.id.get())
 }
 
-#[test]
-fn an_expiry_tick_whose_key_a_host_expiry_took_settles_nothing_and_expires_at_the_next_boundary() {
-    for host_limit in [7, 1_024] {
-        let plugin = ResourcePlugin::default();
-        let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
-            .with_domain_records(world().into_records().expect("the root persists"));
-        let mut canwu = Canwu::new_with_plugins(21, scenario, &[&plugin]).expect("runtime");
-        while last_boundary(&canwu) < 8 {
-            settle(&mut canwu);
-        }
-        let at = canwu.time();
-        let next = last_boundary(&canwu) + 1;
-        let taken = next + 1;
+const EXPIRY_PLUGIN: &str = "fixture-expiry";
+const EXPIRY_INGRESS: &str = "fixture_expiry_v1";
 
-        // At the next boundary, the host's expiry for the one after it,
-        // which finds nothing due and records its outcome under that
-        // boundary's key, then a grant that falls due there.
-        let host_expiry = ResourceCompletionOperationV1::Expire(ExpireCompletionCapacityV1 {
-            at,
-            current_boundary: taken,
-            candidate_limit: host_limit,
+/// Schedules, for each of its packets, one resource completion expiry that
+/// names the boundary the packet gives.
+struct ExpiryPlugin;
+
+impl SimulationPlugin for ExpiryPlugin {
+    fn name(&self) -> &'static str {
+        EXPIRY_PLUGIN
+    }
+
+    fn version(&self) -> &'static str {
+        "1"
+    }
+
+    fn semantic_hash(&self) -> &'static str {
+        "00000000000000000000000000000000000000000000000000000000000000f7"
+    }
+
+    fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+        registrar.register_ingress(PluginIngressDescriptor {
+            name: EXPIRY_INGRESS.to_owned(),
+            description: "Schedule one resource completion expiry".to_owned(),
+            class: IngressClass::Information,
+            payload_schema: PayloadSchema::Any,
+        })?;
+        let mut contract = BoundarySystemContract::new(
+            "schedule-fixture-expiry-v1",
+            BoundaryPhase::DomainDeltaProposal,
+            SystemCadence::EventDriven,
+        );
+        contract.reads = vec![StateKey::core_ingress()];
+        contract.plugin_ingress_targets = vec![PluginIngressTarget {
+            target_plugin: PLUGIN_NAME.to_owned(),
+            packet_type: RESOURCE_COMPLETION_INGRESS.to_owned(),
+        }];
+        contract.visibility = StateVisibility::SameBoundary;
+        registrar.register_boundary_system(contract, schedule_expiry)
+    }
+}
+
+fn schedule_expiry(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+) -> Result<BoundaryProposal, CanwuError> {
+    let mut directives = Vec::new();
+    for ingress in &context.admitted_ingress {
+        let Some(IngressPayload::Plugin {
+            plugin,
+            packet_type,
+            payload,
+            ..
+        }) = view.ingress(*ingress)?.map(|ingress| &ingress.payload)
+        else {
+            continue;
+        };
+        if plugin != EXPIRY_PLUGIN || packet_type != EXPIRY_INGRESS {
+            continue;
+        }
+        let expiry = ResourceCompletionOperationV1::Expire(ExpireCompletionCapacityV1 {
+            at: context.at,
+            current_boundary: payload["current_boundary"].as_u64().expect("boundary"),
+            candidate_limit: 1_024,
         });
-        enqueue_resource_completion_operation(&mut canwu, at, &host_expiry).expect("host expiry");
-        let revision = state(&canwu).completion_leases.acquisitions[&acquisition()].revision;
-        enqueue_resource_completion_operation(
+        directives.push(BoundaryDirective::SchedulePluginIngress {
+            target_plugin: PLUGIN_NAME.to_owned(),
+            after: SimDuration::ZERO,
+            packet_type: RESOURCE_COMPLETION_INGRESS.to_owned(),
+            priority: 0,
+            payload: serde_json::to_value(&expiry).expect("expiry"),
+            affected: Vec::new(),
+        });
+    }
+    Ok(BoundaryProposal {
+        directives,
+        ..BoundaryProposal::default()
+    })
+}
+
+fn grant_state(canwu: &Canwu) -> CompletionGrantStateV1 {
+    state(canwu).completion_leases.grants
+        [&CompletionCapacityGrantId::new("fixture:grant:expiring").expect("grant")]
+        .state
+}
+
+#[test]
+fn a_completion_expiry_names_its_settling_boundary_or_settles_nothing() {
+    let resource = ResourcePlugin::default();
+    let plugins: [&dyn SimulationPlugin; 2] = [&resource, &ExpiryPlugin];
+    let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
+        .with_domain_records(world().into_records().expect("the root persists"));
+    let mut canwu = Canwu::new_with_plugins(21, scenario, &plugins).expect("runtime");
+    while last_boundary(&canwu) < 8 {
+        settle(&mut canwu);
+    }
+    let at = canwu.time();
+    let next = last_boundary(&canwu) + 1;
+    let due = next + 2;
+
+    // The host's expiry is refused whatever boundary it names: the host
+    // cannot know which boundary admits it.
+    for current_boundary in [next, due] {
+        let refused = enqueue_resource_completion_operation(
             &mut canwu,
             at,
-            &ResourceCompletionOperationV1::Grant(GrantCompletionCapacityV1 {
-                grant_id: CompletionCapacityGrantId::new("fixture:grant:expiring").expect("grant"),
-                acquisition: acquisition(),
-                expected_acquisition_revision: revision,
-                owner_plugin: PLUGIN_NAME.to_owned(),
-                target_versions: vec![CompletionLockedTargetV1::Account {
-                    id: account(),
-                    revision: ResourceRevision::INITIAL,
-                }],
-                current_boundary: taken - PREACTIVATION_LEASE_TTL_BOUNDARIES,
+            &ResourceCompletionOperationV1::Expire(ExpireCompletionCapacityV1 {
+                at,
+                current_boundary,
+                candidate_limit: 1_024,
             }),
         )
-        .expect("grant");
-        assert!(settle(&mut canwu).is_empty());
-        assert_eq!(last_boundary(&canwu), next);
-        let host_outcome = state(&canwu).outcomes[&host_expiry.operation_key()].clone();
+        .expect_err("a host expiry is refused at enqueue");
         assert!(
-            state(&canwu)
-                .completion_leases
-                .expiry_due
-                .range(..=taken)
-                .any(|(_, grants)| !grants.is_empty()),
-            "the grant falls due at the boundary whose key the host took"
-        );
-
-        // The grant scheduled an expiry tick, which settles at that boundary
-        // and finds the key taken: a different expiry is skipped with an
-        // event, the same expiry is a resend. Neither writes over the host's
-        // outcome.
-        let skipped = settle(&mut canwu);
-        assert_eq!(last_boundary(&canwu), taken);
-        if host_limit == 1_024 {
-            assert!(skipped.is_empty(), "the same expiry is a resend");
-        } else {
-            assert_eq!(skipped.len(), 1, "{skipped:?}");
-            assert_eq!(
-                skipped[0].reason,
-                ResourceIngressSkipReasonV1::OperationKeyTaken
-            );
-            assert_eq!(skipped[0].operation_key, Some(host_expiry.operation_key()));
-        }
-        let root = state(&canwu);
-        assert_eq!(root.outcomes[&host_expiry.operation_key()], host_outcome);
-        assert!(!root.completion_leases.expiry_due.is_empty());
-
-        // The tick is scheduled again, and the next boundary's key is free:
-        // the grant expires.
-        assert!(canwu.step_canonical().expect("the tick settles").is_some());
-        let root = state(&canwu);
-        assert!(root.completion_leases.expiry_due.is_empty());
-        assert_eq!(
-            root.completion_leases.grants
-                [&CompletionCapacityGrantId::new("fixture:grant:expiring").expect("grant")]
-                .state,
-            CompletionGrantStateV1::Expired
+            refused
+                .message
+                .contains("enqueue_resource_completion_expiry_tick"),
+            "{refused:?}"
         );
     }
+
+    // A grant that falls due at `due`, and a plugin expiry, scheduled at
+    // `next`, that settles at the boundary after it but names `due`.
+    let revision = state(&canwu).completion_leases.acquisitions[&acquisition()].revision;
+    enqueue_resource_completion_operation(
+        &mut canwu,
+        at,
+        &ResourceCompletionOperationV1::Grant(GrantCompletionCapacityV1 {
+            grant_id: CompletionCapacityGrantId::new("fixture:grant:expiring").expect("grant"),
+            acquisition: acquisition(),
+            expected_acquisition_revision: revision,
+            owner_plugin: PLUGIN_NAME.to_owned(),
+            target_versions: vec![CompletionLockedTargetV1::Account {
+                id: account(),
+                revision: ResourceRevision::INITIAL,
+            }],
+            current_boundary: due - PREACTIVATION_LEASE_TTL_BOUNDARIES,
+        }),
+    )
+    .expect("grant");
+    canwu
+        .enqueue_plugin_ingress(PluginIngressRequest::new(
+            EXPIRY_PLUGIN,
+            EXPIRY_INGRESS,
+            at,
+            serde_json::json!({ "current_boundary": due }),
+        ))
+        .expect("fixture expiry");
+    assert!(settle(&mut canwu).is_empty());
+    assert_eq!(last_boundary(&canwu), next);
+    assert_eq!(grant_state(&canwu), CompletionGrantStateV1::Held);
+
+    // The plugin's expiry names a later boundary than the one settling it:
+    // it settles nothing, with an event, and expires nothing early.
+    let skipped = settle(&mut canwu);
+    assert_eq!(last_boundary(&canwu), next + 1);
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(
+        skipped[0].reason,
+        ResourceIngressSkipReasonV1::FailedSettlementChecks
+    );
+    assert_eq!(grant_state(&canwu), CompletionGrantStateV1::Held);
+    let skipped_key = format!("resource:completion:expire:{}:{due}", at.as_minutes());
+    assert!(
+        !state(&canwu)
+            .outcomes
+            .keys()
+            .any(|key| key.as_str() == skipped_key),
+        "the skipped expiry took no key"
+    );
+
+    // The grant's own expiry tick expires it on time, under its boundary's
+    // key, and the expired lease leaves the root.
+    while last_boundary(&canwu) < due {
+        settle(&mut canwu);
+    }
+    let root = state(&canwu);
+    let expiry = &root.outcomes[&ResourceOperationKey::new(skipped_key).expect("key")];
+    assert_eq!(expiry.status, ResourceOperationStatus::Applied);
+    assert!(root.completion_leases.expiry_due.is_empty());
+    assert!(
+        !root
+            .completion_leases
+            .acquisitions
+            .contains_key(&acquisition())
+    );
+    assert!(root.completion_leases.grants.is_empty());
 }

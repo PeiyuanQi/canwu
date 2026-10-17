@@ -182,16 +182,7 @@ fn drive(run: &mut impl Host, archive: &MemoryArchive) -> Vec<BoundaryReceipt> {
     assert_eq!(state(run).archive_head.revision, 1);
 
     let at = run.time();
-    enqueue_resource_completion_operation(
-        run,
-        at,
-        &ResourceCompletionOperationV1::Expire(ExpireCompletionCapacityV1 {
-            at,
-            current_boundary: 0,
-            candidate_limit: 1,
-        }),
-    )
-    .expect("completion operation enqueues");
+    enqueue_resource_completion_expiry_tick(run, at).expect("completion expiry tick enqueues");
     step(run, &mut receipts);
 
     // A re-sent archived operation is a no-op, decided from the archive.
@@ -248,19 +239,11 @@ fn a_continuation_restored_resource_run_continues_in_lockstep() {
     finalize_resource_archive_retention(&mut full, &archive, &receipt).expect("retention");
     step(&mut full, &mut full_receipts);
 
-    // A completion operation is queued for a later instant, so it is pending
-    // at the cut.
+    // A completion expiry tick is queued for a later instant, so it is
+    // pending at the cut.
     let at = full.time() + SimDuration::minutes(5);
-    enqueue_resource_completion_operation(
-        &mut full,
-        at,
-        &ResourceCompletionOperationV1::Expire(ExpireCompletionCapacityV1 {
-            at,
-            current_boundary: 0,
-            candidate_limit: 1,
-        }),
-    )
-    .expect("completion operation enqueues");
+    enqueue_resource_completion_expiry_tick(&mut full, at)
+        .expect("completion expiry tick enqueues");
     let (checkpoint, hash) = full
         .continuation_checkpoint()
         .expect("the continuation checkpoint builds");

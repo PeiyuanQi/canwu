@@ -779,16 +779,7 @@ fn a_run_citing_initial_scenario_evidence_seals_before_its_first_boundary() {
         &[&ProviderFixture("test-provider"), &plugin],
     )
     .expect("resource runtime");
-    enqueue_resource_completion_operation(
-        &mut unsealed,
-        SimTime::EPOCH,
-        &ResourceCompletionOperationV1::Expire(ExpireCompletionCapacityV1 {
-            at: SimTime::EPOCH,
-            current_boundary: 0,
-            candidate_limit: 1,
-        }),
-    )
-    .expect("expiry ingress");
+    enqueue_resource_completion_expiry_tick(&mut unsealed, SimTime::EPOCH).expect("expiry ingress");
     let mut sealed = unsealed.fork().into_compacted().expect("compact interface");
     sealed
         .seal_evidence()
@@ -1320,16 +1311,8 @@ fn named_terminal_report_reservation_publishes_the_last_real_hot_slot() {
         ],
     )
     .expect("resource runtime");
-    enqueue_resource_completion_operation(
-        &mut canwu,
-        SimTime::EPOCH,
-        &ResourceCompletionOperationV1::Expire(ExpireCompletionCapacityV1 {
-            at: SimTime::EPOCH,
-            current_boundary: 0,
-            candidate_limit: 1,
-        }),
-    )
-    .expect("initial report wake boundary");
+    enqueue_resource_completion_expiry_tick(&mut canwu, SimTime::EPOCH)
+        .expect("initial report wake boundary");
     for minute in 0..32 {
         canwu
             .settle_boundary(BoundaryRequest::at(
@@ -2956,12 +2939,22 @@ fn canonical_completion_ingress_persists_holder_status_and_abort() {
     canwu
         .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
         .expect("abort boundary");
-    assert_eq!(
-        resource_completion_status(&canwu, &holder(1), &acquisition)
-            .expect("released status")
-            .state,
-        CompletionLeaseAcquisitionStateV1::Released
+    // The aborted lease is released and leaves the root; its receipt stays.
+    assert!(resource_completion_status(&canwu, &holder(1), &acquisition).is_err());
+    let (_, state) = resource_state(&canwu)
+        .expect("query")
+        .expect("resource state");
+    assert!(
+        !state
+            .completion_leases
+            .acquisitions
+            .contains_key(&acquisition)
     );
+    assert!(state.completion_leases.receipts.values().any(|receipt| {
+        receipt.acquisition == acquisition
+            && receipt.action == CompletionLeaseReceiptActionV1::Aborted
+            && receipt.state == CompletionLeaseAcquisitionStateV1::Released
+    }));
     let snapshot = canwu.snapshot_json().expect("snapshot");
     from_resource_snapshot_json(&snapshot, &[&plugin]).expect("completion restart");
 }
@@ -3028,10 +3021,17 @@ fn completion_grant_expires_without_coordinator_follow_up() {
             .expect("autonomous expiry tick");
     }
     let (_, state) = resource_state(&canwu).expect("query").expect("state");
-    assert_eq!(
-        state.completion_leases.acquisitions[&acquisition].state,
-        CompletionLeaseAcquisitionStateV1::Expired
+    // The expired lease leaves the root; its receipt records the expiry.
+    assert!(
+        !state
+            .completion_leases
+            .acquisitions
+            .contains_key(&acquisition)
     );
+    assert!(state.completion_leases.receipts.values().any(|receipt| {
+        receipt.action == CompletionLeaseReceiptActionV1::Expired
+            && receipt.state == CompletionLeaseAcquisitionStateV1::Expired
+    }));
     assert_eq!(state.completion_leases.reserved_units, 0);
     assert!(state.completion_leases.target_locks.is_empty());
 }

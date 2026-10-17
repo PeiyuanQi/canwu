@@ -1,48 +1,78 @@
-//! How the resource root is persisted: one live-root record and the hot
-//! terminal records in buckets of their own.
+//! How the resource root is persisted: one live-root record, the hot terminal
+//! records in buckets of their own, and the live records that grow with the
+//! world (accounts, access grants, resource definitions, and unit revisions)
+//! in live buckets.
 //!
 //! The resource root is one [`ResourceState`]. It persists as
 //!
 //! - the **live root**, the domain record `resource:runtime:v1`: every part of
 //!   the state except the bodies of its hot terminal records (its archive
-//!   candidates) and their candidate index, plus a
-//!   [`ResourceHotTerminalLedgerV1`] that counts them; and
+//!   candidates) and their candidate index, and except its accounts, access
+//!   grants, definitions, and unit revisions, plus a
+//!   [`ResourceHotTerminalLedgerV1`] and a [`ResourceLiveLedgerV1`] that count
+//!   them;
 //! - the **hot terminal buckets**, domain records
 //!   `resource:hot-terminal:{bucket}`: each hot terminal record, with its
 //!   terminal sequence, in the bucket its identity hashes to
-//!   ([`resource_hot_terminal_bucket`]).
+//!   ([`resource_hot_terminal_bucket`]); and
+//! - the **live buckets**, domain records `resource:live:{bucket}`: each
+//!   account, access grant, definition, and unit revision in the bucket its
+//!   identity hashes to ([`resource_live_bucket`]).
 //!
-//! A hot terminal record adds nothing to the live root but its counts in the
+//! Both kinds of bucket are records of one kind, `canwu.resource` `bucket`
+//! ([`ResourceBucketRecord`]), so a reader declares one state key for both
+//! ([`crate::resource_hot_terminal_state_key`]).
+//!
+//! A bucketed record adds nothing to the live root but its counts in a
 //! ledger, so a boundary that settles an operation decodes, validates,
-//! re-encodes, and journals the live root and the buckets of the terminal
-//! records it reads or writes, not the whole backlog. The split is a function of the state: the same state
-//! always persists as the same records ([`ResourceState::into_records`]), and
-//! [`ResourceState::from_records`] restores it.
+//! re-encodes, and journals the live root and the buckets of the records it
+//! reads or writes, not the whole backlog or the whole world. The split is a
+//! function of the state: the same state always persists as the same records
+//! ([`ResourceState::into_records`]), and [`ResourceState::from_records`]
+//! restores it.
 //!
 //! In a boundary the resource plugin works on a *partial* state: the live root
-//! with only the hot terminal records it reads attached. Every rule that
-//! counts or aggregates hot terminal records reads the ledger, so a partial
-//! state settles every operation exactly as the whole state would, as long as
-//! the records an operation reads by identity are attached. The plugin
-//! attaches every hot terminal record a packet names, and every record those
-//! name in turn, before it settles the packet.
+//! with only the bucketed records it reads attached. Every rule that counts or
+//! aggregates bucketed records reads a ledger, so a partial state settles every
+//! operation exactly as the whole state would, as long as the records an
+//! operation reads by identity are attached. The plugin attaches every
+//! bucketed record a packet names, and every record those name in turn,
+//! before it settles the packet.
 
 use crate::{
-    CompletionLeaseAcquisitionId, PLUGIN_NAMESPACE, ProtectedFloorPolicyRevisionId, ResourceError,
-    ResourceLimitsV1, ResourceReservationId, ResourceState, ResourceTerminalArchivePayloadV1,
-    ResourceTerminalRecordKeyV1, resource_canwu_error, resource_runtime_reference,
+    CompletionCapacityGrantId, CompletionLeaseAcquisitionId, CompletionLockedTargetV1,
+    PLUGIN_NAMESPACE, ProtectedFloorPolicyRevisionId, ResourceAccessGrantId,
+    ResourceAccessGrantRecordV1, ResourceAccount, ResourceAccountId, ResourceDefinitionRevision,
+    ResourceDefinitionRevisionId, ResourceError, ResourceLimitsV1, ResourceReservationId,
+    ResourceState, ResourceTerminalArchivePayloadV1, ResourceTerminalRecordKeyV1,
+    ResourceUnitRevision, ResourceUnitRevisionId, resource_canwu_error, resource_runtime_reference,
 };
 use canwu_api::{
     BoundaryDirective, CanwuError, CanwuRun, DomainRecord, DomainRecordClass, DomainRecordDraft,
     DomainRecordLifecycle, DomainRecordMutation, DomainRecordRef, DomainRecordType,
     DomainValueKindClass, ErrorCode, KnowledgeHolderRef, SimulationView, TypedDomainRecordRef,
 };
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Format of a [`ResourceHotTerminalBucketV1`].
+/// Format of a hot terminal bucket ([`ResourceHotTerminalBucketV1`]).
 pub const RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION: u32 = 1;
+
+/// Format of a live bucket ([`ResourceLiveBucketV1`]).
+pub const RESOURCE_LIVE_BUCKET_FORMAT_VERSION: u32 = 1;
+
+/// Hot terminal records one bucket holds, on average, at a full candidate
+/// budget ([`resource_hot_terminal_bucket_count`]). An archive commit
+/// rewrites each bucket it empties once, so it writes about one bucket per
+/// this many archived records; an ordinary boundary rewrites the bucket of
+/// each record it adds with the records that share it.
+pub const RESOURCE_HOT_TERMINAL_RECORDS_PER_BUCKET: usize = 2;
+
+/// Live records one live bucket holds, on average, when every live budget of
+/// the root is full ([`resource_live_bucket_count`]).
+pub const RESOURCE_LIVE_RECORDS_PER_BUCKET: usize = 4;
 
 /// Counts and aggregates over the hot terminal records of a resource root,
 /// persisted in its live root.
@@ -74,8 +104,12 @@ pub struct ResourceHotTerminalLedgerV1 {
     pub demand_requesters: BTreeMap<KnowledgeHolderRef, u64>,
     /// Hot terminal demands by the protected-floor policy they name.
     pub demand_floor_policies: BTreeMap<ProtectedFloorPolicyRevisionId, u64>,
-    /// Hot completion lease receipts by acquisition.
-    pub lease_receipt_acquisitions: BTreeMap<CompletionLeaseAcquisitionId, u64>,
+}
+
+/// What one hot terminal record adds to the ledger, read from its body.
+struct HotTerminalFacts<'a> {
+    requester: Option<&'a KnowledgeHolderRef>,
+    floor_policy: Option<&'a ProtectedFloorPolicyRevisionId>,
 }
 
 impl ResourceHotTerminalLedgerV1 {
@@ -96,6 +130,32 @@ impl ResourceHotTerminalLedgerV1 {
         key: &ResourceTerminalRecordKeyV1,
         add: bool,
     ) -> Result<(), ResourceError> {
+        let facts = match key {
+            ResourceTerminalRecordKeyV1::Demand(id) => {
+                let demand = state.demands.get(id).ok_or_else(|| {
+                    ResourceError::NotFound("hot terminal demand is not attached".to_owned())
+                })?;
+                HotTerminalFacts {
+                    requester: Some(&demand.requester),
+                    floor_policy: demand.protected_floor_policy.as_ref(),
+                }
+            }
+            _ => HotTerminalFacts {
+                requester: None,
+                floor_policy: None,
+            },
+        };
+        self.count_facts(key, &facts, add)
+    }
+
+    /// Counts a hot terminal record in or out from its key and the facts its
+    /// body holds.
+    fn count_facts(
+        &mut self,
+        key: &ResourceTerminalRecordKeyV1,
+        facts: &HotTerminalFacts<'_>,
+        add: bool,
+    ) -> Result<(), ResourceError> {
         step(&mut self.records, add)?;
         match key {
             ResourceTerminalRecordKeyV1::Outcome(_) => step(&mut self.outcomes, add)?,
@@ -103,48 +163,30 @@ impl ResourceHotTerminalLedgerV1 {
             ResourceTerminalRecordKeyV1::ArchiveMaintenanceReceipt(_) => {
                 step(&mut self.applied_archive_maintenance_receipts, add)?;
             }
-            ResourceTerminalRecordKeyV1::Demand(id) => {
-                let demand = state.demands.get(id).ok_or_else(|| {
-                    ResourceError::NotFound("hot terminal demand is not attached".to_owned())
+            ResourceTerminalRecordKeyV1::Demand(_) => {
+                let requester = facts.requester.ok_or_else(|| {
+                    ResourceError::InvalidDefinition(
+                        "hot terminal demand facts name no requester".to_owned(),
+                    )
                 })?;
-                step_key(&mut self.demand_requesters, &demand.requester, add)?;
-                if let Some(policy) = &demand.protected_floor_policy {
+                step_key(&mut self.demand_requesters, requester, add)?;
+                if let Some(policy) = facts.floor_policy {
                     step_key(&mut self.demand_floor_policies, policy, add)?;
                 }
-            }
-            ResourceTerminalRecordKeyV1::LeaseReceipt(sequence) => {
-                let receipt = state
-                    .completion_leases
-                    .receipts
-                    .get(sequence)
-                    .ok_or_else(|| {
-                        ResourceError::NotFound(
-                            "hot terminal completion receipt is not attached".to_owned(),
-                        )
-                    })?;
-                step_key(
-                    &mut self.lease_receipt_acquisitions,
-                    &receipt.acquisition,
-                    add,
-                )?;
             }
             ResourceTerminalRecordKeyV1::Reservation(_)
             | ResourceTerminalRecordKeyV1::AllocationLeg(_)
             | ResourceTerminalRecordKeyV1::Consumption(_)
             | ResourceTerminalRecordKeyV1::Fulfillment(_)
             | ResourceTerminalRecordKeyV1::Loss(_)
-            | ResourceTerminalRecordKeyV1::ExternalCompletionParticipant(_) => {}
+            | ResourceTerminalRecordKeyV1::ExternalCompletionParticipant(_)
+            | ResourceTerminalRecordKeyV1::LeaseReceipt(_) => {}
         }
         Ok(())
     }
 
     /// Whether every count of `attached` is at most this ledger's.
     fn covers(&self, attached: &Self) -> bool {
-        fn covers_map<K: Ord>(ledger: &BTreeMap<K, u64>, attached: &BTreeMap<K, u64>) -> bool {
-            attached
-                .iter()
-                .all(|(key, count)| ledger.get(key).is_some_and(|total| total >= count))
-        }
         attached.records <= self.records
             && attached.outcomes <= self.outcomes
             && attached.transfers <= self.transfers
@@ -152,11 +194,13 @@ impl ResourceHotTerminalLedgerV1 {
                 <= self.applied_archive_maintenance_receipts
             && covers_map(&self.demand_requesters, &attached.demand_requesters)
             && covers_map(&self.demand_floor_policies, &attached.demand_floor_policies)
-            && covers_map(
-                &self.lease_receipt_acquisitions,
-                &attached.lease_receipt_acquisitions,
-            )
     }
+}
+
+fn covers_map<K: Ord>(ledger: &BTreeMap<K, u64>, attached: &BTreeMap<K, u64>) -> bool {
+    attached
+        .iter()
+        .all(|(key, count)| ledger.get(key).is_some_and(|total| total >= count))
 }
 
 fn step(value: &mut u64, add: bool) -> Result<(), ResourceError> {
@@ -184,6 +228,16 @@ fn step_key<K: Ord + Clone>(
             map.remove(key);
         }
     }
+    Ok(())
+}
+
+fn step_amount(value: &mut u64, amount: u64, add: bool) -> Result<(), ResourceError> {
+    *value = if add {
+        value.checked_add(amount)
+    } else {
+        value.checked_sub(amount)
+    }
+    .ok_or(ResourceError::Overflow)?;
     Ok(())
 }
 
@@ -227,6 +281,126 @@ mod holder_counts {
     }
 }
 
+/// The identity of one record a live bucket holds.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum ResourceLiveRecordKeyV1 {
+    Account(ResourceAccountId),
+    AccessGrant(ResourceAccessGrantId),
+    Definition(ResourceDefinitionRevisionId),
+    Unit(ResourceUnitRevisionId),
+    /// The accounts one custodian holds ([`ResourceCustodianAccountsV1`]).
+    Custodian(KnowledgeHolderRef),
+}
+
+/// The accounts one custodian holds: the index a reader of a holder's stock
+/// attaches ([`ResourceRootReader::attach_custodian_accounts`]) instead of
+/// reading every account. A custodian never changes, and an account is
+/// created once, so the entry changes only when the custodian gains an
+/// account.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceCustodianAccountsV1 {
+    pub holder: KnowledgeHolderRef,
+    pub accounts: BTreeSet<ResourceAccountId>,
+}
+
+/// The body of one record a live bucket holds.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", content = "record", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
+pub enum ResourceLivePayloadV1 {
+    Account(ResourceAccount),
+    AccessGrant(ResourceAccessGrantRecordV1),
+    Definition(ResourceDefinitionRevision),
+    Unit(ResourceUnitRevision),
+    Custodian(ResourceCustodianAccountsV1),
+}
+
+/// One live record as its bucket holds it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceLiveEntryV1 {
+    /// The record's identity, which decides its bucket.
+    pub key: ResourceLiveRecordKeyV1,
+    /// The record itself.
+    pub payload: ResourceLivePayloadV1,
+}
+
+/// One bucket of live records: the payload of `resource:live:{bucket}`. Its
+/// entries are those whose identity hashes to `bucket`, in ascending key
+/// order.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceLiveBucketV1 {
+    /// [`RESOURCE_LIVE_BUCKET_FORMAT_VERSION`].
+    pub format_version: u32,
+    /// The bucket's index, below the root's live bucket count.
+    pub bucket: u32,
+    /// The bucket's live records, in ascending key order.
+    pub entries: Vec<ResourceLiveEntryV1>,
+}
+
+/// Counts and totals over the live records of a resource root that persist
+/// in live buckets, persisted in its live root.
+///
+/// In a persisted live root it counts every account, access grant,
+/// definition, and unit revision, and `bytes` is the encoded size of every
+/// live entry. In memory it counts only the records that are not attached to
+/// the state: a whole state, with every record attached, holds the default.
+/// Every rule that counts these records, or totals account balances (the
+/// conservation check), or asks whether an account names a protected-floor
+/// policy, reads the attached records and this ledger together.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceLiveLedgerV1 {
+    pub accounts: u64,
+    /// The balances of the counted accounts.
+    pub balance: u128,
+    /// The counted accounts by the protected-floor policy they name.
+    pub account_floor_policies: BTreeMap<ProtectedFloorPolicyRevisionId, u64>,
+    pub access_grants: u64,
+    pub definitions: u64,
+    pub units: u64,
+    /// Custodian account indexes ([`ResourceCustodianAccountsV1`]).
+    pub custodians: u64,
+    /// Encoded bytes of the counted live entries.
+    pub bytes: u64,
+}
+
+impl ResourceLiveLedgerV1 {
+    /// Counts one live entry of `bytes` encoded bytes in or out.
+    fn count(
+        &mut self,
+        payload: &ResourceLivePayloadV1,
+        bytes: u64,
+        add: bool,
+    ) -> Result<(), ResourceError> {
+        step_amount(&mut self.bytes, bytes, add)?;
+        match payload {
+            ResourceLivePayloadV1::Account(account) => {
+                step(&mut self.accounts, add)?;
+                let balance = u128::from(account.balance);
+                self.balance = if add {
+                    self.balance.checked_add(balance)
+                } else {
+                    self.balance.checked_sub(balance)
+                }
+                .ok_or(ResourceError::Overflow)?;
+                if let Some(policy) = &account.protected_floor_policy {
+                    step_key(&mut self.account_floor_policies, policy, add)?;
+                }
+            }
+            ResourceLivePayloadV1::AccessGrant(_) => step(&mut self.access_grants, add)?,
+            ResourceLivePayloadV1::Definition(_) => step(&mut self.definitions, add)?,
+            ResourceLivePayloadV1::Unit(_) => step(&mut self.units, add)?,
+            ResourceLivePayloadV1::Custodian(_) => step(&mut self.custodians, add)?,
+        }
+        Ok(())
+    }
+
+    /// Whether the ledger counts no record: every live record is attached.
+    fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 /// One hot terminal record as its bucket holds it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceHotTerminalEntryV1 {
@@ -243,29 +417,69 @@ pub struct ResourceHotTerminalEntryV1 {
     pub reservations: BTreeSet<ResourceReservationId>,
 }
 
+/// A key of the work list that attaches records to a partial state.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum RootKey {
+    Terminal(ResourceTerminalRecordKeyV1),
+    Live(ResourceLiveRecordKeyV1),
+    /// The exact targets of the grants of a completion lease acquisition, or
+    /// of an external participant grant, held in the live root.
+    Lease(CompletionLeaseAcquisitionId),
+    /// The exact targets of one completion lease grant held in the live root.
+    LeaseGrant(CompletionCapacityGrantId),
+}
+
+impl From<ResourceTerminalRecordKeyV1> for RootKey {
+    fn from(value: ResourceTerminalRecordKeyV1) -> Self {
+        Self::Terminal(value)
+    }
+}
+
+impl From<ResourceLiveRecordKeyV1> for RootKey {
+    fn from(value: ResourceLiveRecordKeyV1) -> Self {
+        Self::Live(value)
+    }
+}
+
+fn account_key(id: &ResourceAccountId) -> RootKey {
+    RootKey::Live(ResourceLiveRecordKeyV1::Account(id.clone()))
+}
+
+fn target_keys(target: &CompletionLockedTargetV1) -> Option<RootKey> {
+    use ResourceTerminalRecordKeyV1 as Key;
+    match target {
+        CompletionLockedTargetV1::Account { id, .. } => Some(account_key(id)),
+        CompletionLockedTargetV1::AllocationLeg { id, .. } => {
+            Some(RootKey::Terminal(Key::AllocationLeg(id.clone())))
+        }
+        CompletionLockedTargetV1::Demand { id, .. } => {
+            Some(RootKey::Terminal(Key::Demand(id.clone())))
+        }
+        CompletionLockedTargetV1::Transfer { id, .. } => {
+            Some(RootKey::Terminal(Key::Transfer(id.clone())))
+        }
+        CompletionLockedTargetV1::ExternalRecord { .. } => None,
+    }
+}
+
 impl ResourceHotTerminalEntryV1 {
-    /// The identities this record names that a reader may need attached
-    /// beside it: the closure of a demand, and the records a reservation,
-    /// allocation leg, consumption, fulfillment, transfer, or loss belongs to.
-    fn references(&self) -> Vec<ResourceTerminalRecordKeyV1> {
+    /// The records this record names that a reader may need attached beside
+    /// it: the closure of a demand, and the records a reservation, allocation
+    /// leg, consumption, fulfillment, transfer, or loss belongs to.
+    fn references(&self) -> Vec<RootKey> {
         let mut references = payload_references(&self.payload);
         references.extend(
             self.reservations
                 .iter()
                 .cloned()
-                .map(ResourceTerminalRecordKeyV1::Reservation),
+                .map(|id| RootKey::Terminal(ResourceTerminalRecordKeyV1::Reservation(id))),
         );
         references
     }
 
     /// Bytes this entry adds to the encoded root.
     fn encoded_len(&self) -> Result<u64, ResourceError> {
-        let bytes = serde_json::to_vec(self).map_err(|error| {
-            ResourceError::InvalidDefinition(format!(
-                "resource hot terminal entry cannot be encoded: {error}"
-            ))
-        })?;
-        u64::try_from(bytes.len()).map_err(|_| ResourceError::Overflow)
+        encoded_len(self)
     }
 
     /// Whether `payload` is the record `key` names.
@@ -297,37 +511,143 @@ impl ResourceHotTerminalEntryV1 {
     }
 }
 
-fn payload_references(
-    payload: &ResourceTerminalArchivePayloadV1,
-) -> Vec<ResourceTerminalRecordKeyV1> {
+impl ResourceLiveEntryV1 {
+    /// The records this live record names that a reader may need attached
+    /// beside it: the definition and unit of an account or an access grant,
+    /// and the canonical unit of a definition.
+    fn references(&self) -> Vec<RootKey> {
+        live_payload_references(&self.payload)
+    }
+
+    fn names_its_payload(&self) -> bool {
+        use ResourceLivePayloadV1 as Payload;
+        use ResourceLiveRecordKeyV1 as Key;
+        match (&self.key, &self.payload) {
+            (Key::Account(id), Payload::Account(value)) => &value.id == id,
+            (Key::AccessGrant(id), Payload::AccessGrant(value)) => &value.grant.grant_id == id,
+            (Key::Definition(id), Payload::Definition(value)) => &value.id == id,
+            (Key::Unit(id), Payload::Unit(value)) => &value.id == id,
+            (Key::Custodian(holder), Payload::Custodian(value)) => &value.holder == holder,
+            _ => false,
+        }
+    }
+}
+
+fn encoded_len<T: Serialize>(value: &T) -> Result<u64, ResourceError> {
+    /// Counts the bytes written to it and keeps none.
+    struct Counter(u64);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len() as u64);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value).map_err(|error| {
+        ResourceError::InvalidDefinition(format!(
+            "resource bucket entry cannot be encoded: {error}"
+        ))
+    })?;
+    Ok(counter.0)
+}
+
+fn live_payload_references(payload: &ResourceLivePayloadV1) -> Vec<RootKey> {
+    use ResourceLiveRecordKeyV1 as Key;
+    match payload {
+        ResourceLivePayloadV1::Account(value) => vec![
+            RootKey::Live(Key::Definition(value.resource_revision.clone())),
+            RootKey::Live(Key::Unit(value.unit_revision.clone())),
+        ],
+        ResourceLivePayloadV1::AccessGrant(value) => vec![
+            RootKey::Live(Key::Definition(value.grant.resource_revision.clone())),
+            RootKey::Live(Key::Unit(value.grant.unit_revision.clone())),
+        ],
+        ResourceLivePayloadV1::Definition(value) => {
+            vec![RootKey::Live(Key::Unit(value.canonical_unit.clone()))]
+        }
+        // The accounts an index lists are attached only when asked for.
+        ResourceLivePayloadV1::Unit(_) | ResourceLivePayloadV1::Custodian(_) => Vec::new(),
+    }
+}
+
+fn demand_references(value: &crate::ResourceDemand) -> Vec<RootKey> {
+    use ResourceLiveRecordKeyV1 as Key;
+    let mut references = vec![
+        RootKey::Live(Key::Definition(value.resource_revision.clone())),
+        RootKey::Live(Key::Unit(value.unit_revision.clone())),
+    ];
+    match &value.source_policy {
+        crate::ResourceDemandSourcePolicyV1::Pooled => {}
+        crate::ResourceDemandSourcePolicyV1::ExactAccounts(accounts) => {
+            references.extend(accounts.iter().map(account_key));
+        }
+        crate::ResourceDemandSourcePolicyV1::Granted { grant_id, accounts } => {
+            references.push(RootKey::Live(Key::AccessGrant(grant_id.clone())));
+            references.extend(accounts.iter().map(account_key));
+        }
+    }
+    references
+}
+
+fn payload_references(payload: &ResourceTerminalArchivePayloadV1) -> Vec<RootKey> {
+    use ResourceLiveRecordKeyV1 as Live;
     use ResourceTerminalArchivePayloadV1 as Payload;
     use ResourceTerminalRecordKeyV1 as Key;
     match payload {
         Payload::Reservation(value) => vec![
-            Key::AllocationLeg(value.allocation_leg.clone()),
-            Key::Demand(value.demand.clone()),
+            RootKey::Terminal(Key::AllocationLeg(value.allocation_leg.clone())),
+            RootKey::Terminal(Key::Demand(value.demand.clone())),
+            account_key(&value.account),
         ],
         Payload::AllocationLeg(value) => vec![
-            Key::Reservation(value.reservation.clone()),
-            Key::Demand(value.demand.clone()),
+            RootKey::Terminal(Key::Reservation(value.reservation.clone())),
+            RootKey::Terminal(Key::Demand(value.demand.clone())),
+            account_key(&value.account),
         ],
         Payload::Consumption(value) => vec![
-            Key::AllocationLeg(value.allocation_leg.clone()),
-            Key::Demand(value.demand.clone()),
+            RootKey::Terminal(Key::AllocationLeg(value.allocation_leg.clone())),
+            RootKey::Terminal(Key::Demand(value.demand.clone())),
+            RootKey::Terminal(Key::Fulfillment(value.fulfillment.clone())),
+            account_key(&value.account),
         ],
-        Payload::Fulfillment(value) => std::iter::once(Key::Demand(value.demand.clone()))
-            .chain(
+        Payload::Fulfillment(value) => {
+            std::iter::once(RootKey::Terminal(Key::Demand(value.demand.clone())))
+                .chain(
+                    value
+                        .allocation_legs
+                        .iter()
+                        .cloned()
+                        .map(|id| RootKey::Terminal(Key::AllocationLeg(id))),
+                )
+                .collect()
+        }
+        Payload::Transfer(value) => {
+            let mut references = vec![
+                RootKey::Terminal(Key::AllocationLeg(value.allocation_leg.clone())),
+                account_key(&value.source),
+            ];
+            references.extend(value.destination.iter().map(account_key));
+            references.extend(
                 value
-                    .allocation_legs
+                    .access_grant
                     .iter()
                     .cloned()
-                    .map(Key::AllocationLeg),
-            )
+                    .map(|id| RootKey::Live(Live::AccessGrant(id))),
+            );
+            references
+        }
+        Payload::Loss(value) => value
+            .transfer
+            .iter()
+            .cloned()
+            .map(|id| RootKey::Terminal(Key::Transfer(id)))
+            .chain(value.account.iter().map(account_key))
             .collect(),
-        Payload::Transfer(value) => vec![Key::AllocationLeg(value.allocation_leg.clone())],
-        Payload::Loss(value) => value.transfer.iter().cloned().map(Key::Transfer).collect(),
+        Payload::Demand(value) => demand_references(value),
         Payload::Outcome(_)
-        | Payload::Demand(_)
         | Payload::ExternalCompletionParticipant(_)
         | Payload::LeaseReceipt(_)
         | Payload::ArchiveMaintenanceReceipt(_) => Vec::new(),
@@ -348,32 +668,77 @@ pub struct ResourceHotTerminalBucketV1 {
     pub entries: Vec<ResourceHotTerminalEntryV1>,
 }
 
-/// Domain record type of a hot terminal bucket.
+/// Domain record type of the resource buckets, hot terminal
+/// (`resource:hot-terminal:{bucket}`, payload [`ResourceHotTerminalBucketV1`])
+/// and live (`resource:live:{bucket}`, payload [`ResourceLiveBucketV1`]).
+/// Its payload is read as JSON because the two shapes share the kind.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ResourceHotTerminalBucketRecord;
+pub struct ResourceBucketRecord;
 
-impl DomainRecordType for ResourceHotTerminalBucketRecord {
-    type Payload = ResourceHotTerminalBucketV1;
+impl DomainRecordType for ResourceBucketRecord {
+    type Payload = Value;
     type Class = DomainValueKindClass;
 
     const NAMESPACE: &'static str = PLUGIN_NAMESPACE;
-    const NAME: &'static str = "hot-terminal";
+    const NAME: &'static str = "bucket";
 }
+
+const HOT_TERMINAL_BUCKET_PREFIX: &str = "resource:hot-terminal:";
+const LIVE_BUCKET_PREFIX: &str = "resource:live:";
 
 /// The domain record of hot terminal bucket `bucket`.
 #[must_use]
 pub fn resource_hot_terminal_bucket_reference(
     bucket: u32,
-) -> TypedDomainRecordRef<ResourceHotTerminalBucketRecord> {
-    TypedDomainRecordRef::new(format!("resource:hot-terminal:{bucket}"))
+) -> TypedDomainRecordRef<ResourceBucketRecord> {
+    TypedDomainRecordRef::new(format!("{HOT_TERMINAL_BUCKET_PREFIX}{bucket}"))
+}
+
+/// The domain record of live bucket `bucket`.
+#[must_use]
+pub fn resource_live_bucket_reference(bucket: u32) -> TypedDomainRecordRef<ResourceBucketRecord> {
+    TypedDomainRecordRef::new(format!("{LIVE_BUCKET_PREFIX}{bucket}"))
+}
+
+fn power_of_two_buckets(records: usize, per_bucket: usize) -> u32 {
+    u32::try_from(
+        records
+            .div_ceil(per_bucket)
+            .max(1)
+            .checked_next_power_of_two()
+            .unwrap_or(1 << 31),
+    )
+    .unwrap_or(1 << 31)
 }
 
 /// How many hot terminal buckets a root with `limits` uses: the candidate
-/// budget rounded up to a power of two, so a full budget holds about one
-/// record per bucket. Fixed for the life of a root.
+/// budget divided by [`RESOURCE_HOT_TERMINAL_RECORDS_PER_BUCKET`], rounded up
+/// to a power of two. Fixed for the life of a root.
 #[must_use]
 pub fn resource_hot_terminal_bucket_count(limits: &ResourceLimitsV1) -> u32 {
-    u32::try_from(limits.max_archive_candidates.max(1).next_power_of_two()).unwrap_or(1 << 31)
+    power_of_two_buckets(
+        limits.max_archive_candidates,
+        RESOURCE_HOT_TERMINAL_RECORDS_PER_BUCKET,
+    )
+}
+
+/// How many live buckets a root with `limits` uses: every account, access
+/// grant, definition, unit revision, and custodian index the root may hold
+/// (one custodian per account at most), divided by
+/// [`RESOURCE_LIVE_RECORDS_PER_BUCKET`], rounded up to a power of two. Fixed
+/// for the life of a root. A bucket is a domain record only once it holds a
+/// record, so an unused budget costs nothing.
+#[must_use]
+pub fn resource_live_bucket_count(limits: &ResourceLimitsV1) -> u32 {
+    power_of_two_buckets(
+        limits
+            .max_accounts
+            .saturating_add(crate::MAX_RESOURCE_ACCESS_GRANTS)
+            .saturating_add(limits.max_definitions)
+            .saturating_add(limits.max_unit_revisions)
+            .saturating_add(limits.max_accounts),
+        RESOURCE_LIVE_RECORDS_PER_BUCKET,
+    )
 }
 
 /// The text a hot terminal record is bucketed by: the identity it carries.
@@ -397,9 +762,11 @@ fn key_text(key: &ResourceTerminalRecordKeyV1) -> std::borrow::Cow<'_, str> {
     }
 }
 
-fn text_bucket(text: &str, buckets: u32) -> u32 {
+fn text_bucket(domain: &[u8], kind: &str, text: &str, buckets: u32) -> u32 {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"canwu.resource.hot-terminal-bucket.v1");
+    hasher.update(domain);
+    hasher.update(&[0]);
+    hasher.update(kind.as_bytes());
     hasher.update(&[0]);
     hasher.update(text.as_bytes());
     let digest = hasher.finalize();
@@ -414,39 +781,112 @@ fn text_bucket(text: &str, buckets: u32) -> u32 {
 /// bucket.
 #[must_use]
 pub fn resource_hot_terminal_bucket(key: &ResourceTerminalRecordKeyV1, buckets: u32) -> u32 {
-    text_bucket(&key_text(key), buckets)
+    text_bucket(
+        b"canwu.resource.hot-terminal-bucket.v2",
+        "",
+        &key_text(key),
+        buckets,
+    )
 }
 
-/// Every hot terminal record a string could name.
-fn keys_named_by(text: &str) -> Vec<ResourceTerminalRecordKeyV1> {
+/// The live bucket of a root with `buckets` live buckets
+/// ([`resource_live_bucket_count`]) that holds the live record `key`.
+#[must_use]
+pub fn resource_live_bucket(key: &ResourceLiveRecordKeyV1, buckets: u32) -> u32 {
+    let (kind, text): (&str, std::borrow::Cow<'_, str>) = match key {
+        ResourceLiveRecordKeyV1::Account(id) => ("account", id.as_str().into()),
+        ResourceLiveRecordKeyV1::AccessGrant(id) => ("access_grant", id.as_str().into()),
+        ResourceLiveRecordKeyV1::Definition(id) => ("definition", id.as_str().into()),
+        ResourceLiveRecordKeyV1::Unit(id) => ("unit", id.as_str().into()),
+        // A holder's canonical encoding, which names it exactly.
+        ResourceLiveRecordKeyV1::Custodian(holder) => (
+            "custodian",
+            serde_json::to_string(holder).unwrap_or_default().into(),
+        ),
+    };
+    text_bucket(b"canwu.resource.live-bucket.v1", kind, &text, buckets)
+}
+
+/// The two bucket spaces: what parsing a stored bucket of either needs.
+trait BucketKey: Ord + Clone + DeserializeOwned {
+    const FORMAT_VERSION: u32;
+    fn reference(bucket: u32) -> DomainRecordRef;
+    fn bucket_of(&self, buckets: u32) -> u32;
+}
+
+impl BucketKey for ResourceTerminalRecordKeyV1 {
+    const FORMAT_VERSION: u32 = RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION;
+
+    fn reference(bucket: u32) -> DomainRecordRef {
+        resource_hot_terminal_bucket_reference(bucket).into_untyped()
+    }
+
+    fn bucket_of(&self, buckets: u32) -> u32 {
+        resource_hot_terminal_bucket(self, buckets)
+    }
+}
+
+impl BucketKey for ResourceLiveRecordKeyV1 {
+    const FORMAT_VERSION: u32 = RESOURCE_LIVE_BUCKET_FORMAT_VERSION;
+
+    fn reference(bucket: u32) -> DomainRecordRef {
+        resource_live_bucket_reference(bucket).into_untyped()
+    }
+
+    fn bucket_of(&self, buckets: u32) -> u32 {
+        resource_live_bucket(self, buckets)
+    }
+}
+
+/// Every record a string could name.
+fn keys_named_by(text: &str) -> Vec<RootKey> {
+    use ResourceLiveRecordKeyV1 as Live;
     use ResourceTerminalRecordKeyV1 as Key;
     let mut keys = Vec::new();
     if let Ok(id) = crate::ResourceOperationKey::new(text) {
-        keys.push(Key::Outcome(id));
+        keys.push(RootKey::Terminal(Key::Outcome(id)));
     }
     if let Ok(id) = crate::ResourceDemandId::new(text) {
-        keys.push(Key::Demand(id));
+        keys.push(RootKey::Terminal(Key::Demand(id)));
     }
     if let Ok(id) = ResourceReservationId::new(text) {
-        keys.push(Key::Reservation(id));
+        keys.push(RootKey::Terminal(Key::Reservation(id)));
     }
     if let Ok(id) = crate::ResourceAllocationLegId::new(text) {
-        keys.push(Key::AllocationLeg(id));
+        keys.push(RootKey::Terminal(Key::AllocationLeg(id)));
     }
     if let Ok(id) = crate::ResourceConsumptionId::new(text) {
-        keys.push(Key::Consumption(id));
+        keys.push(RootKey::Terminal(Key::Consumption(id)));
     }
     if let Ok(id) = crate::ResourceFulfillmentId::new(text) {
-        keys.push(Key::Fulfillment(id));
+        keys.push(RootKey::Terminal(Key::Fulfillment(id)));
     }
     if let Ok(id) = crate::ResourceLossId::new(text) {
-        keys.push(Key::Loss(id));
+        keys.push(RootKey::Terminal(Key::Loss(id)));
     }
     if let Ok(id) = crate::ResourceTransferId::new(text) {
-        keys.push(Key::Transfer(id));
+        keys.push(RootKey::Terminal(Key::Transfer(id)));
     }
     if let Ok(id) = CompletionLeaseAcquisitionId::new(text) {
-        keys.push(Key::ExternalCompletionParticipant(id));
+        keys.push(RootKey::Terminal(Key::ExternalCompletionParticipant(
+            id.clone(),
+        )));
+        keys.push(RootKey::Lease(id));
+    }
+    if let Ok(id) = CompletionCapacityGrantId::new(text) {
+        keys.push(RootKey::LeaseGrant(id));
+    }
+    if let Ok(id) = ResourceAccountId::new(text) {
+        keys.push(RootKey::Live(Live::Account(id)));
+    }
+    if let Ok(id) = ResourceAccessGrantId::new(text) {
+        keys.push(RootKey::Live(Live::AccessGrant(id)));
+    }
+    if let Ok(id) = ResourceDefinitionRevisionId::new(text) {
+        keys.push(RootKey::Live(Live::Definition(id)));
+    }
+    if let Ok(id) = ResourceUnitRevisionId::new(text) {
+        keys.push(RootKey::Live(Live::Unit(id)));
     }
     keys
 }
@@ -499,6 +939,75 @@ impl ResourceState {
     pub fn hot_terminal_records_attached(&self) -> bool {
         u64::try_from(self.terminal_archive_candidates.len()).ok()
             == Some(self.hot_terminal.records)
+    }
+
+    /// Whether every account, access grant, definition, and unit revision of
+    /// this root is attached to it.
+    #[must_use]
+    pub fn live_records_attached(&self) -> bool {
+        self.live.is_empty()
+    }
+
+    /// Accounts of this root, attached or not.
+    #[must_use]
+    pub fn account_count(&self) -> usize {
+        self.accounts
+            .len()
+            .saturating_add(usize::try_from(self.live.accounts).unwrap_or(usize::MAX))
+    }
+
+    /// Access grants of this root, attached or not.
+    #[must_use]
+    pub fn access_grant_count(&self) -> usize {
+        self.access_grants
+            .len()
+            .saturating_add(usize::try_from(self.live.access_grants).unwrap_or(usize::MAX))
+    }
+
+    /// Resource definition revisions of this root, attached or not.
+    #[must_use]
+    pub fn definition_count(&self) -> usize {
+        self.definitions
+            .len()
+            .saturating_add(usize::try_from(self.live.definitions).unwrap_or(usize::MAX))
+    }
+
+    /// Unit revisions of this root, attached or not.
+    #[must_use]
+    pub fn unit_count(&self) -> usize {
+        self.units
+            .len()
+            .saturating_add(usize::try_from(self.live.units).unwrap_or(usize::MAX))
+    }
+
+    /// The balances of every account of this root, attached or not.
+    pub fn total_account_balance(&self) -> Result<u128, ResourceError> {
+        self.accounts
+            .values()
+            .try_fold(self.live.balance, |total, account| {
+                total
+                    .checked_add(u128::from(account.balance))
+                    .ok_or(ResourceError::Overflow)
+            })
+    }
+
+    /// Recomputes the custodian index ([`Self::custodian_accounts`],
+    /// [`ResourceCustodianAccountsV1`]) from the accounts of a whole state.
+    ///
+    /// Required after inserting accounts into [`Self::accounts`] directly:
+    /// validation, and so every operation applied in memory, refuses an
+    /// account missing from its custodian's index. Every resource operation
+    /// and [`Self::install_opening_account`] keep the index current, and
+    /// [`Self::into_records`] derives it, so only fixtures that edit the map
+    /// themselves call this.
+    pub fn refresh_custodian_index(&mut self) {
+        self.custodian_accounts = BTreeMap::new();
+        for account in self.accounts.values() {
+            self.custodian_accounts
+                .entry(account.custodian.clone())
+                .or_default()
+                .insert(account.id.clone());
+        }
     }
 
     /// Recomputes the hot terminal ledger from the attached records, for a
@@ -746,12 +1255,109 @@ impl ResourceState {
         Ok(())
     }
 
+    /// Whether the state holds the live record `key`.
+    fn holds_live(&self, key: &ResourceLiveRecordKeyV1) -> bool {
+        match key {
+            ResourceLiveRecordKeyV1::Account(id) => self.accounts.contains_key(id),
+            ResourceLiveRecordKeyV1::AccessGrant(id) => self.access_grants.contains_key(id),
+            ResourceLiveRecordKeyV1::Definition(id) => self.definitions.contains_key(id),
+            ResourceLiveRecordKeyV1::Unit(id) => self.units.contains_key(id),
+            ResourceLiveRecordKeyV1::Custodian(holder) => {
+                self.custodian_accounts.contains_key(holder)
+            }
+        }
+    }
+
+    /// The live entry of the attached live record `key`.
+    fn live_entry(
+        &self,
+        key: &ResourceLiveRecordKeyV1,
+    ) -> Result<ResourceLiveEntryV1, ResourceError> {
+        let missing = || ResourceError::NotFound("resource live record is not attached".to_owned());
+        let payload = match key {
+            ResourceLiveRecordKeyV1::Account(id) => {
+                ResourceLivePayloadV1::Account(self.accounts.get(id).cloned().ok_or_else(missing)?)
+            }
+            ResourceLiveRecordKeyV1::AccessGrant(id) => ResourceLivePayloadV1::AccessGrant(
+                self.access_grants.get(id).cloned().ok_or_else(missing)?,
+            ),
+            ResourceLiveRecordKeyV1::Definition(id) => ResourceLivePayloadV1::Definition(
+                self.definitions.get(id).cloned().ok_or_else(missing)?,
+            ),
+            ResourceLiveRecordKeyV1::Unit(id) => {
+                ResourceLivePayloadV1::Unit(self.units.get(id).cloned().ok_or_else(missing)?)
+            }
+            ResourceLiveRecordKeyV1::Custodian(holder) => {
+                ResourceLivePayloadV1::Custodian(ResourceCustodianAccountsV1 {
+                    holder: holder.clone(),
+                    accounts: self
+                        .custodian_accounts
+                        .get(holder)
+                        .cloned()
+                        .ok_or_else(missing)?,
+                })
+            }
+        };
+        Ok(ResourceLiveEntryV1 {
+            key: key.clone(),
+            payload,
+        })
+    }
+
+    /// Attaches one stored live record. The caller takes it out of the
+    /// ledger.
+    fn attach_live(&mut self, entry: ResourceLiveEntryV1) -> Result<(), ResourceError> {
+        if !entry.names_its_payload() {
+            return Err(ResourceError::InvalidDefinition(
+                "resource live entry does not hold the record its key names".to_owned(),
+            ));
+        }
+        let replaced = match entry.payload {
+            ResourceLivePayloadV1::Account(value) => {
+                self.accounts.insert(value.id.clone(), value).is_some()
+            }
+            ResourceLivePayloadV1::AccessGrant(value) => self
+                .access_grants
+                .insert(value.grant.grant_id.clone(), value)
+                .is_some(),
+            ResourceLivePayloadV1::Definition(value) => {
+                self.definitions.insert(value.id.clone(), value).is_some()
+            }
+            ResourceLivePayloadV1::Unit(value) => {
+                self.units.insert(value.id.clone(), value).is_some()
+            }
+            ResourceLivePayloadV1::Custodian(value) => {
+                if value.accounts.is_empty() {
+                    return Err(ResourceError::InvalidDefinition(
+                        "resource custodian index lists no account".to_owned(),
+                    ));
+                }
+                self.custodian_accounts
+                    .insert(value.holder, value.accounts)
+                    .is_some()
+            }
+        };
+        if replaced {
+            return Err(ResourceError::InvalidDefinition(
+                "resource live record is already in the root".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Splits this state into its live root and the entries of its attached
-    /// hot terminal records. The live root's ledger then counts the encoded
-    /// bytes of every hot terminal entry, attached or not.
-    pub(crate) fn split_hot_terminal(
+    /// bucketed records. The live root's ledgers then count the encoded bytes
+    /// of every hot terminal entry and every live record, attached or not.
+    pub(crate) fn split_parts(
         mut self,
-    ) -> Result<(Self, Vec<ResourceHotTerminalEntryV1>), ResourceError> {
+    ) -> Result<
+        (
+            Self,
+            Vec<ResourceHotTerminalEntryV1>,
+            Vec<ResourceLiveEntryV1>,
+        ),
+        ResourceError,
+    > {
         let mut entries = Vec::with_capacity(self.terminal_archive_candidates.len());
         for (sequence, key) in &self.terminal_archive_candidates {
             entries.push(self.hot_terminal_entry(*sequence, key)?);
@@ -765,13 +1371,67 @@ impl ResourceState {
         }
         self.terminal_archive_candidates.clear();
         self.hot_terminal.bytes = bytes;
-        Ok((self, entries))
+        let mut live = Vec::with_capacity(
+            self.accounts.len()
+                + self.access_grants.len()
+                + self.definitions.len()
+                + self.units.len(),
+        );
+        live.extend(
+            std::mem::take(&mut self.accounts)
+                .into_iter()
+                .map(|(id, value)| ResourceLiveEntryV1 {
+                    key: ResourceLiveRecordKeyV1::Account(id),
+                    payload: ResourceLivePayloadV1::Account(value),
+                }),
+        );
+        live.extend(
+            std::mem::take(&mut self.access_grants)
+                .into_iter()
+                .map(|(id, value)| ResourceLiveEntryV1 {
+                    key: ResourceLiveRecordKeyV1::AccessGrant(id),
+                    payload: ResourceLivePayloadV1::AccessGrant(value),
+                }),
+        );
+        live.extend(
+            std::mem::take(&mut self.definitions)
+                .into_iter()
+                .map(|(id, value)| ResourceLiveEntryV1 {
+                    key: ResourceLiveRecordKeyV1::Definition(id),
+                    payload: ResourceLivePayloadV1::Definition(value),
+                }),
+        );
+        live.extend(
+            std::mem::take(&mut self.units)
+                .into_iter()
+                .map(|(id, value)| ResourceLiveEntryV1 {
+                    key: ResourceLiveRecordKeyV1::Unit(id),
+                    payload: ResourceLivePayloadV1::Unit(value),
+                }),
+        );
+        live.extend(
+            std::mem::take(&mut self.custodian_accounts)
+                .into_iter()
+                .map(|(holder, accounts)| ResourceLiveEntryV1 {
+                    key: ResourceLiveRecordKeyV1::Custodian(holder.clone()),
+                    payload: ResourceLivePayloadV1::Custodian(ResourceCustodianAccountsV1 {
+                        holder,
+                        accounts,
+                    }),
+                }),
+        );
+        for entry in &live {
+            let size = encoded_len(entry)?;
+            self.live.count(&entry.payload, size, true)?;
+        }
+        Ok((self, entries, live))
     }
 
-    /// Bytes the root occupies persisted: its live root encoded, and every
-    /// hot terminal entry. This is what `max_state_bytes` bounds.
+    /// Bytes the root occupies persisted: its live root encoded, every hot
+    /// terminal entry, and every live entry. This is what `max_state_bytes`
+    /// bounds.
     pub(crate) fn encoded_root_bytes(&self) -> Result<usize, ResourceError> {
-        let (live, _) = self.clone().split_hot_terminal()?;
+        let (live, _, _) = self.clone().split_parts()?;
         // The live root encodes as its state does.
         let head = serde_json::to_vec(&live)
             .map_err(|error| {
@@ -783,6 +1443,11 @@ impl ResourceState {
         usize::try_from(live.hot_terminal.bytes)
             .ok()
             .and_then(|bytes| bytes.checked_add(head))
+            .and_then(|bytes| {
+                usize::try_from(live.live.bytes)
+                    .ok()
+                    .and_then(|live| bytes.checked_add(live))
+            })
             .ok_or(ResourceError::Overflow)
     }
 
@@ -840,20 +1505,26 @@ impl ResourceState {
     }
 
     /// The domain records that persist this whole state: its live root,
-    /// then one record per non-empty hot terminal bucket in bucket order.
-    /// This is how a scenario installs a resource root.
+    /// then one record per non-empty hot terminal bucket and one per
+    /// non-empty live bucket, each in bucket order. This is how a scenario
+    /// installs a resource root.
     pub fn into_records(mut self) -> Result<Vec<DomainRecord>, CanwuError> {
-        if !self.hot_terminal_records_attached() {
+        if !self.hot_terminal_records_attached() || !self.live_records_attached() {
             return Err(CanwuError::new(
                 ErrorCode::InvalidDomainRecord,
-                "a resource root persists whole: some hot terminal records are not attached",
+                "a resource root persists whole: some bucketed records are not attached",
             ));
         }
         self.refresh_continuation();
+        // The custodian index of a whole state is a function of its
+        // accounts, so a fixture that placed accounts in the map directly
+        // installs a consistent one.
+        self.refresh_custodian_index();
         self.validate().map_err(resource_canwu_error)?;
         let version = self.state_revision.get();
         let buckets = resource_hot_terminal_bucket_count(&self.limits);
-        let (live, entries) = self.split_hot_terminal().map_err(resource_canwu_error)?;
+        let live_buckets = resource_live_bucket_count(&self.limits);
+        let (live, entries, live_entries) = self.split_parts().map_err(resource_canwu_error)?;
         let mut bucketed = BTreeMap::<u32, Vec<ResourceHotTerminalEntryV1>>::new();
         for entry in entries {
             bucketed
@@ -861,33 +1532,77 @@ impl ResourceState {
                 .or_default()
                 .push(entry);
         }
+        let mut live_bucketed = BTreeMap::<u32, Vec<ResourceLiveEntryV1>>::new();
+        for entry in live_entries {
+            live_bucketed
+                .entry(resource_live_bucket(&entry.key, live_buckets))
+                .or_default()
+                .push(entry);
+        }
         let mut records = vec![live_root_record(live, version)?];
         for (bucket, mut entries) in bucketed {
             entries.sort_by(|left, right| left.key.cmp(&right.key));
-            records.push(bucket_record(bucket, entries, 1)?);
+            records.push(bucket_record(
+                resource_hot_terminal_bucket_reference(bucket).into_untyped(),
+                encode_value(&ResourceHotTerminalBucketV1 {
+                    format_version: RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION,
+                    bucket,
+                    entries,
+                })?,
+            )?);
+        }
+        for (bucket, mut entries) in live_bucketed {
+            entries.sort_by(|left, right| left.key.cmp(&right.key));
+            records.push(bucket_record(
+                resource_live_bucket_reference(bucket).into_untyped(),
+                encode_value(&ResourceLiveBucketV1 {
+                    format_version: RESOURCE_LIVE_BUCKET_FORMAT_VERSION,
+                    bucket,
+                    entries,
+                })?,
+            )?);
         }
         Ok(records)
     }
 
-    /// Restores a whole state from its live root and the records of its hot
-    /// terminal buckets (any order; empty buckets may be included), checking
-    /// that each entry lies in its bucket, that the ledger counts exactly the
-    /// entries, and that the state is valid.
+    /// Restores a whole state from its live root and the records of its
+    /// buckets, hot terminal and live, in any order (empty buckets may be
+    /// included), checking that each entry lies in its bucket, that the
+    /// ledgers count exactly the entries, and that the state is valid.
     pub fn from_records<'a>(
         live_root: &DomainRecord,
         buckets: impl IntoIterator<Item = &'a DomainRecord>,
     ) -> Result<Self, CanwuError> {
         let mut state = decode_live_root(live_root)?;
         let count = resource_hot_terminal_bucket_count(&state.limits);
+        let live_count = resource_live_bucket_count(&state.limits);
         let mut seen = BTreeSet::new();
         let mut bytes = 0_u64;
+        let mut live_ledger = ResourceLiveLedgerV1::default();
         for record in buckets {
-            let (bucket, entries) = stored_bucket_entries(record, count)?;
-            if !seen.insert(bucket) {
+            if record.reference.id.starts_with(LIVE_BUCKET_PREFIX) {
+                let (bucket, entries) =
+                    stored_bucket_entries::<ResourceLiveRecordKeyV1>(record, live_count)?;
+                if !seen.insert((true, bucket)) {
+                    return Err(invalid("resource live bucket is listed twice"));
+                }
+                for value in entries.into_values() {
+                    let entry = decode_canonical::<ResourceLiveEntryV1>(value)?;
+                    let size = encoded_len(&entry).map_err(resource_canwu_error)?;
+                    live_ledger
+                        .count(&entry.payload, size, true)
+                        .map_err(resource_canwu_error)?;
+                    state.attach_live(entry).map_err(resource_canwu_error)?;
+                }
+                continue;
+            }
+            let (bucket, entries) =
+                stored_bucket_entries::<ResourceTerminalRecordKeyV1>(record, count)?;
+            if !seen.insert((false, bucket)) {
                 return Err(invalid("resource hot terminal bucket is listed twice"));
             }
             for value in entries.into_values() {
-                let entry = decode_entry(value)?;
+                let entry = decode_canonical::<ResourceHotTerminalEntryV1>(value)?;
                 bytes = bytes
                     .checked_add(entry.encoded_len().map_err(resource_canwu_error)?)
                     .ok_or_else(|| invalid("resource hot terminal bytes overflow"))?;
@@ -901,7 +1616,13 @@ impl ResourceState {
                 "resource hot terminal ledger bytes differ from the stored entries",
             ));
         }
+        if live_ledger != state.live {
+            return Err(invalid(
+                "resource live ledger differs from the stored live entries",
+            ));
+        }
         state.hot_terminal.bytes = 0;
+        state.live = ResourceLiveLedgerV1::default();
         check_demand_closures(&state)?;
         state.validate().map_err(resource_canwu_error)?;
         Ok(state)
@@ -929,26 +1650,26 @@ fn invalid(message: impl Into<String>) -> CanwuError {
 }
 
 /// The payload of the live root `resource:runtime:v1`: the resource state
-/// without the bodies of its hot terminal records, which its ledger counts
-/// and its buckets hold.
+/// without the bodies of its hot terminal records and of its accounts, access
+/// grants, definitions, and unit revisions, which its ledgers count and its
+/// buckets hold.
 ///
 /// It encodes as that state does. Read a root through
 /// [`crate::resource_state`] (host application) or
 /// [`resource_root_in_view`] (boundary system or admission), which attach
-/// the hot terminal records; the live root alone answers no question about
-/// them.
+/// the bucketed records; the live root alone answers no question about them.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct ResourceLiveRootV1(ResourceState);
 
 impl ResourceLiveRootV1 {
-    /// The live part of the root. Its maps lack every hot terminal record.
+    /// The live part of the root. Its maps lack every bucketed record.
     #[must_use]
     pub fn live(&self) -> &ResourceState {
         &self.0
     }
 
-    /// The live part of the root. Its maps lack every hot terminal record.
+    /// The live part of the root. Its maps lack every bucketed record.
     #[must_use]
     pub fn into_live(self) -> ResourceState {
         self.0
@@ -959,9 +1680,15 @@ pub(crate) fn decode_live_root(record: &DomainRecord) -> Result<ResourceState, C
     let state = record
         .decode_payload::<crate::ResourceRuntimeRecord>()?
         .into_live();
-    if !state.terminal_archive_candidates.is_empty() {
+    if !state.terminal_archive_candidates.is_empty()
+        || !state.accounts.is_empty()
+        || !state.access_grants.is_empty()
+        || !state.definitions.is_empty()
+        || !state.units.is_empty()
+        || !state.custodian_accounts.is_empty()
+    {
         return Err(invalid(
-            "a resource live root holds no hot terminal records itself",
+            "a resource live root holds no bucketed records itself",
         ));
     }
     if record.reference != resource_runtime_reference().into_untyped()
@@ -974,8 +1701,7 @@ pub(crate) fn decode_live_root(record: &DomainRecord) -> Result<ResourceState, C
     Ok(state)
 }
 
-/// The draft of the live root `live`, which has no attached hot terminal
-/// record.
+/// The draft of the live root `live`, which has no attached bucketed record.
 pub(crate) fn live_root_draft(live: ResourceState) -> Result<DomainRecordDraft, CanwuError> {
     DomainRecordDraft::from_typed(resource_runtime_reference(), &ResourceLiveRootV1(live))
 }
@@ -993,45 +1719,38 @@ fn live_root_record(live: ResourceState, version: u64) -> Result<DomainRecord, C
     })
 }
 
-fn bucket_draft(
-    bucket: u32,
-    entries: Vec<ResourceHotTerminalEntryV1>,
-) -> Result<DomainRecordDraft, CanwuError> {
-    DomainRecordDraft::from_typed(
-        resource_hot_terminal_bucket_reference(bucket),
-        &ResourceHotTerminalBucketV1 {
-            format_version: RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION,
-            bucket,
-            entries,
-        },
-    )
+fn encode_value<T: Serialize>(value: &T) -> Result<Value, CanwuError> {
+    serde_json::to_value(value).map_err(|error| invalid(error.to_string()))
 }
 
-fn bucket_record(
-    bucket: u32,
-    entries: Vec<ResourceHotTerminalEntryV1>,
-    version: u64,
-) -> Result<DomainRecord, CanwuError> {
-    let draft = bucket_draft(bucket, entries)?;
+fn bucket_record(reference: DomainRecordRef, payload: Value) -> Result<DomainRecord, CanwuError> {
+    let draft = DomainRecordDraft::new(reference, payload);
     Ok(DomainRecord {
         reference: draft.reference,
         owner: crate::PLUGIN_NAME.to_owned(),
         class: DomainRecordClass::Record,
-        version,
+        version: 1,
         lifecycle: DomainRecordLifecycle::Active,
         payload: draft.payload,
         references: draft.references,
     })
 }
 
-/// Where hot terminal buckets are read: the simulation view of a boundary
-/// system or admission, or the host application's runtime.
+/// Where buckets are read: the simulation view of a boundary system or
+/// admission, or the host application's runtime.
 pub(crate) trait HotTerminalSource {
     fn hot_terminal_record(
         &self,
         reference: &DomainRecordRef,
     ) -> Result<Option<&DomainRecord>, CanwuError>;
+
+    /// The references of every stored bucket, hot terminal and live, so a
+    /// whole read visits the buckets that exist rather than every index.
+    fn bucket_references(&self) -> Result<Vec<DomainRecordRef>, CanwuError>;
 }
+
+/// Records one page of a bucket listing reads.
+const BUCKET_LISTING_PAGE: usize = 4_096;
 
 impl HotTerminalSource for SimulationView<'_> {
     fn hot_terminal_record(
@@ -1039,6 +1758,20 @@ impl HotTerminalSource for SimulationView<'_> {
         reference: &DomainRecordRef,
     ) -> Result<Option<&DomainRecord>, CanwuError> {
         self.domain_record(reference)
+    }
+
+    fn bucket_references(&self) -> Result<Vec<DomainRecordRef>, CanwuError> {
+        let kind = canwu_api::DomainRecordKind::for_type::<ResourceBucketRecord>();
+        let mut references = Vec::new();
+        loop {
+            let page =
+                self.domain_records_of_kind_after(&kind, references.last(), BUCKET_LISTING_PAGE)?;
+            let full = page.len() == BUCKET_LISTING_PAGE;
+            references.extend(page.into_iter().map(|record| record.reference));
+            if !full {
+                return Ok(references);
+            }
+        }
     }
 }
 
@@ -1053,13 +1786,22 @@ impl<H: CanwuRun + ?Sized> HotTerminalSource for RunSource<'_, H> {
     ) -> Result<Option<&DomainRecord>, CanwuError> {
         Ok(self.0.domain_record(reference))
     }
+
+    fn bucket_references(&self) -> Result<Vec<DomainRecordRef>, CanwuError> {
+        Ok(self
+            .0
+            .domain_records()
+            .filter(|record| record.reference.kind.matches_type::<ResourceBucketRecord>())
+            .map(|record| record.reference.clone())
+            .collect())
+    }
 }
 
 /// One bucket as it was stored when the work read it: its version, and each
 /// entry's encoded value by key. An entry is decoded only when attached.
-struct StoredBucket<'s> {
+struct StoredBucket<'s, K> {
     version: Option<u64>,
-    entries: BTreeMap<ResourceTerminalRecordKeyV1, &'s Value>,
+    entries: BTreeMap<K, &'s Value>,
 }
 
 /// A hot terminal record attached by the work, as it was stored.
@@ -1068,16 +1810,21 @@ struct AttachedEntry {
     entry: ResourceHotTerminalEntryV1,
 }
 
-/// The keys of one stored bucket of a root with `count` buckets, with each
+/// A live record attached by the work, as it was stored.
+struct AttachedLive {
+    bucket: u32,
+    entry: ResourceLiveEntryV1,
+}
+
+/// The keys of one stored bucket of a space with `count` buckets, with each
 /// entry's encoded value, checking that it is the bucket its identity names,
 /// that its keys ascend, and that each lies in this bucket. Entry bodies are
 /// checked when they are attached.
-fn stored_bucket_entries(
+fn stored_bucket_entries<K: BucketKey>(
     record: &DomainRecord,
     count: u32,
-) -> Result<(u32, BTreeMap<ResourceTerminalRecordKeyV1, &Value>), CanwuError> {
-    let malformed =
-        || invalid("resource hot terminal bucket is malformed or holds a record of another bucket");
+) -> Result<(u32, BTreeMap<K, &Value>), CanwuError> {
+    let malformed = || invalid("resource bucket is malformed or holds a record of another bucket");
     let fields = record.payload.as_object().ok_or_else(malformed)?;
     let bucket = fields
         .get("bucket")
@@ -1090,13 +1837,10 @@ fn stored_bucket_entries(
         .ok_or_else(malformed)?;
     if fields.len() != 3
         || fields.get("format_version").and_then(Value::as_u64)
-            != Some(u64::from(RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION))
+            != Some(u64::from(K::FORMAT_VERSION))
         || bucket >= count
-        || !record
-            .reference
-            .kind
-            .matches_type::<ResourceHotTerminalBucketRecord>()
-        || record.reference != resource_hot_terminal_bucket_reference(bucket).into_untyped()
+        || !record.reference.kind.matches_type::<ResourceBucketRecord>()
+        || record.reference != K::reference(bucket)
         || record.owner != crate::PLUGIN_NAME
         || record.lifecycle != DomainRecordLifecycle::Active
     {
@@ -1106,14 +1850,14 @@ fn stored_bucket_entries(
     for entry in entries {
         let key = entry
             .get("key")
-            .map(ResourceTerminalRecordKeyV1::deserialize)
+            .map(K::deserialize)
             .transpose()
             .map_err(|_| malformed())?
             .ok_or_else(malformed)?;
-        if resource_hot_terminal_bucket(&key, count) != bucket
+        if key.bucket_of(count) != bucket
             || keyed
                 .last_key_value()
-                .is_some_and(|(last, _): (&ResourceTerminalRecordKeyV1, _)| last >= &key)
+                .is_some_and(|(last, _): (&K, _)| last >= &key)
         {
             return Err(malformed());
         }
@@ -1124,30 +1868,67 @@ fn stored_bucket_entries(
 
 /// Decodes one stored entry, which must be in its canonical encoding: what
 /// the entry it decodes to encodes as.
-fn decode_entry(value: &Value) -> Result<ResourceHotTerminalEntryV1, CanwuError> {
-    let entry = ResourceHotTerminalEntryV1::deserialize(value).map_err(|error| {
-        invalid(format!(
-            "resource hot terminal entry cannot be decoded: {error}"
-        ))
-    })?;
+fn decode_canonical<T: DeserializeOwned + Serialize>(value: &Value) -> Result<T, CanwuError> {
+    let entry = T::deserialize(value)
+        .map_err(|error| invalid(format!("resource bucket entry cannot be decoded: {error}")))?;
     if serde_json::to_value(&entry).ok().as_ref() != Some(value) {
         return Err(invalid(
-            "resource hot terminal entry is not in its canonical encoding",
+            "resource bucket entry is not in its canonical encoding",
         ));
     }
     Ok(entry)
 }
 
+/// The facts the ledger counts of a stored hot terminal entry, read from its
+/// encoded value without decoding it.
+fn stored_hot_facts(
+    key: &ResourceTerminalRecordKeyV1,
+    value: &Value,
+) -> Result<
+    (
+        Option<KnowledgeHolderRef>,
+        Option<ProtectedFloorPolicyRevisionId>,
+    ),
+    CanwuError,
+> {
+    if !matches!(key, ResourceTerminalRecordKeyV1::Demand(_)) {
+        return Ok((None, None));
+    }
+    let demand = value
+        .get("payload")
+        .and_then(|payload| payload.get("value"))
+        .ok_or_else(|| invalid("resource hot terminal demand entry is malformed"))?;
+    let requester = demand
+        .get("requester")
+        .map(KnowledgeHolderRef::deserialize)
+        .transpose()
+        .map_err(|error| invalid(error.to_string()))?
+        .ok_or_else(|| invalid("resource hot terminal demand entry names no requester"))?;
+    let policy = match demand.get("protected_floor_policy") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            ProtectedFloorPolicyRevisionId::deserialize(value)
+                .map_err(|error| invalid(error.to_string()))?,
+        ),
+    };
+    Ok((Some(requester), policy))
+}
+
 /// The resource root as one boundary system, admission, or host read works
-/// on it: the live root, with the hot terminal records it reads attached
-/// from their buckets.
+/// on it: the live root, with the bucketed records it reads attached.
 pub(crate) struct ResourceRootWork<'s, S: HotTerminalSource + ?Sized> {
     source: &'s S,
     pub(crate) live_version: u64,
     pub(crate) state: ResourceState,
     bucket_count: u32,
-    buckets: BTreeMap<u32, StoredBucket<'s>>,
+    buckets: BTreeMap<u32, StoredBucket<'s, ResourceTerminalRecordKeyV1>>,
     attached: BTreeMap<ResourceTerminalRecordKeyV1, AttachedEntry>,
+    live_bucket_count: u32,
+    live_buckets: BTreeMap<u32, StoredBucket<'s, ResourceLiveRecordKeyV1>>,
+    live_attached: BTreeMap<ResourceLiveRecordKeyV1, AttachedLive>,
+    /// Hot terminal records an archive commit removed without attaching
+    /// them, by bucket.
+    archived: BTreeMap<ResourceTerminalRecordKeyV1, u32>,
 }
 
 impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
@@ -1158,13 +1939,20 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
             source,
             live_version: live.version,
             bucket_count: resource_hot_terminal_bucket_count(&state.limits),
+            live_bucket_count: resource_live_bucket_count(&state.limits),
             state,
             buckets: BTreeMap::new(),
             attached: BTreeMap::new(),
+            live_buckets: BTreeMap::new(),
+            live_attached: BTreeMap::new(),
+            archived: BTreeMap::new(),
         })
     }
 
-    fn bucket(&mut self, bucket: u32) -> Result<&StoredBucket<'s>, CanwuError> {
+    fn bucket(
+        &mut self,
+        bucket: u32,
+    ) -> Result<&StoredBucket<'s, ResourceTerminalRecordKeyV1>, CanwuError> {
         if !self.buckets.contains_key(&bucket) {
             let source: &'s S = self.source;
             let stored = match source
@@ -1182,6 +1970,29 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
             self.buckets.insert(bucket, stored);
         }
         Ok(&self.buckets[&bucket])
+    }
+
+    fn live_bucket(
+        &mut self,
+        bucket: u32,
+    ) -> Result<&StoredBucket<'s, ResourceLiveRecordKeyV1>, CanwuError> {
+        if !self.live_buckets.contains_key(&bucket) {
+            let source: &'s S = self.source;
+            let stored = match source
+                .hot_terminal_record(resource_live_bucket_reference(bucket).as_untyped())?
+            {
+                None => StoredBucket {
+                    version: None,
+                    entries: BTreeMap::new(),
+                },
+                Some(record) => StoredBucket {
+                    version: Some(record.version),
+                    entries: stored_bucket_entries(record, self.live_bucket_count)?.1,
+                },
+            };
+            self.live_buckets.insert(bucket, stored);
+        }
+        Ok(&self.live_buckets[&bucket])
     }
 
     /// Whether the state holds the body of `key`, live or attached.
@@ -1210,10 +2021,7 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
 
     /// The records a record the state holds names that a reader may need
     /// attached beside it.
-    fn held_references(
-        &self,
-        key: &ResourceTerminalRecordKeyV1,
-    ) -> Vec<ResourceTerminalRecordKeyV1> {
+    fn held_references(&self, key: &ResourceTerminalRecordKeyV1) -> Vec<RootKey> {
         use ResourceTerminalArchivePayloadV1 as Payload;
         use ResourceTerminalRecordKeyV1 as Key;
         let state = &self.state;
@@ -1242,9 +2050,10 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
             Key::Loss(id) => state.losses.get(id).cloned().map(Payload::Loss),
             // A demand's reservations become hot terminal with it, so a live
             // demand names no hot terminal reservation, and an attached one
-            // attached its closure already.
+            // attached its closure already. Its source accounts, grant,
+            // definition, and unit are live records.
+            Key::Demand(id) => state.demands.get(id).cloned().map(Payload::Demand),
             Key::Outcome(_)
-            | Key::Demand(_)
             | Key::ExternalCompletionParticipant(_)
             | Key::LeaseReceipt(_)
             | Key::ArchiveMaintenanceReceipt(_) => None,
@@ -1252,14 +2061,37 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
         payload.as_ref().map(payload_references).unwrap_or_default()
     }
 
-    /// Attaches the hot terminal records `keys` name, and every record those
-    /// name in turn: the closure of a demand, and what a reservation,
-    /// allocation leg, consumption, fulfillment, transfer, or loss belongs
-    /// to, followed through live records as well. A key that names no hot
-    /// terminal record is ignored.
-    pub(crate) fn attach(
+    /// The exact targets the lease grants of `acquisition` lock, local or
+    /// external.
+    fn lease_references(&self, acquisition: &CompletionLeaseAcquisitionId) -> Vec<RootKey> {
+        let leases = &self.state.completion_leases;
+        let local = leases
+            .acquisitions
+            .get(acquisition)
+            .into_iter()
+            .flat_map(|acquisition| acquisition.grants.values())
+            .filter_map(|grant| leases.grants.get(grant))
+            .flat_map(|grant| grant.target_versions.iter());
+        let external = self
+            .state
+            .external_completion_participants
+            .participant(acquisition)
+            .into_iter()
+            .flat_map(|participant| participant.grant.target_versions.iter());
+        local.chain(external).filter_map(target_keys).collect()
+    }
+
+    /// Attaches the bucketed records `keys` name, and every record those name
+    /// in turn: the closure of a demand, what a reservation, allocation leg,
+    /// consumption, fulfillment, transfer, or loss belongs to, the accounts,
+    /// grants, definitions, and units those name, and the targets of a named
+    /// completion lease, followed through live-root records as well. A key
+    /// that names no record is ignored. Without `follow_live` only hot
+    /// terminal records are attached.
+    pub(crate) fn attach_keys(
         &mut self,
-        keys: impl IntoIterator<Item = ResourceTerminalRecordKeyV1>,
+        keys: impl IntoIterator<Item = RootKey>,
+        follow_live: bool,
     ) -> Result<(), CanwuError> {
         let mut pending: Vec<_> = keys.into_iter().collect();
         let mut visited = BTreeSet::new();
@@ -1267,42 +2099,136 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
             if !visited.insert(key.clone()) {
                 continue;
             }
-            if self.holds(&key) {
-                pending.extend(self.held_references(&key));
-                continue;
+            match key {
+                RootKey::Terminal(key) => {
+                    let references = self.attach_terminal(&key)?;
+                    pending.extend(references);
+                }
+                RootKey::Live(key) => {
+                    if follow_live {
+                        let references = self.attach_live_key(&key)?;
+                        pending.extend(references);
+                    }
+                }
+                RootKey::Lease(acquisition) => {
+                    if follow_live {
+                        pending.extend(self.lease_references(&acquisition));
+                    }
+                }
+                RootKey::LeaseGrant(grant) => {
+                    if follow_live {
+                        pending.extend(
+                            self.state
+                                .completion_leases
+                                .grants
+                                .get(&grant)
+                                .into_iter()
+                                .flat_map(|grant| grant.target_versions.iter())
+                                .filter_map(target_keys)
+                                .collect::<Vec<_>>(),
+                        );
+                    }
+                }
             }
-            // Attached before and no longer held: this work archived it.
-            if self.attached.contains_key(&key) {
-                continue;
-            }
-            let bucket = resource_hot_terminal_bucket(&key, self.bucket_count);
-            let Some(value) = self.bucket(bucket)?.entries.get(&key).copied() else {
-                continue;
-            };
-            let entry = decode_entry(value)?;
-            if entry.key != key {
-                return Err(invalid(
-                    "resource hot terminal entry differs from its stored key",
-                ));
-            }
-            let size = entry.encoded_len().map_err(resource_canwu_error)?;
-            pending.extend(entry.references());
-            self.state
-                .attach_hot_terminal(entry.clone())
-                .map_err(resource_canwu_error)?;
-            self.state.hot_terminal.bytes = self
-                .state
-                .hot_terminal
-                .bytes
-                .checked_sub(size)
-                .ok_or_else(|| invalid("resource hot terminal ledger bytes are short"))?;
-            self.attached.insert(key, AttachedEntry { bucket, entry });
         }
         Ok(())
     }
 
-    /// Attaches every hot terminal record that `value` names by an identity
-    /// string, with their closures ([`Self::attach`]).
+    /// Attaches one hot terminal record, and returns what it names.
+    fn attach_terminal(
+        &mut self,
+        key: &ResourceTerminalRecordKeyV1,
+    ) -> Result<Vec<RootKey>, CanwuError> {
+        if self.holds(key) {
+            return Ok(self.held_references(key));
+        }
+        // Attached before and no longer held, or archived without being
+        // attached: this work archived it.
+        if self.attached.contains_key(key) || self.archived.contains_key(key) {
+            return Ok(Vec::new());
+        }
+        let bucket = resource_hot_terminal_bucket(key, self.bucket_count);
+        let Some(value) = self.bucket(bucket)?.entries.get(key).copied() else {
+            return Ok(Vec::new());
+        };
+        let entry = decode_canonical::<ResourceHotTerminalEntryV1>(value)?;
+        if &entry.key != key {
+            return Err(invalid(
+                "resource hot terminal entry differs from its stored key",
+            ));
+        }
+        let size = entry.encoded_len().map_err(resource_canwu_error)?;
+        let references = entry.references();
+        self.state
+            .attach_hot_terminal(entry.clone())
+            .map_err(resource_canwu_error)?;
+        self.state.hot_terminal.bytes = self
+            .state
+            .hot_terminal
+            .bytes
+            .checked_sub(size)
+            .ok_or_else(|| invalid("resource hot terminal ledger bytes are short"))?;
+        self.attached
+            .insert(key.clone(), AttachedEntry { bucket, entry });
+        Ok(references)
+    }
+
+    /// Attaches one live record, and returns what it names.
+    fn attach_live_key(
+        &mut self,
+        key: &ResourceLiveRecordKeyV1,
+    ) -> Result<Vec<RootKey>, CanwuError> {
+        if self.state.holds_live(key) {
+            return Ok(self
+                .state
+                .live_entry(key)
+                .map(|entry| entry.references())
+                .unwrap_or_default());
+        }
+        if self.live_attached.contains_key(key) {
+            return Ok(Vec::new());
+        }
+        let bucket = resource_live_bucket(key, self.live_bucket_count);
+        let Some(value) = self.live_bucket(bucket)?.entries.get(key).copied() else {
+            return Ok(Vec::new());
+        };
+        let entry = decode_canonical::<ResourceLiveEntryV1>(value)?;
+        if &entry.key != key {
+            return Err(invalid("resource live entry differs from its stored key"));
+        }
+        let size = encoded_len(&entry).map_err(resource_canwu_error)?;
+        let references = entry.references();
+        let mut ledger = std::mem::take(&mut self.state.live);
+        let counted = ledger.count(&entry.payload, size, false);
+        self.state.live = ledger;
+        counted.map_err(|_| invalid("resource live ledger is short of a stored live entry"))?;
+        self.state
+            .attach_live(entry.clone())
+            .map_err(resource_canwu_error)?;
+        self.live_attached
+            .insert(key.clone(), AttachedLive { bucket, entry });
+        Ok(references)
+    }
+
+    /// Attaches the hot terminal records `keys` name, with their closures,
+    /// live records included ([`Self::attach_keys`]).
+    pub(crate) fn attach(
+        &mut self,
+        keys: impl IntoIterator<Item = ResourceTerminalRecordKeyV1>,
+    ) -> Result<(), CanwuError> {
+        self.attach_keys(keys.into_iter().map(RootKey::Terminal), true)
+    }
+
+    /// Attaches the live records `keys` name, with what they name.
+    pub(crate) fn attach_live(
+        &mut self,
+        keys: impl IntoIterator<Item = ResourceLiveRecordKeyV1>,
+    ) -> Result<(), CanwuError> {
+        self.attach_keys(keys.into_iter().map(RootKey::Live), true)
+    }
+
+    /// Attaches every record that `value` names by an identity string, with
+    /// their closures ([`Self::attach_keys`]).
     pub(crate) fn attach_named(&mut self, value: &Value) -> Result<(), CanwuError> {
         let mut texts = BTreeSet::new();
         named_identities(value, &mut texts);
@@ -1310,23 +2236,219 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
             .iter()
             .flat_map(|text| keys_named_by(text))
             .collect::<Vec<_>>();
-        self.attach(keys)
+        self.attach_keys(keys, true)
     }
 
-    /// Attaches every hot terminal record of the root, which makes the state
-    /// whole.
-    pub(crate) fn attach_all(&mut self) -> Result<(), CanwuError> {
+    /// Attaches the live records every live demand names, and every account
+    /// when one of `demands` draws on the pooled source policy: what an
+    /// allocation pass over those demands reads.
+    pub(crate) fn attach_demand_sources(
+        &mut self,
+        demands: &BTreeSet<crate::ResourceDemandId>,
+    ) -> Result<(), CanwuError> {
         let mut keys = Vec::new();
-        for bucket in 0..self.bucket_count {
-            keys.extend(self.bucket(bucket)?.entries.keys().cloned());
+        let mut pooled = false;
+        for id in demands {
+            if let Some(demand) = self.state.demands.get(id) {
+                pooled |= matches!(
+                    demand.source_policy,
+                    crate::ResourceDemandSourcePolicyV1::Pooled
+                );
+                keys.push(RootKey::Terminal(ResourceTerminalRecordKeyV1::Demand(
+                    id.clone(),
+                )));
+            }
         }
-        self.attach(keys)?;
-        if !self.state.hot_terminal_records_attached() || self.state.hot_terminal.bytes != 0 {
+        if pooled {
+            self.attach_all_accounts()?;
+        }
+        self.attach_keys(keys, true)
+    }
+
+    /// Attaches every account of the root, with the definitions and units
+    /// they name: what a pooled demand draws on. Access grants and custodian
+    /// indexes stay where they are.
+    fn attach_all_accounts(&mut self) -> Result<(), CanwuError> {
+        let (_, buckets) = self.stored_bucket_indexes()?;
+        let mut keys = Vec::new();
+        for bucket in buckets {
+            keys.extend(
+                self.live_bucket(bucket)?
+                    .entries
+                    .keys()
+                    .filter(|key| matches!(key, ResourceLiveRecordKeyV1::Account(_)))
+                    .cloned()
+                    .map(RootKey::Live),
+            );
+        }
+        self.attach_keys(keys, true)
+    }
+
+    /// The indexes of the stored buckets: hot terminal, then live.
+    fn stored_bucket_indexes(&self) -> Result<(Vec<u32>, Vec<u32>), CanwuError> {
+        let mut hot = Vec::new();
+        let mut live = Vec::new();
+        for reference in self.source.bucket_references()? {
+            let (space, index) =
+                if let Some(index) = reference.id.strip_prefix(HOT_TERMINAL_BUCKET_PREFIX) {
+                    (&mut hot, index)
+                } else if let Some(index) = reference.id.strip_prefix(LIVE_BUCKET_PREFIX) {
+                    (&mut live, index)
+                } else {
+                    return Err(invalid("a resource bucket record has an unknown identity"));
+                };
+            space.push(
+                index
+                    .parse()
+                    .map_err(|_| invalid("a resource bucket record has an unknown identity"))?,
+            );
+        }
+        Ok((hot, live))
+    }
+
+    /// Attaches every live record of the root.
+    pub(crate) fn attach_all_live(&mut self) -> Result<(), CanwuError> {
+        let (_, buckets) = self.stored_bucket_indexes()?;
+        let mut keys = Vec::new();
+        for bucket in buckets {
+            keys.extend(
+                self.live_bucket(bucket)?
+                    .entries
+                    .keys()
+                    .cloned()
+                    .map(RootKey::Live),
+            );
+        }
+        self.attach_keys(keys, true)
+    }
+
+    /// Attaches every hot terminal and live record of the root, which makes
+    /// the state whole.
+    pub(crate) fn attach_all(&mut self) -> Result<(), CanwuError> {
+        let (buckets, _) = self.stored_bucket_indexes()?;
+        let mut keys = Vec::new();
+        for bucket in buckets {
+            keys.extend(
+                self.bucket(bucket)?
+                    .entries
+                    .keys()
+                    .cloned()
+                    .map(RootKey::Terminal),
+            );
+        }
+        self.attach_keys(keys, false)?;
+        self.attach_all_live()?;
+        if !self.state.hot_terminal_records_attached()
+            || self.state.hot_terminal.bytes != 0
+            || !self.state.live_records_attached()
+        {
             return Err(invalid(
-                "resource hot terminal ledger differs from the stored entries",
+                "resource bucket ledgers differ from the stored entries",
             ));
         }
         Ok(())
+    }
+
+    /// Applies one verified archive commit to the root: a commit prepared
+    /// from this root archives its selected records, each taken out of its
+    /// bucket and out of the ledger, and moves the archive head; any other
+    /// commit is stale. Records the work has not attached are removed from
+    /// their stored entries without being decoded, so a commit reads and
+    /// rewrites each bucket it empties once.
+    pub(crate) fn apply_archive_commit(
+        &mut self,
+        commit: &crate::VerifiedResourceArchiveCommitV1,
+    ) -> Result<crate::ResourceArchiveMaintenanceReceiptV1, CanwuError> {
+        commit.validate().map_err(resource_canwu_error)?;
+        let applied = self
+            .state
+            .archive_source_root()
+            .map_err(resource_canwu_error)?
+            == commit.expected_source_root;
+        if applied {
+            let selected: BTreeSet<_> = commit.selected.iter().cloned().collect();
+            let attached: BTreeSet<_> = self
+                .state
+                .terminal_archive_candidates
+                .values()
+                .filter(|candidate| selected.contains(*candidate))
+                .cloned()
+                .collect();
+            if selected.len() != commit.selected.len() {
+                return Err(invalid(
+                    "an applied resource archive commit selects a record twice",
+                ));
+            }
+            let not_candidate = || {
+                CanwuError::new(
+                    ErrorCode::InvalidDomainRecord,
+                    "an applied resource archive commit selects a record that is not a hot candidate",
+                )
+            };
+            let mut demands = BTreeSet::new();
+            for key in &commit.selected {
+                if attached.contains(key) {
+                    self.state
+                        .remove_hot_terminal(key)
+                        .map_err(resource_canwu_error)?;
+                    continue;
+                }
+                if self.holds(key) || self.archived.contains_key(key) {
+                    return Err(not_candidate());
+                }
+                let bucket = resource_hot_terminal_bucket(key, self.bucket_count);
+                let value = self
+                    .bucket(bucket)?
+                    .entries
+                    .get(key)
+                    .copied()
+                    .ok_or_else(not_candidate)?;
+                let size = encoded_len(value).map_err(resource_canwu_error)?;
+                let (requester, policy) = stored_hot_facts(key, value)?;
+                if let ResourceTerminalRecordKeyV1::Reservation(_) = key {
+                    let demand = value
+                        .get("payload")
+                        .and_then(|payload| payload.get("value"))
+                        .and_then(|reservation| reservation.get("demand"))
+                        .map(crate::ResourceDemandId::deserialize)
+                        .transpose()
+                        .map_err(|error| invalid(error.to_string()))?
+                        .ok_or_else(|| invalid("resource hot terminal reservation is malformed"))?;
+                    demands.insert(demand);
+                }
+                let facts = HotTerminalFacts {
+                    requester: requester.as_ref(),
+                    floor_policy: policy.as_ref(),
+                };
+                self.state
+                    .hot_terminal
+                    .count_facts(key, &facts, false)
+                    .map_err(resource_canwu_error)?;
+                self.state.hot_terminal.bytes = self
+                    .state
+                    .hot_terminal
+                    .bytes
+                    .checked_sub(size)
+                    .ok_or_else(|| invalid("resource hot terminal ledger bytes are short"))?;
+                self.archived.insert(key.clone(), bucket);
+            }
+            self.state
+                .terminal_archive_candidates
+                .retain(|_, candidate| !selected.contains(candidate));
+            // A commit may archive part of a demand's closure: the demand,
+            // still hot, is rewritten with the reservations it keeps.
+            let kept = demands
+                .into_iter()
+                .filter(|demand| {
+                    !selected.contains(&ResourceTerminalRecordKeyV1::Demand(demand.clone()))
+                })
+                .map(|demand| RootKey::Terminal(ResourceTerminalRecordKeyV1::Demand(demand)))
+                .collect::<Vec<_>>();
+            self.attach_keys(kept, false)?;
+        }
+        self.state
+            .record_archive_commit(commit, applied)
+            .map_err(resource_canwu_error)
     }
 
     /// The record mutations that persist the state as it now is: the live
@@ -1336,12 +2458,12 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
     /// the state first. The work is spent: its state is left empty.
     ///
     /// A record the work did not attach that its bucket already holds means
-    /// the settlement read past a hot terminal record: it fails with
+    /// the settlement read past a stored record: it fails with
     /// `invalid_boundary`, an engine invariant, instead of writing over it.
     pub(crate) fn persist(&mut self, summary: &str) -> Result<Vec<BoundaryDirective>, CanwuError> {
         let empty = ResourceState::empty(self.state.limits).map_err(resource_canwu_error)?;
         let state = std::mem::replace(&mut self.state, empty);
-        let (live, entries) = state.split_hot_terminal().map_err(resource_canwu_error)?;
+        let (live, entries, live_entries) = state.split_parts().map_err(resource_canwu_error)?;
         let present: BTreeMap<_, _> = entries
             .into_iter()
             .map(|entry| (entry.key.clone(), entry))
@@ -1355,10 +2477,34 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
                     .insert(key.clone());
             }
         }
+        for (key, bucket) in &self.archived {
+            changed.entry(*bucket).or_default().insert(key.clone());
+        }
         for key in present.keys() {
             if !self.attached.contains_key(key) {
                 changed
                     .entry(resource_hot_terminal_bucket(key, self.bucket_count))
+                    .or_default()
+                    .insert(key.clone());
+            }
+        }
+        let live_present: BTreeMap<_, _> = live_entries
+            .into_iter()
+            .map(|entry| (entry.key.clone(), entry))
+            .collect();
+        let mut live_changed = BTreeMap::<u32, BTreeSet<ResourceLiveRecordKeyV1>>::new();
+        for (key, attached) in &self.live_attached {
+            if live_present.get(key) != Some(&attached.entry) {
+                live_changed
+                    .entry(attached.bucket)
+                    .or_default()
+                    .insert(key.clone());
+            }
+        }
+        for key in live_present.keys() {
+            if !self.live_attached.contains_key(key) {
+                live_changed
+                    .entry(resource_live_bucket(key, self.live_bucket_count))
                     .or_default()
                     .insert(key.clone());
             }
@@ -1370,14 +2516,23 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
             },
             summary: summary.to_owned(),
         }];
+        let read_past = || {
+            CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                "a resource boundary would overwrite a bucketed record it did not read",
+            )
+        };
         for (bucket, keys) in changed {
-            let stored = self.bucket(bucket)?;
-            let version = stored.version;
-            let mut entries: BTreeMap<_, _> = stored
-                .entries
-                .iter()
-                .map(|(key, value)| (key.clone(), (*value).clone()))
-                .collect();
+            let (version, mut entries) = {
+                let stored = self.bucket(bucket)?;
+                let entries: BTreeMap<_, _> = stored
+                    .entries
+                    .iter()
+                    .map(|(key, value)| (key.clone(), (*value).clone()))
+                    .collect();
+                (stored.version, entries)
+            };
+            let attached = &self.attached;
             for key in keys {
                 match present.get(&key) {
                     Some(entry) => {
@@ -1385,58 +2540,97 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
                         // root. One already stored was read past: the
                         // settlement could not have seen it, so writing over
                         // it would record a second, unseen answer for it.
-                        if !self.attached.contains_key(&key) && entries.contains_key(&key) {
-                            return Err(CanwuError::new(
-                                ErrorCode::InvalidBoundary,
-                                "a resource boundary would overwrite a hot terminal record it did not read",
-                            ));
+                        if !attached.contains_key(&key) && entries.contains_key(&key) {
+                            return Err(read_past());
                         }
-                        let value = serde_json::to_value(entry)
-                            .map_err(|error| invalid(error.to_string()))?;
-                        entries.insert(key, value);
+                        entries.insert(key, encode_value(entry)?);
                     }
                     None => {
                         entries.remove(&key);
                     }
                 }
             }
-            let record = DomainRecordDraft::new(
+            directives.push(bucket_directive(
                 resource_hot_terminal_bucket_reference(bucket).into_untyped(),
                 serde_json::json!({
                     "format_version": RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION,
                     "bucket": bucket,
                     "entries": entries.into_values().collect::<Vec<_>>(),
                 }),
-            );
-            directives.push(BoundaryDirective::MutateRecord {
-                mutation: match version {
-                    None => DomainRecordMutation::Create { record },
-                    Some(expected_version) => DomainRecordMutation::Update {
-                        record,
-                        expected_version,
-                    },
-                },
-                summary: summary.to_owned(),
-            });
+                version,
+                summary,
+            ));
+        }
+        for (bucket, keys) in live_changed {
+            let (version, mut entries) = {
+                let stored = self.live_bucket(bucket)?;
+                let entries: BTreeMap<_, _> = stored
+                    .entries
+                    .iter()
+                    .map(|(key, value)| (key.clone(), (*value).clone()))
+                    .collect();
+                (stored.version, entries)
+            };
+            let attached = &self.live_attached;
+            for key in keys {
+                let entry = live_present
+                    .get(&key)
+                    .ok_or_else(|| invalid("a resource live record left the root"))?;
+                if !attached.contains_key(&key) && entries.contains_key(&key) {
+                    return Err(read_past());
+                }
+                entries.insert(key, encode_value(entry)?);
+            }
+            directives.push(bucket_directive(
+                resource_live_bucket_reference(bucket).into_untyped(),
+                serde_json::json!({
+                    "format_version": RESOURCE_LIVE_BUCKET_FORMAT_VERSION,
+                    "bucket": bucket,
+                    "entries": entries.into_values().collect::<Vec<_>>(),
+                }),
+                version,
+                summary,
+            ));
         }
         Ok(directives)
     }
 }
 
+fn bucket_directive(
+    reference: DomainRecordRef,
+    payload: Value,
+    version: Option<u64>,
+    summary: &str,
+) -> BoundaryDirective {
+    let record = DomainRecordDraft::new(reference, payload);
+    BoundaryDirective::MutateRecord {
+        mutation: match version {
+            None => DomainRecordMutation::Create { record },
+            Some(expected_version) => DomainRecordMutation::Update {
+                record,
+                expected_version,
+            },
+        },
+        summary: summary.to_owned(),
+    }
+}
+
 /// The resource root as a boundary system or command admission of another
-/// plugin reads it: the live root, with the hot terminal records it asks for
+/// plugin reads it: the live root, with the bucketed records it asks for
 /// attached.
 ///
 /// [`Self::attach`] attaches the hot terminal records some keys name, and
-/// every record those name in turn (the closure of a demand, and what a
+/// every record those name in turn (the closure of a demand, what a
 /// reservation, allocation leg, consumption, fulfillment, transfer, or loss
-/// belongs to). The state then answers every question about its live part
-/// and about the attached records exactly as the whole root would; a hot
-/// terminal record it was not asked for is absent from its maps. Its ledger
-/// ([`ResourceState::hot_terminal_records`],
-/// [`ResourceState::hot_operation_outcomes`]) counts every hot terminal
-/// record. Reading needs the `canwu.resource` `runtime` and `hot-terminal`
-/// state keys ([`crate::resource_hot_terminal_state_key`]).
+/// belongs to, and the accounts, access grants, definitions, and units they
+/// name). [`Self::attach_live`] attaches accounts, access grants,
+/// definitions, and unit revisions by identity. The state then answers every
+/// question about its live root and about the attached records exactly as the
+/// whole root would; a bucketed record it was not asked for is absent from
+/// its maps. Its ledgers ([`ResourceState::hot_terminal_records`],
+/// [`ResourceState::account_count`], [`ResourceState::total_account_balance`])
+/// count every record. Reading needs the `canwu.resource` `runtime` and
+/// `bucket` state keys ([`crate::resource_hot_terminal_state_key`]).
 pub struct ResourceRootReader<'v, 'a> {
     live: DomainRecord,
     work: ResourceRootWork<'v, SimulationView<'a>>,
@@ -1463,19 +2657,54 @@ impl<'v, 'a> ResourceRootReader<'v, 'a> {
         self.work.attach(keys)
     }
 
+    /// Attaches the accounts, access grants, definitions, and unit revisions
+    /// `keys` name, with the definitions and units they name. A key that
+    /// names no record is ignored.
+    pub fn attach_live(
+        &mut self,
+        keys: impl IntoIterator<Item = ResourceLiveRecordKeyV1>,
+    ) -> Result<(), CanwuError> {
+        self.work.attach_live(keys)
+    }
+
+    /// Attaches every account `holder` holds, through the custodian index,
+    /// and returns their identities. It reads the index and those accounts,
+    /// not the other accounts of the root.
+    pub fn attach_custodian_accounts(
+        &mut self,
+        holder: &KnowledgeHolderRef,
+    ) -> Result<BTreeSet<ResourceAccountId>, CanwuError> {
+        self.work
+            .attach_live([ResourceLiveRecordKeyV1::Custodian(holder.clone())])?;
+        let accounts = self
+            .work
+            .state
+            .custodian_accounts
+            .get(holder)
+            .cloned()
+            .unwrap_or_default();
+        self.work.attach_live(
+            accounts
+                .iter()
+                .cloned()
+                .map(ResourceLiveRecordKeyV1::Account),
+        )?;
+        Ok(accounts)
+    }
+
     /// The live root record, whose version is the root's state revision.
     #[must_use]
     pub fn live_record(&self) -> &DomainRecord {
         &self.live
     }
 
-    /// The live root with the attached hot terminal records.
+    /// The live root with the attached records.
     #[must_use]
     pub fn state(&self) -> &ResourceState {
         &self.work.state
     }
 
-    /// The live root with the attached hot terminal records.
+    /// The live root with the attached records.
     #[must_use]
     pub fn into_state(self) -> ResourceState {
         self.work.state
@@ -1483,9 +2712,9 @@ impl<'v, 'a> ResourceRootReader<'v, 'a> {
 }
 
 /// Reads the resource root in a boundary system or in command admission:
-/// the live root, with the hot terminal records `keys` name attached
-/// ([`ResourceRootReader`]). Returns the live root record beside the state,
-/// or `None` without a resource root.
+/// the live root, with the hot terminal records `keys` name attached, and
+/// what they name ([`ResourceRootReader`]). Returns the live root record
+/// beside the state, or `None` without a resource root.
 pub fn resource_root_in_view(
     view: &SimulationView<'_>,
     keys: impl IntoIterator<Item = ResourceTerminalRecordKeyV1>,
@@ -1498,9 +2727,9 @@ pub fn resource_root_in_view(
 }
 
 /// Reads the whole resource root in a boundary system: the live root and
-/// every hot terminal record. Its cost grows with the hot terminal backlog,
-/// so a boundary system that needs only some records reads them with
-/// [`resource_root_in_view`].
+/// every bucketed record. Its cost grows with the hot terminal backlog and
+/// with the number of accounts, so a boundary system that needs only some
+/// records reads them with [`ResourceRootReader`].
 pub fn whole_resource_root_in_view(
     view: &SimulationView<'_>,
 ) -> Result<Option<(DomainRecord, ResourceState)>, CanwuError> {
@@ -1514,7 +2743,7 @@ pub fn whole_resource_root_in_view(
 }
 
 /// Reads the whole resource root of a run, from either runtime handle: the
-/// live root record and the state with every hot terminal record attached.
+/// live root record and the state with every bucketed record attached.
 pub(crate) fn whole_resource_root<H: CanwuRun + ?Sized>(
     canwu: &H,
 ) -> Result<Option<(DomainRecord, ResourceState)>, CanwuError> {

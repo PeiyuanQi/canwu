@@ -6,6 +6,17 @@ operations, their outcomes, their refusals, and the archive lookup index keep
 their 0.16.0 semantics. `canwu-production`, `canwu-economy-reference`, and
 `canwu-force-supply-reference` read the root through the new readers.
 
+Changed in 0.18.0 by [resource series scale](resource-series-scale.md):
+accounts, access grants, definitions, unit revisions, and a custodian index
+leave the live root for live buckets (`resource:live:{bucket}`), both bucket
+kinds are the record kind `canwu.resource` `bucket`
+(`ResourceBucketRecord`), a hot terminal bucket holds about two records,
+an archive commit rewrites each bucket it empties once, and a finished lease
+leaves the root when it finishes. The open decisions "refusing a host expiry"
+and "splitting the live state" are settled there; the known limits "finished
+leases stay live" and "the archive commit costs more than before" no longer
+hold.
+
 It builds on [resource archive lookup and volume](resource-archive-lookup-and-volume.md)
 (0.15.0), whose "Choosing the budget" section measured the cost this change
 removes, and on [resource refusals without stalls](resource-refusals-without-stalls.md)

@@ -338,6 +338,10 @@ fn archived_input_payloads(
         .expect("acquisition"),
         status: ConsumptionStatus::Settled,
         operation_key: input.consumption_outcome.operation_key.clone(),
+        fulfillment: canwu_resource::ResourceFulfillmentId::new(
+            "resource:archived-production-input-fulfillment",
+        )
+        .expect("fulfillment"),
         semantic_digest: String::new(),
         terminal_sequence: 1,
     };

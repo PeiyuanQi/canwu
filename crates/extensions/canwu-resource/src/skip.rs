@@ -45,7 +45,8 @@ pub enum ResourceIngressSkipReasonV1 {
     OperationKeyTaken,
     /// The packet names an operation key under
     /// [`crate::RESOURCE_COMPLETION_OPERATION_KEY_PREFIX`] on a request that
-    /// is not a completion operation.
+    /// is not a completion operation, or under
+    /// [`crate::RESOURCE_CONSUMPTION_BATCH_ITEM_KEY_PREFIX`].
     ReservedOperationKey,
     /// The packet does not decode, or does not pass the checks its ingress
     /// makes at settlement: its binding to a tracked command, its provider
@@ -76,16 +77,22 @@ pub enum ResourceIngressSkipReasonV1 {
     /// until its deferral delay has reached 1,024 minutes, and is skipped if
     /// it still does not fit after that wait.
     RootLimit,
+    /// The boundary has settled as many consumption batch items as
+    /// `max_batch_items_per_boundary` allows. Nothing was recorded: the batch
+    /// is deferred to the next boundary at the same instant
+    /// (`deferred_until` names it), where it settles.
+    BoundaryBudget,
 }
 
 impl ResourceIngressSkipReasonV1 {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::OperationKeyTaken,
         Self::ReservedOperationKey,
         Self::FailedSettlementChecks,
         Self::ArchiveBacklog,
         Self::ReservedCapacity,
         Self::RootLimit,
+        Self::BoundaryBudget,
     ];
 
     /// The stable code the skip event's summary carries.
@@ -98,6 +105,7 @@ impl ResourceIngressSkipReasonV1 {
             Self::ArchiveBacklog => "archive_backlog",
             Self::ReservedCapacity => "reserved_capacity",
             Self::RootLimit => "root_limit",
+            Self::BoundaryBudget => "boundary_budget",
         }
     }
 

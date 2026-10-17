@@ -157,6 +157,7 @@ impl SimulationPlugin for ConsumerPlugin {
         contract.reads = vec![
             own.clone(),
             DomainRecordSchema::for_record::<ResourceRuntimeRecord>().state_key(),
+            resource_hot_terminal_state_key(),
         ];
         contract.writes = vec![own];
         contract.visibility = StateVisibility::SameBoundary;
@@ -177,9 +178,19 @@ fn publish_intent(
     if own.payload["published"] == true {
         return Ok(BoundaryProposal::default());
     }
-    // The live root: the allocated leg is live, not hot terminal.
-    let (_, resource) = canwu_resource::resource_root_in_view(view, [])
-        .map(|root| root.expect("resource record"))?;
+    // The live root: the allocated leg is live, not hot terminal. Its
+    // account is a live record of its own bucket, read by identity.
+    let mut reader = ResourceRootReader::load(view)?.expect("resource record");
+    let account = reader
+        .state()
+        .allocation_legs
+        .values()
+        .next()
+        .expect("allocated demand")
+        .account
+        .clone();
+    reader.attach_live([ResourceLiveRecordKeyV1::Account(account)])?;
+    let resource = reader.into_state();
     let leg = resource
         .allocation_legs
         .values()
@@ -303,18 +314,23 @@ fn prepared(fault: &str) -> (Canwu, ResourceAdapterOperationV1, DomainRecordVers
             EntityRef::Person(PersonId::new(2)),
         ],
     )
-    .with_domain_records(vec![
-        initial.state.into_record().expect("genesis resources"),
-        DomainRecord {
-            reference: consumer_ref().into_untyped(),
-            owner: CONSUMER.to_owned(),
-            class: DomainRecordClass::Record,
-            version: 1,
-            lifecycle: DomainRecordLifecycle::Active,
-            payload: json!({"published": false, "fault": fault}),
-            references: Vec::new(),
-        },
-    ]);
+    .with_domain_records(
+        initial
+            .state
+            .into_records()
+            .expect("genesis resources")
+            .into_iter()
+            .chain([DomainRecord {
+                reference: consumer_ref().into_untyped(),
+                owner: CONSUMER.to_owned(),
+                class: DomainRecordClass::Record,
+                version: 1,
+                lifecycle: DomainRecordLifecycle::Active,
+                payload: json!({"published": false, "fault": fault}),
+                references: Vec::new(),
+            }])
+            .collect(),
+    );
     let mut simulation =
         Canwu::new_with_plugins(31, scenario, &[&resource_plugin(), &ConsumerPlugin])
             .expect("installed consumer runtime");

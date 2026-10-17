@@ -14,15 +14,35 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
 
 /// Canonical resource plugin limits. A scenario may choose lower values.
+///
+/// Accounts, access grants, definitions, and unit revisions persist in live
+/// buckets of their own ([`crate::ResourceLiveBucketV1`]), so a boundary
+/// reads and writes the ones it touches and their budgets cost an ordinary
+/// boundary nothing. Open demands, their reservations and allocation legs,
+/// active transfers, leases, report grants, and observation heads stay in the
+/// live root, which every changing boundary rewrites; their budgets bound
+/// what each such boundary costs.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceLimitsV1 {
+    /// Resource definition revisions, at most [`Self::MAX_DEFINITIONS`].
     pub max_definitions: usize,
+    /// Unit revisions, at most [`Self::MAX_DEFINITIONS`].
     pub max_unit_revisions: usize,
     pub max_accounts: usize,
     pub max_demands: usize,
     pub max_transfers: usize,
+    /// Most demands one allocation pass considers, at most
+    /// [`Self::MAX_ALLOCATION_CANDIDATES`].
     pub max_allocation_candidates: usize,
-    pub max_mutations_per_boundary: usize,
+    /// Consumption batch items ([`crate::ResourceConsumptionBatchRequestV1`])
+    /// that settle in one boundary, at most
+    /// [`Self::MAX_BATCH_ITEMS_PER_BOUNDARY`]; a batch larger than this is
+    /// refused whole. A batch that fits alone but not beside the batches the
+    /// boundary has settled is deferred, with a
+    /// [`crate::ResourceIngressSkipReasonV1::BoundaryBudget`] event, to the
+    /// next boundary at the same instant, where it settles: a boundary always
+    /// settles its first batch.
+    pub max_batch_items_per_boundary: usize,
     pub max_operation_outcomes: usize,
     pub max_reports_per_boundary: usize,
     pub max_observation_heads: usize,
@@ -56,6 +76,26 @@ impl ResourceLimitsV1 {
     pub const DEFAULT_SHARDS: usize = 8;
     pub const MAX_HOLDERS: usize = 1_024;
     pub const MAX_QUERY_PAGE: usize = 256;
+    /// Hard maximum of `max_definitions` and `max_unit_revisions`.
+    pub const MAX_DEFINITIONS: usize = 16_384;
+    /// Hard maximum of `max_allocation_candidates` and `max_dirty_demands`.
+    /// A pass allocates in its boundary, and its legs and reservations stay
+    /// in the live root, which that boundary writes whole: about 0.1 ms and
+    /// 2.2 KB of journal a demand in the 0.18.0 profile (0.13 to 0.25 s for
+    /// 2,048 demands, 0.8 s for 8,192), so the canonical values stay 2,048.
+    pub const MAX_ALLOCATION_CANDIDATES: usize = 16_384;
+    /// Hard maximum of `max_batch_items_per_boundary`: eight full batches. A
+    /// batch item costs its boundary about 0.5 ms and 13 KB of journal in the
+    /// 0.18.0 profile, so a boundary at this bound takes about a second.
+    pub const MAX_BATCH_ITEMS_PER_BOUNDARY: usize = 2_048;
+    /// The canonical `max_batch_items_per_boundary`: what the canonical
+    /// archive budget of 256 candidates holds at once
+    /// ([`crate::RESOURCE_CONSUMPTION_BATCH_ITEM_RECORDS`] an item) beside
+    /// one other lease's reserved receipts. A root that settles full batches
+    /// of [`crate::MAX_RESOURCE_CONSUMPTION_BATCH_ITEMS`] raises both this
+    /// and `max_archive_candidates`
+    /// ([`crate::ResourceState::consumption_batch_can_fit`]).
+    pub const CANONICAL_BATCH_ITEMS_PER_BOUNDARY: usize = 32;
     /// The canonical `max_operation_outcomes`.
     pub const MAX_HOT_RECEIPTS: usize = 8_192;
     /// Hard maximum of `max_operation_outcomes`: the operation outcomes the
@@ -66,12 +106,13 @@ impl ResourceLimitsV1 {
     /// resource root may hold between two archive commits. It is what one
     /// archive commit carries ([`crate::MAX_RESOURCE_ARCHIVE_COMMIT_RECORDS`]).
     ///
-    /// Each hot terminal record lies in a bucket record of its own
+    /// Hot terminal records lie in bucket records of about
+    /// [`crate::RESOURCE_HOT_TERMINAL_RECORDS_PER_BUCKET`] records each
     /// ([`crate::ResourceHotTerminalBucketV1`]), so a boundary that settles an
     /// operation reads and writes the live root and the buckets of the
     /// records it touches, whatever the backlog. What the backlog still costs
     /// is paid where it is handled: the boundary that applies an archive
-    /// commit rewrites one bucket per archived record, the host application
+    /// commit rewrites each bucket it empties once, the host application
     /// reads every hot record to prepare the commit, and a restore validates
     /// them all. The canonical value stays 256.
     pub const MAX_ARCHIVE_CANDIDATES: usize = 16_384;
@@ -88,13 +129,17 @@ impl ResourceLimitsV1 {
     #[must_use]
     pub const fn canonical() -> Self {
         Self {
-            max_definitions: 1_024,
-            max_unit_revisions: 1_024,
+            max_definitions: Self::MAX_DEFINITIONS,
+            max_unit_revisions: Self::MAX_DEFINITIONS,
+            // Accounts persist in live buckets, so only a pooled demand's
+            // allocation pass, which reads every account, pays for them
+            // (about 30 µs an account): the hard maximum serves a root that
+            // draws on exact accounts and grants.
             max_accounts: Self::DEFAULT_ACTIVE_PER_SHARD * Self::DEFAULT_SHARDS,
             max_demands: Self::DEFAULT_ACTIVE_PER_SHARD * Self::DEFAULT_SHARDS,
             max_transfers: Self::DEFAULT_ACTIVE_PER_SHARD * Self::DEFAULT_SHARDS,
             max_allocation_candidates: 2_048,
-            max_mutations_per_boundary: 4_096,
+            max_batch_items_per_boundary: Self::CANONICAL_BATCH_ITEMS_PER_BOUNDARY,
             max_operation_outcomes: Self::MAX_HOT_RECEIPTS,
             max_reports_per_boundary: 256,
             max_observation_heads: Self::MAX_HOLDERS * 4,
@@ -124,9 +169,9 @@ impl ResourceLimitsV1 {
 
     pub fn validate(self) -> Result<(), ResourceError> {
         if self.max_definitions == 0
-            || self.max_definitions > 1_024
+            || self.max_definitions > Self::MAX_DEFINITIONS
             || self.max_unit_revisions == 0
-            || self.max_unit_revisions > 1_024
+            || self.max_unit_revisions > Self::MAX_DEFINITIONS
             || self.max_accounts == 0
             || self.max_accounts > Self::HARD_ACTIVE_PER_SHARD * Self::MAX_SHARDS
             || self.max_demands == 0
@@ -134,9 +179,9 @@ impl ResourceLimitsV1 {
             || self.max_transfers == 0
             || self.max_transfers > Self::HARD_ACTIVE_PER_SHARD * Self::MAX_SHARDS
             || self.max_allocation_candidates == 0
-            || self.max_allocation_candidates > 2_048
-            || self.max_mutations_per_boundary == 0
-            || self.max_mutations_per_boundary > 4_096
+            || self.max_allocation_candidates > Self::MAX_ALLOCATION_CANDIDATES
+            || self.max_batch_items_per_boundary == 0
+            || self.max_batch_items_per_boundary > Self::MAX_BATCH_ITEMS_PER_BOUNDARY
             || self.max_operation_outcomes == 0
             || self.max_operation_outcomes > Self::MAX_OPERATION_OUTCOMES
             || self.max_reports_per_boundary == 0
@@ -148,7 +193,7 @@ impl ResourceLimitsV1 {
             || self.max_archive_maintenance_receipts == 0
             || self.max_archive_maintenance_receipts > Self::MAX_ARCHIVE_CANDIDATES
             || self.max_dirty_demands == 0
-            || self.max_dirty_demands > 2_048
+            || self.max_dirty_demands > Self::MAX_ALLOCATION_CANDIDATES
             || self.max_due_entries == 0
             || self.max_due_entries > Self::HARD_ACTIVE_PER_SHARD * Self::MAX_SHARDS
             || self.max_state_bytes == 0
@@ -550,8 +595,10 @@ impl ResourceDemandSourcePolicyV1 {
 pub const MAX_DEMAND_SOURCE_ACCOUNTS: usize = 256;
 
 /// Maximum number of access grants retained in one resource state. Grants,
-/// including revoked ones, stay in hot state; they are not archived.
-pub const MAX_RESOURCE_ACCESS_GRANTS: usize = 4_096;
+/// including revoked ones, stay in the root for its life; they are not
+/// archived. They persist in live buckets, so a boundary reads only the
+/// grants it touches.
+pub const MAX_RESOURCE_ACCESS_GRANTS: usize = 16_384;
 
 /// Delegated access a grantor custodian gives a grantee over its stock of one
 /// exact resource and unit revision.
@@ -888,6 +935,11 @@ pub struct ResourceConsumption {
     pub completion_acquisition: CompletionLeaseAcquisitionId,
     pub status: ConsumptionStatus,
     pub operation_key: ResourceOperationKey,
+    /// The fulfillment this consumption recorded on its demand, so a reader
+    /// of the consumption attaches it by identity
+    /// ([`crate::ResourceRootReader::attach`] follows it) instead of
+    /// searching every hot fulfillment.
+    pub fulfillment: ResourceFulfillmentId,
     pub semantic_digest: String,
     pub terminal_sequence: u64,
 }
@@ -1020,6 +1072,10 @@ pub enum ResourceOperationKind {
     IssueAccessGrant,
     /// A grantor custodian revokes an access grant nothing has drawn on.
     RevokeAccessGrant,
+    /// Several consumptions under one completion lease
+    /// ([`crate::ResourceConsumptionBatchRequestV1`]). The batch outcome
+    /// totals the applied items; each item has an outcome of its own.
+    ConsumeBatch,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1129,9 +1185,9 @@ impl ResourceOperationOutcome {
         let evidence_count = self.exact_evidence.len();
         let evidence_shape_ok = self.status != ResourceOperationStatus::Applied
             || match self.kind {
-                ResourceOperationKind::Consume | ResourceOperationKind::ExternalOutflow => {
-                    evidence_count == 1
-                }
+                ResourceOperationKind::Consume
+                | ResourceOperationKind::ExternalOutflow
+                | ResourceOperationKind::ConsumeBatch => evidence_count == 1,
                 ResourceOperationKind::AdvanceTransfer => evidence_count == 1,
                 ResourceOperationKind::Credit | ResourceOperationKind::Loss => evidence_count <= 1,
                 ResourceOperationKind::BeginExchange | ResourceOperationKind::RevokeAccessGrant => {
@@ -1198,7 +1254,9 @@ fn result_ref_matches_kind(
             Some(ResourceRecordRefV1::Transfer(_) | ResourceRecordRefV1::Loss(_))
         ),
         ResourceOperationKind::Loss => matches!(result_ref, Some(ResourceRecordRefV1::Loss(_))),
-        ResourceOperationKind::BeginExchange => result_ref.is_none(),
+        ResourceOperationKind::BeginExchange | ResourceOperationKind::ConsumeBatch => {
+            result_ref.is_none()
+        }
         ResourceOperationKind::CompletionLease => {
             let Some(suffix) = operation_key.strip_prefix("resource:completion:") else {
                 return false;
@@ -1338,10 +1396,12 @@ pub struct ResourceReportGrantV1 {
 /// exact revisions.
 ///
 /// It persists as its live root, the domain record `resource:runtime:v1`,
-/// and one record per hot terminal bucket (see [`crate::ResourceLiveRootV1`]
-/// and [`ResourceState::into_records`]). A boundary works on the live root
-/// with only the hot terminal records it reads attached; `hot_terminal`
-/// counts all of them.
+/// one record per hot terminal bucket, and one per live bucket (see
+/// [`crate::ResourceLiveRootV1`] and [`ResourceState::into_records`]). A
+/// boundary works on the live root with only the bucketed records it reads
+/// attached: `hot_terminal` counts every hot terminal record, and `live`
+/// every account, access grant, definition, and unit revision that is not
+/// attached.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceState {
     pub format_version: u32,
@@ -1399,6 +1459,61 @@ pub struct ResourceState {
     /// Counts and aggregates over every hot terminal record, attached or
     /// not. Every rule that counts hot terminal records reads it.
     pub hot_terminal: crate::ResourceHotTerminalLedgerV1,
+    /// Counts and totals over the accounts, access grants, definitions, and
+    /// unit revisions that are not attached. Every rule that counts or
+    /// totals them reads it beside the attached records.
+    pub live: crate::ResourceLiveLedgerV1,
+    /// The accounts each custodian holds, for the attached custodians
+    /// ([`crate::ResourceCustodianAccountsV1`]). A live root holds none:
+    /// they persist in live buckets.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        with = "custodian_account_sets"
+    )]
+    pub custodian_accounts: BTreeMap<KnowledgeHolderRef, BTreeSet<ResourceAccountId>>,
+}
+
+// A holder is not a JSON object key: persist the index as entries in
+// ascending holder order, refusing an empty set, a duplicate, or another
+// order, so the index has one encoding.
+mod custodian_account_sets {
+    use super::{BTreeMap, BTreeSet, KnowledgeHolderRef, ResourceAccountId};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(
+        value: &BTreeMap<KnowledgeHolderRef, BTreeSet<ResourceAccountId>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<BTreeMap<KnowledgeHolderRef, BTreeSet<ResourceAccountId>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries =
+            Vec::<(KnowledgeHolderRef, BTreeSet<ResourceAccountId>)>::deserialize(deserializer)?;
+        let mut index = BTreeMap::new();
+        for (holder, accounts) in entries {
+            if accounts.is_empty()
+                || index
+                    .last_key_value()
+                    .is_some_and(|(last, _): (&KnowledgeHolderRef, _)| last >= &holder)
+            {
+                return Err(serde::de::Error::custom(
+                    "custodian account sets must be nonempty and strictly ascending",
+                ));
+            }
+            index.insert(holder, accounts);
+        }
+        Ok(index)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1418,14 +1533,23 @@ pub fn resource_runtime_reference() -> canwu_api::TypedDomainRecordRef<ResourceR
 }
 
 impl ResourceState {
-    /// The live root record of a state that holds no hot terminal record.
-    /// A root with hot terminal records persists as several records
+    /// The live root record of a state that holds no bucketed record: no
+    /// hot terminal record, account, access grant, definition, or unit
+    /// revision. Any other root persists as several records
     /// ([`Self::into_records`]); this refuses it.
     pub fn into_record(self) -> Result<DomainRecord, canwu_api::CanwuError> {
-        if self.hot_terminal.records != 0 || !self.terminal_archive_candidates.is_empty() {
+        if self.hot_terminal.records != 0
+            || !self.terminal_archive_candidates.is_empty()
+            || !self.live_records_attached()
+            || !self.accounts.is_empty()
+            || !self.access_grants.is_empty()
+            || !self.definitions.is_empty()
+            || !self.units.is_empty()
+            || !self.custodian_accounts.is_empty()
+        {
             return Err(canwu_api::CanwuError::new(
                 canwu_api::ErrorCode::InvalidDomainRecord,
-                "the resource root holds hot terminal records: install it with into_records",
+                "the resource root holds bucketed records: install it with into_records",
             ));
         }
         let mut records = self.into_records()?;

@@ -1772,6 +1772,7 @@ fn resource_state_for_execution(
             },
         );
     }
+    resource.refresh_custodian_index();
     let input = &execution.inputs[0];
     resource.allocation_legs.insert(
         input.allocation_leg.id.clone(),
@@ -2093,6 +2094,8 @@ fn archived_resource_input_payloads(
         .expect("archived completion acquisition ID"),
         status: ConsumptionStatus::Settled,
         operation_key: input.consumption_outcome.operation_key.clone(),
+        fulfillment: canwu_resource::ResourceFulfillmentId::new("resource:fulfillment:2")
+            .expect("fulfillment"),
         semantic_digest: String::new(),
         terminal_sequence: 1,
     };
@@ -6652,8 +6655,10 @@ fn sealed_run_admits_only_current_production_evidence_and_replays_exactly() {
         },
     );
     let mut scenario = scenario_with_production(production);
+    scenario
+        .domain_records
+        .extend(resource.into_records().expect("resource root"));
     scenario.domain_records.extend([
-        resource.into_record().expect("resource root"),
         sealed_evidence_record(
             sealed_evidence_qualification(),
             &canwu_technology::CapabilityQualificationPayload {

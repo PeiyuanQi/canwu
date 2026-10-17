@@ -55,9 +55,11 @@ resource = ["dep:canwu-resource"]
 Create scenario state with `ResourceState::empty`, install immutable
 definitions/units and opening accounts, then use `ResourceState::into_records`
 to obtain the records that persist the authoritative root: its live root
-`resource:runtime:v1`, and one record per hot terminal bucket when the root
-already holds terminal records (`ResourceState::into_record` returns the live
-root of a root that holds none). Activate
+`resource:runtime:v1`, one record per live bucket that holds accounts, access
+grants, definitions, unit revisions, or custodian indexes, and one record per
+hot terminal bucket when the root already holds terminal records.
+`ResourceState::into_record` returns the live root of a root that holds none of
+these, and refuses any other root. Activate
 `ResourcePlugin::new(adapter_evidence_kinds)` with the exact external record
 kinds allowed to prove adapter consumption, external-inflow credit, loss, or
 outflow. Production output credits do not use adapter ingress; they settle
@@ -168,7 +170,13 @@ escrow move, loss, outflow, or credit. Use `resource_completion_certificate`,
 `resource_completion_grant`, `resource_completion_status`, and
 `exact_resource_completion_certificate` for detached exact queries. Canonical
 lease transitions enter through `enqueue_resource_completion_operation` and
-`RESOURCE_COMPLETION_INGRESS`.
+`RESOURCE_COMPLETION_INGRESS`. An expiry is the exception: `Expire` and
+`ExpireExternalParticipants` name the boundary that settles them, which a host
+application cannot know when it queues a packet, so
+`enqueue_resource_completion_operation` refuses them and the host queues
+`enqueue_resource_completion_expiry_tick`, whose boundary derives the expiry.
+An expiry another plugin schedules that names another boundary than the one
+settling it is skipped with `failed_settlement_checks` and expires nothing.
 
 An acquisition persisted in `ResourceState` reserves
 `MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE` terminal slots. Admission includes all
@@ -205,9 +213,14 @@ the one the four steps produce for the same acquisition, grant, and targets
 when their activation runs at the same boundary, so the operation it
 authorizes is unchanged. It leaves one `CompletionLease` outcome, keyed
 `resource:completion:lease:{acquisition}`, and one `Activated` receipt, where
-the four steps leave four of each; completion still adds its one receipt. A
-same-place transfer therefore leaves 15 terminal records and makes 9 archive
-lookups instead of 27 and 15.
+the four steps leave four of each; completion still adds its one receipt.
+An acquisition identity is used once for the run: an `Acquire` whose
+identity a single step took, or a single step whose identity an `Acquire`
+took, is refused as `idempotency_conflict` by the applied outcome under the
+other key (`resource:completion:acquire:{acquisition}` or
+`resource:completion:lease:{acquisition}`), hot or archived, which each lease
+start looks up. A same-place transfer therefore leaves 15 terminal records
+and makes 11 archive lookups instead of 27 and 17.
 
 A tracked command cannot carry the single step. The host application queues
 it with `enqueue_resource_completion_operation`, as it queues the grant,
@@ -246,6 +259,15 @@ skipped, not failed: `archive_backlog` when an archive commit would make room,
 leases, which only their completion, release, or expiry frees. An archive
 lookup that fails (a missing, forged, or unreadable archive object, never a
 miss) still fails the boundary.
+
+A lease leaves the root as soon as it finishes: once its operation completes
+it, or a `Release`, an expiry, or an abort ends it, and any report it reserved
+has published, the acquisition, its grants, and its certificate are removed.
+Its receipts stay hot terminal records until an archive commit takes them, and
+the outcomes under its keys answer a resend. A later request naming a finished
+lease under a key it has not used is refused as `not_found`, and an
+`Acquire` or a single step of its identity as `idempotency_conflict`: an
+identity starts one lease for the run.
 
 What a host application has to watch:
 
@@ -505,22 +527,39 @@ receipt of an applied commit becomes a terminal candidate and can itself move
 cold; ordinary lifecycle work does not scan cold history.
 
 The root persists in parts. Its live root, the domain record
-`resource:runtime:v1` (`ResourceLiveRootV1`), holds everything except the hot
-terminal records, the root's archive candidates, which it only counts in a
-`ResourceHotTerminalLedgerV1`. Each hot terminal record lies in a bucket
-record of its own, `resource:hot-terminal:{bucket}`
+`resource:runtime:v1` (`ResourceLiveRootV1`), holds open demands, their
+reservations and allocation legs, active transfers, leases, report grants, and
+observation heads. It does not hold the hot terminal records, the root's
+archive candidates, which it counts in a `ResourceHotTerminalLedgerV1`, nor the
+accounts, access grants, definitions, unit revisions, and custodian indexes,
+which it counts and totals in a `ResourceLiveLedgerV1`. Each hot terminal
+record lies in a bucket record `resource:hot-terminal:{bucket}`
 (`ResourceHotTerminalBucketV1`), chosen by a hash of its identity
-(`resource_hot_terminal_bucket`) among as many buckets as the candidate
-budget rounded up to a power of two. A boundary reads and writes the live
-root and the buckets of the records it touches: the resource plugin attaches
-every hot terminal record a packet names, and every record those name, before
-it settles the packet, and every rule that counts hot terminal records reads
-the ledger. A boundary with nothing for the resource plugin reads nothing of
-the root. `resource_state` reads the whole root, every bucket included. A
-boundary system or command handler of another plugin reads it with
-`resource_root_in_view` or `ResourceRootReader`, naming the hot terminal
-records it needs, and declares the read of `resource_hot_terminal_state_key()`
-beside the live root's; `whole_resource_root_in_view` reads every bucket.
+(`resource_hot_terminal_bucket`) among the candidate budget divided by two,
+rounded up to a power of two. Each live record lies in a live bucket
+`resource:live:{bucket}` (`ResourceLiveBucketV1`, `resource_live_bucket`).
+Both are records of one kind, `canwu.resource` `bucket`.
+
+A boundary reads and writes the live root and the buckets of the records it
+touches: the resource plugin attaches every record a packet names, and every
+record those name (a leg's account, a demand's source accounts and grant, an
+account's definition and unit), before it settles the packet, and every rule
+that counts or totals bucketed records reads a ledger. An allocation pass
+attaches the source accounts of the requester's due demands; a pooled demand
+attaches every account. A boundary with nothing for the resource plugin reads
+nothing of the root. `resource_state` reads the whole root, every bucket
+included. A boundary system or command handler of another plugin reads it
+with `resource_root_in_view` or `ResourceRootReader`, which attach the hot
+terminal records it names with their closures, accounts included;
+`ResourceRootReader::attach_live` attaches accounts, grants, definitions, and
+units by identity, and `attach_custodian_accounts` every account of one
+holder through its index. A holder's index is one entry that lists every
+account it holds, so a holder with many accounts rewrites a large entry when
+it gains one (some 250 KB for 10,000 accounts). It declares the read of
+`resource_hot_terminal_state_key()` beside the live root's;
+`whole_resource_root_in_view` reads every bucket. A consumption names the
+fulfillment it recorded (`ResourceConsumption::fulfillment`), so a reader
+attaches both by naming the consumption.
 
 An archive commit never fails for capacity. A commit that went stale because
 another commit or an operation settled first is a terminal no-op: its receipt
@@ -551,11 +590,17 @@ defaults to 256 and may be raised to `ResourceLimitsV1::MAX_ARCHIVE_CANDIDATES`
 operations costs the same whatever the hot terminal backlog: in the recorded
 baseline one operation boundary takes about 0.2 ms and 8 KB of journal at
 every backlog up to 4,000 records
-(`benchmarks/baselines/2026-10-15-resource-root-*.json`). The backlog is paid
-for by the archive commit that clears it, which rewrites one bucket per
-archived record (about 25 µs and 1.3 KB of journal per record in that
-baseline), by preparing the commit, which reads every hot record, and by a
-restore, which validates them all. Room is measured on what an operation leaves: a
+(`benchmarks/baselines/2026-10-15-resource-root-*.json`), and it costs the
+same whatever the number of accounts unless a pooled demand is due (its
+allocation pass reads every account). The backlog is paid for by the archive
+commit that clears it, which rewrites each hot bucket it empties once (about
+one write per two archived records) and takes records it has not read out of
+their buckets without decoding them, by preparing the commit, which reads every
+hot record, and by a restore, which validates them all. A commit's boundary
+costs in proportion to the records it archives, so a host with a large budget
+commits in chunks of about 2,048 records or fewer
+(`prepare_resource_archive(candidate_limit)`) rather than the whole backlog at
+once. Room is measured on what an operation leaves: a
 refused operation needs one slot for its outcome, an applied one a slot for
 every terminal record it adds, beside the slots reserved for admitted
 completion lifecycles. An operation that does not fit settles nothing and is
@@ -720,11 +765,64 @@ transfers and consumptions debited under it, and a grant-backed transfer to
 name exactly the grant its (hot) demand drew on.
 
 `resource_access_grant_status` is the holder-bound read of a grant and its
-accounting for the grantor or grantee. Grants stay in hot state, bounded by one
-global `MAX_RESOURCE_ACCESS_GRANTS`; they are not archived, so a host should
-control who may issue grants, as it does for account creation. Grants, granted demands,
+accounting for the grantor or grantee. Grants stay in the root for its life,
+bounded by one global `MAX_RESOURCE_ACCESS_GRANTS` (16,384), in live buckets;
+they are not archived, so a host should control who may issue grants, as it
+does for account creation. Grants, granted demands,
 and grant-backed transfers persist, hash, restore, and replay with the resource
 root; states without grants keep their canonical encoding.
+
+## Consumption batches
+
+`ResourceConsumptionBatchRequestV1` settles up to
+`MAX_RESOURCE_CONSUMPTION_BATCH_ITEMS` (256) exact allocation-leg consumptions
+under one completion lease, where `ResourceConsumptionRequestV1` takes a lease
+per consumption. It enters through the adapter ingress of its provider, as
+`ResourceOperationRequestV1::ConsumeBatch`, and the provider authorizes every
+item with a typed consumption intent whose operation key is the item's
+reserved key, `resource_consumption_batch_item_key(batch key, index)`. The
+lease is held by the requester of every item's demand and locks exactly
+`ResourceConsumptionBatchRequestV1::locked_targets`: each item's account, leg,
+and demand, and the one consumer evidence, which is the provider's source
+version.
+
+Items settle one by one. An item that fails its checks (a stale leg, account,
+or demand revision, a leg no longer reserved, a consumption identity that
+exists, a grant that is not current) is refused alone, with a rejected
+consumption outcome under its key; the other items consume their legs and
+record applied outcomes. Several items may draw on one account: an item that
+expects the revision the batch found draws on the account as the batch's
+earlier items left it. The batch outcome under the batch key totals the
+consumed quantity, its `remainder` is the quantity of the refused items, and
+the lease completes once, with one receipt; a batch whose every item is
+refused is applied with quantity zero, and its lease finishes. A refusal of
+the batch itself (no items, more than the per-batch bound or than
+`max_batch_items_per_boundary`, a certificate that does not bind exactly its
+targets) is one rejected batch outcome, with no item outcome and the lease
+left active.
+
+Room is measured on the batch's whole result: a batch whose records do not
+fit the archive budgets beside the reservations of other leases records
+nothing and is skipped (`archive_backlog` or `reserved_capacity`), and its
+lease stays active. An item that consumes the one leg of its demand leaves
+`RESOURCE_CONSUMPTION_BATCH_ITEM_RECORDS` (6) hot terminal records and the
+batch `RESOURCE_CONSUMPTION_BATCH_RECORDS` (2);
+`ResourceState::consumption_batch_can_fit(items)` says whether a batch of that
+size can ever settle in the root, and a provider checks it before it takes the
+lease. The canonical limits settle batches of
+`ResourceLimitsV1::CANONICAL_BATCH_ITEMS_PER_BOUNDARY` (32) items, what the
+canonical budget of 256 candidates holds; a root that settles full batches
+raises `max_batch_items_per_boundary` and `max_archive_candidates` together.
+
+A boundary settles at most `max_batch_items_per_boundary` batch items. A batch
+that fits alone but not beside the batches the boundary applied is deferred,
+with a `boundary_budget` event naming the instant, to the next boundary at the
+same instant, which the kernel settles before any later one and which settles
+it; a batch refused whole takes nothing of the budget. A batch is bound to its
+instant (its `at` and its certificate), so it never waits for a later one.
+One lease locks one version of the provider's record, and one holder takes
+one lease per simulated minute, so batches that settle together cite records
+of their own or belong to different holders.
 
 ## Production output credit
 

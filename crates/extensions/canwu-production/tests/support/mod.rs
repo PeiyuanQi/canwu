@@ -314,6 +314,8 @@ fn input_payloads(input: &ResourceInputBinding) -> (ResourceConsumption, Resourc
         .expect("acquisition"),
         status: ConsumptionStatus::Settled,
         operation_key: input.consumption_outcome.operation_key.clone(),
+        fulfillment: canwu_resource::ResourceFulfillmentId::new("resource:fulfillment:2")
+            .expect("fulfillment"),
         semantic_digest: String::new(),
         terminal_sequence: 1,
     };
