@@ -75,7 +75,7 @@ pub fn correspondence_knowledge_schemas() -> Vec<PluginKnowledgeSchema> {
         ),
         (
             CONNECTION_KNOWLEDGE_SCHEMA,
-            "2f10c55b8504d952b97d947c53fd8abfceae919e4c2d0991f702b175d576639f",
+            "b98510212ba6e3236ee0a201fbed8f8afd0a44c588b9e8948bb1e05095046b1b",
         ),
         (
             ENDPOINT_KNOWLEDGE_SCHEMA,

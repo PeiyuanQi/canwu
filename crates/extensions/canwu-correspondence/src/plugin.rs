@@ -63,7 +63,7 @@ pub const CARRIER_DELEGATION_COMMAND: &str = "delegate_carrier_v1";
 pub const CARRY_CORRESPONDENCE_CAPABILITY: &str = "carry_correspondence";
 
 const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
-const SEMANTIC_HASH: &str = "a3f74357d75d36feae882c946ae7701277f300d1cd848a9cf8c20a7352c6f380";
+const SEMANTIC_HASH: &str = "a197a514cf20b6626241812132eaa532bd6d07be9a4142b6dff048f39dce5685";
 const SEIZURE_FAILURE_REASON: &str = "carrier seized";
 const REPORT_ORIGIN_METHOD: &str = "correspondence_attempt_report_v1";
 const INPUT_HASH_DOMAIN: &str = "canwu.correspondence.input.v1";

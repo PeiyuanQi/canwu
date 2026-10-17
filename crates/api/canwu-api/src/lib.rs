@@ -29,10 +29,13 @@ pub use canwu_knowledge::{
     MAX_KNOWLEDGE_PAGE_SIZE,
 };
 pub use canwu_routing::{
-    DepartureSlot, DurationSample, PlanningSnapshot, ROUTING_ALGORITHM_VERSION, RouteCost,
-    RouteLeg, RoutePlan, RoutingAlgorithm, RoutingCache, RoutingConnection, RoutingConnectionRef,
-    RoutingEndpoint, RoutingEndpointKind, RoutingError, RoutingNetwork, RoutingNodeRef,
-    RoutingPolicy, RoutingRequest, TransferMode, TraversalModel, plan_route,
+    DepartureSlot, DurationSample, EdgeConditionEffect, EdgeConditionOverlay, EdgeConditionRef,
+    EdgeConditionSet, MAX_CONDITION_PER_MILLE, MAX_EDGE_CONDITIONS,
+    MAX_EDGE_CONDITIONS_PER_CONNECTION, MAX_RECURRING_OFFSETS, PlanningSnapshot,
+    ROUTING_ALGORITHM_VERSION, RouteCost, RouteLeg, RoutePlan, RoutingAlgorithm, RoutingCache,
+    RoutingConnection, RoutingConnectionRef, RoutingEndpoint, RoutingEndpointKind, RoutingError,
+    RoutingIndex, RoutingNetwork, RoutingNodeRef, RoutingPolicy, RoutingRequest, TransferMode,
+    TraversalModel, plan_route,
 };
 use canwu_sim::Simulation;
 pub use canwu_sim::{

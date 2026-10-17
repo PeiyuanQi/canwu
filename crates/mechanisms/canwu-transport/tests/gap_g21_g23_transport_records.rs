@@ -34,6 +34,7 @@ fn plan(stops: &[&str]) -> RoutePlan {
         algorithm_version: ROUTING_ALGORITHM_VERSION.to_owned(),
         policy_version: "fixture.policy.v1".to_owned(),
         planning_snapshot_digest: "fixture-snapshot".to_owned(),
+        edge_conditions_digest: None,
         origin: RoutingNodeRef::new(stops[0]),
         destination: RoutingNodeRef::new(*stops.last().unwrap()),
         departure_at: SimTime::EPOCH,

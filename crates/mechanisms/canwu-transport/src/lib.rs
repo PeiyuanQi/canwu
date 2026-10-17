@@ -1528,6 +1528,7 @@ mod tests {
             algorithm_version: ROUTING_ALGORITHM_VERSION.to_owned(),
             policy_version: "policy.v1".to_owned(),
             planning_snapshot_digest: "snapshot".to_owned(),
+            edge_conditions_digest: None,
             origin: RoutingNodeRef::new("a"),
             destination: RoutingNodeRef::new("b"),
             departure_at: canwu_time::SimTime::EPOCH,
