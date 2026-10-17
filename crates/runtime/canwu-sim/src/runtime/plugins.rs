@@ -1,4 +1,7 @@
-use super::knowledge::{KnowledgeLimitsV1, PluginKnowledgeSchema, validate_schema_set};
+use super::knowledge::{
+    KnowledgeLimitsV1, KnowledgePublicationReservation, KnowledgePublicationReservations,
+    PluginKnowledgeSchema, knowledge_publication_reservations_fit, validate_schema_set,
+};
 use super::maintenance::{
     OwnerAuthorizedMaintenanceRequest, OwnerAuthorizedParticipantDraft,
     OwnerAuthorizedParticipantRole,
@@ -185,11 +188,38 @@ pub struct PluginDescriptor {
     pub owner_authorized_maintenance_participant: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub archive_reachability_participant: bool,
+    /// The share of every boundary's knowledge publication budget held for
+    /// this plugin's systems
+    /// ([`PluginRegistrar::reserve_knowledge_publication`]). Omitted from the
+    /// wire, and so from the descriptor's bytes, when the plugin holds none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_publication_reservation: Option<KnowledgePublicationReservation>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+impl PluginDescriptor {
+    /// The boundary systems that may publish knowledge: those of phases 4
+    /// and 13 that hold a knowledge write grant.
+    fn knowledge_writing_systems(&self) -> impl Iterator<Item = &BoundarySystemContract> {
+        self.boundary_systems.iter().filter(|contract| {
+            !contract.knowledge_writes.is_empty()
+                && matches!(
+                    contract.phase,
+                    BoundaryPhase::PerceptionAndAttentionRefresh
+                        | BoundaryPhase::PerspectiveAndReportMaterialization
+                )
+        })
+    }
+
+    /// Whether the descriptor holds a reservation it has no system to use.
+    fn reserves_without_a_publisher(&self) -> bool {
+        self.knowledge_publication_reservation.is_some()
+            && self.knowledge_writing_systems().next().is_none()
+    }
 }
 
 fn missing_descriptor_format() -> u32 {
@@ -216,6 +246,7 @@ impl Default for PluginDescriptor {
             maintenance_dependency_resolvers: Vec::new(),
             owner_authorized_maintenance_participant: false,
             archive_reachability_participant: false,
+            knowledge_publication_reservation: None,
         }
     }
 }
@@ -356,6 +387,58 @@ pub trait SimulationPlugin {
     }
 }
 
+/// Registers a plugin with a share of every boundary's knowledge publication
+/// budget held for it, so that a host can reserve budget for a publisher it
+/// does not write.
+///
+/// The wrapped plugin registers as it always does, then reserves the share
+/// with [`PluginRegistrar::reserve_knowledge_publication`]. Its name,
+/// version, semantic hash, handlers, and activation check are the plugin's
+/// own; its descriptor differs only in the reservation, so a restore, an
+/// exact replay, or a fork of the run registers the plugin through the same
+/// wrapper, and a registration with another reservation is refused as a
+/// plugin-identity mismatch.
+pub struct KnowledgeReservedPlugin<'a> {
+    plugin: &'a dyn SimulationPlugin,
+    reservation: KnowledgePublicationReservation,
+}
+
+impl<'a> KnowledgeReservedPlugin<'a> {
+    #[must_use]
+    pub const fn new(
+        plugin: &'a dyn SimulationPlugin,
+        reservation: KnowledgePublicationReservation,
+    ) -> Self {
+        Self {
+            plugin,
+            reservation,
+        }
+    }
+}
+
+impl SimulationPlugin for KnowledgeReservedPlugin<'_> {
+    fn name(&self) -> &str {
+        self.plugin.name()
+    }
+
+    fn version(&self) -> &str {
+        self.plugin.version()
+    }
+
+    fn semantic_hash(&self) -> &str {
+        self.plugin.semantic_hash()
+    }
+
+    fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+        self.plugin.register(registrar)?;
+        registrar.reserve_knowledge_publication(self.reservation)
+    }
+
+    fn validate_activation(&self, records: &[DomainRecord]) -> Result<(), CanwuError> {
+        self.plugin.validate_activation(records)
+    }
+}
+
 impl PluginRegistry {
     /// The longest settled-boundary horizon any registered boundary system
     /// declares. It is read from the persisted descriptors, so a restored run
@@ -422,6 +505,67 @@ pub struct PluginRegistrar<'a> {
 }
 
 impl PluginRegistrar<'_> {
+    /// Holds `reservation` of every boundary's knowledge publication budget
+    /// for this plugin's systems: systems of other plugins are not shown what
+    /// the plugin has not yet spent of it, and cannot take it, whatever their
+    /// dispatch order (see [`KnowledgePublicationReservation`]). The
+    /// reservation is part of the plugin descriptor, and so of the run's
+    /// identity.
+    ///
+    /// Refused with [`ErrorCode::InvalidPluginRegistration`] when the
+    /// reservation holds nothing, when the plugin already holds one, or when
+    /// the reservations of every plugin registered so far, this one
+    /// included, would together exceed the per-boundary limits of
+    /// [`KnowledgeLimitsV1`].
+    pub fn reserve_knowledge_publication(
+        &mut self,
+        reservation: KnowledgePublicationReservation,
+    ) -> Result<(), CanwuError> {
+        let refuse = |message: String| {
+            Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                message,
+            ))
+        };
+        if reservation.is_empty() {
+            return refuse(format!(
+                "plugin {} reserves no knowledge publication budget",
+                self.plugin
+            ));
+        }
+        if self
+            .registry
+            .descriptors
+            .get(&self.plugin)
+            .is_some_and(|descriptor| descriptor.knowledge_publication_reservation.is_some())
+        {
+            return refuse(format!(
+                "plugin {} reserved knowledge publication budget twice",
+                self.plugin
+            ));
+        }
+        let others = self
+            .registry
+            .descriptors
+            .iter()
+            .filter(|(plugin, _)| **plugin != self.plugin)
+            .filter_map(|(_, descriptor)| descriptor.knowledge_publication_reservation.as_ref());
+        if !knowledge_publication_reservations_fit(others.chain([&reservation])) {
+            return refuse(format!(
+                "the knowledge publication reservation of plugin {} and those of the plugins registered before it together exceed the per-boundary budget",
+                self.plugin
+            ));
+        }
+        let descriptor = self
+            .registry
+            .descriptors
+            .entry(self.plugin.clone())
+            .or_default();
+        descriptor.name.clone_from(&self.plugin);
+        descriptor.knowledge_publication_reservation = Some(reservation);
+        Ok(())
+    }
+
     pub fn register_archive_reachability_participant(
         &mut self,
         handler: PluginArchiveReachabilityParticipant,
@@ -1255,6 +1399,14 @@ impl PluginRegistry {
                 format!("plugin {plugin_name} did not produce a descriptor"),
             ));
         };
+        if generated_descriptor.reserves_without_a_publisher() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                format!(
+                    "plugin {plugin_name} reserves knowledge publication budget but registers no knowledge-writing boundary system in phase 4 or 13"
+                ),
+            ));
+        }
         if let Some(expected) = expected_descriptor
             && generated_descriptor != &expected
         {
@@ -1702,7 +1854,48 @@ impl PluginRegistry {
         validate_schema_set(&registry.knowledge_schemas, &registry.knowledge_kind_owners).map_err(
             |error| invalid_snapshot_error(format!("invalid knowledge schema set: {error}")),
         )?;
+        let reservations: Vec<_> = registry
+            .descriptors
+            .values()
+            .filter_map(|descriptor| descriptor.knowledge_publication_reservation.as_ref())
+            .collect();
+        if reservations
+            .iter()
+            .any(|reservation| reservation.is_empty())
+            || !knowledge_publication_reservations_fit(reservations)
+            || registry
+                .descriptors
+                .values()
+                .any(PluginDescriptor::reserves_without_a_publisher)
+        {
+            return invalid_snapshot(
+                "plugin knowledge publication reservations are empty, have no knowledge-writing system, or together exceed the per-boundary budget",
+            );
+        }
         Ok(registry)
+    }
+
+    /// The reservation of every plugin with a knowledge-writing boundary
+    /// system due in a boundary of `cadences`, in which `has_admitted_events`
+    /// says whether event-driven systems are due: the reservations that
+    /// boundary holds.
+    pub(super) fn knowledge_publication_reservations_due(
+        &self,
+        cadences: &[SystemCadence],
+        has_admitted_events: bool,
+    ) -> KnowledgePublicationReservations {
+        self.descriptors
+            .iter()
+            .filter_map(|(plugin, descriptor)| {
+                let reservation = descriptor.knowledge_publication_reservation?;
+                descriptor
+                    .knowledge_writing_systems()
+                    .any(|contract| {
+                        super::boundary_system_due(contract, cadences, has_admitted_events)
+                    })
+                    .then(|| (plugin.clone(), reservation))
+            })
+            .collect()
     }
 
     pub(super) fn ensure_active(&self) -> Result<(), CanwuError> {

@@ -153,9 +153,10 @@ impl SimulationView<'_> {
     /// The knowledge publication budget left at this system's cut: the
     /// boundary's limits less what every proposal validated earlier in the
     /// boundary (systems of earlier phases, and earlier systems of this
-    /// phase in the registry's dispatch order) has taken, with the
-    /// per-directive bounds a publisher splits its groups against. Outside a
-    /// boundary it is the whole budget.
+    /// phase in the registry's dispatch order) has taken, less what other
+    /// plugins' reservations ([`crate::KnowledgePublicationReservation`])
+    /// still hold unspent, with the per-directive bounds a publisher splits
+    /// its groups against. Outside a boundary it is the whole budget.
     ///
     /// It needs no read declaration: the answer is the check the engine
     /// applies to this system's own proposal, as

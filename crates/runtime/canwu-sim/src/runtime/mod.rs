@@ -95,8 +95,8 @@ pub use ingress::{
     PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest,
 };
 pub use knowledge::{
-    KnowledgeHeads, KnowledgeLimitsV1, KnowledgePublicationBudget, KnowledgeSubjectSchema,
-    KnowledgeSubjectTargetKind, PluginKnowledgeSchema,
+    KnowledgeHeads, KnowledgeLimitsV1, KnowledgePublicationBudget, KnowledgePublicationReservation,
+    KnowledgeSubjectSchema, KnowledgeSubjectTargetKind, PluginKnowledgeSchema,
 };
 pub use maintenance::{
     MAX_OWNER_AUTHORIZED_MUTATIONS, MAX_OWNER_AUTHORIZED_PARTICIPANTS,
@@ -932,9 +932,10 @@ use scenario::{
 
 use plugins::PluginComponentKey;
 pub use plugins::{
-    PLUGIN_DESCRIPTOR_FORMAT_VERSION, PayloadProperty, PayloadSchema, PayloadValueType,
-    PluginActionDescriptor, PluginCommandHandler, PluginComponentRecord, PluginDescriptor,
-    PluginRegistrar, PluginRegistry, SimulationPlugin, SimulationSystemHandler, SystemDirective,
+    KnowledgeReservedPlugin, PLUGIN_DESCRIPTOR_FORMAT_VERSION, PayloadProperty, PayloadSchema,
+    PayloadValueType, PluginActionDescriptor, PluginCommandHandler, PluginComponentRecord,
+    PluginDescriptor, PluginRegistrar, PluginRegistry, SimulationPlugin, SimulationSystemHandler,
+    SystemDirective,
 };
 
 pub use view::SimulationView;
@@ -1736,6 +1737,15 @@ impl Simulation {
                 plugin_name,
                 self.state.scheduler.now,
                 &|entity| runtime_entity_exists(&self.state, entity),
+            )?;
+            // The plugin's schemas are known from here: refuse its
+            // initial-scenario records that no seal could accept.
+            persistence::validate_initial_evidence_declarations(
+                self.bound_initial_scenario()
+                    .into_iter()
+                    .flat_map(|scenario| &scenario.domain_records)
+                    .filter(|record| record.owner == plugin_name),
+                &self.plugins.record_schemas,
             )?;
             let activation_records = self
                 .state
@@ -3570,10 +3580,7 @@ fn validate_command_ingress_policy(
         ingress,
     } = admission;
     if request_id.is_some_and(|id| id.get() == 0) {
-        return Err(CanwuError::new(
-            ErrorCode::InvalidPayload,
-            "command request IDs must be nonzero",
-        ));
+        return Err(ingress::zero_command_request_id_error());
     }
     if let Some(expected) = expected_revision
         && expected != current_revision

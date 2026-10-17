@@ -415,7 +415,7 @@ impl Simulation {
                 "boundary-generated decision command identity or guards are invalid",
             ));
         }
-        self.append_ingress(
+        self.append_boundary_ingress(
             due_at,
             IngressClass::Decision,
             priority,
@@ -423,7 +423,6 @@ impl Simulation {
                 request: Box::new(request),
             },
             Some(CauseRef::Boundary(boundary_id)),
-            true,
         )
     }
 

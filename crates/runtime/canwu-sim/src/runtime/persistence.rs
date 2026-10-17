@@ -1042,6 +1042,41 @@ fn add_payload_required_continuation_dependencies(
     Ok(())
 }
 
+/// Refuses initial-scenario records whose evidence declarations no seal can
+/// accept while the record stays current. These are the per-record checks
+/// [`Simulation::evidence_dependencies`] applies to every current record at a
+/// seal and a continuation checkpoint, applied when a scenario is loaded: an
+/// initial-scenario version has no evidence to archive or keep, so either
+/// declaration naming one is refused, as are a declaration naming the
+/// record's own version, a malformed declaration, and a completed
+/// continuation that keeps dependencies. A record of a kind with no
+/// registered schema is left to the record-store validation.
+pub(super) fn validate_initial_evidence_declarations<'a>(
+    records: impl IntoIterator<Item = &'a DomainRecord>,
+    schemas: &super::records::DomainRecordSchemas,
+) -> Result<(), CanwuError> {
+    for record in records {
+        let Some((_, schema)) = schemas.get(&record.reference.kind) else {
+            continue;
+        };
+        let mut dependencies = BTreeMap::new();
+        add_identity_evidence_dependencies(&mut dependencies, record, schema)
+            .and_then(|()| {
+                add_payload_required_continuation_dependencies(&mut dependencies, record, schema)
+            })
+            .map_err(|error| {
+                CanwuError::new(
+                    ErrorCode::InvalidDomainRecord,
+                    format!(
+                        "initial-scenario record {} declares evidence no seal can accept: {}",
+                        record.reference, error.message
+                    ),
+                )
+            })?;
+    }
+    Ok(())
+}
+
 fn reachable_archived_receipt_references(
     dependencies: &[EvidenceDependency],
 ) -> BTreeSet<EvidenceRef> {

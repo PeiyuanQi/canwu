@@ -1,6 +1,6 @@
 use super::event_payloads::{KnowledgePublished, RuntimeEventPayload};
 use super::ingress::{PluginIngressCancellationProof, valid_ingress_cancellation_reason};
-use super::knowledge::{BodyShape, KnowledgeBudgetUsage, schema_retention};
+use super::knowledge::{BodyShape, KnowledgeBudgetLedger, KnowledgeBudgetUsage, schema_retention};
 use super::validation::{
     EvidenceAvailability, RuntimeValidationContext, resolve_evidence_reference,
 };
@@ -321,9 +321,14 @@ impl Simulation {
         let mut pending_knowledge_digests = Vec::new();
         let mut knowledge_correlations = BTreeSet::new();
         // What the knowledge publications validated so far in this boundary
-        // took from its budget, system by system in dispatch order, and the
-        // next local ID of each holder the boundary has published to.
-        let mut knowledge_budget_used = KnowledgeBudgetUsage::default();
+        // took from its budget, system by system in dispatch order, with the
+        // reservations of the plugins whose publishers are due, and the next
+        // local ID of each holder the boundary has published to.
+        let mut knowledge_budget =
+            KnowledgeBudgetLedger::new(self.plugins.knowledge_publication_reservations_due(
+                &request.cadences,
+                !admitted_events.is_empty() || !admitted_ingress.is_empty(),
+            ));
         let mut knowledge_next_locals = BTreeMap::new();
         let mut ordinary = Vec::new();
         let mut transitions = Vec::new();
@@ -472,7 +477,7 @@ impl Simulation {
                     proposal_evidence: Some(&proposal_evidence),
                     knowledge_overlay: Some(&visible_knowledge_overlay),
                     knowledge_schemas: &self.plugins.knowledge_schemas,
-                    knowledge_budget: knowledge_budget_used.remaining(),
+                    knowledge_budget: knowledge_budget.remaining_for(&registered.plugin),
                     allocations: Some(&allocations),
                     allowed_reservations: Some(&registered.contract.reservation_reads),
                     random_session: Some(RefCell::new(random_session)),
@@ -547,8 +552,7 @@ impl Simulation {
                     &proposal,
                     &random_execution.draws,
                 )?;
-                knowledge_budget_used =
-                    knowledge_budget_used.checked_add(validated_knowledge.usage)?;
+                knowledge_budget.charge(&registered.plugin, validated_knowledge.usage)?;
                 let mut validated_publications = validated_knowledge.publications.into_iter();
                 person_writes.stage(
                     &registered.plugin,
@@ -1366,7 +1370,7 @@ impl Simulation {
                             "boundary-generated ingress exceeds the supported time range",
                         )
                     })?;
-                    let receipt = self.append_ingress(
+                    let receipt = self.append_boundary_ingress(
                         due_at,
                         descriptor.class,
                         priority,
@@ -1378,7 +1382,6 @@ impl Simulation {
                             archive_retention: Vec::new(),
                         },
                         Some(CauseRef::Boundary(boundary_id)),
-                        true,
                     )?;
                     generated_ingress.push(BoundaryIngressGeneration {
                         ingress: receipt.ingress_id,
@@ -1420,7 +1423,7 @@ impl Simulation {
                             "boundary-generated cross-plugin ingress exceeds the supported time range",
                         )
                     })?;
-                    let receipt = self.append_ingress(
+                    let receipt = self.append_boundary_ingress(
                         due_at,
                         descriptor.class,
                         priority,
@@ -1432,7 +1435,6 @@ impl Simulation {
                             archive_retention: Vec::new(),
                         },
                         Some(CauseRef::Boundary(boundary_id)),
-                        true,
                     )?;
                     generated_ingress.push(BoundaryIngressGeneration {
                         ingress: receipt.ingress_id,
@@ -1476,12 +1478,11 @@ impl Simulation {
                         },
                         &reason,
                     )?;
-                    let receipt = self.append_plugin_ingress_cancellation(
+                    let receipt = self.append_boundary_ingress_cancellation(
                         target,
                         IngressCancellationAuthority::BoundarySystem,
                         reason,
                         Some(CauseRef::Boundary(boundary_id)),
-                        true,
                     )?;
                     generated_ingress.push(BoundaryIngressGeneration {
                         ingress: receipt.ingress_id,

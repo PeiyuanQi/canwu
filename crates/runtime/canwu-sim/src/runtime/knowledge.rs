@@ -21,9 +21,11 @@ use std::collections::BTreeMap;
 /// A boundary has one publication budget of record bodies, holder entries,
 /// and payload bytes, spent in dispatch order by every publishing system: a
 /// system reads what is left with
-/// [`crate::SimulationView::knowledge_publication_budget`]. A proposal that
-/// exceeds it, or a directive that exceeds its per-directive bounds, fails
-/// the boundary with [`ErrorCode::KnowledgeLimitExceeded`].
+/// [`crate::SimulationView::knowledge_publication_budget`]. A plugin may hold
+/// a share of it ([`KnowledgePublicationReservation`]), which other plugins'
+/// systems cannot take. A proposal that exceeds what it was left, or a directive that
+/// exceeds its per-directive bounds, fails the boundary with
+/// [`ErrorCode::KnowledgeLimitExceeded`].
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct KnowledgeLimitsV1 {
     pub schemas_per_plugin: usize,
@@ -125,6 +127,79 @@ impl KnowledgePublicationBudget {
     }
 }
 
+/// A share of every boundary's knowledge publication budget held for one
+/// plugin's systems, declared at registration
+/// ([`crate::PluginRegistrar::reserve_knowledge_publication`]; a host
+/// reserves for a plugin it does not write by registering it through
+/// [`crate::KnowledgeReservedPlugin`]).
+///
+/// The plugin must register a knowledge-writing boundary system (phase 4 or
+/// 13 with a knowledge write grant). In every boundary where one of those
+/// systems is due, whatever the others' cadences, the share is held for the
+/// whole boundary: what the plugin has not yet spent of it is left out of
+/// the budget every system of another plugin reads, whatever the dispatch
+/// order, so a publisher that runs earlier and spends all it is shown cannot
+/// take it. A plugin publishing in both phases has one share for both; when
+/// only its phase-4 system is due, what it leaves unspent stays held through
+/// phase 13. A boundary in which none of its knowledge-writing systems is
+/// due holds nothing for it. The plugin's own systems read the whole of what
+/// is left, their unspent share included. A publication counts against its
+/// plugin's share first and, past it, against the unreserved budget. Without
+/// reservations, the default, the budget is shared in dispatch order as
+/// before.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgePublicationReservation {
+    /// Record bodies held for the plugin in each boundary.
+    pub records: usize,
+    /// Holder entries held for the plugin in each boundary.
+    pub holder_entries: usize,
+    /// Payload bytes of new bodies held for the plugin in each boundary,
+    /// charged as [`KnowledgeRecordDraft::payload_bytes`] charges them.
+    pub payload_bytes: usize,
+}
+
+impl KnowledgePublicationReservation {
+    #[must_use]
+    pub const fn new(records: usize, holder_entries: usize, payload_bytes: usize) -> Self {
+        Self {
+            records,
+            holder_entries,
+            payload_bytes,
+        }
+    }
+
+    /// Whether it holds nothing; registration refuses such a reservation.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.records == 0 && self.holder_entries == 0 && self.payload_bytes == 0
+    }
+}
+
+/// The reservations a boundary holds, by plugin name.
+pub(crate) type KnowledgePublicationReservations =
+    BTreeMap<String, KnowledgePublicationReservation>;
+
+/// Whether `reservations` together fit the per-boundary limits.
+pub(crate) fn knowledge_publication_reservations_fit<'a>(
+    reservations: impl IntoIterator<Item = &'a KnowledgePublicationReservation>,
+) -> bool {
+    let limits = KnowledgeLimitsV1::CURRENT;
+    let total =
+        reservations
+            .into_iter()
+            .fold(KnowledgeBudgetUsage::default(), |total, reservation| {
+                total.plus(KnowledgeBudgetUsage {
+                    records: reservation.records,
+                    entries: reservation.holder_entries,
+                    payload_bytes: reservation.payload_bytes,
+                })
+            });
+    total.records <= limits.records_per_boundary
+        && total.entries <= limits.holder_entries_per_boundary
+        && total.payload_bytes <= limits.payload_bytes_per_boundary
+}
+
 /// What the knowledge publications of a boundary, or of one proposal, take
 /// from the budget.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -135,40 +210,115 @@ pub(crate) struct KnowledgeBudgetUsage {
 }
 
 impl KnowledgeBudgetUsage {
-    /// The budget left after this usage.
+    /// The budget left after this usage, with nothing reserved.
     pub(crate) const fn remaining(self) -> KnowledgePublicationBudget {
+        self.remaining_less(Self {
+            records: 0,
+            entries: 0,
+            payload_bytes: 0,
+        })
+    }
+
+    /// The budget left after this usage and `withheld`.
+    const fn remaining_less(self, withheld: Self) -> KnowledgePublicationBudget {
         let limits = KnowledgeLimitsV1::CURRENT;
         KnowledgePublicationBudget {
-            records: limits.records_per_boundary.saturating_sub(self.records),
+            records: limits
+                .records_per_boundary
+                .saturating_sub(self.records)
+                .saturating_sub(withheld.records),
             holder_entries: limits
                 .holder_entries_per_boundary
-                .saturating_sub(self.entries),
+                .saturating_sub(self.entries)
+                .saturating_sub(withheld.entries),
             payload_bytes: limits
                 .payload_bytes_per_boundary
-                .saturating_sub(self.payload_bytes),
+                .saturating_sub(self.payload_bytes)
+                .saturating_sub(withheld.payload_bytes),
             records_per_batch: limits.records_per_batch,
             holder_entries_per_batch: limits.holder_entries_per_batch,
         }
     }
 
-    /// This usage plus `other`, refused past the boundary's budget.
-    pub(crate) fn checked_add(self, other: Self) -> Result<Self, CanwuError> {
-        let limits = KnowledgeLimitsV1::CURRENT;
-        let sum = Self {
+    const fn plus(self, other: Self) -> Self {
+        Self {
             records: self.records.saturating_add(other.records),
             entries: self.entries.saturating_add(other.entries),
             payload_bytes: self.payload_bytes.saturating_add(other.payload_bytes),
-        };
-        if sum.records > limits.records_per_boundary
-            || sum.entries > limits.holder_entries_per_boundary
-            || sum.payload_bytes > limits.payload_bytes_per_boundary
+        }
+    }
+}
+
+/// What a boundary's knowledge publications have taken from its budget, in
+/// total and by each plugin that holds a reservation, in dispatch order.
+///
+/// A system of plugin `p` may take what the limits leave after everything
+/// taken so far and after the unspent shares of the other plugins'
+/// reservations. Since the reservations together fit the limits and every
+/// charge stays inside what its plugin was left, what remains always covers
+/// every plugin's unspent share: no charge by one plugin can reduce what
+/// another plugin's reservation still guarantees it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct KnowledgeBudgetLedger {
+    reservations: KnowledgePublicationReservations,
+    used: KnowledgeBudgetUsage,
+    /// What each plugin with a reservation has taken, keyed by plugin.
+    reserved_used: BTreeMap<String, KnowledgeBudgetUsage>,
+}
+
+impl KnowledgeBudgetLedger {
+    pub(crate) fn new(reservations: KnowledgePublicationReservations) -> Self {
+        Self {
+            reservations,
+            used: KnowledgeBudgetUsage::default(),
+            reserved_used: BTreeMap::new(),
+        }
+    }
+
+    /// The budget a system of `plugin` reads: the limits less what every
+    /// publication charged so far took, less what the other plugins'
+    /// reservations still hold.
+    pub(crate) fn remaining_for(&self, plugin: &str) -> KnowledgePublicationBudget {
+        let mut withheld = KnowledgeBudgetUsage::default();
+        for (holder, reservation) in &self.reservations {
+            if holder == plugin {
+                continue;
+            }
+            let spent = self.reserved_used.get(holder).copied().unwrap_or_default();
+            withheld = withheld.plus(KnowledgeBudgetUsage {
+                records: reservation.records.saturating_sub(spent.records),
+                entries: reservation.holder_entries.saturating_sub(spent.entries),
+                payload_bytes: reservation
+                    .payload_bytes
+                    .saturating_sub(spent.payload_bytes),
+            });
+        }
+        self.used.remaining_less(withheld)
+    }
+
+    /// Charges what one proposal, or one directive, of `plugin` publishes;
+    /// refused past what [`Self::remaining_for`] left the plugin.
+    pub(crate) fn charge(
+        &mut self,
+        plugin: &str,
+        usage: KnowledgeBudgetUsage,
+    ) -> Result<(), CanwuError> {
+        let remaining = self.remaining_for(plugin);
+        if usage.records > remaining.records
+            || usage.entries > remaining.holder_entries
+            || usage.payload_bytes > remaining.payload_bytes
         {
             return Err(CanwuError::new(
                 ErrorCode::KnowledgeLimitExceeded,
                 "boundary knowledge publication budget exceeded: the system published past what knowledge_publication_budget left",
             ));
         }
-        Ok(sum)
+        self.used = self.used.plus(usage);
+        if self.reservations.contains_key(plugin) {
+            let spent = self.reserved_used.entry(plugin.to_owned()).or_default();
+            *spent = spent.plus(usage);
+        }
+        Ok(())
     }
 }
 

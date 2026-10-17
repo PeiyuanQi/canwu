@@ -517,6 +517,14 @@ pub struct IngressRecord {
     pub cause: Option<CauseRef>,
 }
 
+/// The refusal of command request ID 0, at admission and at enqueue.
+pub(super) fn zero_command_request_id_error() -> CanwuError {
+    CanwuError::new(
+        ErrorCode::InvalidPayload,
+        "command request IDs must be nonzero",
+    )
+}
+
 /// The refusal of a request whose ID a retired command request used.
 pub(super) fn retired_request_error(request_id: CommandRequestId) -> CanwuError {
     CanwuError::new(
@@ -585,6 +593,11 @@ impl Simulation {
         self.ensure_runtime_ready()?;
         self.ensure_canonical_ingress_can_start()?;
         self.ensure_command_ingress_family(CommandIngress::LiveRequest)?;
+        // Admission refuses ID 0 and a save refuses a queued command that
+        // carries it, so it is refused here, before anything is queued.
+        if request.request_id.get() == 0 {
+            return Err(zero_command_request_id_error());
+        }
         if self.command_request_retired(request.request_id) {
             return Err(retired_request_error(request.request_id));
         }
@@ -796,7 +809,7 @@ impl Simulation {
             },
             &reason,
         )?;
-        self.append_plugin_ingress_cancellation(target, authority, reason, None, false)
+        self.append_plugin_ingress_cancellation(target, authority, reason, None)
     }
 
     /// Resolves and authorizes one cancellation target, returning its exact
@@ -961,9 +974,43 @@ impl Simulation {
         authority: IngressCancellationAuthority,
         reason: String,
         cause: Option<CauseRef>,
-        after_current_boundary: bool,
     ) -> Result<IngressReceipt, CanwuError> {
         let transaction = IngressTransactionCheckpoint::capture(&self.state);
+        let receipt =
+            self.push_plugin_ingress_cancellation(target, authority, reason, cause, false)?;
+        if let Err(error) = self.refresh_checkpoint_hash() {
+            transaction.restore_cancellation(&mut self.state, target);
+            return Err(error);
+        }
+        Ok(receipt)
+    }
+
+    /// Appends the cancellation record of a boundary system's
+    /// `CancelPluginIngress` while its boundary settles. The record and its
+    /// queue effects are those of [`Self::append_plugin_ingress_cancellation`];
+    /// the checkpoint hash is left to the boundary, as
+    /// [`Self::append_boundary_ingress`] explains.
+    pub(super) fn append_boundary_ingress_cancellation(
+        &mut self,
+        target: IngressQueueKey,
+        authority: IngressCancellationAuthority,
+        reason: String,
+        cause: Option<CauseRef>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.push_plugin_ingress_cancellation(target, authority, reason, cause, true)
+    }
+
+    /// Claims the cancellation record's identity and applies it to the
+    /// journal and the queue, leaving the checkpoint hash to the caller. It
+    /// fails only before it changes anything.
+    fn push_plugin_ingress_cancellation(
+        &mut self,
+        target: IngressQueueKey,
+        authority: IngressCancellationAuthority,
+        reason: String,
+        cause: Option<CauseRef>,
+        after_current_boundary: bool,
+    ) -> Result<IngressReceipt, CanwuError> {
         let (id, next_id, eligible_boundary_count) =
             self.next_ingress_identity(after_current_boundary)?;
         let now = self.state.scheduler.now;
@@ -990,10 +1037,6 @@ impl Simulation {
             .set_ingress_status(target.id, super::PluginIngressStatus::Cancelled);
         self.state.evidence.push_ingress(record);
         self.state.metadata.plugin_registration_closed = true;
-        if let Err(error) = self.refresh_checkpoint_hash() {
-            transaction.restore_cancellation(&mut self.state, target);
-            return Err(error);
-        }
         Ok(IngressReceipt {
             ingress_id: IngressId::new(id),
             issued_at: now,
@@ -1165,6 +1208,58 @@ impl Simulation {
         cause: Option<CauseRef>,
         after_current_boundary: bool,
     ) -> Result<IngressReceipt, CanwuError> {
+        let transaction = IngressTransactionCheckpoint::capture(&self.state);
+        let (receipt, queue_key) = self.push_ingress_record(
+            due_at,
+            class,
+            priority,
+            payload,
+            cause,
+            after_current_boundary,
+        )?;
+        if let Err(error) = self.refresh_checkpoint_hash() {
+            transaction.restore(&mut self.state, &queue_key);
+            return Err(error);
+        }
+        Ok(receipt)
+    }
+
+    /// Appends an ingress record that a boundary generates while it settles:
+    /// a boundary system's `ScheduleIngress` or `SchedulePluginIngress`, or a
+    /// boundary-generated decision. The record, its ID, issue time, due time,
+    /// eligibility cut, queue key, and receipt are the ones
+    /// [`Self::append_ingress`] gives, claimed at the same point of the
+    /// boundary. Only the checkpoint hash is not recomputed here: settlement
+    /// recomputes it over the whole state as its last step, nothing reads it
+    /// in between (a boundary view does not expose it), and a boundary that
+    /// fails after this append restores the state it started from. A refresh
+    /// here would hash every commitment root the boundary has dirtied so far,
+    /// and the boundary's own hashing phase would hash again every root dirtied
+    /// after it.
+    pub(super) fn append_boundary_ingress(
+        &mut self,
+        due_at: SimTime,
+        class: IngressClass,
+        priority: i32,
+        payload: IngressPayload,
+        cause: Option<CauseRef>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.push_ingress_record(due_at, class, priority, payload, cause, true)
+            .map(|(receipt, _)| receipt)
+    }
+
+    /// Claims the record's identity and appends it to the journal and the
+    /// queue, leaving the checkpoint hash to the caller. It fails only before
+    /// it changes anything.
+    fn push_ingress_record(
+        &mut self,
+        due_at: SimTime,
+        class: IngressClass,
+        priority: i32,
+        payload: IngressPayload,
+        cause: Option<CauseRef>,
+        after_current_boundary: bool,
+    ) -> Result<(IngressReceipt, IngressQueueKey), CanwuError> {
         if due_at < self.state.scheduler.now {
             return Err(CanwuError::new(
                 ErrorCode::LateIngress,
@@ -1174,7 +1269,6 @@ impl Simulation {
                 ),
             ));
         }
-        let transaction = IngressTransactionCheckpoint::capture(&self.state);
         let (id, next_id, eligible_boundary_count) =
             self.next_ingress_identity(after_current_boundary)?;
         let record = IngressRecord {
@@ -1190,17 +1284,14 @@ impl Simulation {
         let queue_key = IngressQueueKey::from_record(&record);
         self.state.counters.next_ingress_id = next_id;
         self.state.scheduler.pending_ingress.insert(queue_key);
-        self.state.evidence.push_ingress(record.clone());
-        self.state.metadata.plugin_registration_closed = true;
-        if let Err(error) = self.refresh_checkpoint_hash() {
-            transaction.restore(&mut self.state, &queue_key);
-            return Err(error);
-        }
-        Ok(IngressReceipt {
+        let receipt = IngressReceipt {
             ingress_id: record.id,
             issued_at: record.issued_at,
             due_at: record.due_at,
-        })
+        };
+        self.state.evidence.push_ingress(record);
+        self.state.metadata.plugin_registration_closed = true;
+        Ok((receipt, queue_key))
     }
 
     /// Claims the next ingress identifier and its journal eligibility cut.

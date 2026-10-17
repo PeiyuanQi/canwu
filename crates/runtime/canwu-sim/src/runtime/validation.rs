@@ -1565,6 +1565,15 @@ fn validate_snapshot_domain_records(
     .map_err(|error| {
         invalid_snapshot_error(format!("snapshot domain-record state is invalid: {error}"))
     })?;
+    if let Some(initial_scenario) = &snapshot.initial_scenario {
+        super::persistence::validate_initial_evidence_declarations(
+            &initial_scenario.domain_records,
+            &plugins.record_schemas,
+        )
+        .map_err(|error| {
+            invalid_snapshot_error(format!("snapshot initial scenario is invalid: {error}"))
+        })?;
+    }
     Ok(records)
 }
 
@@ -4029,7 +4038,12 @@ fn validate_boundary_knowledge_changes(
         (&Arc<super::KnowledgeRecordBody>, &super::HolderEntry),
     )> = Vec::new();
     let mut next_locals = BTreeMap::<&KnowledgeHolderRef, u64>::new();
-    let mut usage = super::knowledge::KnowledgeBudgetUsage::default();
+    let mut budget = super::knowledge::KnowledgeBudgetLedger::new(
+        plugins.knowledge_publication_reservations_due(
+            &record.cadences,
+            boundary_has_event_ingress(record),
+        ),
+    );
     let mut digests = Vec::with_capacity(record.knowledge_changes.len());
     for change in &record.knowledge_changes {
         let Some(contract) = snapshot_boundary_contract(plugins, &change.plugin, &change.system)
@@ -4219,12 +4233,15 @@ fn validate_boundary_knowledge_changes(
                 "boundary knowledge body is unheld, or an Explicit body has more than one holder",
             );
         }
-        usage = usage
-            .checked_add(super::knowledge::KnowledgeBudgetUsage {
-                records: change.records.len(),
-                entries: entry_count,
-                payload_bytes,
-            })
+        budget
+            .charge(
+                &change.plugin,
+                super::knowledge::KnowledgeBudgetUsage {
+                    records: change.records.len(),
+                    entries: entry_count,
+                    payload_bytes,
+                },
+            )
             .map_err(|_| {
                 invalid_snapshot_error("boundary knowledge exceeds the boundary's budget")
             })?;
