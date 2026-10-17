@@ -374,7 +374,7 @@ for (binding_id, report) in fiscal_reports(&viewer)? {
 - **改指与移除。** 绑定改指之后，新持有人在下一次发布时拿到整份报告，旧持有人的报告被撤回：它的摘要被一条标为 `withdrawn` 的摘要取代，读取函数不再列出它。对 `Interval` 绑定，这两件事都在它的下一个到期时刻发生，所以新持有人最多等 `every` 才拿到第一份报告，旧持有人在此之前保留自己的报告。被移除的绑定的报告以同样方式立即撤回，记录本身保留，所以它的标识不会被重复使用。被撤回的持有人保留已经拿到的记录，那是历史。
 - **账本里留下什么。** `fiscal_report` schema 按上层应用在 `FiscalPlugin::with_report_retention` 中选的[留存策略](/architecture/knowledge-information/#留存)注册：默认 `RetireWhenSuperseded`，持有人每条线只保留一条记录，已关闭周期的数字在空分段取代它们之后离开持有人的账本；`Keep` 则让每个被取代的分段仍可用 `FullHistory` 读到。要从旧报告记录里读已关闭周期数字的上层应用，请用 `Keep`，或者自己归档收到过的报告。
 
-报告系统在它的**报告份额**之内发布，即引擎[发布预算](/architecture/knowledge-information/#发布预算)中给财政的那一份，同时也不超过本边界更早的发布方留下的预算。份额（`FiscalReportBudget`）按本体、条目和载荷字节计。默认是 `KnowledgeLimitsV1::CURRENT` 的一半：16,384 个本体、16,384 个条目和 32 MiB，足以在一个边界内发完 `fiscal-world-profile` 基准世界（见[限制与预算](#限制与预算)）中一个有变动的月度周期。`FiscalPlugin::with_report_budget` 可以在 `FiscalReportBudget::MINIMUM`（两个本体、两个条目、128 KiB）和引擎上限之间上调或下调。自定义的份额写在报告系统的名称里，所以是插件身份的一部分。每个持有人的记录是指令中的一个组，各组按引擎单条指令的上限打包进指令，所以向几千个持有人发布的边界只有几条指令和几个 `KnowledgePublished` 事件；分段的切法保证摘要始终有位置。放不下的留在队列里，边界安排一条立即到期的内部 `fiscal_report_drain_v1` 数据包，同一时刻的下一个边界继续发布；`advance_canonical` 和 `step_canonical` 会先结算这个边界再前进，`settle_boundary` 则拒绝更晚的时间，直到这一时刻的某个边界准入了这个数据包。为此财政记录中只有报告记账发生变化，没有任何修订号前进。队列排空之前，摘要列出待发布的分段，`FiscalReport::is_complete` 为 `false`，`is_stale(fact_id)` 可以告诉你某条事实属于待发布的分段，它可能比 `as_of` 旧，也可能缺失。保留直接命令历史的运行不能加入规范化输入，这时不安排排空，被欠的分段等下一个运行财政系统的边界。
+报告系统在它的**报告份额**之内发布，即引擎[发布预算](/architecture/knowledge-information/#发布预算)中给财政的那一份，同时也不超过本边界更早的发布方留下的预算。份额（`FiscalReportBudget`）按记录正文、条目和载荷字节计。默认是 `KnowledgeLimitsV1::CURRENT` 的一半：16,384 个正文、16,384 个条目和 32 MiB，足以在一个边界内发完 `fiscal-world-profile` 基准世界（见[限制与预算](#限制与预算)）中一个有变动的月度周期。`FiscalPlugin::with_report_budget` 可以在 `FiscalReportBudget::MINIMUM`（两个正文、两个条目、128 KiB）和引擎上限之间上调或下调。自定义的份额写在报告系统的名称里，所以是插件身份的一部分。每个持有人的记录是指令中的一个组，各组按引擎单条指令的上限打包进指令，所以向几千个持有人发布的边界只有几条指令和几个 `KnowledgePublished` 事件；分段的切法保证摘要始终有位置。放不下的留在队列里，边界安排一条立即到期的内部 `fiscal_report_drain_v1` 数据包，同一时刻的下一个边界继续发布；`advance_canonical` 和 `step_canonical` 会先结算这个边界再前进，`settle_boundary` 则拒绝更晚的时间，直到这一时刻的某个边界准入了这个数据包。为此财政记录中只有报告记账发生变化，没有任何修订号前进。队列排空之前，摘要列出待发布的分段，`FiscalReport::is_complete` 为 `false`，`is_stale(fact_id)` 可以告诉你某条事实属于待发布的分段，它可能比 `as_of` 旧，也可能缺失。保留直接命令历史的运行不能加入规范化输入，这时不安排排空，被欠的分段等下一个运行财政系统的边界。
 
 推迟发布会泄露一点观察者绑定权限之外的信息：哪些分段待发布，取决于排在它前面的报告。
 
@@ -422,7 +422,7 @@ for (binding_id, report) in fiscal_reports(&viewer)? {
 | `MAX_FISCAL_APPOINTMENT_PARTIES`、`MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY`、`MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY` | 32、4、64 | 一份政策的提名方或请议方；一方的待决提案；一份政策保留的已结案提案 |
 | `MAX_FISCAL_LEDGER_RECORD_BYTES`、`MAX_FISCAL_RECORD_BYTES`、`FISCAL_RECORD_RING_RESERVE_BYTES` | 256 KiB、1 MiB、4 KiB | 一条范围明细；一条财政机构记录或辖区记录；每条记录为结果环预留的空间 |
 | `FISCAL_REPORT_ROWS_PER_PART`、`MAX_FISCAL_REPORT_CYCLE_SLOTS` | 16、64 | 一个分段中的行数；一份报告显示的周期数 |
-| 报告份额（`FiscalReportBudget`、`with_report_budget`） | 默认 16,384 个本体、16,384 个条目、32 MiB | 报告系统在一个边界内发布的量，同时不超过引擎剩余的发布预算 |
+| 报告份额（`FiscalReportBudget`、`with_report_budget`） | 默认 16,384 个正文、16,384 个条目、32 MiB | 报告系统在一个边界内发布的量，同时不超过引擎剩余的发布预算 |
 | `FISCAL_PARKED_CHECKS_PER_BOUNDARY` | 16 | 报告系统每次运行重新检查的搁置条目数 |
 | `MAX_FISCAL_ARCHIVE_COMMIT_RECORDS`、`MAX_FISCAL_ARCHIVE_RECORDS_PER_BLOB`、`MAX_FISCAL_ARCHIVE_PENDING_HANDLES` | 4,096、64、64 | 一次归档提交的记录数和 blob 大小；未确认的保留句柄数 |
 

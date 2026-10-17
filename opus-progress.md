@@ -83,8 +83,8 @@ auditor appointment, G-15 High with the county-level world target, continuation 
 phases 1 and 2 in 0.16.0, §4.2 findings staying engine-side, the 0.16.0 contract choices, and the continuation gate as
 a release test not run in CI with a pre-release test step in the release skill (done in 0.17.0).
 
-Taken in the 0.17.0 run by the orchestrator, under the owner's instruction to do the next step and release (2026-10-16);
-each is recorded in `docs/proposals/fiscal-observers-at-scale.md` and the owner may reverse any of them:
+Taken in the 0.17.0 run by the orchestrator, under the owner's instruction to do the next step and release, and
+confirmed by the owner on 2026-10-16; each is recorded in `docs/proposals/fiscal-observers-at-scale.md`:
 - Superseded report entries retire **at publication** (`RetireWhenSuperseded`), not after a seal as the 0.16.0 row
   suggested: retirement tied to a seal would make sealed and unsealed runs differ and break the lockstep gate.
 - Retention is a schema-level policy plus the fiscal knob `with_report_retention` (default `RetireWhenSuperseded`);
@@ -99,12 +99,14 @@ each is recorded in `docs/proposals/fiscal-observers-at-scale.md` and the owner 
   writers of the fiscal records.
 - 0.16.0 was yanked after 0.17.0 was verified on crates.io, following the one-live-version practice.
 
-Open:
-- Confirm the 0.17.0 decisions above.
-- The Chinese terms of the 0.17.0 concepts, as proposed in `docs/terminology.md`: 知识记录本体 knowledge record body,
-  持有人条目 holder entry, 持有人本地记录号 holder-local record ID, 共享发布 shared publication, 发布预算 publication
-  budget, 知识留存策略 knowledge retention, 已清退条目 cleared entry, 报告节律 report cadence, 报告日程记录 report
-  schedule, 机构粒度 institution granularity, 报告份额 report share, 搁置轮询 parked rotation, 唤醒节奏 wake cadence.
+Decided on 2026-10-16 (owner), the Chinese terms of the 0.17.0 concepts, on `main` in the docs and website:
+知识记录正文 knowledge record body (short form 正文, 记录正文 on the knowledge page beside an information item's
+正文; the owner first wrote 知识记录主体, then chose 正文 because 主体 already names a record's subjects), 持有人条目
+holder entry, 持有人本地记录号 holder-local record ID, 共享发布 shared publication, 发布预算 publication budget,
+知识留存策略 knowledge retention, 已清退条目 cleared entry, 报告节律 report cadence, 报告日程记录 report schedule,
+机构粒度 institution granularity, 报告份额 report share, 搁置轮询 parked rotation, 唤醒节奏 wake cadence.
+
+Open: none.
 
 ## 7. Working rules
 

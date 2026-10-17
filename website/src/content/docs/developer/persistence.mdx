@@ -184,16 +184,16 @@ assert_eq!(continued.checkpoint_hash(), canwu.checkpoint_hash());
 参伍 0.17.0 写出快照格式 9、承诺格式 6、检查点/证据日志格式 6、分页检查点封装格式 6 和接续检查点格式 2。参伍的 crate 只依赖彼此完全相同的版本，存档也记录了精确的 `engine_version`，所以 0.17.0 引擎只能加载 0.17.0 写出的存档。0.16.0 及更早版本的存档不能加载，改写其中记录的版本号也不行；需要读取时，请保留旧引擎，或用自己的工具导出数据。
 :::
 
-参伍 0.17.0 是次版本，每种持久化格式都变了（快照、承诺、检查点/证据日志、分页检查点封装、接续检查点；状态修订、准入游标和精确重放格式仍是 3），原因只有一个：[知识账本](/architecture/knowledge-information/#知识账本)现在每个记录本体只存一份、每个持有人各一个持有人条目，schema 还可以在发布时清退被取代的条目（[留存](/architecture/knowledge-information/#留存)）。快照格式 9 把账本编码为本体和持有人条目，每个持有人带它的下一个本地记录号；承诺格式 6 按块计算账本的哈希（每个条目一个叶哈希，每 256 个本地记录号一块，每个持有人一个根），所以条目可以离开；检查点/证据日志格式 6 把每次发布记为它的本体和每个持有人的条目，每条指令一个列出全部持有人的 `KnowledgePublished` 事件；分页检查点封装（格式 6）和接续检查点（格式 2）内嵌新的快照。哈希算法没有变化，但每个检查点哈希、边界哈希和状态承诺都与 0.16.0 不同。与存档和代码有关的变化如下：
+参伍 0.17.0 是次版本，每种持久化格式都变了（快照、承诺、检查点/证据日志、分页检查点封装、接续检查点；状态修订、准入游标和精确重放格式仍是 3），原因只有一个：[知识账本](/architecture/knowledge-information/#知识账本)现在每个记录正文只存一份、每个持有人各一个持有人条目，schema 还可以在发布时清退被取代的条目（[留存](/architecture/knowledge-information/#留存)）。快照格式 9 把账本编码为正文和持有人条目，每个持有人带它的下一个本地记录号；承诺格式 6 按块计算账本的哈希（每个条目一个叶哈希，每 256 个本地记录号一块，每个持有人一个根），所以条目可以离开；检查点/证据日志格式 6 把每次发布记为它的正文和每个持有人的条目，每条指令一个列出全部持有人的 `KnowledgePublished` 事件；分页检查点封装（格式 6）和接续检查点（格式 2）内嵌新的快照。哈希算法没有变化，但每个检查点哈希、边界哈希和状态承诺都与 0.16.0 不同。与存档和代码有关的变化如下：
 
 - **存档只保存当前的知识。** 在 `RetireWhenSuperseded` 下，持有人每条线只保留一个条目，所以有几千个报告持有人的世界，它的接续检查点在模拟的年月中保持平稳，不再随每次发布增长。分页检查点仍把整本知识账本放在一个 4 MiB 的封装页里，几千个报告持有人的世界放不下；这样的运行请用[接续检查点](#接续检查点)存档。
 - **需要修改的代码。**
   - *发布方。* 发布知识的插件把原来的指令包一层：`PublishKnowledge { visibility, producer_correlation, supersession: KnowledgeSupersession::Explicit, groups: vec![KnowledgePublicationGroup { holders: vec![holder], records }], summary }`。原来按 `KnowledgeLimitsV1::batches_per_system_boundary`（已移除）控制节奏的插件，改读 `view.knowledge_publication_budget()`，只发布 `take` 允许的部分。每个 `PluginKnowledgeSchema` 都要写明 `retention`。
-  - *读事件和边界记录的代码。* `KnowledgePublished` 带 `holders`、`record_count` 和 `entry_count`，受众是 `EventAudience::KnowledgeHolders`；`BoundaryKnowledgeChange` 带 `records`（本体）和 `holders`（条目）。
+  - *读事件和边界记录的代码。* `KnowledgePublished` 带 `holders`、`record_count` 和 `entry_count`，受众是 `EventAudience::KnowledgeHolders`；`BoundaryKnowledgeChange` 带 `records`（正文）和 `holders`（条目）。
   - *读账本的代码。* `HolderLedgers::record`、`records`、`records_after`、`record_count`、`last_record_id` 和 `remove` 已移除，由 `insert_publication`、`remove_entry`、`body` 和 `HolderLedger::entry` 取代，`KnowledgeQueryResult` 新增 `retention`。
   - *财政。* `FiscalObserverBinding` 新增 `granularity` 和 `cadence`（都有默认值），根记录去掉了 `queue_pages`，`FiscalState` 新增 `report_schedule`，报告日程记录是新增的记录。
 - **插件身份。** 财政插件升到 `0.4.0-experimental`，语义哈希改变，唤醒节奏（`with_report_cadence`）、报告份额和留存策略这几个选项都是它身份的一部分。每个注册了知识 schema 的插件都把 schema 的留存策略记入插件描述。
-- **进入时的检查。** 知识账本里有没人持有的本体、指向不存在本体的条目、乱序的本地记录号，或在持有人内解析不了的关联的快照会被拒绝；恢复时引擎从日志重建账本，和存档里的账本对不上也会被拒绝。
+- **进入时的检查。** 知识账本里有没人持有的正文、指向不存在正文的条目、乱序的本地记录号，或在持有人内解析不了的关联的快照会被拒绝；恢复时引擎从日志重建账本，和存档里的账本对不上也会被拒绝。
 - **接续闸门。** `canwu-api` 的 Cargo feature `continuation-gate` 是发布前的测试，应用绝不要开启：它让每次修改同时在运行本身和一个从接续检查点恢复的封存影子上执行，有任何分歧就 panic。
 
 和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.16.0 的存档；需要读取时，请保留 0.16.0 引擎。

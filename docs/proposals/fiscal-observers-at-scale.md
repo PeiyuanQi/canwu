@@ -1153,7 +1153,7 @@ shipped in 0.16.0, unchanged by this design.
 | 中文规范写法 (proposed) | English | Code | Meaning |
 | --- | --- | --- | --- |
 | 共享发布 | shared publication | `KnowledgePublicationGroup`, `KnowledgeSupersession::CurrentOnSubjects` | One directive publishes the same record bodies to many holders; each body is stored once and each holder gets its own entry and supersession. |
-| 知识记录本体 | knowledge record body | `KnowledgeRecordBody` | The holder-independent part of a knowledge record: schema, subjects, payload, times, confidence, origin. |
+| 知识记录正文 | knowledge record body | `KnowledgeRecordBody` | The holder-independent part of a knowledge record: schema, subjects, payload, times, confidence, origin. |
 | 持有人条目 | holder entry | `HolderEntry` | One holder's hold on one body: its local ID and its own supersession and contradiction lists. |
 | 持有人本地记录号 | holder-local record ID | `HolderKnowledgeRecordId`, `HolderEntry::local` | The ID a holder sees for one of its records, from the holder's own counter; it never changes and never names another holder's record. |
 | 发布预算 | publication budget | `KnowledgePublicationBudget`, `knowledge_publication_budget` | What a boundary may still spend on knowledge: payload bytes, holder entries, bodies. |
