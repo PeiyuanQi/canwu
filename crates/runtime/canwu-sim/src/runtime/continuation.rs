@@ -172,7 +172,7 @@ impl Simulation {
         }
         // K2: the causes of scheduled work.
         for action in self.state.scheduler.actions.values() {
-            match action {
+            match &**action {
                 ScheduledAction::ArmyArrival { order_event, .. }
                 | ScheduledAction::PersonArrival { order_event, .. } => {
                     needs.records.insert(EvidenceRef::Event(*order_event));
@@ -1670,13 +1670,13 @@ impl Simulation {
             retired_command_requests: super::state::RetiredRequestIds::from_ranges(
                 requests.retired_commands,
             ),
-            events: unadmitted.events,
+            events: unadmitted.events.into(),
             commands: super::state::RetainedJournal::default(),
             command_attempts: super::state::RetainedJournal::default(),
             ingress: super::state::RetainedJournal::default(),
             command_index: super::state::CommandHistoryIndex::default(),
-            boundaries: Vec::new(),
-            random_draws: Vec::new(),
+            boundaries: super::state::SharedJournal::default(),
+            random_draws: super::state::SharedJournal::default(),
             archived_segment_headers: im::Vector::new(),
             archived_evidence_receipts: im::OrdMap::new(),
             keyed_draws,

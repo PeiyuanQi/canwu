@@ -15,6 +15,7 @@ use super::{
     catch_unwind, claim_counter, random, validate_directives_with_context,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub(super) struct ScheduleKey {
@@ -87,7 +88,7 @@ impl Simulation {
 
     pub fn step(&mut self) -> Result<Vec<SimEvent>, CanwuError> {
         self.ensure_runtime_ready()?;
-        if self.state.scheduler.pending_ingress.first().is_some() {
+        if self.state.scheduler.pending_ingress.get_min().is_some() {
             return Err(CanwuError::new(
                 ErrorCode::InvalidBoundary,
                 "pending canonical ingress requires step_canonical",
@@ -151,7 +152,7 @@ impl Simulation {
             .state
             .scheduler
             .pending_ingress
-            .first()
+            .get_min()
             .is_some_and(|key| key.due_at <= target)
         {
             return Err(CanwuError::new(
@@ -175,14 +176,13 @@ impl Simulation {
                     .state
                     .scheduler
                     .actions
-                    .first_key_value()
+                    .get_min()
                     .is_some_and(|(key, _)| key.at == boundary_time)
                 {
-                    let (_, action) = self
+                    let action = self
                         .state
                         .scheduler
-                        .actions
-                        .pop_first()
+                        .pop_first_action()
                         .expect("scheduler was checked as non-empty");
                     self.execute_scheduled(action)?;
                 }
@@ -222,7 +222,7 @@ impl Simulation {
             .state
             .scheduler
             .actions
-            .first_key_value()
+            .get_min()
             .is_some_and(|(key, _)| key.at == at)
         {
             self.invalidate_commitments(CommitmentDomains::SCHEDULER);
@@ -231,14 +231,13 @@ impl Simulation {
             .state
             .scheduler
             .actions
-            .first_key_value()
+            .get_min()
             .is_some_and(|(key, _)| key.at == at)
         {
-            let (_, action) = self
+            let action = self
                 .state
                 .scheduler
-                .actions
-                .pop_first()
+                .pop_first_action()
                 .expect("scheduler was checked as non-empty");
             self.execute_scheduled(action)?;
         }
@@ -330,9 +329,15 @@ impl Simulation {
     ) -> Result<(), CanwuError> {
         self.invalidate_commitments(CommitmentDomains::WORLD);
         let commander = {
-            let army_state = self.state.current.armies.get_mut(&army).ok_or_else(|| {
-                CanwuError::new(ErrorCode::ArmyNotFound, "scheduled army no longer exists")
-            })?;
+            let army_state = self
+                .state
+                .current
+                .armies
+                .get_mut(&army)
+                .map(Arc::make_mut)
+                .ok_or_else(|| {
+                    CanwuError::new(ErrorCode::ArmyNotFound, "scheduled army no longer exists")
+                })?;
             army_state.location = destination;
             army_state.transit = None;
             army_state.commander
@@ -449,12 +454,18 @@ impl Simulation {
     ) -> Result<(), CanwuError> {
         self.invalidate_commitments(CommitmentDomains::WORLD);
         {
-            let person_state = self.state.current.people.get_mut(&person).ok_or_else(|| {
-                CanwuError::new(
-                    ErrorCode::EntityNotFound,
-                    "scheduled person no longer exists",
-                )
-            })?;
+            let person_state = self
+                .state
+                .current
+                .people
+                .get_mut(&person)
+                .map(Arc::make_mut)
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::EntityNotFound,
+                        "scheduled person no longer exists",
+                    )
+                })?;
             let transit = person_state.transit.take().ok_or_else(|| {
                 CanwuError::new(
                     ErrorCode::InvalidSnapshot,
@@ -551,6 +562,7 @@ impl Simulation {
                 .current
                 .letters
                 .get_mut(&letter_id)
+                .map(Arc::make_mut)
                 .ok_or_else(|| {
                     CanwuError::new(ErrorCode::EntityNotFound, "arrival cargo disappeared")
                 })?;
@@ -574,6 +586,7 @@ impl Simulation {
             .current
             .letters
             .get_mut(&letter_id)
+            .map(Arc::make_mut)
             .ok_or_else(|| {
                 CanwuError::new(ErrorCode::EntityNotFound, "delivery letter disappeared")
             })?;
@@ -933,7 +946,13 @@ impl Simulation {
         let key = ScheduleKey { at, sequence };
         self.state.counters.next_schedule_sequence = next_sequence;
         self.invalidate_commitments(CommitmentDomains::SCHEDULER);
-        if self.state.scheduler.actions.insert(key, action).is_some() {
+        if self
+            .state
+            .scheduler
+            .actions
+            .insert(key, Arc::new(action))
+            .is_some()
+        {
             return Err(CanwuError::new(
                 ErrorCode::InvalidSnapshot,
                 "the runtime attempted to reuse a schedule key",

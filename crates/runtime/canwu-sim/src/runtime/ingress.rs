@@ -1842,7 +1842,7 @@ impl Simulation {
             .state
             .scheduler
             .pending_ingress
-            .first()
+            .get_min()
             .map(|key| key.due_at);
         match (scheduled, ingress) {
             (Some(left), Some(right)) => Some(left.min(right)),
@@ -1857,14 +1857,14 @@ impl Simulation {
             .state
             .scheduler
             .pending_ingress
-            .first()
+            .get_min()
             .is_some_and(|key| key.due_at <= at)
         {
             let key = self
                 .state
                 .scheduler
                 .pending_ingress
-                .pop_first()
+                .remove_min()
                 .expect("pending ingress was checked as non-empty");
             admitted.push(key.id);
         }

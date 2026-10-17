@@ -52,10 +52,10 @@ pub(super) struct StateHashMaterial<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) entities: Option<&'a [EntityRef]>,
     pub(super) world: &'a WorldSnapshot,
-    #[serde(skip_serializing_if = "person_availability_is_empty")]
-    pub(super) person_availability: &'a BTreeMap<super::PersonId, super::PersonAvailability>,
-    #[serde(skip_serializing_if = "created_person_slice_is_empty")]
-    pub(super) created_persons: &'a [super::CreatedPerson],
+    #[serde(skip_serializing_if = "AvailabilityTable::is_empty")]
+    pub(super) person_availability: AvailabilityTable<'a>,
+    #[serde(skip_serializing_if = "CreatedPersonList::is_empty")]
+    pub(super) created_persons: CreatedPersonList<'a>,
     pub(super) knowledge: &'a KnowledgeSnapshot,
     pub(super) events: &'a [SimEvent],
     pub(super) commands: &'a [CommandRecord],
@@ -63,7 +63,7 @@ pub(super) struct StateHashMaterial<'a> {
     pub(super) command_attempts: &'a [CommandAttemptRecord],
     #[serde(skip_serializing_if = "ingress_record_slice_is_empty")]
     pub(super) ingress: &'a [IngressRecord],
-    pub(super) plugin_components: &'a [PluginComponentRecord],
+    pub(super) plugin_components: &'a [&'a PluginComponentRecord],
     #[serde(skip_serializing_if = "domain_record_slice_is_empty")]
     pub(super) domain_records: &'a [DomainRecord],
     #[serde(skip_serializing_if = "DecisionState::is_empty")]
@@ -95,15 +95,57 @@ pub(super) struct StateHashMaterial<'a> {
     pub(super) next_person_id: u64,
 }
 
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn person_availability_is_empty(
-    value: &&BTreeMap<super::PersonId, super::PersonAvailability>,
-) -> bool {
-    value.is_empty()
+/// The person-availability table of a hash input: a snapshot's ordered map
+/// or the runtime's persistent one. Both serialize as the same ordered map,
+/// so the bytes do not depend on where the table came from.
+#[derive(Clone, Copy)]
+pub(super) enum AvailabilityTable<'a> {
+    Snapshot(&'a BTreeMap<super::PersonId, super::PersonAvailability>),
+    Runtime(&'a im::OrdMap<super::PersonId, super::PersonAvailability>),
 }
 
-fn created_person_slice_is_empty(value: &&[super::CreatedPerson]) -> bool {
-    value.is_empty()
+impl AvailabilityTable<'_> {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Snapshot(table) => table.is_empty(),
+            Self::Runtime(table) => table.is_empty(),
+        }
+    }
+}
+
+impl Serialize for AvailabilityTable<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Snapshot(table) => table.serialize(serializer),
+            Self::Runtime(table) => serializer.collect_map(table.iter()),
+        }
+    }
+}
+
+/// The created-person registry of a hash input: a snapshot's list or the
+/// runtime's persistent vector, serialized as the same sequence.
+#[derive(Clone, Copy)]
+pub(super) enum CreatedPersonList<'a> {
+    Snapshot(&'a [super::CreatedPerson]),
+    Runtime(&'a im::Vector<super::CreatedPerson>),
+}
+
+impl CreatedPersonList<'_> {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Snapshot(list) => list.is_empty(),
+            Self::Runtime(list) => list.is_empty(),
+        }
+    }
+}
+
+impl Serialize for CreatedPersonList<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Snapshot(list) => list.serialize(serializer),
+            Self::Runtime(list) => serializer.collect_seq(list.iter()),
+        }
+    }
 }
 
 fn transition_manifest_slice_is_empty(value: &&[&super::PendingTransitionManifest]) -> bool {
@@ -252,8 +294,8 @@ pub(super) fn committed_initial_scenario(scenario: Option<&Scenario>) -> Option<
 pub(super) fn world_commitment_root(
     world: &WorldSnapshot,
     entities: &[EntityRef],
-    person_availability: &BTreeMap<super::PersonId, super::PersonAvailability>,
-    created_persons: &[super::CreatedPerson],
+    person_availability: AvailabilityTable<'_>,
+    created_persons: CreatedPersonList<'_>,
 ) -> Result<String, CanwuError> {
     canonical_hash(
         "canwu.commitment.world.v1",
@@ -288,13 +330,16 @@ pub(super) fn world_commitment_root(
                 .then(|| {
                     canonical_hash(
                         "canwu.commitment.world.person-availability.v1",
-                        person_availability,
+                        &person_availability,
                     )
                 })
                 .transpose()?,
             created_persons: (!created_persons.is_empty())
                 .then(|| {
-                    canonical_hash("canwu.commitment.world.created-persons.v1", created_persons)
+                    canonical_hash(
+                        "canwu.commitment.world.created-persons.v1",
+                        &created_persons,
+                    )
                 })
                 .transpose()?,
         },
@@ -348,7 +393,7 @@ pub(super) fn knowledge_commitment_root(
 }
 
 pub(super) fn plugin_component_commitment_root(
-    components: &[PluginComponentRecord],
+    components: &[&PluginComponentRecord],
 ) -> Result<String, CanwuError> {
     canonical_sorted_hash_by(
         "canwu.commitment.plugin-components.v1",
@@ -663,6 +708,7 @@ pub(super) fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<Strin
         authoritative_run_identity(run_manifest, &snapshot.run_manifest_hash, run_configuration)?;
     let initial_scenario = committed_initial_scenario(snapshot.initial_scenario.as_ref());
     let transition_manifests: Vec<_> = snapshot.pending_transition_manifests.iter().collect();
+    let plugin_components: Vec<_> = snapshot.plugin_components.iter().collect();
     state_hash(&StateHashMaterial {
         engine_version: &snapshot.engine_version,
         snapshot_format_version: snapshot.snapshot_format_version,
@@ -674,14 +720,14 @@ pub(super) fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<Strin
         plugin_registration_closed: snapshot.plugin_registration_closed,
         entities: committed_entities(&snapshot.entities, &snapshot.world),
         world: &snapshot.world,
-        person_availability: &snapshot.person_availability,
-        created_persons: &snapshot.created_persons,
+        person_availability: AvailabilityTable::Snapshot(&snapshot.person_availability),
+        created_persons: CreatedPersonList::Snapshot(&snapshot.created_persons),
         knowledge: &snapshot.knowledge,
         events: &snapshot.events,
         commands: &snapshot.commands,
         command_attempts: &snapshot.command_attempts,
         ingress: &snapshot.ingress,
-        plugin_components: &snapshot.plugin_components,
+        plugin_components: &plugin_components,
         domain_records: &snapshot.domain_records,
         decisions: &snapshot.decisions,
         plugin_descriptors: &snapshot.plugin_descriptors,
@@ -754,6 +800,7 @@ pub(super) fn snapshot_commitment_roots(
         authoritative_run_identity(run_manifest, &snapshot.run_manifest_hash, run_configuration)?;
     let initial_scenario = committed_initial_scenario(snapshot.initial_scenario.as_ref());
     let transition_manifests: Vec<_> = snapshot.pending_transition_manifests.iter().collect();
+    let plugin_components: Vec<_> = snapshot.plugin_components.iter().collect();
     commitment_roots(
         &StateHashMaterial {
             engine_version: &snapshot.engine_version,
@@ -766,14 +813,14 @@ pub(super) fn snapshot_commitment_roots(
             plugin_registration_closed: snapshot.plugin_registration_closed,
             entities: committed_entities(&snapshot.entities, &snapshot.world),
             world: &snapshot.world,
-            person_availability: &snapshot.person_availability,
-            created_persons: &snapshot.created_persons,
+            person_availability: AvailabilityTable::Snapshot(&snapshot.person_availability),
+            created_persons: CreatedPersonList::Snapshot(&snapshot.created_persons),
             knowledge: &snapshot.knowledge,
             events: &snapshot.events,
             commands: &snapshot.commands,
             command_attempts: &snapshot.command_attempts,
             ingress: &snapshot.ingress,
-            plugin_components: &snapshot.plugin_components,
+            plugin_components: &plugin_components,
             domain_records: &snapshot.domain_records,
             decisions: &snapshot.decisions,
             plugin_descriptors: &snapshot.plugin_descriptors,

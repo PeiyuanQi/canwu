@@ -73,7 +73,7 @@ impl Simulation {
             .state
             .scheduler
             .pending_ingress
-            .first()
+            .get_min()
             .is_some_and(|key| key.due_at < request.at)
         {
             return Err(CanwuError::new(
@@ -1248,14 +1248,14 @@ impl Simulation {
                         .get(&key)
                         .map(|record| record.value.clone());
                     self.state.current.plugin_components.insert(
-                        key,
-                        PluginComponentRecord {
+                        Arc::new(key),
+                        Arc::new(PluginComponentRecord {
                             plugin: staged.plugin.clone(),
                             state: state.clone(),
                             entity: entity.clone(),
                             component: component.clone(),
                             value: value.clone(),
-                        },
+                        }),
                     );
                     let change_index = u64::try_from(changes.len()).map_err(|_| {
                         CanwuError::new(
@@ -1940,14 +1940,14 @@ impl Simulation {
                     let key = component_key(plugin, &state, &entity, &component);
                     self.invalidate_commitments(CommitmentDomains::PLUGIN_COMPONENTS);
                     self.state.current.plugin_components.insert(
-                        key,
-                        PluginComponentRecord {
+                        Arc::new(key),
+                        Arc::new(PluginComponentRecord {
                             plugin: plugin.to_owned(),
                             state,
                             entity: entity.clone(),
                             component: component.clone(),
                             value,
-                        },
+                        }),
                     );
                     self.emit(
                         EventKind::plugin(plugin, format!("{component}_changed")),
@@ -2334,7 +2334,7 @@ fn validate_boundary_proposal(
     plugin: &str,
     contract: &BoundarySystemContract,
     current: &RuntimeCurrentState,
-    committed_availability: &BTreeMap<super::PersonId, super::PersonAvailability>,
+    committed_availability: &im::OrdMap<super::PersonId, super::PersonAvailability>,
     now: SimTime,
     runtime: &RuntimeState,
     boundary_id: BoundaryId,
@@ -3046,7 +3046,7 @@ fn validate_random_decision_resolution(
     plugin: &str,
     contract: &BoundarySystemContract,
     current: &RuntimeCurrentState,
-    committed_availability: &BTreeMap<super::PersonId, super::PersonAvailability>,
+    committed_availability: &im::OrdMap<super::PersonId, super::PersonAvailability>,
     pending_random_draws: &[random::PendingRandomDraw],
     used_samples: &mut BTreeSet<(super::RandomStreamKey, RandomDrawAddress)>,
     resolution: &super::RandomDecisionResolution,
@@ -3424,7 +3424,7 @@ fn record_writes_are_same_boundary(directives: &[StagedBoundaryDirective]) -> bo
 struct BoundaryRecordOverlayContext<'a> {
     current: &'a RuntimeCurrentState,
     now: SimTime,
-    scheduled_actions: &'a BTreeMap<ScheduleKey, ScheduledAction>,
+    scheduled_actions: &'a im::OrdMap<ScheduleKey, Arc<ScheduledAction>>,
     run_configuration: &'a RunConfigurationSnapshot,
     schemas: &'a records::DomainRecordSchemas,
 }

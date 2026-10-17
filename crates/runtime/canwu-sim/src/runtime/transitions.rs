@@ -226,14 +226,14 @@ impl TransitionAuditRecord {
 pub(super) struct BoundaryTransitionEvidence {
     pub(super) registered: Vec<PendingTransitionManifest>,
     pub(super) audits: Vec<TransitionAuditRecord>,
-    pub(super) pending: BTreeMap<TransitionManifestId, PendingTransitionManifest>,
+    pub(super) pending: im::OrdMap<TransitionManifestId, PendingTransitionManifest>,
 }
 
 /// Boundary-local transition state. It starts from the committed pending
 /// manifests and is written back only when the boundary commits.
 pub(super) struct BoundaryTransitionLedger {
     boundary: BoundaryId,
-    pending: BTreeMap<TransitionManifestId, PendingTransitionManifest>,
+    pending: im::OrdMap<TransitionManifestId, PendingTransitionManifest>,
     proposed: Vec<PendingTransitionManifest>,
     registered: Vec<PendingTransitionManifest>,
     staged: BTreeMap<TransitionManifestId, BTreeMap<String, u64>>,
@@ -433,7 +433,7 @@ fn version_source(source: &DomainRecordVersionSource) -> String {
 impl BoundaryTransitionLedger {
     pub(super) fn new(
         boundary: BoundaryId,
-        pending: &BTreeMap<TransitionManifestId, PendingTransitionManifest>,
+        pending: &im::OrdMap<TransitionManifestId, PendingTransitionManifest>,
     ) -> Self {
         Self {
             boundary,

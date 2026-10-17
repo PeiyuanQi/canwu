@@ -1589,7 +1589,7 @@ fn repeated_keyed_seals_keep_draws_out_of_the_checkpoint_and_dependencies() {
         .iter()
         .cloned()
         .map(|stream| (stream.key.clone(), stream))
-        .collect::<BTreeMap<_, _>>();
+        .collect::<im::OrdMap<_, _>>();
     let mut retry_session = random::RandomSession::new(
         &available,
         std::slice::from_ref(&alpha.stream),

@@ -10,7 +10,7 @@ use super::{
     SimTime, Territory, TerritoryId,
 };
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -35,15 +35,15 @@ pub(super) struct RuntimeEvidence {
     /// retired request's outcome and queued receipt leave the archived tables
     /// above; its ID stays used.
     pub(super) retired_command_requests: RetiredRequestIds,
-    pub(super) events: Vec<SimEvent>,
+    pub(super) events: SharedJournal<SimEvent>,
     pub(super) commands: RetainedJournal<CommandRecord>,
     pub(super) command_attempts: RetainedJournal<CommandAttemptRecord>,
     pub(super) ingress: RetainedJournal<IngressRecord>,
     /// The derived index of the three journals above; see
     /// [`CommandHistoryIndex`].
     pub(super) command_index: CommandHistoryIndex,
-    pub(super) boundaries: Vec<BoundaryRecord>,
-    pub(super) random_draws: Vec<RandomDrawRecord>,
+    pub(super) boundaries: SharedJournal<BoundaryRecord>,
+    pub(super) random_draws: SharedJournal<RandomDrawRecord>,
     pub(super) archived_segment_headers: im::Vector<ArchivedSegmentHeader>,
     pub(super) archived_evidence_receipts: im::OrdMap<EvidenceRef, Arc<ArchivedEvidenceReceipt>>,
     /// The keyed-draw ledger: every operation-keyed address the run has
@@ -299,16 +299,121 @@ pub(super) struct ArchivedIngressRequest {
     pub(super) receipt: IngressReceipt,
 }
 
+/// A retained evidence journal that a run shares with its forks and
+/// rollback copies until one of them changes it.
+///
+/// A clone shares the records, so `fork` and a transaction's copy cost
+/// nothing in proportion to the journal. The first change to a shared
+/// journal copies what the change keeps: an append copies the journal
+/// (what a fork used to copy), a truncation copies the kept prefix, and a
+/// drain from the front copies the kept suffix. A journal no copy shares
+/// changes in place. Reads see one contiguous slice.
+pub(super) struct SharedJournal<T>(Arc<Vec<T>>);
+
+impl<T> Clone for SharedJournal<T> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<T> Default for SharedJournal<T> {
+    fn default() -> Self {
+        Self(Arc::new(Vec::new()))
+    }
+}
+
+impl<T> From<Vec<T>> for SharedJournal<T> {
+    fn from(records: Vec<T>) -> Self {
+        Self(Arc::new(records))
+    }
+}
+
+impl<T> std::ops::Deref for SharedJournal<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<'a, T> IntoIterator for &'a SharedJournal<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<T: Clone> SharedJournal<T> {
+    /// Appends a record, copying the journal first if a copy shares it.
+    pub(super) fn push(&mut self, record: T) {
+        Arc::make_mut(&mut self.0).push(record);
+    }
+
+    /// Keeps the first `len` records; a length at or past the end keeps the
+    /// journal as it is.
+    pub(super) fn truncate(&mut self, len: usize) {
+        if len >= self.0.len() {
+            return;
+        }
+        match Arc::get_mut(&mut self.0) {
+            Some(records) => records.truncate(len),
+            None => self.0 = Arc::new(self.0[..len].to_vec()),
+        }
+    }
+
+    /// Removes the records before `range.end`, as `Vec::drain(..end)` does,
+    /// copying only the kept suffix if a copy shares the journal.
+    pub(super) fn drain(&mut self, range: std::ops::RangeTo<usize>) {
+        if range.end == 0 {
+            return;
+        }
+        match Arc::get_mut(&mut self.0) {
+            Some(records) => {
+                records.drain(range);
+            }
+            None => self.0 = Arc::new(self.0[range.end..].to_vec()),
+        }
+    }
+
+    /// The last record, for an in-place update; copies the journal first if
+    /// a copy shares it.
+    pub(super) fn last_mut(&mut self) -> Option<&mut T> {
+        Arc::make_mut(&mut self.0).last_mut()
+    }
+
+    /// Removes and returns the last record.
+    #[cfg(test)]
+    pub(super) fn pop(&mut self) -> Option<T> {
+        Arc::make_mut(&mut self.0).pop()
+    }
+
+    /// Removes every record.
+    pub(super) fn clear(&mut self) {
+        match Arc::get_mut(&mut self.0) {
+            Some(records) => records.clear(),
+            None => self.0 = Arc::default(),
+        }
+    }
+
+    /// Whether `other` shares this journal's records.
+    #[cfg(test)]
+    pub(super) fn shares_records_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 /// One retained journal of the command history: the accepted commands, the
 /// command attempts, or the ingress. Any module reads it as a slice; only the
 /// command-history methods of [`RuntimeEvidence`] change it, so the derived
 /// [`CommandHistoryIndex`] cannot drift from the records.
 #[derive(Clone)]
-pub(super) struct RetainedJournal<T>(Vec<T>);
+pub(super) struct RetainedJournal<T>(SharedJournal<T>);
 
 impl<T> Default for RetainedJournal<T> {
     fn default() -> Self {
-        Self(Vec::new())
+        Self(SharedJournal::default())
     }
 }
 
@@ -317,6 +422,14 @@ impl<T> std::ops::Deref for RetainedJournal<T> {
 
     fn deref(&self) -> &[T] {
         &self.0
+    }
+}
+
+#[cfg(test)]
+impl<T: Clone> RetainedJournal<T> {
+    /// Whether `other` shares this journal's records.
+    pub(super) fn shares_records_with(&self, other: &Self) -> bool {
+        self.0.shares_records_with(&other.0)
     }
 }
 
@@ -338,9 +451,10 @@ impl<'a, T> IntoIterator for &'a RetainedJournal<T> {
 #[derive(Clone, Default)]
 pub(super) struct CommandHistoryIndex {
     /// Retained command and decision ingress per command request.
-    queued_requests: BTreeMap<CommandRequestId, usize>,
+    /// Persistent, as the journals are shared, so a fork copies neither.
+    queued_requests: im::OrdMap<CommandRequestId, usize>,
     /// The position of the first retained attempt of each command request.
-    attempt_by_request: BTreeMap<CommandRequestId, usize>,
+    attempt_by_request: im::OrdMap<CommandRequestId, usize>,
     /// The position of the first retained legacy-direct command.
     first_direct_command: Option<usize>,
     /// The position of the first retained attempt whose request was not
@@ -552,9 +666,9 @@ impl RuntimeEvidence {
         attempts: Vec<CommandAttemptRecord>,
         ingress: Vec<IngressRecord>,
     ) {
-        self.commands = RetainedJournal(commands);
-        self.command_attempts = RetainedJournal(attempts);
-        self.ingress = RetainedJournal(ingress);
+        self.commands = RetainedJournal(commands.into());
+        self.command_attempts = RetainedJournal(attempts.into());
+        self.ingress = RetainedJournal(ingress.into());
         self.rebuild_command_index();
     }
 
@@ -1160,25 +1274,37 @@ pub(super) struct RuntimeDomainCommitmentRoots {
     pub(super) identity: String,
 }
 
+/// The scheduler's collections are persistent (`im`) structures, so a
+/// boundary's rollback copy and a fork share them and a change copies only
+/// the paths it changes. Iterate them forward only (see
+/// [`RuntimeCurrentState`]).
 #[derive(Clone)]
 pub(super) struct RuntimeScheduler {
     pub(super) initial_time: SimTime,
     pub(super) now: SimTime,
-    pub(super) actions: BTreeMap<ScheduleKey, ScheduledAction>,
-    pub(super) pending_ingress: BTreeSet<IngressQueueKey>,
+    pub(super) actions: im::OrdMap<ScheduleKey, Arc<ScheduledAction>>,
+    pub(super) pending_ingress: im::OrdSet<IngressQueueKey>,
     /// Derived index of retained plugin ingress withdrawn by a terminal
     /// cancellation record. Rebuilt from the ingress journal on restore and
     /// cleared when the retained journal is sealed.
-    pub(super) cancelled_ingress: BTreeSet<super::IngressId>,
+    pub(super) cancelled_ingress: im::OrdSet<super::IngressId>,
     /// Registered transition manifests awaiting their ready boundary,
     /// committed under the scheduler root.
     pub(super) transition_manifests:
-        BTreeMap<super::TransitionManifestId, super::PendingTransitionManifest>,
+        im::OrdMap<super::TransitionManifestId, super::PendingTransitionManifest>,
     /// Derived ledger of the boundaries settled within the run's boundary
     /// schedule horizon of the latest boundary, in settlement order.
     /// Maintained at boundary commit, rebuilt from the full journal on
     /// restore, and kept across a seal.
     pub(super) settled_boundaries: im::Vector<std::sync::Arc<super::BoundarySummary>>,
+}
+
+impl RuntimeScheduler {
+    /// Removes the earliest scheduled action and returns it, owned.
+    pub(super) fn pop_first_action(&mut self) -> Option<ScheduledAction> {
+        let key = self.actions.get_min()?.0.clone();
+        self.actions.remove(&key).map(Arc::unwrap_or_clone)
+    }
 }
 
 #[derive(Clone)]
@@ -1253,7 +1379,9 @@ impl InitialRecordIndex {
 
 #[derive(Clone)]
 pub(super) struct RuntimeMetadata {
-    pub(super) initial_scenario: Option<Scenario>,
+    /// The bound initial scenario, shared by forks and rollback copies; it
+    /// never changes after the run starts.
+    pub(super) initial_scenario: Option<Arc<Scenario>>,
     pub(super) initial_domain_record_indexes: Arc<InitialRecordIndex>,
     /// Exact provenance and establishment time for each current domain-record
     /// version. This is maintained incrementally at boundary commit time and
@@ -1287,26 +1415,37 @@ pub(super) struct CurrentDomainRecordVersion {
     pub(super) established_at: SimTime,
 }
 
+/// Current state. Every collection is a persistent (`im`) structure or
+/// shared through an `Arc`, so the per-command and per-boundary rollback
+/// copies, a boundary's stable view of phases 1 to 9, and a fork share it in
+/// O(1), and a change copies only the tree paths it changes. Values that own
+/// heap data and are rewritten during a run are held in an `Arc`, so a
+/// copied tree node copies pointers, not values; a change goes through
+/// `Arc::make_mut`. Iterate these collections forward only: `im` 15.1.0
+/// ordered maps and sets break on reverse traversal past about 2,100
+/// entries (no `.rev()`, `next_back`, `get_prev`, or reverse ranges;
+/// `get_min` and `get_max` are safe).
 #[derive(Clone)]
 pub(super) struct RuntimeCurrentState {
-    pub(super) entities: BTreeSet<EntityRef>,
-    pub(super) people: BTreeMap<PersonId, Person>,
+    pub(super) entities: im::OrdSet<EntityRef>,
+    pub(super) people: im::OrdMap<PersonId, Arc<Person>>,
     /// Core life and custody state; absent entries are alive and free.
-    pub(super) person_availability: BTreeMap<PersonId, PersonAvailability>,
+    pub(super) person_availability: im::OrdMap<PersonId, PersonAvailability>,
     /// Runtime-created persons in allocation order, keyed for next-boundary
     /// correlation lookup independently of retained evidence.
-    pub(super) created_persons: Vec<super::CreatedPerson>,
-    pub(super) letters: BTreeMap<canwu_core::LetterId, super::LetterCargo>,
-    pub(super) governments: BTreeMap<GovernmentId, Government>,
-    pub(super) territories: BTreeMap<TerritoryId, Territory>,
-    pub(super) routes: BTreeMap<RouteId, Route>,
-    pub(super) armies: BTreeMap<ArmyId, Army>,
+    pub(super) created_persons: im::Vector<super::CreatedPerson>,
+    pub(super) letters: im::OrdMap<canwu_core::LetterId, Arc<super::LetterCargo>>,
+    /// Written only when a run starts, so their values are held inline.
+    pub(super) governments: im::OrdMap<GovernmentId, Government>,
+    pub(super) territories: im::OrdMap<TerritoryId, Territory>,
+    pub(super) routes: im::OrdMap<RouteId, Route>,
+    pub(super) armies: im::OrdMap<ArmyId, Arc<Army>>,
     /// Shared, so boundary and transaction captures, early-phase views, and
     /// forks copy nothing. A change goes through `Arc::make_mut`: it copies
     /// the compatibility actor projection and shares the persistent holder
     /// ledgers, of which it copies only the paths it changes.
     pub(super) knowledge: std::sync::Arc<KnowledgeSnapshot>,
-    pub(super) plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
+    pub(super) plugin_components: im::OrdMap<Arc<PluginComponentKey>, Arc<PluginComponentRecord>>,
     /// Persistent current-state root. Boundary checkpoints and forks clone the
     /// handle in O(1), while writes copy only paths in the persistent map.
     pub(super) domain_records: PersistentDomainRecordStore,
@@ -1315,7 +1454,7 @@ pub(super) struct RuntimeCurrentState {
     /// Persisted authority credential root. It is intentionally separate from
     /// the deterministic simulation RNG seed and is never used for draws.
     pub(super) authority_root_seed: u64,
-    pub(super) random_streams: BTreeMap<RandomStreamKey, RandomStreamState>,
+    pub(super) random_streams: im::OrdMap<RandomStreamKey, RandomStreamState>,
 }
 
 #[derive(Clone)]

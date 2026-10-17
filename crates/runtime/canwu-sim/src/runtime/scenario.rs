@@ -124,14 +124,37 @@ pub(super) fn validate_scenario(scenario: &Scenario) -> Result<(), CanwuError> {
 }
 
 pub(super) fn validate_scenario_state(scenario: &Scenario) -> Result<(), CanwuError> {
-    validate_entities(&scenario.entities)?;
+    validate_scenario_state_parts(&ScenarioStateParts {
+        start_time: scenario.start_time,
+        entities: &scenario.entities,
+        world: &scenario.world,
+        knowledge: &scenario.knowledge,
+        domain_records: &scenario.domain_records,
+    })
+}
+
+/// The parts of a scenario its state validation reads, borrowed, so that a
+/// restore validates a snapshot's current state without copying it.
+pub(super) struct ScenarioStateParts<'a> {
+    pub(super) start_time: SimTime,
+    pub(super) entities: &'a [EntityRef],
+    pub(super) world: &'a WorldSnapshot,
+    pub(super) knowledge: &'a KnowledgeSnapshot,
+    pub(super) domain_records: &'a [DomainRecord],
+}
+
+/// [`validate_scenario_state`] of borrowed parts.
+pub(super) fn validate_scenario_state_parts(
+    scenario: &ScenarioStateParts<'_>,
+) -> Result<(), CanwuError> {
+    validate_entities(scenario.entities)?;
     validate_unique_ids(&scenario.world.people, |value| value.id, "person")?;
     validate_unique_ids(&scenario.world.governments, |value| value.id, "government")?;
     validate_unique_ids(&scenario.world.territories, |value| value.id, "territory")?;
     validate_unique_ids(&scenario.world.routes, |value| value.id, "route")?;
     validate_unique_ids(&scenario.world.armies, |value| value.id, "army")?;
     validate_unique_ids(&scenario.world.letters, |value| value.id, "letter")?;
-    let expected_legacy_entities = legacy_entities(&scenario.world);
+    let expected_legacy_entities = legacy_entities(scenario.world);
     if expected_legacy_entities
         .iter()
         .any(|entity| scenario.entities.binary_search(entity).is_err())
@@ -271,9 +294,9 @@ pub(super) fn validate_scenario_state(scenario: &Scenario) -> Result<(), CanwuEr
             ));
         }
     }
-    records::validate_initial_records(&scenario.domain_records, scenario.start_time, &|entity| {
+    records::validate_initial_records(scenario.domain_records, scenario.start_time, &|entity| {
         scenario.entities.binary_search(entity).is_ok()
-            || core_world_entity_exists(&scenario.world, entity)
+            || core_world_entity_exists(scenario.world, entity)
     })?;
     for (actor_id, actor) in &scenario.knowledge.actors {
         if actor.actor != *actor_id || scenario.world.person(*actor_id).is_none() {

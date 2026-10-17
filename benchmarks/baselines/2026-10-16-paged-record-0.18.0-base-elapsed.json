@@ -1,0 +1,382 @@
+{
+  "benchmark": "canwu-paged-records",
+  "engine_version": "0.17.0",
+  "environment": {
+    "arch": "x86_64",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "cargo_features": [],
+    "logical_cpus": 16,
+    "os": "windows",
+    "profile": "release",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.0\nLLVM version: 23.1.1"
+  },
+  "machine": "local-windows-x86_64-shared",
+  "method": {
+    "allocation_scope": "not collected in this uninstrumented build",
+    "elapsed_scope": "wall-clock nanoseconds in a build with the default system allocator; setup and post-measurement drops are excluded",
+    "fork": "Canwu::fork of the filled run; the fork is dropped outside the measurement",
+    "fork_first_boundary": "the first Daily boundary on a fresh fork of the filled run, which replaces one small record",
+    "idle_boundary": "one Daily boundary whose system proposes nothing, measured as the writes are",
+    "paged_prepare": "Canwu::prepare_paged_checkpoint into an empty page store, of a run whose store holds exactly the listed records",
+    "paged_restore": "Canwu::from_paged_checkpoint_and_journal_with_plugins from a store that holds the prepared pages",
+    "paged_samples": 5,
+    "records_per_filling_boundary": 4096,
+    "warmup_iterations": 3,
+    "write": "one Daily boundary that replaces one small record with a record whose payload text has the stated bytes, on a fork of the filled run, after one unmeasured boundary on that fork",
+    "write_payload_bytes": [
+      1024,
+      8192,
+      65536,
+      1048576
+    ],
+    "write_samples": 31,
+    "write_store_records": 65536
+  },
+  "metric_mode": "elapsed",
+  "paged": [
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            702800,
+            663100,
+            646400,
+            569800,
+            690900
+          ],
+          "name": "paged_prepare",
+          "summary": {
+            "elapsed_ns_max": 702800,
+            "elapsed_ns_median": 663100,
+            "elapsed_ns_min": 569800,
+            "elapsed_ns_p95": 702800
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            8431100,
+            8213200,
+            8671600,
+            6321600,
+            8284500
+          ],
+          "name": "paged_restore",
+          "summary": {
+            "elapsed_ns_max": 8671600,
+            "elapsed_ns_median": 8284500,
+            "elapsed_ns_min": 6321600,
+            "elapsed_ns_p95": 8671600
+          }
+        }
+      ],
+      "delta_page_bytes": 908309,
+      "delta_pages": 4,
+      "largest_page_bytes": 900407,
+      "payload_bytes": [
+        900000
+      ]
+    }
+  ],
+  "recorded_on": "2026-10-16",
+  "schema_version": 1,
+  "source": {
+    "content_hash": "cd51df70b250c01b0cce3efc84b80c25ed62cdce05880da803512b970bc80857",
+    "label": "release/0.18.0 2b42f05"
+  },
+  "writes": [
+    {
+      "elapsed_samples_ns": [
+        60917500,
+        59466000,
+        55853800,
+        53287600,
+        54591700,
+        47680600,
+        46684600,
+        48976400,
+        49294400,
+        51823000,
+        62272100,
+        50738800,
+        49376400,
+        47085000,
+        47366800,
+        51791600,
+        53778800,
+        47564400,
+        50667200,
+        49752900,
+        48439000,
+        49140200,
+        64131100,
+        71368000,
+        65175900,
+        64611800,
+        58962300,
+        56992300,
+        62563500,
+        64466400,
+        55870400
+      ],
+      "name": "fork",
+      "summary": {
+        "elapsed_ns_max": 71368000,
+        "elapsed_ns_median": 53287600,
+        "elapsed_ns_min": 46684600,
+        "elapsed_ns_p95": 65175900
+      }
+    },
+    {
+      "elapsed_samples_ns": [
+        1549500,
+        1605900,
+        1554800,
+        1515400,
+        1576200,
+        1500100,
+        1511600,
+        1545600,
+        1584500,
+        1569700,
+        1775500,
+        1624500,
+        1496100,
+        1471800,
+        1523400,
+        1543100,
+        1547500,
+        1559800,
+        1599000,
+        1520100,
+        1517800,
+        1518500,
+        1513800,
+        1712500,
+        1901900,
+        1781000,
+        1518100,
+        1675500,
+        1803800,
+        1772800,
+        1502100
+      ],
+      "name": "fork_first_boundary",
+      "summary": {
+        "elapsed_ns_max": 1901900,
+        "elapsed_ns_median": 1549500,
+        "elapsed_ns_min": 1471800,
+        "elapsed_ns_p95": 1803800
+      }
+    },
+    {
+      "elapsed_samples_ns": [
+        34800,
+        42500,
+        39400,
+        38400,
+        29400,
+        42000,
+        41100,
+        39600,
+        38600,
+        54500,
+        29000,
+        43400,
+        40600,
+        41200,
+        43100,
+        29400,
+        40200,
+        39800,
+        40800,
+        42200,
+        40900,
+        39800,
+        42200,
+        40500,
+        42200,
+        40300,
+        39400,
+        42100,
+        41100,
+        38900,
+        29200
+      ],
+      "name": "idle_boundary",
+      "summary": {
+        "elapsed_ns_max": 54500,
+        "elapsed_ns_median": 40500,
+        "elapsed_ns_min": 29000,
+        "elapsed_ns_p95": 43400
+      }
+    },
+    {
+      "elapsed_samples_ns": [
+        105200,
+        79100,
+        124200,
+        109800,
+        126700,
+        116600,
+        79900,
+        114600,
+        108100,
+        113600,
+        114000,
+        115600,
+        112500,
+        78600,
+        113900,
+        85000,
+        104800,
+        108500,
+        105000,
+        111900,
+        108100,
+        85200,
+        110200,
+        104400,
+        107500,
+        87900,
+        105200,
+        89500,
+        109000,
+        110200,
+        83700
+      ],
+      "name": "write_1024",
+      "summary": {
+        "elapsed_ns_max": 126700,
+        "elapsed_ns_median": 108100,
+        "elapsed_ns_min": 78600,
+        "elapsed_ns_p95": 124200
+      }
+    },
+    {
+      "elapsed_samples_ns": [
+        197400,
+        89300,
+        135700,
+        135200,
+        114600,
+        127600,
+        130100,
+        108900,
+        125700,
+        91800,
+        124600,
+        120200,
+        127200,
+        110800,
+        122400,
+        150100,
+        79700,
+        102600,
+        121300,
+        123200,
+        121100,
+        122600,
+        121500,
+        96000,
+        94700,
+        119200,
+        122700,
+        121600,
+        106100,
+        111600,
+        120200
+      ],
+      "name": "write_8192",
+      "summary": {
+        "elapsed_ns_max": 197400,
+        "elapsed_ns_median": 121300,
+        "elapsed_ns_min": 79700,
+        "elapsed_ns_p95": 150100
+      }
+    },
+    {
+      "elapsed_samples_ns": [
+        160300,
+        202900,
+        191500,
+        167800,
+        142400,
+        179400,
+        176200,
+        208700,
+        163900,
+        156400,
+        136800,
+        158900,
+        128400,
+        191100,
+        161000,
+        188100,
+        119900,
+        167700,
+        167500,
+        169700,
+        133900,
+        174900,
+        133200,
+        167400,
+        177400,
+        178800,
+        162800,
+        168400,
+        170600,
+        175500,
+        181900
+      ],
+      "name": "write_65536",
+      "summary": {
+        "elapsed_ns_max": 208700,
+        "elapsed_ns_median": 167800,
+        "elapsed_ns_min": 119900,
+        "elapsed_ns_p95": 202900
+      }
+    },
+    {
+      "elapsed_samples_ns": [
+        1336800,
+        1125600,
+        1403000,
+        1485700,
+        1115800,
+        1410100,
+        1086500,
+        1365900,
+        1445500,
+        1488400,
+        1143900,
+        1154600,
+        1089400,
+        1395900,
+        1371900,
+        1352500,
+        1397300,
+        1410000,
+        1228200,
+        1299400,
+        1155500,
+        1421000,
+        1482000,
+        1349600,
+        1412700,
+        1108700,
+        1122900,
+        1405100,
+        1408800,
+        1436000,
+        1387900
+      ],
+      "name": "write_1048576",
+      "summary": {
+        "elapsed_ns_max": 1488400,
+        "elapsed_ns_median": 1371900,
+        "elapsed_ns_min": 1086500,
+        "elapsed_ns_p95": 1485700
+      }
+    }
+  ]
+}

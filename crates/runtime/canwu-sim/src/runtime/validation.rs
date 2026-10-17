@@ -2903,7 +2903,7 @@ fn resolve_runtime_domain_record_version(
         DomainRecordVersionSource::InitialScenario => {
             if initial_domain_record_matches(
                 &state.metadata.initial_domain_record_indexes,
-                state.metadata.initial_scenario.as_ref(),
+                state.metadata.initial_scenario.as_deref(),
                 reference,
             ) {
                 EvidenceAvailability::Retained
@@ -2954,7 +2954,7 @@ pub(super) fn sealed_version_is_known(
     else {
         return initial_domain_record_matches(
             &state.metadata.initial_domain_record_indexes,
-            state.metadata.initial_scenario.as_ref(),
+            state.metadata.initial_scenario.as_deref(),
             reference,
         );
     };
@@ -3920,7 +3920,10 @@ fn expected_owner_authorized_record_changes(
     plugins: &PluginRegistry,
     values: &BTreeMap<DomainRecordRef, DomainRecord>,
 ) -> Result<Vec<DomainRecordChange>, CanwuError> {
-    let mut current = super::PersistentDomainRecordStore::from_records(values.clone())?;
+    // The store is built when the first owner-authorized commit needs it:
+    // most boundaries admit none, and building it costs the whole record
+    // set.
+    let mut store: Option<super::PersistentDomainRecordStore> = None;
     let mut expected_changes = Vec::new();
     let mut maintenance_change_index = 0_usize;
     for ingress_id in &record.admitted_ingress {
@@ -3942,6 +3945,12 @@ fn expected_owner_authorized_record_changes(
                 "owner-authorized ingress and terminal change evidence disagree",
             );
         }
+        let current = match &mut store {
+            Some(current) => current,
+            None => store.insert(super::PersistentDomainRecordStore::from_records(
+                values.clone(),
+            )?),
+        };
         let observed_root = canonical_hash(
             "canwu.owner-authorized.source-domain-root.v1",
             current.roots(),
@@ -3962,7 +3971,7 @@ fn expected_owner_authorized_record_changes(
             super::MaintenanceDisposition::Applied => {
                 let (next, changes) = maintenance::apply_verified_owner_authorized_commit(
                     commit,
-                    &current,
+                    current,
                     plugins,
                     record.at,
                     &|entity| snapshot_core_entity_exists(snapshot, entity),
@@ -3979,7 +3988,7 @@ fn expected_owner_authorized_record_changes(
                         "owner-authorized terminal target root disagrees with deterministic replay",
                     );
                 }
-                current = next;
+                *current = next;
                 expected_changes.extend(changes);
             }
             super::MaintenanceDisposition::RejectedStale => {
@@ -5372,8 +5381,8 @@ pub(super) fn validate_runtime_domain_dependents(state: &RuntimeState) -> Result
 }
 
 pub(super) fn validate_domain_dependents_with_records(
-    plugin_components: &BTreeMap<PluginComponentKey, PluginComponentRecord>,
-    scheduled_actions: &BTreeMap<ScheduleKey, ScheduledAction>,
+    plugin_components: &im::OrdMap<Arc<PluginComponentKey>, Arc<PluginComponentRecord>>,
+    scheduled_actions: &im::OrdMap<ScheduleKey, Arc<ScheduledAction>>,
     run_configuration: &RunConfigurationSnapshot,
     domain_records: &impl records::DomainRecordRead,
 ) -> Result<(), CanwuError> {
@@ -5387,7 +5396,7 @@ pub(super) fn validate_domain_dependents_with_records(
             "a domain entity with persisted plugin components cannot be deleted",
         ));
     }
-    if scheduled_actions.values().any(|action| match action {
+    if scheduled_actions.values().any(|action| match &**action {
         ScheduledAction::PluginDirective { directive, .. } => {
             system_directive_has_entity(directive, &unavailable)
         }

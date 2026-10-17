@@ -5,7 +5,7 @@ use super::{
     RandomStreamState, RuntimeCommitmentCache, RuntimeCounters, RuntimeScheduler, RuntimeState,
     ScheduleKey, ScheduledAction, SimTime,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 pub(super) struct RejectionTransactionCheckpoint {
     next_command_attempt_id: u64,
@@ -95,13 +95,16 @@ impl IngressTransactionCheckpoint {
     }
 }
 
+/// The rollback copy of one command. Every collection it holds is a
+/// persistent structure or an `Arc` shared with the live state, so the
+/// capture copies no entries: its cost does not grow with the world.
 pub(super) struct CommandTransactionCheckpoint {
-    people: BTreeMap<PersonId, Person>,
-    letters: BTreeMap<LetterId, LetterCargo>,
-    armies: BTreeMap<ArmyId, Army>,
+    people: im::OrdMap<PersonId, Arc<Person>>,
+    letters: im::OrdMap<LetterId, Arc<LetterCargo>>,
+    armies: im::OrdMap<ArmyId, Arc<Army>>,
     knowledge: std::sync::Arc<KnowledgeSnapshot>,
-    plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
-    scheduled_actions: BTreeMap<ScheduleKey, ScheduledAction>,
+    plugin_components: im::OrdMap<Arc<PluginComponentKey>, Arc<PluginComponentRecord>>,
+    scheduled_actions: im::OrdMap<ScheduleKey, Arc<ScheduledAction>>,
     counters: RuntimeCounters,
     event_count: usize,
     command_count: usize,
@@ -154,17 +157,17 @@ impl CommandTransactionCheckpoint {
 }
 
 pub(super) struct BoundaryTransactionCheckpoint {
-    entities: BTreeSet<EntityRef>,
-    people: BTreeMap<PersonId, Person>,
-    person_availability: BTreeMap<PersonId, PersonAvailability>,
-    created_persons: Vec<super::CreatedPerson>,
-    letters: BTreeMap<LetterId, LetterCargo>,
-    armies: BTreeMap<ArmyId, Army>,
+    entities: im::OrdSet<EntityRef>,
+    people: im::OrdMap<PersonId, Arc<Person>>,
+    person_availability: im::OrdMap<PersonId, PersonAvailability>,
+    created_persons: im::Vector<super::CreatedPerson>,
+    letters: im::OrdMap<LetterId, Arc<LetterCargo>>,
+    armies: im::OrdMap<ArmyId, Arc<Army>>,
     knowledge: std::sync::Arc<KnowledgeSnapshot>,
-    plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
+    plugin_components: im::OrdMap<Arc<PluginComponentKey>, Arc<PluginComponentRecord>>,
     domain_records: PersistentDomainRecordStore,
     decisions: DecisionState,
-    random_streams: BTreeMap<RandomStreamKey, RandomStreamState>,
+    random_streams: im::OrdMap<RandomStreamKey, RandomStreamState>,
     scheduler: RuntimeScheduler,
     counters: RuntimeCounters,
     event_count: usize,
@@ -252,14 +255,14 @@ impl BoundaryTransactionCheckpoint {
 }
 
 pub(super) struct ScheduledBatchTransactionCheckpoint {
-    people: BTreeMap<PersonId, Person>,
-    letters: BTreeMap<LetterId, LetterCargo>,
-    armies: BTreeMap<ArmyId, Army>,
+    people: im::OrdMap<PersonId, Arc<Person>>,
+    letters: im::OrdMap<LetterId, Arc<LetterCargo>>,
+    armies: im::OrdMap<ArmyId, Arc<Army>>,
     knowledge: std::sync::Arc<KnowledgeSnapshot>,
-    plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
-    random_streams: BTreeMap<RandomStreamKey, RandomStreamState>,
+    plugin_components: im::OrdMap<Arc<PluginComponentKey>, Arc<PluginComponentRecord>>,
+    random_streams: im::OrdMap<RandomStreamKey, RandomStreamState>,
     now: SimTime,
-    scheduled_actions: BTreeMap<ScheduleKey, ScheduledAction>,
+    scheduled_actions: im::OrdMap<ScheduleKey, Arc<ScheduledAction>>,
     counters: RuntimeCounters,
     event_count: usize,
     random_draw_count: usize,
@@ -340,7 +343,8 @@ impl ClockTransactionCheckpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Scenario, Simulation};
+    use crate::{Command, CommandEnvelope, Issuer, Scenario, Simulation, demo_scenario};
+    use canwu_time::SimDuration;
 
     #[test]
     fn boundary_checkpoint_shares_domain_record_root() {
@@ -352,6 +356,115 @@ mod tests {
                 .domain_records
                 .shares_root_with(&simulation.state.current.domain_records)
         );
+    }
+
+    /// Every rollback capture and a fork share the current state's
+    /// collections and the evidence journals with the live run instead of
+    /// copying them, so their cost does not grow with the world or its
+    /// history. A change on either side then copies only what it changes and
+    /// leaves the other side as it was.
+    #[test]
+    fn rollback_copies_and_forks_share_state_and_journals() {
+        let (scenario, ids) = demo_scenario();
+        let mut simulation = Simulation::new(35, scenario).unwrap();
+        simulation
+            .submit(CommandEnvelope::new(
+                Issuer::Actor(ids.commander),
+                Command::OrderMovement {
+                    subject: EntityRef::Army(ids.army),
+                    destination: ids.eastern_territory,
+                    cargo: Vec::new(),
+                },
+            ))
+            .unwrap();
+        let live = &simulation.state;
+        assert!(!live.scheduler.actions.is_empty() && !live.evidence.events.is_empty());
+
+        let command = CommandTransactionCheckpoint::capture(live);
+        assert!(command.people.ptr_eq(&live.current.people));
+        assert!(command.letters.ptr_eq(&live.current.letters));
+        assert!(command.armies.ptr_eq(&live.current.armies));
+        assert!(
+            command
+                .plugin_components
+                .ptr_eq(&live.current.plugin_components)
+        );
+        assert!(command.scheduled_actions.ptr_eq(&live.scheduler.actions));
+
+        let boundary = BoundaryTransactionCheckpoint::capture(live);
+        assert!(boundary.entities.ptr_eq(&live.current.entities));
+        assert!(boundary.people.ptr_eq(&live.current.people));
+        assert!(
+            boundary
+                .person_availability
+                .ptr_eq(&live.current.person_availability)
+        );
+        assert!(boundary.armies.ptr_eq(&live.current.armies));
+        assert!(boundary.random_streams.ptr_eq(&live.current.random_streams));
+        assert!(boundary.scheduler.actions.ptr_eq(&live.scheduler.actions));
+        assert!(
+            boundary
+                .scheduler
+                .pending_ingress
+                .ptr_eq(&live.scheduler.pending_ingress)
+        );
+
+        let batch = ScheduledBatchTransactionCheckpoint::capture(live);
+        assert!(batch.armies.ptr_eq(&live.current.armies));
+        assert!(batch.random_streams.ptr_eq(&live.current.random_streams));
+        assert!(batch.scheduled_actions.ptr_eq(&live.scheduler.actions));
+
+        let before = simulation.snapshot();
+        let mut fork = simulation.fork();
+        let (copy, live) = (&fork.state, &simulation.state);
+        assert!(copy.current.armies.ptr_eq(&live.current.armies));
+        assert!(copy.current.territories.ptr_eq(&live.current.territories));
+        assert!(copy.scheduler.actions.ptr_eq(&live.scheduler.actions));
+        assert!(Arc::ptr_eq(
+            copy.metadata.initial_scenario.as_ref().unwrap(),
+            live.metadata.initial_scenario.as_ref().unwrap()
+        ));
+        assert!(
+            copy.evidence
+                .events
+                .shares_records_with(&live.evidence.events)
+        );
+        assert!(
+            copy.evidence
+                .command_attempts
+                .shares_records_with(&live.evidence.command_attempts)
+        );
+        assert!(
+            copy.evidence
+                .commands
+                .shares_records_with(&live.evidence.commands)
+        );
+
+        // The fork moves the army and appends evidence; the run it was
+        // taken from is unchanged, and advancing it gives the same state.
+        fork.advance(SimDuration::days(4)).unwrap();
+        assert!(
+            !fork
+                .state
+                .current
+                .armies
+                .ptr_eq(&simulation.state.current.armies)
+        );
+        assert!(fork.state.evidence.events.len() > simulation.state.evidence.events.len());
+        assert_eq!(simulation.snapshot(), before);
+        simulation.advance(SimDuration::days(4)).unwrap();
+        assert_eq!(simulation.snapshot(), fork.snapshot());
+
+        // A truncation or a front drain of a shared journal keeps the other
+        // copy whole.
+        let events = simulation.state.evidence.events.to_vec();
+        let mut truncated = simulation.state.evidence.events.clone();
+        truncated.truncate(1);
+        let mut drained = simulation.state.evidence.events.clone();
+        drained.drain(..1);
+        assert_eq!(&*truncated, &events[..1]);
+        assert_eq!(&*drained, &events[1..]);
+        assert_eq!(&*simulation.state.evidence.events, events.as_slice());
     }
 
     /// Every rollback capture shares the knowledge state instead of copying

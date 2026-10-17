@@ -277,12 +277,30 @@ impl From<&BoundaryPersonCreation> for CreatedPerson {
     }
 }
 
-pub(super) fn person_is_available(
-    availability: &BTreeMap<PersonId, PersonAvailability>,
+/// A person-availability table: the runtime's persistent map, or an ordered
+/// map that validation rebuilds from evidence.
+pub(super) trait AvailabilityLookup {
+    fn availability_of(&self, person: PersonId) -> Option<&PersonAvailability>;
+}
+
+impl AvailabilityLookup for BTreeMap<PersonId, PersonAvailability> {
+    fn availability_of(&self, person: PersonId) -> Option<&PersonAvailability> {
+        self.get(&person)
+    }
+}
+
+impl AvailabilityLookup for im::OrdMap<PersonId, PersonAvailability> {
+    fn availability_of(&self, person: PersonId) -> Option<&PersonAvailability> {
+        self.get(&person)
+    }
+}
+
+pub(super) fn person_is_available<A: AvailabilityLookup + ?Sized>(
+    availability: &A,
     person: PersonId,
 ) -> bool {
     availability
-        .get(&person)
+        .availability_of(person)
         .is_none_or(PersonAvailability::is_available)
 }
 
@@ -544,8 +562,8 @@ fn command_persons(issuer: &Issuer, authority: &CommandAuthority) -> BTreeSet<Pe
 
 /// Rejects a command whose issuing person is dead, missing, detained, or
 /// captive. Non-person issuers and authorities are unaffected.
-pub(super) fn validate_command_issuer_availability(
-    availability: &BTreeMap<PersonId, PersonAvailability>,
+pub(super) fn validate_command_issuer_availability<A: AvailabilityLookup + ?Sized>(
+    availability: &A,
     issuer: &Issuer,
     authority: &CommandAuthority,
 ) -> Result<(), CanwuError> {
@@ -581,10 +599,10 @@ fn controller_issuer_message(controller: &str, person: PersonId) -> String {
     )
 }
 
-fn controller_authority_availability_error(
+fn controller_authority_availability_error<A: AvailabilityLookup + ?Sized>(
     decisions: &DecisionState,
     controller_id: &str,
-    availability: &BTreeMap<PersonId, PersonAvailability>,
+    availability: &A,
 ) -> Option<(DecisionAttemptErrorCode, String)> {
     decisions
         .controller(controller_id)
@@ -605,10 +623,10 @@ fn controller_authority_availability_error(
 /// assigned controller whose authority person is unavailable, so a ticket is
 /// never opened for a controller that could not resolve it. `Resolve` refuses
 /// a controller whose authority person is unavailable.
-pub(super) fn decision_mutation_availability_error(
+pub(super) fn decision_mutation_availability_error<A: AvailabilityLookup + ?Sized>(
     mutation: &DecisionMutation,
     decisions: &DecisionState,
-    availability: &BTreeMap<PersonId, PersonAvailability>,
+    availability: &A,
 ) -> Option<(DecisionAttemptErrorCode, String)> {
     match mutation {
         DecisionMutation::Open { ticket } => match ticket.decision_maker {
@@ -633,8 +651,8 @@ pub(super) fn decision_mutation_availability_error(
 
 /// Availability guard for resolving one ticket through its controller, used
 /// by host decision preparation and by boundary random decision resolutions.
-pub(super) fn validate_decision_preparation(
-    availability: &BTreeMap<PersonId, PersonAvailability>,
+pub(super) fn validate_decision_preparation<A: AvailabilityLookup + ?Sized>(
+    availability: &A,
     ticket: &DecisionTicket,
     controller: &DecisionControllerBinding,
 ) -> Result<(), CanwuError> {
@@ -882,7 +900,7 @@ impl Simulation {
                 .state
                 .metadata
                 .initial_scenario
-                .as_ref()
+                .as_deref()
                 .ok_or_else(|| {
                     CanwuError::new(
                         ErrorCode::InvalidSnapshot,
@@ -920,7 +938,10 @@ impl Simulation {
         // Only a placed person joins the `WorldSnapshot` projection; an
         // unplaced person stays a registry identity.
         if let Some(record) = person.person_record() {
-            self.state.current.people.insert(id, record);
+            self.state
+                .current
+                .people
+                .insert(id, std::sync::Arc::new(record));
         }
         self.state
             .current
@@ -938,7 +959,7 @@ impl Simulation {
         self.state
             .current
             .created_persons
-            .push(CreatedPerson::from(&creation));
+            .push_back(CreatedPerson::from(&creation));
         Ok(creation)
     }
 }

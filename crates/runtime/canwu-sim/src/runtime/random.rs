@@ -397,7 +397,7 @@ pub(crate) struct RandomSession {
 
 impl RandomSession {
     pub(crate) fn new(
-        available: &BTreeMap<RandomStreamKey, RandomStreamState>,
+        available: &im::OrdMap<RandomStreamKey, RandomStreamState>,
         allowed: &[RandomStreamKey],
         root_seed: u64,
         producer_plugin: &str,
@@ -1095,7 +1095,7 @@ mod tests {
         let stream = fixture_stream();
         let state = RandomStreamState::initial(41, stream.clone());
         let mut session = RandomSession::new(
-            &BTreeMap::from([(stream.clone(), state)]),
+            &im::OrdMap::unit(stream.clone(), state),
             std::slice::from_ref(&stream),
             41,
             "fixture-random",
@@ -1165,7 +1165,7 @@ mod tests {
         let run = |evidence, include_unrelated| {
             let state = RandomStreamState::initial(91, stream.clone());
             let mut session = RandomSession::new(
-                &BTreeMap::from([(stream.clone(), state)]),
+                &im::OrdMap::unit(stream.clone(), state),
                 std::slice::from_ref(&stream),
                 91,
                 "fixture-random",
@@ -1255,7 +1255,7 @@ mod tests {
             })
             .expect("fixture search should find a sequential rejection");
         let mut session = RandomSession::new(
-            &BTreeMap::from([(stream.clone(), initial.clone())]),
+            &im::OrdMap::unit(stream.clone(), initial.clone()),
             std::slice::from_ref(&stream),
             root_seed,
             "fixture-random",

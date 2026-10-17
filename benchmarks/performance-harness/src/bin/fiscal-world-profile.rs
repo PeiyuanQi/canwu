@@ -6,8 +6,8 @@
 //! every scope at once, receipts, a close of every book, the report
 //! publication and drains those boundaries cause, and archive commits. It
 //! also records what the world costs to hold: fiscal record bytes per kind,
-//! the largest record, snapshot bytes, activation and restore time, and the
-//! host's audit of every fiscal record.
+//! the largest record, snapshot bytes, activation, fork, and restore time,
+//! and the host's audit of every fiscal record.
 //!
 //! The generator splits the scopes over partitions with a heavy-tailed size
 //! (the largest about 6,000 scopes in the `world` preset), each partition
@@ -1819,6 +1819,12 @@ fn main() -> Fallible<()> {
         });
         return write_report(&options, &mut report);
     }
+    // Forking the unsealed run once every scope is assessed, the fork
+    // dropped outside the measurement.
+    let started = Meter::start();
+    let fork = assessed.fork();
+    let fork_cost = started.finish();
+    drop(fork);
     let snapshot_started = Instant::now();
     let snapshot = assessed.snapshot_json()?;
     #[allow(clippy::cast_precision_loss)]
@@ -1917,6 +1923,7 @@ fn main() -> Fallible<()> {
             "audit_every_record_ms": audit_base,
             "initial": sizes_initial,
             "every_scope_assessed": sizes_assessed,
+            "fork_ms": fork_cost,
             "snapshot_json_bytes": snapshot_bytes,
             "snapshot_encode_ms": snapshot_ms,
             "restore_ms": restore,

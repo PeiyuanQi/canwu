@@ -1,0 +1,126 @@
+{
+  "benchmark": "canwu-continuation-checkpoint",
+  "engine_version": "0.17.0",
+  "environment": {
+    "arch": "x86_64",
+    "cargo_features": [],
+    "logical_cpus": 16,
+    "os": "windows",
+    "profile": "release",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)"
+  },
+  "machine": "local-windows-x86_64-shared",
+  "method": {
+    "churned_records_per_day": 140,
+    "continuation": "continuation_checkpoint and to_json of the unsealed run, and CompactedCanwu::from_continuation_checkpoint_json_verified of it",
+    "days_per_month": 30,
+    "full_save": "checkpoint_journal_json of the unsealed run, and Canwu::from_checkpoint_journal_json_with_plugins of it",
+    "heap": "allocation build only: net bytes held by a run built alone to the last month, unsealed or sealing every month",
+    "host_commands_per_day": 8,
+    "part_bytes": "the JSON length of each part of the continuation checkpoint",
+    "samples": 3
+  },
+  "metric_mode": "elapsed",
+  "recorded_on": "2026-10-16",
+  "schema_version": 1,
+  "series": [
+    {
+      "keyed_draws_per_packet": 0,
+      "months": [
+        {
+          "continuation": {
+            "bytes": 279749,
+            "non_state_bytes": 216343,
+            "part_bytes": {
+              "boundary_ledger": 145,
+              "current_record_versions": 30275,
+              "ingress_provenance": 4304,
+              "journal_frontiers": 3374,
+              "keyed_draw_ledger": 2,
+              "known_record_versions": 2,
+              "pending_ingress": 132,
+              "pinned": 15390,
+              "pinned_ingress": 9410,
+              "request_index": 124919,
+              "state": 63406,
+              "time_index": 3721,
+              "unadmitted": 33288
+            },
+            "restore_allocation_operations": 0,
+            "restore_net_bytes": 0,
+            "restore_ns_median": 10374600,
+            "write_ns_median": 3078500
+          },
+          "full_save": {
+            "bytes": 10687630,
+            "restore_ns_median": 251982800,
+            "write_ns_median": 32517400
+          },
+          "month": 1
+        },
+        {
+          "continuation": {
+            "bytes": 351659,
+            "non_state_bytes": 252038,
+            "part_bytes": {
+              "boundary_ledger": 295,
+              "current_record_versions": 30701,
+              "ingress_provenance": 5035,
+              "journal_frontiers": 6166,
+              "keyed_draw_ledger": 2,
+              "known_record_versions": 2,
+              "pending_ingress": 247,
+              "pinned": 25519,
+              "pinned_ingress": 15010,
+              "request_index": 134166,
+              "state": 99621,
+              "time_index": 15246,
+              "unadmitted": 33860
+            },
+            "restore_allocation_operations": 0,
+            "restore_net_bytes": 0,
+            "restore_ns_median": 13860100,
+            "write_ns_median": 6877800
+          },
+          "full_save": {
+            "bytes": 42425208,
+            "restore_ns_median": 1203751000,
+            "write_ns_median": 139843600
+          },
+          "month": 4
+        },
+        {
+          "continuation": {
+            "bytes": 523055,
+            "non_state_bytes": 302531,
+            "part_bytes": {
+              "boundary_ledger": 295,
+              "current_record_versions": 30701,
+              "ingress_provenance": 5135,
+              "journal_frontiers": 6019,
+              "keyed_draw_ledger": 2,
+              "known_record_versions": 2,
+              "pending_ingress": 271,
+              "pinned": 25481,
+              "pinned_ingress": 14857,
+              "request_index": 144523,
+              "state": 220524,
+              "time_index": 55441,
+              "unadmitted": 33860
+            },
+            "restore_allocation_operations": 0,
+            "restore_net_bytes": 0,
+            "restore_ns_median": 22547100,
+            "write_ns_median": 16982500
+          },
+          "full_save": {
+            "bytes": 148485904,
+            "restore_ns_median": 3618785100,
+            "write_ns_median": 470709300
+          },
+          "month": 14
+        }
+      ]
+    }
+  ]
+}

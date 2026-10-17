@@ -741,16 +741,20 @@ pub(crate) fn validate_snapshot_records(
             .people
             .iter()
             .cloned()
-            .map(|value| (value.id, value))
+            .map(|value| (value.id, std::sync::Arc::new(value)))
             .collect(),
-        person_availability: snapshot.person_availability.clone(),
-        created_persons: snapshot.created_persons.clone(),
+        person_availability: snapshot
+            .person_availability
+            .iter()
+            .map(|(person, availability)| (*person, availability.clone()))
+            .collect(),
+        created_persons: snapshot.created_persons.iter().cloned().collect(),
         letters: snapshot
             .world
             .letters
             .iter()
             .cloned()
-            .map(|value| (value.id, value))
+            .map(|value| (value.id, std::sync::Arc::new(value)))
             .collect(),
         governments: snapshot
             .world
@@ -778,7 +782,7 @@ pub(crate) fn validate_snapshot_records(
             .armies
             .iter()
             .cloned()
-            .map(|value| (value.id, value))
+            .map(|value| (value.id, std::sync::Arc::new(value)))
             .collect(),
         knowledge: std::sync::Arc::new(snapshot.knowledge.clone()),
         plugin_components: snapshot
@@ -787,13 +791,13 @@ pub(crate) fn validate_snapshot_records(
             .cloned()
             .map(|record| {
                 (
-                    component_key(
+                    std::sync::Arc::new(component_key(
                         &record.plugin,
                         &record.state,
                         &record.entity,
                         &record.component,
-                    ),
-                    record,
+                    )),
+                    std::sync::Arc::new(record),
                 )
             })
             .collect(),
@@ -1128,7 +1132,7 @@ mod tests {
     use canwu_knowledge::{HolderEntry, KnowledgeOrigin, KnowledgeRecord};
     use canwu_time::SimTime;
     use serde_json::json;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     /// A record staged by the settling boundary, as the overlay keeps it.
@@ -1169,17 +1173,17 @@ mod tests {
 
     fn current_state(domain_records: Vec<DomainRecord>) -> RuntimeCurrentState {
         RuntimeCurrentState {
-            entities: BTreeSet::new(),
-            people: BTreeMap::new(),
-            person_availability: BTreeMap::new(),
-            created_persons: Vec::new(),
-            letters: BTreeMap::new(),
-            governments: BTreeMap::new(),
-            territories: BTreeMap::new(),
-            routes: BTreeMap::new(),
-            armies: BTreeMap::new(),
+            entities: im::OrdSet::new(),
+            people: im::OrdMap::new(),
+            person_availability: im::OrdMap::new(),
+            created_persons: im::Vector::new(),
+            letters: im::OrdMap::new(),
+            governments: im::OrdMap::new(),
+            territories: im::OrdMap::new(),
+            routes: im::OrdMap::new(),
+            armies: im::OrdMap::new(),
             knowledge: std::sync::Arc::default(),
-            plugin_components: BTreeMap::new(),
+            plugin_components: im::OrdMap::new(),
             domain_records: PersistentDomainRecordStore::from_records(
                 domain_records
                     .into_iter()
@@ -1190,7 +1194,7 @@ mod tests {
             decisions: DecisionState::default(),
             root_seed: 1,
             authority_root_seed: 1,
-            random_streams: BTreeMap::new(),
+            random_streams: im::OrdMap::new(),
         }
     }
 

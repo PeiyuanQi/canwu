@@ -10,6 +10,7 @@ mod gate;
 mod hashing;
 mod ingress;
 mod knowledge;
+mod known_fields;
 mod legacy_world;
 mod maintenance;
 mod manifest;
@@ -341,13 +342,19 @@ fn deserialize_current_value<T>(input: &Value, label: &str) -> Result<T, CanwuEr
 where
     T: for<'de> Deserialize<'de> + Serialize,
 {
-    let decoded: T = serde_json::from_value(input.clone()).map_err(|error| {
+    // Decoding borrows the parsed tree instead of consuming a copy of it.
+    let decoded = T::deserialize(input).map_err(|error| {
         invalid_snapshot_error(format!("could not deserialize format 9 {label}: {error}"))
     })?;
-    let encoded = serde_json::to_value(&decoded).map_err(|error| {
-        invalid_snapshot_error(format!("could not re-encode format 9 {label}: {error}"))
-    })?;
-    reject_unknown_current_fields(input, &encoded, "")?;
+    // The walk answers the unknown-field comparison without building the
+    // re-encoded tree; only an input it cannot pass is compared in full, so
+    // the refusal and its message are the comparison's.
+    if !known_fields::input_fields_are_known(&decoded, input) {
+        let encoded = serde_json::to_value(&decoded).map_err(|error| {
+            invalid_snapshot_error(format!("could not re-encode format 9 {label}: {error}"))
+        })?;
+        reject_unknown_current_fields(input, &encoded, "")?;
+    }
     Ok(decoded)
 }
 
@@ -1567,15 +1574,15 @@ impl Simulation {
                         .world
                         .people
                         .into_iter()
-                        .map(|value| (value.id, value))
+                        .map(|value| (value.id, Arc::new(value)))
                         .collect(),
-                    person_availability: BTreeMap::new(),
-                    created_persons: Vec::new(),
+                    person_availability: im::OrdMap::new(),
+                    created_persons: im::Vector::new(),
                     letters: scenario
                         .world
                         .letters
                         .into_iter()
-                        .map(|value| (value.id, value))
+                        .map(|value| (value.id, Arc::new(value)))
                         .collect(),
                     governments: scenario
                         .world
@@ -1599,10 +1606,10 @@ impl Simulation {
                         .world
                         .armies
                         .into_iter()
-                        .map(|value| (value.id, value))
+                        .map(|value| (value.id, Arc::new(value)))
                         .collect(),
                     knowledge: std::sync::Arc::new(scenario.knowledge),
-                    plugin_components: BTreeMap::new(),
+                    plugin_components: im::OrdMap::new(),
                     domain_records: PersistentDomainRecordStore::from_records(
                         scenario
                             .domain_records
@@ -1613,15 +1620,15 @@ impl Simulation {
                     decisions: DecisionState::default(),
                     root_seed: seed,
                     authority_root_seed,
-                    random_streams: BTreeMap::from([(core_stream.key.clone(), core_stream)]),
+                    random_streams: im::OrdMap::unit(core_stream.key.clone(), core_stream),
                 },
                 scheduler: RuntimeScheduler {
                     initial_time: scenario.start_time,
                     now: scenario.start_time,
-                    actions: BTreeMap::new(),
-                    pending_ingress: BTreeSet::new(),
-                    cancelled_ingress: BTreeSet::new(),
-                    transition_manifests: BTreeMap::new(),
+                    actions: im::OrdMap::new(),
+                    pending_ingress: im::OrdSet::new(),
+                    cancelled_ingress: im::OrdSet::new(),
+                    transition_manifests: im::OrdMap::new(),
                     settled_boundaries: im::Vector::new(),
                 },
                 counters: RuntimeCounters {
@@ -1642,7 +1649,7 @@ impl Simulation {
                     admitted_event_count: 0,
                 },
                 metadata: RuntimeMetadata {
-                    initial_scenario,
+                    initial_scenario: initial_scenario.map(Arc::new),
                     initial_domain_record_indexes,
                     current_domain_record_versions,
                     run_manifest,
@@ -1666,13 +1673,13 @@ impl Simulation {
                     archived_decision_requests: im::OrdMap::new(),
                     archived_decision_command_requests: im::OrdSet::new(),
                     retired_command_requests: state::RetiredRequestIds::default(),
-                    events: Vec::new(),
+                    events: state::SharedJournal::default(),
                     commands: state::RetainedJournal::default(),
                     command_attempts: state::RetainedJournal::default(),
                     ingress: state::RetainedJournal::default(),
                     command_index: state::CommandHistoryIndex::default(),
-                    boundaries: Vec::new(),
-                    random_draws: Vec::new(),
+                    boundaries: state::SharedJournal::default(),
+                    random_draws: state::SharedJournal::default(),
                     archived_segment_headers: im::Vector::new(),
                     archived_evidence_receipts: im::OrdMap::new(),
                     keyed_draws: random::KeyedDrawLedger::default(),
@@ -1786,7 +1793,7 @@ impl Simulation {
     }
 
     fn bound_initial_scenario(&self) -> Option<&Scenario> {
-        self.state.metadata.initial_scenario.as_ref()
+        self.state.metadata.initial_scenario.as_deref()
     }
 
     #[must_use]
@@ -1858,12 +1865,30 @@ impl Simulation {
     #[must_use]
     pub fn world(&self) -> WorldSnapshot {
         WorldSnapshot {
-            people: self.state.current.people.values().cloned().collect(),
+            people: self
+                .state
+                .current
+                .people
+                .values()
+                .map(|value| Person::clone(value))
+                .collect(),
             governments: self.state.current.governments.values().cloned().collect(),
             territories: self.state.current.territories.values().cloned().collect(),
             routes: self.state.current.routes.values().cloned().collect(),
-            armies: self.state.current.armies.values().cloned().collect(),
-            letters: self.state.current.letters.values().cloned().collect(),
+            armies: self
+                .state
+                .current
+                .armies
+                .values()
+                .map(|value| Army::clone(value))
+                .collect(),
+            letters: self
+                .state
+                .current
+                .letters
+                .values()
+                .map(|value| LetterCargo::clone(value))
+                .collect(),
         }
     }
 
@@ -2123,10 +2148,8 @@ impl Simulation {
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
             root_seed: self.state.current.root_seed,
             initial_scenario: self
-                .state
-                .metadata
-                .initial_scenario
-                .clone()
+                .bound_initial_scenario()
+                .cloned()
                 .expect("Format 9 runs always retain their initial scenario"),
             authority_root_seed: self.state.current.authority_root_seed,
             run_manifest: self.state.metadata.run_manifest.clone(),
@@ -2137,7 +2160,7 @@ impl Simulation {
             commands: self.state.evidence.commands.to_vec(),
             command_attempts: self.state.evidence.command_attempts.to_vec(),
             ingress: self.state.evidence.ingress.to_vec(),
-            boundaries: self.state.evidence.boundaries.clone(),
+            boundaries: self.state.evidence.boundaries.to_vec(),
             final_time: self.state.scheduler.now,
             checkpoint_hash: self.state.metadata.checkpoint_hash.clone(),
             commitment_format_version: self.state.metadata.commitment_format_version,
@@ -2212,7 +2235,7 @@ impl Simulation {
             .current
             .plugin_components
             .values()
-            .cloned()
+            .map(AsRef::as_ref)
             .collect();
         let domain_records: Vec<_> = self
             .state
@@ -2229,7 +2252,7 @@ impl Simulation {
             .iter()
             .map(|(key, action)| ScheduledRecord {
                 key: key.clone(),
-                action: action.clone(),
+                action: ScheduledAction::clone(action),
             })
             .collect();
         let random_streams: Vec<_> = self
@@ -2258,8 +2281,12 @@ impl Simulation {
             plugin_registration_closed: self.state.metadata.plugin_registration_closed,
             entities: hashing::committed_entities(&entities, &world),
             world: &world,
-            person_availability: &self.state.current.person_availability,
-            created_persons: &self.state.current.created_persons,
+            person_availability: hashing::AvailabilityTable::Runtime(
+                &self.state.current.person_availability,
+            ),
+            created_persons: hashing::CreatedPersonList::Runtime(
+                &self.state.current.created_persons,
+            ),
             knowledge: &self.state.current.knowledge,
             events: &self.state.evidence.events,
             commands: &self.state.evidence.commands,
@@ -2302,8 +2329,8 @@ impl Simulation {
                 world_commitment_root(
                     &world,
                     &entities,
-                    &self.state.current.person_availability,
-                    &self.state.current.created_persons,
+                    hashing::AvailabilityTable::Runtime(&self.state.current.person_availability),
+                    hashing::CreatedPersonList::Runtime(&self.state.current.created_persons),
                 )
             })
             .transpose()?;
@@ -2319,7 +2346,7 @@ impl Simulation {
                     .current
                     .plugin_components
                     .values()
-                    .cloned()
+                    .map(AsRef::as_ref)
                     .collect();
                 plugin_component_commitment_root(&values)
             })
@@ -2342,7 +2369,7 @@ impl Simulation {
                     .iter()
                     .map(|(key, action)| ScheduledRecord {
                         key: key.clone(),
-                        action: action.clone(),
+                        action: ScheduledAction::clone(action),
                     })
                     .collect();
                 let transition_manifests: Vec<_> =
@@ -2558,16 +2585,12 @@ impl Simulation {
     #[must_use]
     pub fn snapshot(&self) -> SimulationSnapshot {
         let mut snapshot = self.checkpoint_state();
-        snapshot.events.clone_from(&self.state.evidence.events);
+        snapshot.events = self.state.evidence.events.to_vec();
         snapshot.commands = self.state.evidence.commands.to_vec();
         snapshot.command_attempts = self.state.evidence.command_attempts.to_vec();
         snapshot.ingress = self.state.evidence.ingress.to_vec();
-        snapshot
-            .boundaries
-            .clone_from(&self.state.evidence.boundaries);
-        snapshot
-            .random_draws
-            .clone_from(&self.state.evidence.random_draws);
+        snapshot.boundaries = self.state.evidence.boundaries.to_vec();
+        snapshot.random_draws = self.state.evidence.random_draws.to_vec();
         snapshot
     }
 
@@ -2592,12 +2615,12 @@ impl Simulation {
             ));
         }
         validate_current_snapshot_contract(&snapshot)?;
-        validate_scenario_state(&Scenario {
+        scenario::validate_scenario_state_parts(&scenario::ScenarioStateParts {
             start_time: snapshot.now,
-            entities: snapshot.entities.clone(),
-            world: snapshot.world.clone(),
-            knowledge: snapshot.knowledge.clone(),
-            domain_records: snapshot.domain_records.clone(),
+            entities: &snapshot.entities,
+            world: &snapshot.world,
+            knowledge: &snapshot.knowledge,
+            domain_records: &snapshot.domain_records,
         })?;
         let plugins = PluginRegistry::from_descriptors(snapshot.plugin_descriptors.clone())?;
         let (keyed_draws, mut knowledge_ledger) = validate_snapshot(&snapshot, &plugins)?;
@@ -2629,12 +2652,14 @@ impl Simulation {
             })
             .map(IngressQueueKey::from_record)
             .collect();
-        let initial_scenario = Some(snapshot.initial_scenario.clone().ok_or_else(|| {
-            invalid_snapshot_error("format 9 validation requires an initial scenario")
-        })?);
         // Validation built the index of the snapshot's initial scenario; the
         // restored runtime shares it.
         let initial_domain_record_indexes = snapshot.initial_record_index();
+        // Nothing reads the snapshot's scenario after validation, so the
+        // runtime takes it instead of copying it.
+        let initial_scenario = Some(snapshot.initial_scenario.take().ok_or_else(|| {
+            invalid_snapshot_error("format 9 validation requires an initial scenario")
+        })?);
         let current_domain_record_versions = build_current_domain_record_versions(
             initial_scenario.as_ref(),
             snapshot.initial_time,
@@ -2652,13 +2677,13 @@ impl Simulation {
             archived_decision_requests: im::OrdMap::new(),
             archived_decision_command_requests: im::OrdSet::new(),
             retired_command_requests: state::RetiredRequestIds::default(),
-            events: std::mem::take(&mut snapshot.events),
+            events: std::mem::take(&mut snapshot.events).into(),
             commands: state::RetainedJournal::default(),
             command_attempts: state::RetainedJournal::default(),
             ingress: state::RetainedJournal::default(),
             command_index: state::CommandHistoryIndex::default(),
-            boundaries: std::mem::take(&mut snapshot.boundaries),
-            random_draws: std::mem::take(&mut snapshot.random_draws),
+            boundaries: std::mem::take(&mut snapshot.boundaries).into(),
+            random_draws: std::mem::take(&mut snapshot.random_draws).into(),
             archived_segment_headers: im::Vector::new(),
             archived_evidence_receipts: im::OrdMap::new(),
             keyed_draws: random::KeyedDrawLedger::default(),
@@ -2718,15 +2743,15 @@ impl Simulation {
                         .world
                         .people
                         .into_iter()
-                        .map(|value| (value.id, value))
+                        .map(|value| (value.id, Arc::new(value)))
                         .collect(),
-                    person_availability: snapshot.person_availability,
-                    created_persons: snapshot.created_persons,
+                    person_availability: snapshot.person_availability.into_iter().collect(),
+                    created_persons: snapshot.created_persons.into_iter().collect(),
                     letters: snapshot
                         .world
                         .letters
                         .into_iter()
-                        .map(|value| (value.id, value))
+                        .map(|value| (value.id, Arc::new(value)))
                         .collect(),
                     governments: snapshot
                         .world
@@ -2750,7 +2775,7 @@ impl Simulation {
                         .world
                         .armies
                         .into_iter()
-                        .map(|value| (value.id, value))
+                        .map(|value| (value.id, Arc::new(value)))
                         .collect(),
                     knowledge: std::sync::Arc::new(snapshot.knowledge),
                     plugin_components: snapshot
@@ -2758,13 +2783,13 @@ impl Simulation {
                         .into_iter()
                         .map(|record| {
                             (
-                                component_key(
+                                Arc::new(component_key(
                                     &record.plugin,
                                     &record.state,
                                     &record.entity,
                                     &record.component,
-                                ),
-                                record,
+                                )),
+                                Arc::new(record),
                             )
                         })
                         .collect(),
@@ -2790,10 +2815,10 @@ impl Simulation {
                     actions: snapshot
                         .scheduled
                         .into_iter()
-                        .map(|record| (record.key, record.action))
+                        .map(|record| (record.key, Arc::new(record.action)))
                         .collect(),
-                    pending_ingress,
-                    cancelled_ingress,
+                    pending_ingress: pending_ingress.into_iter().collect(),
+                    cancelled_ingress: cancelled_ingress.into_iter().collect(),
                     transition_manifests: snapshot
                         .pending_transition_manifests
                         .into_iter()
@@ -2819,7 +2844,7 @@ impl Simulation {
                     admitted_event_count: snapshot.admitted_event_count,
                 },
                 metadata: RuntimeMetadata {
-                    initial_scenario,
+                    initial_scenario: initial_scenario.map(Arc::new),
                     initial_domain_record_indexes,
                     current_domain_record_versions,
                     run_manifest: snapshot.run_manifest.clone().ok_or_else(|| {
@@ -2874,6 +2899,12 @@ impl Simulation {
     /// An independent copy of the run that shares the attached plugin archive
     /// provider. The copy is `Send`, so a host may advance, checkpoint, or
     /// save it on another thread.
+    ///
+    /// O(1): the copy shares current state and the retained journals with
+    /// the run. While the fork and the original both hold the retained
+    /// journals, the first append on either side copies them, so a save
+    /// fork that outlives the original's next boundary moves that copy onto
+    /// that boundary; a sealed run's retained tail keeps it small.
     #[must_use]
     pub fn fork(&self) -> Self {
         Self {
@@ -3216,9 +3247,15 @@ impl Simulation {
                 destination,
                 arrival_at,
             } => {
-                let army_state = self.state.current.armies.get_mut(&army).ok_or_else(|| {
-                    CanwuError::new(ErrorCode::ArmyNotFound, "validated army disappeared")
-                })?;
+                let army_state = self
+                    .state
+                    .current
+                    .armies
+                    .get_mut(&army)
+                    .map(Arc::make_mut)
+                    .ok_or_else(|| {
+                        CanwuError::new(ErrorCode::ArmyNotFound, "validated army disappeared")
+                    })?;
                 army_state.transit = Some(TransitState {
                     from,
                     to: destination,
@@ -3261,9 +3298,15 @@ impl Simulation {
                 arrival_at,
             } => {
                 self.invalidate_commitments(CommitmentDomains::WORLD);
-                let person_state = self.state.current.people.get_mut(&person).ok_or_else(|| {
-                    CanwuError::new(ErrorCode::EntityNotFound, "validated person disappeared")
-                })?;
+                let person_state = self
+                    .state
+                    .current
+                    .people
+                    .get_mut(&person)
+                    .map(Arc::make_mut)
+                    .ok_or_else(|| {
+                        CanwuError::new(ErrorCode::EntityNotFound, "validated person disappeared")
+                    })?;
                 person_state.transit = Some(PersonTransitState {
                     from,
                     to: destination,
@@ -3271,17 +3314,18 @@ impl Simulation {
                     arrives_at: arrival_at,
                 });
                 for letter_id in &cargo {
-                    let letter =
-                        self.state
-                            .current
-                            .letters
-                            .get_mut(letter_id)
-                            .ok_or_else(|| {
-                                CanwuError::new(
-                                    ErrorCode::EntityNotFound,
-                                    "validated letter disappeared",
-                                )
-                            })?;
+                    let letter = self
+                        .state
+                        .current
+                        .letters
+                        .get_mut(letter_id)
+                        .map(Arc::make_mut)
+                        .ok_or_else(|| {
+                            CanwuError::new(
+                                ErrorCode::EntityNotFound,
+                                "validated letter disappeared",
+                            )
+                        })?;
                     letter.status = LetterStatus::InTransit;
                     letter.carrier = Some(person);
                     letter.location = None;
@@ -3330,6 +3374,7 @@ impl Simulation {
                     .current
                     .armies
                     .get_mut(&army)
+                    .map(Arc::make_mut)
                     .ok_or_else(|| {
                         CanwuError::new(ErrorCode::ArmyNotFound, "validated army disappeared")
                     })?

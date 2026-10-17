@@ -322,6 +322,12 @@ per packet, with 8 commands and 140 churned records a day. The recorded
 [`allocation`](baselines/2026-10-15-continuation-allocations.json) reports
 are interpreted in
 [`docs/proposals/continuation-checkpoint.md`](../docs/proposals/continuation-checkpoint.md).
+The 2026-10-16 reports compare the 0.18.0 integration branch before
+([`base`](baselines/2026-10-16-continuation-0.18.0-base-elapsed.json)) and
+after ([`state copies`](baselines/2026-10-16-continuation-0.18.0-state-copies-elapsed.json))
+the runtime-state-copies change, with `--months 1,4,14 --keyed 0 --samples 3`;
+the faster restores come from the JSON decoder, see
+[`docs/proposals/runtime-state-copies.md`](../docs/proposals/runtime-state-copies.md).
 
 ## Resource archive profile
 
@@ -546,7 +552,8 @@ land rule implemented and one annual cycle. Identifiers are generated
 - the state: partitioning the authored state (`into_records`), activation of
   a new run, the host's audit of every fiscal record, fiscal record bytes and
   counts per kind and the largest record, before and after every scope is
-  assessed, snapshot bytes, and restore time;
+  assessed, and, once every scope is assessed, `fork` of the unsealed run
+  (`fork_ms`), snapshot bytes, and restore time;
 - idle boundaries (one tick of another plugin, nothing fiscal due), on the
   initial state and once every scope holds a book;
 - assessing bursts of 64, a spread day (the annual world's assessments
@@ -906,8 +913,11 @@ neighbouring runs; the allocation counts do not depend on load.
 ## Record-store profiles
 
 The record-store change of 0.16.0 was measured with `record-write-profile`
-above and a second binary, `paged-record-profile`. It measures, on forks of a
-run holding `--records` (65,536) small records, an idle boundary and one
+above and a second binary, `paged-record-profile`. It measures `Canwu::fork`
+of a run holding `--records` (65,536) small records (`fork`) and the first
+boundary on a fresh fork, which writes one record (`fork_first_boundary`), so
+that a copy a fork defers to its first append is measured too; and, on forks
+of that run, an idle boundary and one
 boundary that replaces one record with a payload of each `--write-bytes` size,
 after one unmeasured boundary that writes another record; and, for each
 `--paged` set of record sizes, preparing a paged checkpoint of a run holding
@@ -962,6 +972,16 @@ of the same two builds are beside them. They are interpreted in
 | Record writes | [`elapsed`](baselines/2026-10-15-record-write-0.16.0-base-elapsed.json), [`allocations`](baselines/2026-10-15-record-write-0.16.0-base-allocations.json) | [`elapsed`](baselines/2026-10-15-record-write-0.16.0-record-store-elapsed.json), [`allocations`](baselines/2026-10-15-record-write-0.16.0-record-store-allocations.json), [`elapsed at 50,000 writes`](baselines/2026-10-15-record-write-0.16.0-record-store-50k-elapsed.json) |
 | Paged records | [`elapsed`](baselines/2026-10-15-paged-record-0.16.0-base-elapsed.json), [`allocations`](baselines/2026-10-15-paged-record-0.16.0-base-allocations.json) | [`elapsed`](baselines/2026-10-15-paged-record-0.16.0-record-store-elapsed.json), [`allocations`](baselines/2026-10-15-paged-record-0.16.0-record-store-allocations.json) |
 | Architecture suite | [`allocations`](baselines/2026-10-15-architecture-0.16.0-base-allocations.json) | [`allocations`](baselines/2026-10-15-architecture-0.16.0-record-store-allocations.json) |
+
+The 2026-10-16 reports compare the 0.18.0 integration branch before and
+after the runtime-state-copies change (shared current state, scheduler, and
+journals; see
+[`docs/proposals/runtime-state-copies.md`](../docs/proposals/runtime-state-copies.md)),
+default options except `--paged 900000`:
+[`before elapsed`](baselines/2026-10-16-paged-record-0.18.0-base-elapsed.json),
+[`after elapsed`](baselines/2026-10-16-paged-record-0.18.0-state-copies-elapsed.json),
+[`before allocations`](baselines/2026-10-16-paged-record-0.18.0-base-allocations.json), and
+[`after allocations`](baselines/2026-10-16-paged-record-0.18.0-state-copies-allocations.json).
 
 ## Resource root profile
 

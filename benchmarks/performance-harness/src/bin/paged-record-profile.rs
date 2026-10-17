@@ -3,6 +3,10 @@
 //! The workload measures two things a plugin that keeps its state in a few
 //! large records pays:
 //!
+//! - `fork`: `Canwu::fork` of the filled run, and `fork_first_boundary`, the
+//!   first Daily boundary on a fresh fork, which writes one record (the
+//!   unmeasured boundary before each write below), so that a cost a fork
+//!   defers to its first boundary is measured too;
 //! - `idle_boundary`: one Daily boundary whose system writes nothing, on the
 //!   same forks as the writes, the fixed cost every write below includes;
 //! - `write_<size>`: one Daily boundary whose one system replaces one record
@@ -486,6 +490,35 @@ fn measure_writes(
     Ok(measurements)
 }
 
+/// Measures `Canwu::fork` of `run`, and the first boundary on a fresh fork,
+/// which writes one record as the unmeasured boundary of `measure_writes`
+/// does. The fork and the forked run are dropped outside the measurement.
+fn measure_fork(run: &Run, options: &Options) -> Result<[Measurements; 2], Box<dyn Error>> {
+    let mut fork_cost = Measurements::default();
+    let mut first_boundary = Measurements::default();
+    let mut discarded = [Measurements::default(), Measurements::default()];
+    for sample in 0..options.warmup + options.samples {
+        let [fork_target, boundary_target] = if sample < options.warmup {
+            let [fork, boundary] = &mut discarded;
+            [fork, boundary]
+        } else {
+            [&mut fork_cost, &mut first_boundary]
+        };
+        let mut fork = measure(options.mode, fork_target, || run.canwu.fork());
+        *PENDING.lock().expect("pending writes") = vec![PendingWrite::Update(
+            record_name(1),
+            json!({ "ordinal": 1, "balance": sample }),
+        )];
+        let at = next_day(fork.time())?;
+        let receipt = measure(options.mode, boundary_target, || {
+            fork.settle_boundary(BoundaryRequest::at(at).with_cadence(SystemCadence::Daily))
+        })?;
+        black_box(receipt);
+        drop(black_box(fork));
+    }
+    Ok([fork_cost, first_boundary])
+}
+
 /// Builds a run whose store holds one record per entry of `sizes`, then
 /// measures preparing its paged checkpoint and restoring it.
 fn measure_paged(sizes: &[usize], options: &Options) -> Result<Value, Box<dyn Error>> {
@@ -639,11 +672,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("the write store is missing its last record".into());
     }
     eprintln!("{} records in the write store", options.records);
-    let mut writes = vec![case_json(
-        "idle_boundary",
-        &measure_writes(&run, None, &options)?,
-        options.mode,
-    )];
+    let [fork_cost, fork_first_boundary] = measure_fork(&run, &options)?;
+    let mut writes = vec![
+        case_json("fork", &fork_cost, options.mode),
+        case_json("fork_first_boundary", &fork_first_boundary, options.mode),
+        case_json(
+            "idle_boundary",
+            &measure_writes(&run, None, &options)?,
+            options.mode,
+        ),
+    ];
     for &bytes in &options.write_bytes {
         writes.push(case_json(
             &format!("write_{bytes}"),
@@ -683,6 +721,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             "warmup_iterations": options.warmup,
             "write_samples": options.samples,
             "paged_samples": options.paged_samples,
+            "fork": "Canwu::fork of the filled run; the fork is dropped outside the measurement",
+            "fork_first_boundary": "the first Daily boundary on a fresh fork of the filled run, which replaces one small record",
             "idle_boundary": "one Daily boundary whose system proposes nothing, measured as the writes are",
             "write": "one Daily boundary that replaces one small record with a record whose payload text has the stated bytes, on a fork of the filled run, after one unmeasured boundary on that fork",
             "paged_prepare": "Canwu::prepare_paged_checkpoint into an empty page store, of a run whose store holds exactly the listed records",

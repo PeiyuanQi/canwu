@@ -105,7 +105,7 @@ impl SimulationView<'_> {
 
     pub fn army(&self, id: ArmyId) -> Result<Option<&Army>, CanwuError> {
         self.require_read(&StateKey::core_armies())?;
-        Ok(self.state.current().armies.get(&id))
+        Ok(self.state.current().armies.get(&id).map(AsRef::as_ref))
     }
 
     /// Returns a person's record in the `WorldSnapshot` projection.
@@ -117,7 +117,7 @@ impl SimulationView<'_> {
     /// with [`Self::person_availability`].
     pub fn person(&self, id: PersonId) -> Result<Option<&Person>, CanwuError> {
         self.require_read(&StateKey::core_people())?;
-        Ok(self.state.current().people.get(&id))
+        Ok(self.state.current().people.get(&id).map(AsRef::as_ref))
     }
 
     /// Whether a boundary's knowledge publication to `holder` would be
@@ -1489,7 +1489,13 @@ impl SimulationView<'_> {
         Ok(self
             .component_overlay
             .and_then(|overlay| overlay.get(&key))
-            .or_else(|| self.state.current().plugin_components.get(&key))
+            .or_else(|| {
+                self.state
+                    .current()
+                    .plugin_components
+                    .get(&key)
+                    .map(AsRef::as_ref)
+            })
             .map(|record| &record.value))
     }
 

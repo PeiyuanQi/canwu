@@ -3054,7 +3054,7 @@ impl Simulation {
         }
 
         for action in self.state.scheduler.actions.values() {
-            match action {
+            match &**action {
                 ScheduledAction::ArmyArrival { order_event, .. }
                 | ScheduledAction::PersonArrival { order_event, .. } => promote_dependency(
                     &mut dependencies,
@@ -3289,8 +3289,8 @@ impl Simulation {
             commands: evidence.commands[..command_count].to_vec(),
             command_attempts: evidence.command_attempts[..attempt_count].to_vec(),
             ingress: evidence.ingress.to_vec(),
-            boundaries: evidence.boundaries.clone(),
-            random_draws: evidence.random_draws.clone(),
+            boundaries: evidence.boundaries.to_vec(),
+            random_draws: evidence.random_draws.to_vec(),
             archive: None,
         };
         let checkpoint_hash = self.state.metadata.checkpoint_hash.clone();
@@ -3397,8 +3397,14 @@ impl Simulation {
             plugin_registration_closed: self.state.metadata.plugin_registration_closed,
             entities: self.state.current.entities.iter().cloned().collect(),
             world: self.world(),
-            person_availability: self.state.current.person_availability.clone(),
-            created_persons: self.state.current.created_persons.clone(),
+            person_availability: self
+                .state
+                .current
+                .person_availability
+                .iter()
+                .map(|(person, availability)| (*person, availability.clone()))
+                .collect(),
+            created_persons: self.state.current.created_persons.iter().cloned().collect(),
             knowledge: KnowledgeSnapshot::clone(&self.state.current.knowledge),
             events: Vec::new(),
             commands: Vec::new(),
@@ -3410,7 +3416,7 @@ impl Simulation {
                 .current
                 .plugin_components
                 .values()
-                .cloned()
+                .map(|record| PluginComponentRecord::clone(record))
                 .collect(),
             domain_records: if include_paged_payloads {
                 self.state
@@ -3446,7 +3452,7 @@ impl Simulation {
                 .iter()
                 .map(|(key, action)| ScheduledRecord {
                     key: key.clone(),
-                    action: action.clone(),
+                    action: ScheduledAction::clone(action),
                 })
                 .collect(),
             pending_transition_manifests: self
