@@ -560,6 +560,7 @@ fn snapshot_restore_authenticates_the_embedded_resource_archive_batch() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn force_and_economy_archives_are_provider_backed_and_restore_authenticated() {
     let mut harness = GrainHarness::new().expect("real Canwu composition");
     for decision in decisions().into_iter().take(4) {
@@ -633,17 +634,80 @@ fn force_and_economy_archives_are_provider_backed_and_restore_authenticated() {
             < observation_count_before
     );
     assert!(economy_after.outcomes.len() < economy_before.outcomes.len());
+    // Every commit is acknowledged, so the roots hold no receipt or handle.
+    assert!(force_after.archive_maintenance_receipts.is_empty());
+    assert!(economy_after.archive_maintenance_receipts.is_empty());
+    assert!(economy_after.archive_retention_handles.is_empty());
+
+    // One more economy commit, settled and not acknowledged: the root holds
+    // its receipt and handle, and the restore audit reads its store-side
+    // retention phase.
+    let canwu = harness.canwu_mut();
+    let at = canwu.time();
+    let profile_command = canwu_economy_reference::EconomyCommandV1 {
+        holder: KnowledgeHolderRef::Person(PersonId::new(1)),
+        operation_id: canwu_economy_reference::EconomyOperationId::new(
+            "canwu.economy-reference:operation:unacknowledged-commit",
+        )
+        .expect("ID"),
+        expected_runtime_revision: economy_after.revision,
+        operation: canwu_economy_reference::EconomyOperationV1::RegisterProfile {
+            profile: economy_after
+                .profiles
+                .values()
+                .next()
+                .cloned()
+                .expect("profile"),
+        },
+    };
+    canwu
+        .enqueue_command(
+            at,
+            0,
+            CommandRequest::new(
+                CommandRequestId::new(990_000),
+                canwu.revision(),
+                CommandEnvelope::new(
+                    Issuer::Actor(PersonId::new(1)),
+                    canwu_economy_reference::economy_command(&profile_command).expect("command"),
+                )
+                .at_time(at),
+            ),
+        )
+        .expect("the command queues");
+    for _ in 0..2 {
+        canwu
+            .advance_canonical(canwu_api::SimDuration::ZERO)
+            .expect("the command settles");
+    }
+    let store = harness.archive_store();
+    let (_, economy_pending) = economy_reference_state(harness.canwu())
+        .expect("economy state")
+        .expect("economy runtime");
+    let prepared = economy_pending
+        .prepare_economy_archive(64, store.as_ref(), Some(&force_after))
+        .expect("the batch prepares");
+    let pending = canwu_economy_reference::enqueue_economy_archive(
+        harness.canwu_mut(),
+        &prepared,
+        store.as_ref(),
+    )
+    .expect("the commit queues");
+    harness
+        .canwu_mut()
+        .advance_canonical(canwu_api::SimDuration::ZERO)
+        .expect("the commit settles");
     let snapshot = harness.snapshot_json().expect("snapshot");
     GrainHarness::from_snapshot_json(&snapshot).expect("authenticated package archive restore");
 
     let mut forged_retention: serde_json::Value =
         serde_json::from_str(&snapshot).expect("snapshot json");
-    let retention = forged_retention["archive"]["package_retention"]
-        .as_object_mut()
-        .expect("package retention map")
-        .values_mut()
-        .next()
-        .expect("terminal package retention handle");
+    let retention =
+        &mut forged_retention["archive"]["package_retention"][pending.retention_handle_id.as_str()];
+    assert!(
+        retention.is_object(),
+        "the pending commit's retention handle"
+    );
     retention["phase"] = serde_json::json!("verified");
     let forged_retention =
         serde_json::to_string(&forged_retention).expect("forged retention snapshot json");

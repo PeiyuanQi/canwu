@@ -32,18 +32,152 @@ pub const FORCE_ARCHIVE_INDEX_DIRECTORY_NAMESPACE: &str =
 pub const FORCE_ARCHIVE_LOOKUP_PAGE_NAMESPACE: &str =
     "canwu.force-supply-reference.archive.lookup-page";
 pub const MAX_PACKAGE_ARCHIVE_PAGE_ENTRIES: usize = 512;
-/// Maintenance receipts one plugin root may hold. Every settled archive
-/// commit, applied or stale, leaves one, and receipts never leave the root,
-/// so this bounds the archive commits of a run: a root that would hold more
-/// does not validate, and the boundary that settles the commit fails. The
-/// enqueue helpers refuse a commit that could reach it (see
-/// [`package_archive_commit_room`]). Folding acknowledged receipts into a
-/// digest chain would lift the bound; that is a follow-up.
-pub const MAX_PACKAGE_ARCHIVE_MAINTENANCE_RECEIPTS: usize = 8_192;
+/// Unacknowledged maintenance receipts one plugin root may hold. Every
+/// settled archive commit, applied or stale, leaves one, and the
+/// acknowledgement of its retention handle folds it into the root's
+/// [`PackageArchiveReceiptChainV1`], so this bounds the receipts waiting for
+/// an acknowledgement, not the commits of a run. A root that would hold more
+/// does not validate; the enqueue helpers refuse a commit that could reach
+/// it (see [`package_archive_commit_room`]).
+pub const MAX_PACKAGE_ARCHIVE_MAINTENANCE_RECEIPTS: usize = 64;
 /// Retention handles one plugin root may hold until the host acknowledges
 /// their commits. A settled commit adds one; a root that would hold more
 /// does not validate.
 pub const MAX_PACKAGE_ARCHIVE_RETENTION_HANDLES: usize = 64;
+/// Bytes of a plugin root's byte cap that operations leave free for the
+/// root's own archive maintenance: the receipts and retention handles of
+/// unacknowledged commits, about 1.4 KB per commit, so the receipts and
+/// handles the bounds above allow fit beside a root that operations filled.
+/// Both roots' limits require a byte cap of at least
+/// [`MIN_PACKAGE_STATE_BYTES`], four times this.
+pub const PACKAGE_MAINTENANCE_STATE_BYTE_RESERVE: usize = 128 * 1024;
+/// The smallest byte cap a reference plugin root accepts.
+pub const MIN_PACKAGE_STATE_BYTES: usize = 4 * PACKAGE_MAINTENANCE_STATE_BYTE_RESERVE;
+
+/// The share of a plugin root's byte cap `max_state_bytes` that an
+/// operation's result may fill: the cap less
+/// [`PACKAGE_MAINTENANCE_STATE_BYTE_RESERVE`]. Archive commits and
+/// acknowledgements may use the rest.
+#[must_use]
+pub const fn package_operation_state_bytes(max_state_bytes: usize) -> usize {
+    max_state_bytes.saturating_sub(PACKAGE_MAINTENANCE_STATE_BYTE_RESERVE)
+}
+
+/// Why an operation's result does not fit a reference plugin root. Such an
+/// operation is skipped: nothing is recorded under its operation ID, the
+/// root is unchanged, the boundary commits, and the plugin emits its
+/// `operation_skipped` event ([`PackageOperationSkipV1`]). The ID stays
+/// free: once the root has room, the command rebuilt against the root's
+/// current revision settles under it. The archive commit and the
+/// acknowledgement that make room advance the economy root's revision, so
+/// the same command re-sent unchanged settles there as a stale rejection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackageRootShortageV1 {
+    /// The root holds as many hot operation outcomes as its limits allow.
+    /// An archive commit, which takes outcomes out of the root, makes room.
+    ArchiveBacklog,
+    /// The result passes the share of the root's byte cap that operations
+    /// may fill ([`package_operation_state_bytes`]). An archive commit makes
+    /// room when the root's hot history is what fills it.
+    RootLimit,
+}
+
+impl PackageRootShortageV1 {
+    /// The stable reason code the skip event names.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ArchiveBacklog => "archive_backlog",
+            Self::RootLimit => "root_limit",
+        }
+    }
+
+    /// The reason a skip event's code names, if it names one.
+    #[must_use]
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "archive_backlog" => Some(Self::ArchiveBacklog),
+            "root_limit" => Some(Self::RootLimit),
+            _ => None,
+        }
+    }
+
+    /// The readable detail the skip event gives after the code.
+    #[must_use]
+    pub const fn detail(self) -> &'static str {
+        match self {
+            Self::ArchiveBacklog => {
+                "the root holds as many hot operation outcomes as its limits allow; archive them, then send the command again built against the root's current revision (the operation ID stays free)"
+            }
+            Self::RootLimit => {
+                "the result passes the share of the root's byte cap that operations may fill; archive the root's hot history, then send the command again built against the root's current revision (the operation ID stays free)"
+            }
+        }
+    }
+
+    /// The shortage of a root with `hot_outcomes` operation outcomes under
+    /// the bound `max_outcomes`, whose canonical encoding is `encoded_bytes`
+    /// long under the byte cap `max_state_bytes`, if any.
+    #[must_use]
+    pub const fn of(
+        hot_outcomes: usize,
+        max_outcomes: usize,
+        encoded_bytes: usize,
+        max_state_bytes: usize,
+    ) -> Option<Self> {
+        if hot_outcomes > max_outcomes {
+            Some(Self::ArchiveBacklog)
+        } else if encoded_bytes > package_operation_state_bytes(max_state_bytes) {
+            Some(Self::RootLimit)
+        } else {
+            None
+        }
+    }
+}
+
+/// An operation a reference plugin skipped because its root had no room for
+/// the result, read back from the plugin's `operation_skipped` event: the
+/// event of the force-supply plugin is
+/// `canwu.force-supply.operation_skipped.v1`, that of the economy plugin
+/// `canwu.economy-reference.operation_skipped.v1`. Its summary is
+/// `operation {operation_id} skipped ({code}): {detail}`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageOperationSkipV1 {
+    /// The operation ID, which stays free.
+    pub operation_id: String,
+    /// Why the root had no room.
+    pub shortage: PackageRootShortageV1,
+}
+
+impl PackageOperationSkipV1 {
+    /// The summary of this skip's event.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        format!(
+            "operation {} skipped ({}): {}",
+            self.operation_id,
+            self.shortage.code(),
+            self.shortage.detail()
+        )
+    }
+
+    /// Reads a skip back from `event` when it is the event `event_type` of
+    /// `plugin`, and returns `None` for any other event.
+    #[must_use]
+    pub fn from_event(event: &canwu_api::SimEvent, plugin: &str, event_type: &str) -> Option<Self> {
+        if event.kind.plugin_identity() != Some((plugin, event_type)) {
+            return None;
+        }
+        let rest = event.summary.strip_prefix("operation ")?;
+        let (operation_id, rest) = rest.split_once(" skipped (")?;
+        let (code, _detail) = rest.split_once("): ")?;
+        Some(Self {
+            operation_id: operation_id.to_owned(),
+            shortage: PackageRootShortageV1::from_code(code)?,
+        })
+    }
+}
+
 /// Encoded size above which a package archive directory is refused before it
 /// is decoded. A directory holds a fixed set of ids and counts, about 600
 /// bytes; the bound leaves room for a store that returns the same JSON with
@@ -183,6 +317,216 @@ pub struct PackageArchiveMaintenanceReceiptV1 {
     pub disposition: PackageArchiveMaintenanceDispositionV1,
     pub archived_records: u32,
     pub semantic_digest: String,
+}
+
+/// What a plugin root keeps of the maintenance receipts it has issued once
+/// their commits are acknowledged.
+///
+/// A receipt stays in the root until the host acknowledges its commit's
+/// retention handle. That acknowledgement removes the handle and folds every
+/// receipt recorded under it, oldest first, into `digest`, so the root holds
+/// only the receipts of unacknowledged commits however many commits a run
+/// makes. A folded receipt is no longer readable from the root. What remains
+/// of it: its place in `digest`, which a host that kept the receipt
+/// recomputes with [`fold`](Self::fold); its retention handle in the archive
+/// store, finalized as committed or rejected stale, which names its source
+/// root and directory; and, for an applied commit, its directory on the
+/// archive's chain, which the restore audit authenticates.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PackageArchiveReceiptChainV1 {
+    /// Receipts the root has issued, one per settled commit: the hot ones
+    /// and the folded ones together.
+    pub issued: u64,
+    /// Receipts folded into `digest`.
+    pub folded: u64,
+    /// Empty while nothing is folded; otherwise the digest of the previous
+    /// value and the newest folded receipt's `semantic_digest`, in the order
+    /// the receipts were folded.
+    pub digest: String,
+}
+
+impl PackageArchiveReceiptChainV1 {
+    /// Counts one receipt issued by a settled commit.
+    pub fn issue(&mut self) -> Result<(), CanwuError> {
+        self.issued = self
+            .issued
+            .checked_add(1)
+            .ok_or_else(|| invalid_archive("archive receipt count overflow"))?;
+        Ok(())
+    }
+
+    /// Folds one receipt into the chain.
+    pub fn fold(
+        &mut self,
+        domain: PackageArchiveDomainV1,
+        receipt: &PackageArchiveMaintenanceReceiptV1,
+    ) -> Result<(), CanwuError> {
+        self.digest = digest(
+            domain,
+            "archive-receipt-chain.v1",
+            &(&self.digest, &receipt.semantic_digest),
+        )?;
+        self.folded = self
+            .folded
+            .checked_add(1)
+            .ok_or_else(|| invalid_archive("archive folded receipt count overflow"))?;
+        Ok(())
+    }
+}
+
+/// Checks the hot archive maintenance state of a plugin root: the bounds on
+/// handles and receipts, each sealed digest, that every hot receipt names a
+/// retention handle the root still holds, and that the hot and folded
+/// receipts together number the receipts issued.
+pub fn validate_package_archive_maintenance(
+    domain: PackageArchiveDomainV1,
+    chain: &PackageArchiveReceiptChainV1,
+    handles: &BTreeMap<String, PackageArchiveRetentionHandleV1>,
+    receipts: &BTreeMap<u64, PackageArchiveMaintenanceReceiptV1>,
+) -> Result<(), CanwuError> {
+    if handles.len() > MAX_PACKAGE_ARCHIVE_RETENTION_HANDLES
+        || receipts.len() > MAX_PACKAGE_ARCHIVE_MAINTENANCE_RECEIPTS
+    {
+        return Err(invalid_archive(
+            "archive hot maintenance bounds are exceeded",
+        ));
+    }
+    let hot = u64::try_from(receipts.len())
+        .map_err(|_| invalid_archive("archive receipt count overflow"))?;
+    if hot.checked_add(chain.folded) != Some(chain.issued)
+        || (chain.folded == 0) != chain.digest.is_empty()
+        || (!chain.digest.is_empty()
+            && (chain.digest.len() != 64
+                || !chain.digest.bytes().all(|byte| byte.is_ascii_hexdigit())))
+    {
+        return Err(invalid_archive(
+            "archive receipt chain differs from its hot receipts",
+        ));
+    }
+    for (id, handle) in handles {
+        if id != &handle.id || sealed_archive_retention(domain, handle.clone())? != *handle {
+            return Err(invalid_archive("archive retention handle is forged"));
+        }
+    }
+    for (sequence, receipt) in receipts {
+        let mut detached = receipt.clone();
+        let recorded = std::mem::take(&mut detached.semantic_digest);
+        if sequence != &receipt.sequence
+            || recorded != digest(domain, "archive-maintenance-receipt.v1", &detached)?
+        {
+            return Err(invalid_archive("archive maintenance receipt is forged"));
+        }
+        if !handles.contains_key(&receipt.retention_handle_id) {
+            return Err(invalid_archive(
+                "archive maintenance receipt names no held retention handle",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Settles one retention acknowledgement against a plugin root's hot
+/// archive maintenance state and returns how many receipts it folded.
+///
+/// The acknowledgement names one receipt. When the root holds it, it must be
+/// that receipt exactly; its retention handle is removed and every receipt
+/// recorded under the handle (the applied commit and the stale copies of the
+/// same batch) is folded into `chain`, oldest first. When the root no longer
+/// holds it, an earlier acknowledgement of the same handle folded it, and
+/// this one settles as a no-op that returns 0. It reads nothing but the
+/// root, so a live run, a restore, a sealed run, and an exact replay settle
+/// it alike.
+pub fn settle_package_archive_acknowledgement(
+    domain: PackageArchiveDomainV1,
+    chain: &mut PackageArchiveReceiptChainV1,
+    handles: &mut BTreeMap<String, PackageArchiveRetentionHandleV1>,
+    receipts: &mut BTreeMap<u64, PackageArchiveMaintenanceReceiptV1>,
+    acknowledged: &PackageArchiveMaintenanceReceiptV1,
+) -> Result<u64, CanwuError> {
+    match receipts.get(&acknowledged.sequence) {
+        None => return Ok(0),
+        Some(hot) if hot != acknowledged => {
+            return Err(invalid_archive("archive acknowledgement is forged"));
+        }
+        Some(_) => {}
+    }
+    handles.remove(&acknowledged.retention_handle_id);
+    let recorded = receipts
+        .iter()
+        .filter(|(_, receipt)| receipt.retention_handle_id == acknowledged.retention_handle_id)
+        .map(|(sequence, _)| *sequence)
+        .collect::<Vec<_>>();
+    for sequence in &recorded {
+        let receipt = receipts
+            .remove(sequence)
+            .ok_or_else(|| invalid_archive("archive maintenance receipt disappeared"))?;
+        chain.fold(domain, &receipt)?;
+    }
+    u64::try_from(recorded.len()).map_err(|_| invalid_archive("archive receipt count overflow"))
+}
+
+/// What finalizing the retention of the commit a host queued as
+/// `retention_handle_id` with `directory_root` does.
+///
+/// While the root holds a receipt recorded under the handle, the host
+/// finalizes the handle and acknowledges it: the result names the receipt to
+/// acknowledge and the phase, committed when any receipt under the handle
+/// applied and rejected stale otherwise. Once that acknowledgement settled,
+/// the root holds neither the handle nor its receipts, and the store's handle
+/// is finalized: the result is `None`, nothing is left to do, so a host that
+/// retries a finalization after a crash or a restore treats it as done. A
+/// handle the store holds in any other phase belongs to a commit that has
+/// not settled, and is refused.
+///
+/// `None` is decided from the store's handle phase and the root, and a store
+/// may serve several runs: in a fork, or a run restored from a point taken
+/// before the commit settled, of a run that has since acknowledged it, it
+/// reports "done" while the commit is still queued in that run. Once the
+/// commit settles there, that run's root holds the receipt again, and a
+/// finalization then acknowledges it.
+pub fn package_archive_finalization(
+    handles: &BTreeMap<String, PackageArchiveRetentionHandleV1>,
+    receipts: &BTreeMap<u64, PackageArchiveMaintenanceReceiptV1>,
+    store: &dyn PackageArchiveStore,
+    retention_handle_id: &str,
+    directory_root: &str,
+) -> Result<
+    Option<(
+        PackageArchiveMaintenanceReceiptV1,
+        PackageArchiveRetentionPhaseV1,
+    )>,
+    CanwuError,
+> {
+    let mut recorded = receipts.values().filter(|receipt| {
+        receipt.retention_handle_id == retention_handle_id
+            && receipt.directory_root == directory_root
+    });
+    if let Some(first) = recorded.next() {
+        let applied = std::iter::once(first)
+            .chain(recorded)
+            .find(|receipt| receipt.disposition == PackageArchiveMaintenanceDispositionV1::Applied);
+        return Ok(Some(match applied {
+            Some(receipt) => (receipt.clone(), PackageArchiveRetentionPhaseV1::Committed),
+            None => (first.clone(), PackageArchiveRetentionPhaseV1::RejectedStale),
+        }));
+    }
+    let stored = store.load_package_archive_retention(retention_handle_id)?;
+    match stored {
+        Some(stored)
+            if !handles.contains_key(retention_handle_id)
+                && stored.directory_root == directory_root
+                && matches!(
+                    stored.phase,
+                    PackageArchiveRetentionPhaseV1::Committed
+                        | PackageArchiveRetentionPhaseV1::RejectedStale
+                ) =>
+        {
+            Ok(None)
+        }
+        _ => Err(invalid_archive(
+            "archive commit has not settled, so there is no disposition to finalize",
+        )),
+    }
 }
 
 /// One archive commit ready to store: its records and pages, the lookup
@@ -372,14 +716,17 @@ fn lookup_error(error: &ResourceError) -> CanwuError {
 /// [`MAX_PACKAGE_ARCHIVE_RETENTION_HANDLES`] when it settles.
 ///
 /// Every archive commit that settles, applied or stale, adds a maintenance
-/// receipt and may add a retention handle; a root above either bound does
-/// not validate, so the boundary that settles the commit would fail and could
+/// receipt and may add a retention handle, and both stay until the host
+/// acknowledges the commit's retention; a root above either bound does not
+/// validate, so the boundary that settles the commit would fail and could
 /// not be stepped past. The check adds to the root's `receipts` and `handles`
 /// every commit of `packet_type` still queued for `plugin` in the run, and
 /// this commit, and refuses when either sum passes its bound. It counts no
-/// queued acknowledgement as freeing a handle, and a stale duplicate as
-/// adding one, so it is conservative. It reads the run's ingress queue, not
-/// the archive store, and runs on the host, never inside a boundary.
+/// queued acknowledgement as freeing room, and a stale duplicate as adding a
+/// handle, so it is conservative. A host that acknowledges each commit it
+/// queued before it queues many more is never refused. It reads the run's
+/// ingress queue, not the archive store, and runs on the host, never inside
+/// a boundary.
 pub fn package_archive_commit_room<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &H,
     plugin: &str,
@@ -703,7 +1050,10 @@ where
 /// Authenticates every archive object a restored root depends on: the
 /// directory chain from the head, each commit's blob, records, and pages,
 /// the cumulative record counts, the head's lookup index, and the objects of
-/// every retention handle and maintenance receipt the root holds.
+/// every retention handle and maintenance receipt the root holds. A receipt
+/// an acknowledgement folded is not in `receipts`, so its store-side handle
+/// is not read; an applied commit's objects are still audited through the
+/// directory chain.
 ///
 /// The lookup index of the head is rebuilt from the chain (a key archived
 /// more than once counts by its newest record) and must be exactly what the

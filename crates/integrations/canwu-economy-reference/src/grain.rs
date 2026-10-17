@@ -397,10 +397,24 @@ struct GrainHarnessJournalV1 {
 pub type SyntheticGrainLoop = GrainHarness;
 
 impl GrainHarness {
-    #[allow(clippy::too_many_lines)]
     pub fn new() -> Result<Self, GrainLoopError> {
+        Self::with_limits(
+            crate::EconomyReferenceLimitsV1::canonical(),
+            canwu_force_supply_reference::ForceSupplyReferenceLimitsV1::canonical(),
+        )
+    }
+
+    /// The harness with other limits for its economy and force-supply roots,
+    /// for tests that drive a root to one of its bounds.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_lines)]
+    pub fn with_limits(
+        economy_limits: crate::EconomyReferenceLimitsV1,
+        force_limits: canwu_force_supply_reference::ForceSupplyReferenceLimitsV1,
+    ) -> Result<Self, GrainLoopError> {
         let compiled = compile_content_pack(&synthetic_grain_fixture())?;
         let mut force_state = ForceSupplyStateV1::from_compiled_content(compiled.clone())?;
+        force_state.limits = force_limits;
         let food_profile = force_state
             .profiles
             .values()
@@ -590,6 +604,7 @@ impl GrainHarness {
         };
         let mut economy_state =
             EconomyReferenceStateV1::default().with_compiled_content(compiled)?;
+        economy_state.limits = economy_limits;
         economy_state
             .configure_completion_authority(force_holder.clone(), FORCE_COMPLETION_NAMESPACE)?;
         economy_state.profiles.insert(profile_id, profile);
@@ -829,9 +844,14 @@ impl GrainHarness {
         self.reselect_during_requisition = enabled;
     }
 
+    /// Archives the force-supply and economy roots' settled history, one
+    /// commit of up to 64 records each, and acknowledges each commit, as a
+    /// host's periodic maintenance does. The force-supply root goes first:
+    /// an economy commit leaves out an externality outcome until the
+    /// force-supply archive has taken the saga that cites it.
     pub fn archive_reference_history(&mut self) -> Result<(), GrainLoopError> {
         let force = self.force_state()?;
-        if !force.terminal_receipts.is_empty() {
+        if !force.terminal_receipts.is_empty() || !force.outcomes.is_empty() {
             let prepared =
                 force.prepare_force_archive(ARCHIVE_BATCH, self.archive_store.as_ref())?;
             let receipt =
@@ -860,8 +880,11 @@ impl GrainHarness {
             || !economy.externality_outcomes.is_empty()
             || !economy.outcomes.is_empty();
         if has_archive_candidates {
-            let prepared =
-                economy.prepare_economy_archive(ARCHIVE_BATCH, self.archive_store.as_ref())?;
+            let prepared = economy.prepare_economy_archive(
+                ARCHIVE_BATCH,
+                self.archive_store.as_ref(),
+                Some(&self.force_state()?),
+            )?;
             let receipt = crate::enqueue_economy_archive(
                 &mut self.canwu,
                 &prepared,

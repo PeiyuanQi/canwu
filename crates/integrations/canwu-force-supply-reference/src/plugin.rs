@@ -32,7 +32,10 @@ const RESOURCE_DISPATCH_SYSTEM: &str = "force_supply_resource_dispatch_v1";
 const DUE_EVALUATION_SYSTEM: &str = "force_supply_due_evaluation_v1";
 const VALIDATE_SYSTEM: &str = "force_supply_lifecycle_validate_v1";
 pub const FORCE_SUPPLY_SEMANTIC_HASH: &str =
-    "270448127b82971607b82f80beab69781fd31e9c88e044424b2a846eae6f82a1";
+    "061d2cdc99c4a1843f973bf92c8261e4382ca35303f9368b842d8d9ab7703fa5";
+/// The event of an operation skipped because the root had no room for its
+/// result; [`force_operation_skip`] reads it back.
+pub const FORCE_OPERATION_SKIPPED_EVENT: &str = "canwu.force-supply.operation_skipped.v1";
 static FORCE_ARCHIVE_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static FORCE_ARCHIVE_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 
@@ -209,6 +212,7 @@ impl SimulationPlugin for ForceSupplyReferencePlugin {
         apply.emits = vec![
             "canwu.force-supply.operation_applied.v1".to_owned(),
             "canwu.force-supply.operation_rejected.v1".to_owned(),
+            FORCE_OPERATION_SKIPPED_EVENT.to_owned(),
             "canwu.force-supply.resource_consequence.v1".to_owned(),
             "canwu.force-supply.externality_acknowledged.v1".to_owned(),
         ];
@@ -407,31 +411,13 @@ fn admit_force_operation(
         )
     })?;
     let input_digest = canonical_hash("canwu.force-supply.operation-input.v1", &envelope)?;
-    if let Some(existing) = state.outcomes.get(&envelope.operation_id) {
+    if let Some(existing) = force_operation_outcome(&state, view, &envelope.operation_id)? {
         if existing.input_digest == input_digest {
             return Ok(Vec::new());
         }
         return Err(CanwuError::new(
             ErrorCode::IdempotencyConflict,
             "force operation ID was reused with different input",
-        ));
-    }
-    if let Some(record) = archived_force_record(
-        view,
-        &state,
-        &crate::ForceArchiveKeyV1::OperationOutcome(envelope.operation_id.clone()),
-    )? {
-        let crate::ForceArchivePayloadV1::OperationOutcome(existing) = record.payload else {
-            return Err(invalid(
-                "force archive operation membership has the wrong payload",
-            ));
-        };
-        if existing.input_digest == input_digest {
-            return Ok(Vec::new());
-        }
-        return Err(CanwuError::new(
-            ErrorCode::IdempotencyConflict,
-            "archived force operation ID was reused with different input",
         ));
     }
     if let crate::ForceOperationV1::SubmitConsumptionIntent { intent } = &envelope.operation
@@ -502,17 +488,17 @@ fn apply_force_ingress(
             FORCE_ARCHIVE_RETENTION_ACK_INGRESS => {
                 let acknowledgement: ForceArchiveRetentionAcknowledgementV1 =
                     decode(payload, "force archive retention acknowledgement")?;
-                let persisted = state
-                    .archive_maintenance_receipts
-                    .get(&acknowledgement.receipt.sequence)
-                    .ok_or_else(|| invalid("force archive maintenance receipt is unavailable"))?;
-                if persisted != &acknowledgement.receipt {
-                    return Err(invalid("force archive acknowledgement is forged"));
-                }
-                state
-                    .archive_retention_handles
-                    .remove(&acknowledgement.receipt.retention_handle_id);
-                changed = true;
+                // The handle leaves the root and its receipts fold into the
+                // receipt chain; a second acknowledgement of the same handle
+                // finds nothing to fold and settles as a no-op.
+                let folded = crate::settle_package_archive_acknowledgement(
+                    crate::FORCE_ARCHIVE_DOMAIN,
+                    &mut state.archive_receipt_chain,
+                    &mut state.archive_retention_handles,
+                    &mut state.archive_maintenance_receipts,
+                    &acknowledgement.receipt,
+                )?;
+                changed |= folded > 0;
             }
             FORCE_OPERATION_INGRESS => {
                 let admitted: AdmittedForceOperationV1 =
@@ -522,28 +508,9 @@ fn apply_force_ingress(
                 // of the settled input is a no-op, and a repeat with other
                 // input is skipped with a visible event, never a failed
                 // boundary, whether the outcome is hot or archived.
-                let settled_digest = match state.outcomes.get(&admitted.envelope.operation_id) {
-                    Some(existing) => Some(existing.input_digest.clone()),
-                    None => match archived_force_record(
-                        view,
-                        &state,
-                        &crate::ForceArchiveKeyV1::OperationOutcome(
-                            admitted.envelope.operation_id.clone(),
-                        ),
-                    )? {
-                        Some(record) => {
-                            let crate::ForceArchivePayloadV1::OperationOutcome(existing) =
-                                record.payload
-                            else {
-                                return Err(invalid(
-                                    "force archive operation membership has the wrong payload",
-                                ));
-                            };
-                            Some(existing.input_digest)
-                        }
-                        None => None,
-                    },
-                };
+                let settled_digest =
+                    force_operation_outcome(&state, view, &admitted.envelope.operation_id)?
+                        .map(|existing| existing.input_digest);
                 if let Some(settled_digest) = settled_digest {
                     if settled_digest != admitted.input_digest {
                         directives.push(BoundaryDirective::Emit {
@@ -562,13 +529,13 @@ fn apply_force_ingress(
                     crate::ForceOperationV1::SelectSupplyPosture { decision, .. } => {
                         validate_force_decision_command(view, &admitted.envelope, decision)
                             .and_then(|()| {
-                                candidate.apply_operation(&admitted.envelope, context.at)
+                                candidate.apply_operation_unmeasured(&admitted.envelope, context.at)
                             })
                     }
                     crate::ForceOperationV1::RecordSupplyObservation { force, observation } => {
                         validate_force_observation_source(view, &state, force, observation)
                             .and_then(|()| {
-                                candidate.apply_operation(&admitted.envelope, context.at)
+                                candidate.apply_operation_unmeasured(&admitted.envelope, context.at)
                             })
                     }
                     crate::ForceOperationV1::Completion {
@@ -578,38 +545,75 @@ fn apply_force_ingress(
                                 participant,
                             },
                     } => validate_completion_participant_source(view, owner_source, participant)
-                        .and_then(|()| candidate.apply_operation(&admitted.envelope, context.at)),
-                    _ => candidate.apply_operation(&admitted.envelope, context.at),
+                        .and_then(|()| {
+                            candidate.apply_operation_unmeasured(&admitted.envelope, context.at)
+                        }),
+                    _ => candidate.apply_operation_unmeasured(&admitted.envelope, context.at),
                 };
-                let (applied, rejection_code, rejection_reason) = match result {
+                let operation_id = admitted.envelope.operation_id.clone();
+                let outcome = |applied, rejection_code, rejection_reason| ForceOperationOutcomeV1 {
+                    id: operation_id.clone(),
+                    input_digest: admitted.input_digest.clone(),
+                    applied,
+                    rejection_code,
+                    rejection_reason,
+                    settled_at: context.at,
+                };
+                // Room is measured on the result, its outcome included. A
+                // result that does not fit is skipped: the root stays as it
+                // was, nothing is recorded under the operation ID, and the
+                // same command settles when sent again once an archive commit
+                // has made room.
+                let (applied, shortage) = match result {
                     Ok(()) => {
-                        state = candidate;
-                        (true, None, None)
+                        candidate
+                            .outcomes
+                            .insert(operation_id.clone(), outcome(true, None, None));
+                        let encoded_len = candidate.encoded_len()?;
+                        let shortage = candidate.outcome_room_shortage(encoded_len);
+                        if shortage.is_none() {
+                            candidate.validate_encoded(encoded_len)?;
+                            state = candidate;
+                        }
+                        (true, shortage)
                     }
                     Err(error) if expected_domain_rejection(&error) => {
-                        state.revision = state.revision.checked_add(1).ok_or_else(|| {
+                        let revision = state.revision;
+                        state.revision = revision.checked_add(1).ok_or_else(|| {
                             invalid("force-supply revision overflowed while rejecting an operation")
                         })?;
-                        (
-                            false,
-                            Some(error_code(&error.code).to_owned()),
-                            Some(error.message),
-                        )
+                        state.outcomes.insert(
+                            operation_id.clone(),
+                            outcome(
+                                false,
+                                Some(error_code(&error.code).to_owned()),
+                                Some(error.message),
+                            ),
+                        );
+                        let encoded_len = state.encoded_len()?;
+                        let shortage = state.outcome_room_shortage(encoded_len);
+                        if shortage.is_some() {
+                            state.revision = revision;
+                            state.outcomes.remove(&operation_id);
+                        } else {
+                            state.validate_encoded(encoded_len)?;
+                        }
+                        (false, shortage)
                     }
                     Err(error) => return Err(error),
                 };
-                state.outcomes.insert(
-                    admitted.envelope.operation_id.clone(),
-                    ForceOperationOutcomeV1 {
-                        id: admitted.envelope.operation_id.clone(),
-                        input_digest: admitted.input_digest,
-                        applied,
-                        rejection_code,
-                        rejection_reason,
-                        settled_at: context.at,
-                    },
-                );
-                state.validate()?;
+                if let Some(shortage) = shortage {
+                    directives.push(BoundaryDirective::Emit {
+                        event_type: FORCE_OPERATION_SKIPPED_EVENT.to_owned(),
+                        summary: crate::PackageOperationSkipV1 {
+                            operation_id: operation_id.to_string(),
+                            shortage,
+                        }
+                        .summary(),
+                        affected: Vec::new(),
+                    });
+                    continue;
+                }
                 changed = true;
                 directives.push(BoundaryDirective::Emit {
                     event_type: if applied {
@@ -740,6 +744,44 @@ fn validate_force_decision_command(
         ));
     }
     Ok(())
+}
+
+/// The settled outcome of a force-supply operation, hot in `state` or
+/// archived in the package archive `provider` serves, or `None` when the
+/// operation never settled: never admitted, still queued, or skipped for
+/// room. An archived outcome is the record the archive commit took out of
+/// the root, read through the head's lookup index. Inside a boundary pass
+/// the view; a host passes its runtime handle or its store.
+pub fn force_operation_outcome(
+    state: &ForceSupplyStateV1,
+    provider: &dyn PluginArchiveObjectProvider,
+    operation: &crate::ForceOperationId,
+) -> Result<Option<ForceOperationOutcomeV1>, CanwuError> {
+    if let Some(outcome) = state.outcomes.get(operation) {
+        return Ok(Some(outcome.clone()));
+    }
+    match archived_force_record(
+        provider,
+        state,
+        &crate::ForceArchiveKeyV1::OperationOutcome(operation.clone()),
+    )? {
+        Some(record) => {
+            let crate::ForceArchivePayloadV1::OperationOutcome(outcome) = record.payload else {
+                return Err(invalid(
+                    "force archive operation membership has the wrong payload",
+                ));
+            };
+            Ok(Some(outcome))
+        }
+        None => Ok(None),
+    }
+}
+
+/// The force-supply operation `event` reports skipped for room, if it is
+/// a [`FORCE_OPERATION_SKIPPED_EVENT`].
+#[must_use]
+pub fn force_operation_skip(event: &canwu_api::SimEvent) -> Option<crate::PackageOperationSkipV1> {
+    crate::PackageOperationSkipV1::from_event(event, PLUGIN_NAME, FORCE_OPERATION_SKIPPED_EVENT)
 }
 
 fn archived_force_record(
@@ -1042,18 +1084,46 @@ fn resolve_resource_outcome(
             "force resource acknowledgement cites a non-resource provider",
         ));
     }
-    // The settlement finds the consumption's fulfillment among every hot
-    // fulfillment, so it reads the whole resource root: its live root and
-    // every hot terminal record.
-    let (_, resource_state) = canwu_resource::whole_resource_root_in_view(view)?
-        .ok_or_else(|| invalid("authoritative resource state is unavailable"))?;
-    resource_state
-        .validate()
-        .map_err(|error| invalid(format!("authoritative resource state is invalid: {error}")))?;
     let intent = force_state
         .intents
         .get(&packet.intent)
         .ok_or_else(|| invalid("resource outcome intent is unavailable"))?;
+    // The settlement reads only the records the intent names, without a
+    // search: the outcome and the consumption under the intent's identities,
+    // with their closures (the consumption names its fulfillment and its
+    // account, an account its definition and unit), the accepted transfer,
+    // the completion participant, active or finished, and the destination
+    // account by identity.
+    let mut reader = canwu_resource::ResourceRootReader::load(view)?
+        .ok_or_else(|| invalid("authoritative resource state is unavailable"))?;
+    reader.attach(
+        [
+            canwu_resource::ResourceTerminalRecordKeyV1::Outcome(
+                intent.resource_operation_key.clone(),
+            ),
+            canwu_resource::ResourceTerminalRecordKeyV1::Consumption(intent.consumption_id.clone()),
+            canwu_resource::ResourceTerminalRecordKeyV1::ExternalCompletionParticipant(
+                intent.completion_certificate.acquisition.clone(),
+            ),
+        ]
+        .into_iter()
+        .chain(
+            intent
+                .stock_custody
+                .accepted_transfer
+                .iter()
+                .map(|expected| {
+                    canwu_resource::ResourceTerminalRecordKeyV1::Transfer(expected.transfer.clone())
+                }),
+        ),
+    )?;
+    reader.attach_live([canwu_resource::ResourceLiveRecordKeyV1::Account(
+        intent.stock_custody.destination_account.clone(),
+    )])?;
+    let resource_state = reader.into_state();
+    resource_state
+        .validate()
+        .map_err(|error| invalid(format!("authoritative resource state is invalid: {error}")))?;
     let outcome = resource_state
         .outcomes
         .get(&intent.resource_operation_key)
@@ -1078,8 +1148,8 @@ fn resolve_resource_outcome(
     }
     let fulfillment = resource_state
         .fulfillments
-        .values()
-        .find(|fulfillment| {
+        .get(&consumption.fulfillment)
+        .filter(|fulfillment| {
             fulfillment.operation_key == intent.resource_operation_key
                 && fulfillment.allocation_legs == vec![intent.allocation.id.clone()]
         })
@@ -1434,30 +1504,31 @@ pub fn enqueue_force_archive<H: canwu_api::CanwuRun + ?Sized>(
 
 /// Finalizes a force-supply archive retention handle and queues its
 /// acknowledgement. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+///
+/// The handle is finalized as committed when the commit applied, and as
+/// rejected stale otherwise. The acknowledgement removes the handle from the
+/// root and folds the receipts recorded under it into the root's receipt
+/// chain. A call after that acknowledgement settled does nothing and returns
+/// `None`, so a host may retry a finalization it is unsure of; a call before
+/// the commit settled is refused (see
+/// [`crate::package_archive_finalization`]).
 pub fn finalize_force_archive_retention<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &mut H,
     store: &dyn crate::PackageArchiveStore,
     ingress: &ForceArchiveIngressReceiptV1,
-) -> Result<canwu_api::IngressReceipt, CanwuError> {
+) -> Result<Option<canwu_api::IngressReceipt>, CanwuError> {
     let state = canwu_api::typed_domain_record(canwu, &force_supply_runtime_reference())
         .ok_or_else(|| invalid("force runtime is unavailable"))?
         .decode_payload::<ForceSupplyRuntimeRecord>()?;
-    let receipt = state
-        .archive_maintenance_receipts
-        .values()
-        .find(|receipt| {
-            receipt.retention_handle_id == ingress.retention_handle_id
-                && receipt.directory_root == ingress.directory_root
-        })
-        .cloned()
-        .ok_or_else(|| invalid("force archive terminal disposition is unavailable"))?;
-    let phase = match receipt.disposition {
-        crate::PackageArchiveMaintenanceDispositionV1::Applied => {
-            crate::PackageArchiveRetentionPhaseV1::Committed
-        }
-        crate::PackageArchiveMaintenanceDispositionV1::RejectedStale => {
-            crate::PackageArchiveRetentionPhaseV1::RejectedStale
-        }
+    let Some((receipt, phase)) = crate::package_archive_finalization(
+        &state.archive_retention_handles,
+        &state.archive_maintenance_receipts,
+        store,
+        &ingress.retention_handle_id,
+        &ingress.directory_root,
+    )?
+    else {
+        return Ok(None);
     };
     let stored = store
         .load_package_archive_retention(&ingress.retention_handle_id)?
@@ -1470,16 +1541,18 @@ pub fn finalize_force_archive_retention<H: canwu_api::CanwuRun + ?Sized>(
     let permit = FORCE_ARCHIVE_ACK_PERMIT
         .get()
         .ok_or_else(|| invalid("force archive acknowledgement ingress is not registered"))?;
-    canwu.enqueue_permitted_plugin_ingress(
-        PluginIngressRequest::new(
-            PLUGIN_NAME,
-            FORCE_ARCHIVE_RETENTION_ACK_INGRESS,
-            canwu.time(),
-            serde_json::to_value(ForceArchiveRetentionAcknowledgementV1 { receipt })
-                .map_err(crate::encode_error)?,
-        ),
-        permit,
-    )
+    canwu
+        .enqueue_permitted_plugin_ingress(
+            PluginIngressRequest::new(
+                PLUGIN_NAME,
+                FORCE_ARCHIVE_RETENTION_ACK_INGRESS,
+                canwu.time(),
+                serde_json::to_value(ForceArchiveRetentionAcknowledgementV1 { receipt })
+                    .map_err(crate::encode_error)?,
+            ),
+            permit,
+        )
+        .map(Some)
 }
 
 fn error_code(code: &ErrorCode) -> &'static str {

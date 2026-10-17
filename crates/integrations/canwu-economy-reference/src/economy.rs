@@ -89,7 +89,8 @@ pub type VerifiedEconomyArchiveCommitV1 =
 use std::fmt::{Display, Formatter};
 
 pub const ECONOMY_RUNTIME_ID: &str = "canwu.economy-reference:runtime:v1";
-pub const ECONOMY_FORMAT_VERSION: u32 = 1;
+/// Format of the economy root. 2 adds `archive_receipt_chain`.
+pub const ECONOMY_FORMAT_VERSION: u32 = 2;
 pub const MAX_ECONOMY_IDENTIFIER_BYTES: usize = 192;
 
 fn invalid(message: impl Into<String>) -> CanwuError {
@@ -264,7 +265,7 @@ impl EconomyReferenceLimitsV1 {
             || self.max_operation_outcomes > Self::MAX_OPERATION_OUTCOMES
             || self.max_observation_grants == 0
             || self.max_observation_grants > Self::MAX_OBSERVATION_GRANTS
-            || self.max_state_bytes == 0
+            || self.max_state_bytes < canwu_force_supply_reference::MIN_PACKAGE_STATE_BYTES
             || self.max_state_bytes > Self::MAX_STATE_BYTES
         {
             return Err(invalid(
@@ -613,6 +614,8 @@ pub struct EconomyReferenceStateV1 {
     pub archive_head: EconomyArchiveHeadStateV1,
     pub archive_retention_handles: BTreeMap<String, EconomyArchiveRetentionHandleV1>,
     pub archive_maintenance_receipts: BTreeMap<u64, EconomyArchiveMaintenanceReceiptV1>,
+    /// The maintenance receipts acknowledged so far, folded out of the root.
+    pub archive_receipt_chain: canwu_force_supply_reference::PackageArchiveReceiptChainV1,
     pub outcomes: BTreeMap<EconomyOperationId, EconomyOperationOutcomeV1>,
 }
 
@@ -648,6 +651,7 @@ struct EconomyReferenceStateStorageV1 {
     archive_head: EconomyArchiveHeadStateV1,
     archive_retention_handles: BTreeMap<String, EconomyArchiveRetentionHandleV1>,
     archive_maintenance_receipts: BTreeMap<u64, EconomyArchiveMaintenanceReceiptV1>,
+    archive_receipt_chain: canwu_force_supply_reference::PackageArchiveReceiptChainV1,
     outcomes: BTreeMap<EconomyOperationId, EconomyOperationOutcomeV1>,
 }
 
@@ -676,6 +680,7 @@ impl From<EconomyReferenceStateV1> for EconomyReferenceStateStorageV1 {
             archive_head: state.archive_head,
             archive_retention_handles: state.archive_retention_handles,
             archive_maintenance_receipts: state.archive_maintenance_receipts,
+            archive_receipt_chain: state.archive_receipt_chain,
             outcomes: state.outcomes,
         }
     }
@@ -717,6 +722,7 @@ impl TryFrom<EconomyReferenceStateStorageV1> for EconomyReferenceStateV1 {
             archive_head: state.archive_head,
             archive_retention_handles: state.archive_retention_handles,
             archive_maintenance_receipts: state.archive_maintenance_receipts,
+            archive_receipt_chain: state.archive_receipt_chain,
             outcomes: state.outcomes,
         };
         restored.rebuild_derived_indexes()?;
@@ -762,6 +768,8 @@ impl Default for EconomyReferenceStateV1 {
             .expect("static empty economy archive head must seal"),
             archive_retention_handles: BTreeMap::new(),
             archive_maintenance_receipts: BTreeMap::new(),
+            archive_receipt_chain:
+                canwu_force_supply_reference::PackageArchiveReceiptChainV1::default(),
             outcomes: BTreeMap::new(),
         }
     }
@@ -1446,8 +1454,100 @@ impl EconomyReferenceStateV1 {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), CanwuError> {
+        self.validate_encoded(self.encoded_len()?)
+    }
+
+    /// The length of the root's canonical JSON encoding, which its byte cap
+    /// bounds.
+    pub fn encoded_len(&self) -> Result<usize, CanwuError> {
+        serde_json::to_vec(self)
+            .map(|bytes| bytes.len())
+            .map_err(|error| invalid(error.to_string()))
+    }
+
+    /// Why this root, holding the outcome of the operation it settles, has
+    /// no room for that operation, if it has none: the root then holds more
+    /// hot operation outcomes than `max_operation_outcomes`, or its
+    /// canonical encoding, `encoded_len` bytes long, passes the share of the
+    /// byte cap operations may fill. The operation is then skipped.
+    #[must_use]
+    pub fn outcome_room_shortage(
+        &self,
+        encoded_len: usize,
+    ) -> Option<canwu_force_supply_reference::PackageRootShortageV1> {
+        canwu_force_supply_reference::PackageRootShortageV1::of(
+            self.outcomes.len(),
+            self.limits.max_operation_outcomes,
+            encoded_len,
+            self.limits.max_state_bytes,
+        )
+    }
+
+    /// The first bounded collection of the root, other than its operation
+    /// outcomes, that holds more records than its limit, if any, and
+    /// whether an archive commit can take records out of it: frames,
+    /// superseded route and price observations, settled delivery attempts,
+    /// and externality outcomes are archive candidates; profiles, local
+    /// economies, observation grants, and authorized resource consumption
+    /// intents are not. An operation whose result passes one is a recorded
+    /// rejection.
+    #[must_use]
+    pub fn exceeded_record_cap(&self) -> Option<(&'static str, bool)> {
+        let limits = &self.limits;
+        [
+            (self.profiles.len() > limits.max_profiles, "profile", false),
+            (
+                self.local_economies.len() > limits.max_local_economies,
+                "local economy",
+                false,
+            ),
+            (
+                self.observation_grants.len() > limits.max_observation_grants,
+                "observation grant",
+                false,
+            ),
+            (
+                self.resource_consumption_intents.len() > limits.max_operation_outcomes,
+                "resource consumption intent",
+                false,
+            ),
+            (
+                self.route_observations.len() > limits.max_route_observations,
+                "route observation",
+                true,
+            ),
+            (
+                self.price_observations.len() > limits.max_price_observations,
+                "price observation",
+                true,
+            ),
+            (
+                self.delivery_attempts.len() > limits.max_delivery_attempts,
+                "delivery attempt",
+                true,
+            ),
+            (
+                self.externality_outcomes.len() > limits.max_operation_outcomes,
+                "externality outcome",
+                true,
+            ),
+            (
+                self.frames
+                    .values()
+                    .any(|frames| frames.len() > limits.max_frames_per_economy),
+                "monthly frame",
+                true,
+            ),
+        ]
+        .into_iter()
+        .find_map(|(exceeded, collection, archivable)| exceeded.then_some((collection, archivable)))
+    }
+
+    /// [`validate`](Self::validate) for a root whose canonical encoding is
+    /// `encoded_len` bytes long.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn validate_encoded(&self, encoded_len: usize) -> Result<(), CanwuError> {
         self.limits.validate()?;
         self.completion_run_budget
             .validate()
@@ -1528,10 +1628,9 @@ impl EconomyReferenceStateV1 {
                 "economy completion expiry index differs from participant state",
             ));
         }
-        let encoded = serde_json::to_vec(self).map_err(|error| invalid(error.to_string()))?;
         if self.format_version != ECONOMY_FORMAT_VERSION
             || self.revision == 0
-            || encoded.len() > self.limits.max_state_bytes
+            || encoded_len > self.limits.max_state_bytes
             || self.profiles.len() > self.limits.max_profiles
             || self.local_economies.len() > self.limits.max_local_economies
             || self.route_observations.len() > self.limits.max_route_observations
@@ -1544,41 +1643,30 @@ impl EconomyReferenceStateV1 {
                 "economy-reference state exceeds its V1 bounded limits",
             ));
         }
-        let mut archive_head = self.archive_head.clone();
-        let recorded_head = std::mem::take(&mut archive_head.semantic_digest);
-        if recorded_head
-            != canonical_hash("canwu.economy-reference.archive-head.v1", &archive_head)?
-            || self.archive_retention_handles.len()
-                > canwu_force_supply_reference::MAX_PACKAGE_ARCHIVE_RETENTION_HANDLES
-            || self.archive_maintenance_receipts.len()
-                > canwu_force_supply_reference::MAX_PACKAGE_ARCHIVE_MAINTENANCE_RECEIPTS
+        if canwu_force_supply_reference::sealed_archive_head(
+            ECONOMY_ARCHIVE_DOMAIN,
+            self.archive_head.clone(),
+        )? != self.archive_head
+        {
+            return Err(invalid("economy archive head is forged"));
+        }
+        canwu_force_supply_reference::validate_package_archive_maintenance(
+            ECONOMY_ARCHIVE_DOMAIN,
+            &self.archive_receipt_chain,
+            &self.archive_retention_handles,
+            &self.archive_maintenance_receipts,
+        )
+        .map_err(|error| invalid(format!("economy {}", error.message)))?;
+        // Receipt sequences are issued in order from one, so none may pass
+        // the number issued.
+        if self
+            .archive_maintenance_receipts
+            .keys()
+            .any(|sequence| *sequence == 0 || *sequence > self.archive_receipt_chain.issued)
         {
             return Err(invalid(
-                "economy archive head or hot maintenance bounds are invalid",
+                "economy archive maintenance receipt sequence was never issued",
             ));
-        }
-        for (id, handle) in &self.archive_retention_handles {
-            let mut detached = handle.clone();
-            let recorded = std::mem::take(&mut detached.semantic_digest);
-            if id != &handle.id
-                || recorded
-                    != canonical_hash("canwu.economy-reference.archive-retention.v1", &detached)?
-            {
-                return Err(invalid("economy archive retention handle is forged"));
-            }
-        }
-        for (sequence, receipt) in &self.archive_maintenance_receipts {
-            let mut detached = receipt.clone();
-            let recorded = std::mem::take(&mut detached.semantic_digest);
-            if sequence != &receipt.sequence
-                || recorded
-                    != canonical_hash(
-                        "canwu.economy-reference.archive-maintenance-receipt.v1",
-                        &detached,
-                    )?
-            {
-                return Err(invalid("economy archive maintenance receipt is forged"));
-            }
         }
         for profile in self.profiles.values() {
             profile.validate()?;
@@ -1969,17 +2057,47 @@ impl EconomyReferenceStateV1 {
     /// records. Extending the archive's lookup index reads the head
     /// directory and the index pages on the paths of the new keys from
     /// `store`; `()`, the absent store, is enough for the first commit.
+    ///
+    /// `force` is the force-supply root of the same run, if it has one. An
+    /// externality outcome stays out of the commit while that root still
+    /// holds it hot: from the moment a saga takes its intent until the
+    /// force-supply archive takes the saga's terminal receipt. The commit
+    /// that archived it then would fail its boundary, so
+    /// [`crate::enqueue_economy_archive`] prepares the batch again with the
+    /// run's own force-supply root and refuses one that differs.
     #[allow(clippy::too_many_lines)]
     pub fn prepare_economy_archive(
         &self,
         candidate_limit: usize,
         store: &dyn canwu_force_supply_reference::PackageArchiveStore,
+        force: Option<&canwu_force_supply_reference::ForceSupplyStateV1>,
     ) -> Result<PreparedEconomyArchiveBatchV1, CanwuError> {
         if candidate_limit == 0
             || candidate_limit > canwu_force_supply_reference::MAX_PACKAGE_ARCHIVE_PAGE_ENTRIES
         {
             return Err(invalid("economy archive candidate budget is invalid"));
         }
+        let force_hot_intents = force
+            .into_iter()
+            .flat_map(|force| force.sagas.values())
+            .filter_map(|saga| saga.externality_intent.as_ref())
+            .collect::<BTreeSet<_>>();
+        let force_hot_outcomes = force
+            .into_iter()
+            .flat_map(|force| {
+                force
+                    .sagas
+                    .values()
+                    .filter_map(|saga| saga.externality_outcome.as_ref())
+                    .chain(
+                        force
+                            .terminal_receipts
+                            .values()
+                            .filter_map(|receipt| receipt.externality_outcome.as_ref()),
+                    )
+            })
+            .map(|outcome| &outcome.id)
+            .collect::<BTreeSet<_>>();
         let mut records = Vec::new();
         let mut push_record = |key: EconomyArchiveKeyV1,
                                terminal_sequence: u64,
@@ -2067,7 +2185,10 @@ impl EconomyReferenceStateV1 {
                 EconomyArchivePayloadV1::DeliveryAttempt(attempt.clone()),
             )?;
         }
-        for outcome in self.externality_outcomes.values() {
+        for outcome in self.externality_outcomes.values().filter(|outcome| {
+            !force_hot_outcomes.contains(&outcome.id)
+                && !force_hot_intents.contains(&outcome.intent)
+        }) {
             push_record(
                 EconomyArchiveKeyV1::ExternalityOutcome(outcome.id.clone()),
                 outcome.revision,
@@ -2198,14 +2319,10 @@ impl EconomyReferenceStateV1 {
         } else {
             canwu_force_supply_reference::PackageArchiveMaintenanceDispositionV1::RejectedStale
         };
-        let sequence = self
-            .archive_maintenance_receipts
-            .keys()
-            .next_back()
-            .copied()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| invalid("economy archive receipt overflow"))?;
+        // Receipts leave the root when they are acknowledged, so the next
+        // sequence is counted by the chain, not read from the hot receipts.
+        self.archive_receipt_chain.issue()?;
+        let sequence = self.archive_receipt_chain.issued;
         let mut receipt = EconomyArchiveMaintenanceReceiptV1 {
             sequence,
             retention_handle_id: commit.retention.id.clone(),
@@ -2354,7 +2471,7 @@ mod archive_tests {
         );
         state.validate().expect("valid hot history");
         let prepared = state
-            .prepare_economy_archive(8, &())
+            .prepare_economy_archive(8, &(), None)
             .expect("prepare archive");
         assert!(
             prepared

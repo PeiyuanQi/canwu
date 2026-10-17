@@ -29,7 +29,16 @@ a cumulative lookup index in the resource archive's format, so a boundary
 that asks whether a key was archived reads the head directory, one index page
 per level, and one blob on a hit, however many commits the run has made.
 Preparing a commit reads the archive store, and the restore audit rebuilds
-the head's index from the directory chain.
+the head's index from the directory chain. A settled commit leaves a
+maintenance receipt in the root until the host acknowledges the commit's
+retention; the acknowledgement folds the receipt into the root's receipt
+chain, so the root keeps only the receipts of unacknowledged commits however
+many commits a run makes. An operation whose result finds no room in the
+root is skipped with an `operation_skipped` event (`force_operation_skip`
+reads it) and records nothing; once an archive commit has made room, the
+command rebuilt against the root's current revision settles under the same
+operation ID. `force_operation_outcome` reads a settled outcome, hot or
+archived.
 
 Reports are detached and holder-relative. They are assembled only from typed
 knowledge publications available by the holder's observation cut, so current

@@ -35,7 +35,10 @@ pub const ECONOMY_COMMAND_INGRESS: &str = "economy_reference_operation_v1";
 pub const ECONOMY_ARCHIVE_COMMIT_INGRESS: &str = "economy_archive_commit_v1";
 pub const ECONOMY_ARCHIVE_RETENTION_ACK_INGRESS: &str = "economy_archive_retention_ack_v1";
 pub const ECONOMY_SEMANTIC_HASH: &str =
-    "6bbe3efc7863962661171af6dbbba7464acadb32c9f5aa4095543241a8fc0411";
+    "acba44da66a33cfa1950f4f1439796785e177e33dab5da9bcb989e9223690c7b";
+/// The event of an operation skipped because the root had no room for its
+/// result; [`economy_operation_skip`] reads it back.
+pub const ECONOMY_OPERATION_SKIPPED_EVENT: &str = "canwu.economy-reference.operation_skipped.v1";
 static ECONOMY_ARCHIVE_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static ECONOMY_ARCHIVE_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 
@@ -345,6 +348,7 @@ impl SimulationPlugin for EconomyReferencePlugin {
         apply.emits = vec![
             "canwu.economy-reference.operation_applied.v1".to_owned(),
             "canwu.economy-reference.operation_rejected.v1".to_owned(),
+            ECONOMY_OPERATION_SKIPPED_EVENT.to_owned(),
             "canwu.economy-reference.month_closed.v1".to_owned(),
         ];
         apply.visibility = StateVisibility::SameBoundary;
@@ -426,31 +430,13 @@ fn admit_economy_command(
         .typed_domain_record(&economy_reference_runtime_reference())?
         .ok_or_else(|| missing("economy-reference runtime is unavailable"))?;
     let state = record.decode_payload::<EconomyReferenceRuntimeRecord>()?;
-    if let Some(existing) = state.outcomes.get(&value.operation_id) {
+    if let Some(existing) = economy_operation_outcome(&state, view, &value.operation_id)? {
         if existing.input_digest == input_digest {
             return Ok(Vec::new());
         }
         return Err(CanwuError::new(
             ErrorCode::IdempotencyConflict,
             "economy operation ID was reused with different input",
-        ));
-    }
-    if let Some(record) = archived_economy_record(
-        view,
-        &state,
-        &crate::EconomyArchiveKeyV1::OperationOutcome(value.operation_id.clone()),
-    )? {
-        let crate::EconomyArchivePayloadV1::OperationOutcome(existing) = record.payload else {
-            return Err(invalid(
-                "economy archive operation membership has the wrong payload",
-            ));
-        };
-        if existing.input_digest == input_digest {
-            return Ok(Vec::new());
-        }
-        return Err(CanwuError::new(
-            ErrorCode::IdempotencyConflict,
-            "archived economy operation ID was reused with different input",
         ));
     }
     Ok(vec![SystemDirective::EnqueuePluginIngress {
@@ -511,21 +497,23 @@ fn apply_economy_ingress(
         if packet_type == ECONOMY_ARCHIVE_RETENTION_ACK_INGRESS {
             let acknowledgement: EconomyArchiveRetentionAcknowledgementV1 =
                 decode(payload, "economy archive retention acknowledgement")?;
-            let persisted = state
-                .archive_maintenance_receipts
-                .get(&acknowledgement.receipt.sequence)
-                .ok_or_else(|| invalid("economy archive maintenance receipt is unavailable"))?;
-            if persisted != &acknowledgement.receipt {
-                return Err(invalid("economy archive acknowledgement is forged"));
+            // The handle leaves the root and its receipts fold into the
+            // receipt chain; a second acknowledgement of the same handle
+            // finds nothing to fold and settles as a no-op.
+            let folded = canwu_force_supply_reference::settle_package_archive_acknowledgement(
+                crate::ECONOMY_ARCHIVE_DOMAIN,
+                &mut state.archive_receipt_chain,
+                &mut state.archive_retention_handles,
+                &mut state.archive_maintenance_receipts,
+                &acknowledgement.receipt,
+            )?;
+            if folded > 0 {
+                state.revision = state
+                    .revision
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("economy archive revision overflowed"))?;
+                changed = true;
             }
-            state
-                .archive_retention_handles
-                .remove(&acknowledgement.receipt.retention_handle_id);
-            state.revision = state
-                .revision
-                .checked_add(1)
-                .ok_or_else(|| invalid("economy archive revision overflowed"))?;
-            changed = true;
             continue;
         }
         if packet_type != ECONOMY_COMMAND_INGRESS {
@@ -537,25 +525,8 @@ fn apply_economy_ingress(
         // of the settled input is a no-op, and a repeat with other input is
         // skipped with a visible event rather than failing the boundary, which
         // could never be stepped past.
-        let settled_digest = match state.outcomes.get(&admitted.value.operation_id) {
-            Some(existing) => Some(existing.input_digest.clone()),
-            None => match archived_economy_record(
-                view,
-                &state,
-                &crate::EconomyArchiveKeyV1::OperationOutcome(admitted.value.operation_id.clone()),
-            )? {
-                Some(record) => {
-                    let crate::EconomyArchivePayloadV1::OperationOutcome(existing) = record.payload
-                    else {
-                        return Err(invalid(
-                            "economy archive operation membership has the wrong payload",
-                        ));
-                    };
-                    Some(existing.input_digest)
-                }
-                None => None,
-            },
-        };
+        let settled_digest = economy_operation_outcome(&state, view, &admitted.value.operation_id)?
+            .map(|existing| existing.input_digest);
         if let Some(settled_digest) = settled_digest {
             if settled_digest != admitted.input_digest {
                 directives.push(BoundaryDirective::Emit {
@@ -570,14 +541,16 @@ fn apply_economy_ingress(
             continue;
         }
         if admitted.value.expected_runtime_revision != state.revision {
-            persist_rejection(
+            match settle_rejection(
                 &mut state,
                 &admitted,
                 context.at,
                 &ErrorCode::DomainRecordVersionConflict,
                 "economy runtime revision is stale".to_owned(),
-            )?;
-            changed = true;
+            )? {
+                Some(shortage) => directives.push(operation_skipped(&admitted, shortage)),
+                None => changed = true,
+            }
             continue;
         }
         let mut candidate = state.clone();
@@ -588,7 +561,20 @@ fn apply_economy_ingress(
             &admitted.value,
             context.at,
             &mut operation_directives,
-        );
+        )
+        .and_then(|month_closed| match candidate.exceeded_record_cap() {
+            // A result that passes a bounded collection of the root is a
+            // rejection, which the root has room to record.
+            Some((collection, true)) => Err(CanwuError::new(
+                ErrorCode::QueryBudgetExceeded,
+                format!("economy {collection} hot cap requires archive progress"),
+            )),
+            Some((collection, false)) => Err(CanwuError::new(
+                ErrorCode::QueryBudgetExceeded,
+                format!("economy {collection} limit is reached"),
+            )),
+            None => Ok(month_closed),
+        });
         match result {
             Ok(month_closed) => {
                 candidate.revision = candidate
@@ -599,14 +585,24 @@ fn apply_economy_ingress(
                     admitted.value.operation_id.clone(),
                     EconomyOperationOutcomeV1 {
                         id: admitted.value.operation_id.clone(),
-                        input_digest: admitted.input_digest,
+                        input_digest: admitted.input_digest.clone(),
                         applied: true,
                         rejection_code: None,
                         rejection_reason: None,
                         settled_at: context.at,
                     },
                 );
-                candidate.validate()?;
+                // Room is measured on the result, its outcome included. A
+                // result that does not fit is skipped: the root stays as it
+                // was, nothing is recorded under the operation ID, and the
+                // same command settles when sent again once an archive
+                // commit has made room.
+                let encoded_len = candidate.encoded_len()?;
+                if let Some(shortage) = candidate.outcome_room_shortage(encoded_len) {
+                    directives.push(operation_skipped(&admitted, shortage));
+                    continue;
+                }
+                candidate.validate_encoded(encoded_len)?;
                 state = candidate;
                 changed = true;
                 directives.extend(operation_directives);
@@ -624,13 +620,16 @@ fn apply_economy_ingress(
                 }
             }
             Err(error) if expected_domain_rejection(&error) => {
-                persist_rejection(
+                if let Some(shortage) = settle_rejection(
                     &mut state,
                     &admitted,
                     context.at,
                     &error.code,
                     error.message,
-                )?;
+                )? {
+                    directives.push(operation_skipped(&admitted, shortage));
+                    continue;
+                }
                 changed = true;
                 directives.push(BoundaryDirective::Emit {
                     event_type: "canwu.economy-reference.operation_rejected.v1".to_owned(),
@@ -666,15 +665,17 @@ fn apply_economy_ingress(
     })
 }
 
-fn persist_rejection(
+/// Records an operation's rejection, or, when the root has no room for its
+/// outcome, leaves the root as it was and returns why.
+fn settle_rejection(
     state: &mut EconomyReferenceStateV1,
     admitted: &AdmittedEconomyCommandV1,
     settled_at: canwu_api::SimTime,
     code: &ErrorCode,
     reason: String,
-) -> Result<(), CanwuError> {
-    state.revision = state
-        .revision
+) -> Result<Option<canwu_force_supply_reference::PackageRootShortageV1>, CanwuError> {
+    let revision = state.revision;
+    state.revision = revision
         .checked_add(1)
         .ok_or_else(|| invalid("economy runtime revision overflowed on rejection"))?;
     state.outcomes.insert(
@@ -688,7 +689,78 @@ fn persist_rejection(
             settled_at,
         },
     );
-    state.validate()
+    let encoded_len = state.encoded_len()?;
+    if let Some(shortage) = state.outcome_room_shortage(encoded_len) {
+        state.revision = revision;
+        state.outcomes.remove(&admitted.value.operation_id);
+        return Ok(Some(shortage));
+    }
+    state.validate_encoded(encoded_len)?;
+    Ok(None)
+}
+
+/// The event of an operation skipped because the root has no room for its
+/// result: nothing is recorded under its ID, and the command rebuilt against
+/// the current runtime revision settles under it once an archive commit has
+/// made room (the commit and its acknowledgement advance the revision, so
+/// the same command re-sent unchanged is a stale rejection).
+fn operation_skipped(
+    admitted: &AdmittedEconomyCommandV1,
+    shortage: canwu_force_supply_reference::PackageRootShortageV1,
+) -> BoundaryDirective {
+    BoundaryDirective::Emit {
+        event_type: ECONOMY_OPERATION_SKIPPED_EVENT.to_owned(),
+        summary: canwu_force_supply_reference::PackageOperationSkipV1 {
+            operation_id: admitted.value.operation_id.to_string(),
+            shortage,
+        }
+        .summary(),
+        affected: vec![holder_entity(&admitted.value.holder)],
+    }
+}
+
+/// The economy operation `event` reports skipped for room, if it is an
+/// [`ECONOMY_OPERATION_SKIPPED_EVENT`].
+#[must_use]
+pub fn economy_operation_skip(
+    event: &canwu_api::SimEvent,
+) -> Option<canwu_force_supply_reference::PackageOperationSkipV1> {
+    canwu_force_supply_reference::PackageOperationSkipV1::from_event(
+        event,
+        PLUGIN_NAME,
+        ECONOMY_OPERATION_SKIPPED_EVENT,
+    )
+}
+
+/// The settled outcome of an economy operation, hot in `state` or archived
+/// in the package archive `provider` serves, or `None` when the operation
+/// never settled: never admitted, still queued, or skipped for room. An
+/// archived outcome is the record the archive commit took out of the root,
+/// read through the head's lookup index. Inside a boundary pass the view; a
+/// host passes its runtime handle or its store.
+pub fn economy_operation_outcome(
+    state: &EconomyReferenceStateV1,
+    provider: &dyn PluginArchiveObjectProvider,
+    operation: &EconomyOperationId,
+) -> Result<Option<EconomyOperationOutcomeV1>, CanwuError> {
+    if let Some(outcome) = state.outcomes.get(operation) {
+        return Ok(Some(outcome.clone()));
+    }
+    match archived_economy_record(
+        provider,
+        state,
+        &crate::EconomyArchiveKeyV1::OperationOutcome(operation.clone()),
+    )? {
+        Some(record) => {
+            let crate::EconomyArchivePayloadV1::OperationOutcome(outcome) = record.payload else {
+                return Err(invalid(
+                    "economy archive operation membership has the wrong payload",
+                ));
+            };
+            Ok(Some(outcome))
+        }
+        None => Ok(None),
+    }
 }
 
 fn archived_economy_record(
@@ -1273,10 +1345,13 @@ fn close_month(
             .typed_domain_record(&force_supply_runtime_reference())?
             .ok_or_else(|| missing("force-supply runtime is unavailable"))?;
         let force_state = force_record.decode_payload::<ForceSupplyRuntimeRecord>()?;
-        let outcome = force_state
-            .outcomes
-            .get(force_operation)
-            .ok_or_else(|| missing("force-supply operation outcome is unavailable"))?;
+        // The outcome may already be in the force-supply package archive.
+        let outcome = canwu_force_supply_reference::force_operation_outcome(
+            &force_state,
+            view,
+            force_operation,
+        )?
+        .ok_or_else(|| missing("force-supply operation outcome is unavailable"))?;
         if !outcome.applied {
             return Err(CanwuError::new(
                 ErrorCode::EvidenceUnavailable,
@@ -1872,6 +1947,18 @@ fn apply_force_externalities(
         if view.typed_domain_record(&reference)?.is_some() {
             continue;
         }
+        // The outcome takes a hot slot of the economy root. While none is
+        // free the intent waits in the force-supply root, and a later
+        // boundary of this system materializes it once an archive commit
+        // has made room; nothing fails.
+        if economy_state.externality_outcomes.len() >= economy_state.limits.max_operation_outcomes {
+            continue;
+        }
+        // The same wait when the outcome would take the root past the share
+        // of its byte cap operations may fill: what this intent changes is
+        // undone, and a later boundary materializes it.
+        let before_intent = economy_state.clone();
+        let directives_before_intent = directives.len();
         let force_intent = force_state
             .intents
             .get(&saga.intent)
@@ -2019,6 +2106,15 @@ fn apply_force_externalities(
         economy_state
             .externality_outcomes
             .insert(outcome.id.clone(), outcome.clone());
+        if economy_state.encoded_len()?
+            > canwu_force_supply_reference::package_operation_state_bytes(
+                economy_state.limits.max_state_bytes,
+            )
+        {
+            economy_state = before_intent;
+            directives.truncate(directives_before_intent);
+            continue;
+        }
         economy_changed = true;
         directives.push(BoundaryDirective::MutateRecord {
             mutation: DomainRecordMutation::Create {
@@ -2180,6 +2276,12 @@ fn authoritative_force_externality_scope(
             consumption,
         )])?;
     }
+    // The leg's account, with its definition, lives in the resource account
+    // buckets; it is attached by identity, so the scope reads the same once
+    // archiving has moved the leg out.
+    reader.attach_live([canwu_resource::ResourceLiveRecordKeyV1::Account(
+        consumption_intent.allocation.account.clone(),
+    )])?;
     let resource_record = reader.live_record().clone();
     let resource_state = reader.into_state();
     resource_state.validate().map_err(|error| {
@@ -2490,7 +2592,9 @@ fn expected_domain_rejection(error: &CanwuError) -> bool {
 /// it and the commits already queued settle (see
 /// [`canwu_force_supply_reference::package_archive_commit_room`]); the
 /// boundary that settled such a commit would fail and could not be stepped
-/// past.
+/// past. The batch is prepared again with the run's force-supply root, so a
+/// batch that selects an externality outcome the force-supply root still
+/// holds hot is refused too.
 pub fn enqueue_economy_archive<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &mut H,
     prepared: &crate::PreparedEconomyArchiveBatchV1,
@@ -2499,8 +2603,13 @@ pub fn enqueue_economy_archive<H: canwu_api::CanwuRun + ?Sized>(
     let state = canwu_api::typed_domain_record(canwu, &economy_reference_runtime_reference())
         .ok_or_else(|| invalid("economy runtime is unavailable"))?
         .decode_payload::<EconomyReferenceRuntimeRecord>()?;
-    if state.prepare_economy_archive(prepared.selected.len(), store)? != *prepared {
-        return Err(invalid("economy archive batch is stale or non-canonical"));
+    let force = canwu_api::typed_domain_record(canwu, &force_supply_runtime_reference())
+        .map(canwu_api::DomainRecord::decode_payload::<ForceSupplyRuntimeRecord>)
+        .transpose()?;
+    if state.prepare_economy_archive(prepared.selected.len(), store, force.as_ref())? != *prepared {
+        return Err(invalid(
+            "economy archive batch is stale or non-canonical: prepare it from the current economy and force-supply roots",
+        ));
     }
     canwu_force_supply_reference::package_archive_commit_room(
         canwu,
@@ -2541,30 +2650,31 @@ pub fn enqueue_economy_archive<H: canwu_api::CanwuRun + ?Sized>(
 
 /// Finalizes an economy archive retention handle and queues its
 /// acknowledgement. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+///
+/// The handle is finalized as committed when the commit applied, and as
+/// rejected stale otherwise. The acknowledgement removes the handle from the
+/// root and folds the receipts recorded under it into the root's receipt
+/// chain. A call after that acknowledgement settled does nothing and returns
+/// `None`, so a host may retry a finalization it is unsure of; a call before
+/// the commit settled is refused (see
+/// [`canwu_force_supply_reference::package_archive_finalization`]).
 pub fn finalize_economy_archive_retention<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &mut H,
     store: &dyn canwu_force_supply_reference::PackageArchiveStore,
     ingress: &EconomyArchiveIngressReceiptV1,
-) -> Result<canwu_api::IngressReceipt, CanwuError> {
+) -> Result<Option<canwu_api::IngressReceipt>, CanwuError> {
     let state = canwu_api::typed_domain_record(canwu, &economy_reference_runtime_reference())
         .ok_or_else(|| invalid("economy runtime is unavailable"))?
         .decode_payload::<EconomyReferenceRuntimeRecord>()?;
-    let receipt = state
-        .archive_maintenance_receipts
-        .values()
-        .find(|receipt| {
-            receipt.retention_handle_id == ingress.retention_handle_id
-                && receipt.directory_root == ingress.directory_root
-        })
-        .cloned()
-        .ok_or_else(|| invalid("economy archive terminal disposition is unavailable"))?;
-    let phase = match receipt.disposition {
-        canwu_force_supply_reference::PackageArchiveMaintenanceDispositionV1::Applied => {
-            canwu_force_supply_reference::PackageArchiveRetentionPhaseV1::Committed
-        }
-        canwu_force_supply_reference::PackageArchiveMaintenanceDispositionV1::RejectedStale => {
-            canwu_force_supply_reference::PackageArchiveRetentionPhaseV1::RejectedStale
-        }
+    let Some((receipt, phase)) = canwu_force_supply_reference::package_archive_finalization(
+        &state.archive_retention_handles,
+        &state.archive_maintenance_receipts,
+        store,
+        &ingress.retention_handle_id,
+        &ingress.directory_root,
+    )?
+    else {
+        return Ok(None);
     };
     let stored = store
         .load_package_archive_retention(&ingress.retention_handle_id)?
@@ -2577,16 +2687,18 @@ pub fn finalize_economy_archive_retention<H: canwu_api::CanwuRun + ?Sized>(
     let permit = ECONOMY_ARCHIVE_ACK_PERMIT
         .get()
         .ok_or_else(|| invalid("economy archive acknowledgement is not registered"))?;
-    canwu.enqueue_permitted_plugin_ingress(
-        PluginIngressRequest::new(
-            PLUGIN_NAME,
-            ECONOMY_ARCHIVE_RETENTION_ACK_INGRESS,
-            canwu.time(),
-            serde_json::to_value(EconomyArchiveRetentionAcknowledgementV1 { receipt })
-                .map_err(|error| invalid(error.to_string()))?,
-        ),
-        permit,
-    )
+    canwu
+        .enqueue_permitted_plugin_ingress(
+            PluginIngressRequest::new(
+                PLUGIN_NAME,
+                ECONOMY_ARCHIVE_RETENTION_ACK_INGRESS,
+                canwu.time(),
+                serde_json::to_value(EconomyArchiveRetentionAcknowledgementV1 { receipt })
+                    .map_err(|error| invalid(error.to_string()))?,
+            ),
+            permit,
+        )
+        .map(Some)
 }
 
 fn error_code(code: &ErrorCode) -> &'static str {

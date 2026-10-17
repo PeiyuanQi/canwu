@@ -63,8 +63,14 @@ fn an_archive_commit_the_root_has_no_room_for_is_refused_before_it_is_queued() {
     let (_, state) = economy_reference_state(harness.canwu())
         .expect("economy state")
         .expect("economy runtime");
+    let force = harness
+        .canwu()
+        .typed_domain_record(&canwu_force_supply_reference::force_supply_runtime_reference())
+        .expect("force runtime")
+        .decode_payload::<canwu_force_supply_reference::ForceSupplyRuntimeRecord>()
+        .expect("force state");
     let prepared = state
-        .prepare_economy_archive(8, store.as_ref())
+        .prepare_economy_archive(8, store.as_ref(), Some(&force))
         .expect("the batch prepares");
     for _ in 0..MAX_PACKAGE_ARCHIVE_RETENTION_HANDLES {
         enqueue_economy_archive(harness.canwu_mut(), &prepared, store.as_ref())

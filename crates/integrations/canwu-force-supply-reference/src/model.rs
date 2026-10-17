@@ -26,6 +26,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
 
 pub const FORCE_RUNTIME_ID: &str = "canwu.force-supply-reference:runtime:v1";
+/// Format of the force-supply root. 2 adds `archive_receipt_chain`.
+pub const FORCE_FORMAT_VERSION: u32 = 2;
 pub const ECONOMY_EXTERNALITY_PROVIDER: &str = "canwu-economy-reference";
 pub const MAX_IDENTIFIER_BYTES: usize = 192;
 pub const MAX_REQUIREMENTS_PER_PROFILE: usize = 64;
@@ -93,7 +95,7 @@ impl ForceSupplyReferenceLimitsV1 {
             || self.max_observer_grants > Self::MAX_KNOWLEDGE_RECORDS
             || self.max_reports_per_holder == 0
             || self.max_reports_per_holder > Self::MAX_PER_HOLDER
-            || self.max_state_bytes == 0
+            || self.max_state_bytes < crate::MIN_PACKAGE_STATE_BYTES
             || self.max_state_bytes > Self::MAX_STATE_BYTES
         {
             return Err(invalid("force-supply limits exceed the V1 hard maxima"));
@@ -764,6 +766,8 @@ pub struct ForceSupplyStateV1 {
     pub archive_head: crate::ForceArchiveHeadStateV1,
     pub archive_retention_handles: BTreeMap<String, crate::ForceArchiveRetentionHandleV1>,
     pub archive_maintenance_receipts: BTreeMap<u64, crate::ForceArchiveMaintenanceReceiptV1>,
+    /// The maintenance receipts acknowledged so far, folded out of the root.
+    pub archive_receipt_chain: crate::PackageArchiveReceiptChainV1,
     pub outcomes: BTreeMap<ForceOperationId, ForceOperationOutcomeV1>,
 }
 
@@ -797,6 +801,7 @@ struct ForceSupplyStateStorageV1 {
     archive_head: crate::ForceArchiveHeadStateV1,
     archive_retention_handles: BTreeMap<String, crate::ForceArchiveRetentionHandleV1>,
     archive_maintenance_receipts: BTreeMap<u64, crate::ForceArchiveMaintenanceReceiptV1>,
+    archive_receipt_chain: crate::PackageArchiveReceiptChainV1,
     outcomes: BTreeMap<ForceOperationId, ForceOperationOutcomeV1>,
 }
 
@@ -827,6 +832,7 @@ impl From<ForceSupplyStateV1> for ForceSupplyStateStorageV1 {
             archive_head: state.archive_head,
             archive_retention_handles: state.archive_retention_handles,
             archive_maintenance_receipts: state.archive_maintenance_receipts,
+            archive_receipt_chain: state.archive_receipt_chain,
             outcomes: state.outcomes,
         }
     }
@@ -861,6 +867,7 @@ impl From<ForceSupplyStateStorageV1> for ForceSupplyStateV1 {
             archive_head: state.archive_head,
             archive_retention_handles: state.archive_retention_handles,
             archive_maintenance_receipts: state.archive_maintenance_receipts,
+            archive_receipt_chain: state.archive_receipt_chain,
             outcomes: state.outcomes,
         };
         restored.rebuild_derived_indexes();
@@ -871,7 +878,7 @@ impl From<ForceSupplyStateStorageV1> for ForceSupplyStateV1 {
 impl Default for ForceSupplyStateV1 {
     fn default() -> Self {
         Self {
-            format_version: 1,
+            format_version: FORCE_FORMAT_VERSION,
             revision: 1,
             provider_record_version: 1,
             limits: ForceSupplyReferenceLimitsV1::canonical(),
@@ -901,6 +908,7 @@ impl Default for ForceSupplyStateV1 {
             .expect("static empty force archive head must seal"),
             archive_retention_handles: BTreeMap::new(),
             archive_maintenance_receipts: BTreeMap::new(),
+            archive_receipt_chain: crate::PackageArchiveReceiptChainV1::default(),
             outcomes: BTreeMap::new(),
         }
     }
@@ -1375,8 +1383,40 @@ impl ForceSupplyStateV1 {
         DomainRecordDraft::from_typed(force_supply_runtime_reference(), self)
     }
 
-    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), CanwuError> {
+        self.validate_encoded(self.encoded_len()?)
+    }
+
+    /// The length of the root's canonical JSON encoding, which its byte cap
+    /// bounds.
+    pub fn encoded_len(&self) -> Result<usize, CanwuError> {
+        serde_json::to_vec(self)
+            .map(|bytes| bytes.len())
+            .map_err(encode_error)
+    }
+
+    /// Why this root, holding the outcome of the operation it settles, has
+    /// no room for that operation, if it has none: the root then holds more
+    /// hot operation outcomes than `max_externality_outcomes`, or its
+    /// canonical encoding, `encoded_len` bytes long, passes the share of the
+    /// byte cap operations may fill. The operation is then skipped.
+    #[must_use]
+    pub fn outcome_room_shortage(
+        &self,
+        encoded_len: usize,
+    ) -> Option<crate::PackageRootShortageV1> {
+        crate::PackageRootShortageV1::of(
+            self.outcomes.len(),
+            self.limits.max_externality_outcomes,
+            encoded_len,
+            self.limits.max_state_bytes,
+        )
+    }
+
+    /// [`validate`](Self::validate) for a root whose canonical encoding is
+    /// `encoded_len` bytes long.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn validate_encoded(&self, encoded_len: usize) -> Result<(), CanwuError> {
         self.limits.validate()?;
         self.completion_run_budget
             .validate()
@@ -1449,11 +1489,10 @@ impl ForceSupplyStateV1 {
                 ));
             }
         }
-        let encoded = serde_json::to_vec(self).map_err(encode_error)?;
-        if self.format_version != 1
+        if self.format_version != FORCE_FORMAT_VERSION
             || self.revision == 0
             || self.provider_record_version == 0
-            || encoded.len() > self.limits.max_state_bytes
+            || encoded_len > self.limits.max_state_bytes
             || self.profiles.len() > self.limits.max_profiles
             || self.forces.len() > self.limits.max_forces
             || self.intents.len() > self.limits.max_active_intents
@@ -1863,52 +1902,49 @@ impl ForceSupplyStateV1 {
         {
             return Err(invalid("force terminal continuation is invalid"));
         }
-        let mut archive_head = self.archive_head.clone();
-        let head_digest = std::mem::take(&mut archive_head.semantic_digest);
-        if head_digest
-            != canonical_hash(
-                "canwu.force-supply-reference.archive-head.v1",
-                &archive_head,
-            )?
-            || self.archive_retention_handles.len() > crate::MAX_PACKAGE_ARCHIVE_RETENTION_HANDLES
-            || self.archive_maintenance_receipts.len()
-                > crate::MAX_PACKAGE_ARCHIVE_MAINTENANCE_RECEIPTS
+        if crate::sealed_archive_head(crate::FORCE_ARCHIVE_DOMAIN, self.archive_head.clone())?
+            != self.archive_head
+        {
+            return Err(invalid("force archive head is forged"));
+        }
+        crate::validate_package_archive_maintenance(
+            crate::FORCE_ARCHIVE_DOMAIN,
+            &self.archive_receipt_chain,
+            &self.archive_retention_handles,
+            &self.archive_maintenance_receipts,
+        )
+        .map_err(|error| invalid(format!("force {}", error.message)))?;
+        if self
+            .archive_maintenance_receipts
+            .keys()
+            .any(|sequence| *sequence >= self.next_terminal_sequence)
         {
             return Err(invalid(
-                "force archive head or hot maintenance bounds are invalid",
+                "force archive maintenance receipt sequence was never issued",
             ));
-        }
-        for (id, handle) in &self.archive_retention_handles {
-            let mut detached = handle.clone();
-            let recorded = std::mem::take(&mut detached.semantic_digest);
-            if id != &handle.id
-                || recorded
-                    != canonical_hash(
-                        "canwu.force-supply-reference.archive-retention.v1",
-                        &detached,
-                    )?
-            {
-                return Err(invalid("force archive retention handle is forged"));
-            }
-        }
-        for (sequence, receipt) in &self.archive_maintenance_receipts {
-            let mut detached = receipt.clone();
-            let recorded = std::mem::take(&mut detached.semantic_digest);
-            if sequence != &receipt.sequence
-                || recorded
-                    != canonical_hash(
-                        "canwu.force-supply-reference.archive-maintenance-receipt.v1",
-                        &detached,
-                    )?
-            {
-                return Err(invalid("force archive maintenance receipt is forged"));
-            }
         }
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// Applies one operation and checks the result, its byte cap included.
     pub fn apply_operation(
+        &mut self,
+        envelope: &ForceCommandEnvelopeV1,
+        now: SimTime,
+    ) -> Result<(), CanwuError> {
+        self.apply_operation_unmeasured(envelope, now)?;
+        if self.encoded_len()? > self.limits.max_state_bytes {
+            return Err(invalid("force-supply state exceeds its byte cap"));
+        }
+        Ok(())
+    }
+
+    /// [`apply_operation`](Self::apply_operation) without the byte cap: the
+    /// plugin measures room on the result with its outcome and skips a
+    /// result that does not fit, where a byte-cap failure here would become
+    /// a recorded rejection.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn apply_operation_unmeasured(
         &mut self,
         envelope: &ForceCommandEnvelopeV1,
         now: SimTime,
@@ -2050,7 +2086,8 @@ impl ForceSupplyStateV1 {
                 .checked_add(1)
                 .ok_or_else(|| invalid("force-supply revision overflowed"))?;
         }
-        self.validate()
+        // Everything but the byte cap, which the caller measures.
+        self.validate_encoded(0)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -3458,6 +3495,7 @@ impl ForceSupplyStateV1 {
         self.next_terminal_sequence = sequence
             .checked_add(1)
             .ok_or_else(|| invalid("force archive receipt sequence overflow"))?;
+        self.archive_receipt_chain.issue()?;
         let mut receipt = crate::ForceArchiveMaintenanceReceiptV1 {
             sequence,
             retention_handle_id: commit.retention.id.clone(),
