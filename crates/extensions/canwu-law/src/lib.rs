@@ -20,6 +20,7 @@
     clippy::wildcard_imports
 )]
 
+mod caseload;
 mod compiler;
 mod model;
 mod plugin;
@@ -27,6 +28,15 @@ mod runtime;
 /// Format-8 legal shard, archive, and deterministic compaction contracts.
 pub mod storage;
 
+pub use caseload::{
+    AggregateCaseloadRecord, CaseloadIntakeReport, CaseloadPeriod, CaseloadProfileDefinition,
+    CaseloadRefusalReason, CaseloadReviewFlow, CaseloadReviewQueue, CaseloadStock,
+    LAW_CASELOAD_HEAD, LAW_CASELOAD_INGRESS, LAW_CASELOAD_PERIOD, LAW_CASELOAD_REJECTED_EVENT,
+    LEGAL_CASELOAD_FORMAT_VERSION, LegalCaseloadHead, LegalCaseloadState, MAX_CASELOAD_CLASSES,
+    MAX_CASELOAD_EVIDENCE_BYTES, MAX_CASELOAD_EVIDENCE_PER_REPORT,
+    MAX_CASELOAD_REPORTS_PER_BOUNDARY, MAX_CASELOAD_RETAINED_PERIODS, MAX_CASELOAD_REVIEW_LEVELS,
+    MAX_CASELOAD_STATE_BYTES,
+};
 pub use compiler::{compile_law, validate_compiled_law_plan, validate_definition};
 pub use model::*;
 pub use plugin::{
@@ -35,9 +45,9 @@ pub use plugin::{
     LAW_INGRESS_REJECTED_EVENT, LAW_INTENT_INGRESS, LAW_MUTATION_INGRESS, LAW_OUTBOX_ACK_INGRESS,
     LAW_OUTBOX_PREPARE_INGRESS, LAW_PLAN_STATE, LAW_PROPOSAL_REJECTED_EVENT, LAW_RUNTIME_STATE,
     LAW_SHARD_STATE, LAW_WAKE_INGRESS, LawPlugin, LegalArchiveIngressReceipt,
-    enqueue_legal_archive, enqueue_legal_mutation, enqueue_legal_mutation_at,
-    finalize_legal_archive_retention, law_command_descriptor, law_record_schemas,
-    load_law_state_for_plan, load_legal_runtime,
+    enqueue_caseload_intake, enqueue_legal_archive, enqueue_legal_mutation,
+    enqueue_legal_mutation_at, finalize_legal_archive_retention, law_command_descriptor,
+    law_record_schemas, load_law_state_for_plan, load_legal_caseload, load_legal_runtime,
 };
 pub use runtime::{
     LegalArchiveMaintenanceDisposition, LegalArchiveTerminalRecord, LegalBoundaryResult,
@@ -54,6 +64,8 @@ pub const PLUGIN_NAMESPACE: &str = "canwu.law";
 /// It changes whenever procedure tallying or persisted legal semantics change,
 /// such as weighted and unit-block stages and the advisory consultation kind,
 /// or, in 0.16.0, recorded ingress refusals, current-version compare-and-set,
-/// same-boundary provider provenance, and adoption guards that wait.
+/// same-boundary provider provenance, and adoption guards that wait, or, in
+/// 0.18.0, aggregate caseload records, the immutable plan record, shards that
+/// exist once they hold something, and the budgeted stale-proposal pass.
 pub const LAW_SEMANTIC_HASH: &str =
-    "d157b5d07a8f46f7f326deb93b374e43d2b71b5e4a8e9d96b4eda5d8c4723bb6";
+    "b05ea6dd2848c21c6d913ddbbcd29c26363599e4df40e13b8d344b16c50895c9";

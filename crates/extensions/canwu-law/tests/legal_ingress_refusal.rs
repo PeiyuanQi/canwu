@@ -274,8 +274,20 @@ struct Run {
 
 impl Run {
     fn new(definition: &LegalDefinition) -> Self {
+        Self::with_proposals(definition, Vec::new())
+    }
+
+    /// A run whose initial legal state already holds `proposals`, each open
+    /// and due for settlement.
+    fn with_proposals(definition: &LegalDefinition, proposals: Vec<LegalProposal>) -> Self {
         let plan = compile_law(definition).expect("compile registry plan");
-        let mut records = LegalRuntime::new(&plan)
+        let mut runtime = LegalRuntime::new(&plan);
+        for proposal in proposals {
+            runtime
+                .submit_proposal(&plan, proposal)
+                .expect("submit an initial proposal");
+        }
+        let mut records = runtime
             .to_record_drafts()
             .expect("encode empty legal shards")
             .into_iter()
@@ -561,6 +573,61 @@ fn a_deadline_pile_up_settles_over_continuation_boundaries() {
             .all(|proposal| proposal.status == ProposalStatus::Expired)
     );
     assert!(law.scheduled_wakes.is_empty());
+    assert!(run.events(LAW_INGRESS_REJECTED_EVENT).is_empty());
+    run.assert_exact_replay();
+}
+
+/// The pass that rejects stale pending proposals checks at most the
+/// boundary's mutation budget of dirty procedures; the procedures after the
+/// last one it checked are not advanced at that boundary but wait, still
+/// dirty, for a continuation boundary at the same time, which checks the
+/// next ones. Five stale proposals under a budget of two are rejected two,
+/// two, and one per boundary, and none is left open unchecked.
+#[test]
+fn stale_proposal_checks_stay_within_the_boundary_budget() {
+    let mut authored = definition();
+    authored.budgets.max_mutations_per_boundary = 2;
+    let initial = DomainRecordVersionRef {
+        record: host_record(),
+        version: 1,
+        established_by: DomainRecordVersionSource::InitialScenario,
+    };
+    let stale = (0..5)
+        .map(|index| proposal(&format!("stale-{index}"), vec![initial.clone()]))
+        .collect();
+    let mut run = Run::with_proposals(&authored, stale);
+    run.amend_host_record();
+    // Any legal work makes the boundary settle; the new proposal is current.
+    enqueue_legal_mutation(
+        &mut run.canwu,
+        &LegalMutation::SubmitProposal {
+            proposal: proposal("trigger", Vec::new()),
+        },
+    )
+    .expect("queue a current proposal");
+    let start = run.canwu.time();
+    let mut rejected_per_boundary = Vec::new();
+    loop {
+        let before = run.events(LAW_PROPOSAL_REJECTED_EVENT).len();
+        let boundary = run
+            .canwu
+            .step_canonical()
+            .expect("the boundary settles")
+            .expect("due legal work");
+        if boundary.settled_at != start {
+            break;
+        }
+        rejected_per_boundary.push(run.events(LAW_PROPOSAL_REJECTED_EVENT).len() - before);
+    }
+    assert_eq!(rejected_per_boundary, [2, 2, 1]);
+    let law = run.law();
+    for index in 0..5 {
+        assert_eq!(
+            law.proposals[&format!("stale-{index}")].status,
+            ProposalStatus::Rejected
+        );
+    }
+    assert_ne!(law.proposals["trigger"].status, ProposalStatus::Rejected);
     assert!(run.events(LAW_INGRESS_REJECTED_EVENT).is_empty());
     run.assert_exact_replay();
 }

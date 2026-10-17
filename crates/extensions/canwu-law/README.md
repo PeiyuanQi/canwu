@@ -100,12 +100,18 @@ signal kind compiles to an exact provider plugin and packet type. When a
 boundary admits a packet that the engine matches to a compiled provider's
 metadata and kernel-committed producing boundary, the admission system records
 it, with a hash of its due time and payload, in the bounded legal provider
-index (`max_provider_packets`, lowest ingress ID forgotten first). A legal
+index (`max_provider_packets`, default 256; it keeps the newest packets and
+forgets the lowest ingress ID first, so a boundary that admits more provider
+packets than the index keeps forgets the oldest of them before its own legal
+work runs; each kept packet costs about 9 µs of every boundary that settles
+legal work, so a host that cites packets long after admission raises it
+knowing that). A legal
 mutation at that or any later boundary cites provider evidence by naming a
 recorded packet: every run records the same packets, sealed or not, so a sealed
 run, an unsealed run, and exact replay decide alike, and a recorded packet is
-an identity-evidence dependency, so a seal keeps its receipt. A packet the
-index never recorded or has forgotten is refused. Direct host injection into
+an identity-evidence dependency, so a seal keeps its receipt. A citation of a
+packet the index never recorded or has forgotten, even one admitted by the
+same boundary, is refused with `canwu.law.ingress_rejected.v1`. Direct host injection into
 that namespace is not provider evidence. Admission never trusts
 caller-declared signal kinds; publicity events additionally require the
 recorded hash of the exact provider payload envelope bound to proposal, time,
@@ -169,11 +175,19 @@ inside each record remains bounded by `max_evidence_per_record` and
 `max_nested_items_per_record`.
 
 Format 8 persists independently versioned plan, directory, order/jurisdiction,
-coordinator, culture-dependency, and archive-head records. Closed history moves
-behind authenticated archive roots while current enacted effects stay in the
-hot projections. Kernel domain/decision state uses structural sharing, boundary
-proposal overlays validate only affected closures, and paged checkpoints emit
-content-addressed deltas.
+coordinator, culture-dependency, and archive-head records. The plan record
+holds only the compiled plan, its hash, and its budgets; it is written once,
+when the plan is installed, and declares no evidence: the ledger counters live
+in the coordinator shard and the identity-evidence declaration in the
+directory. An order or jurisdiction shard (and its archive head) is created
+when it first holds something, so a plan of 1,555 jurisdictions starts with
+six law records rather than 3,118, and a boundary that settles legal work
+decodes the plan once and writes only the directory and the shards it loaded
+(measured on that plan: 9.4 ms a law boundary, from 101 ms). Closed history
+moves behind authenticated archive roots while current enacted effects stay in
+the hot projections. Kernel domain/decision state uses structural sharing,
+boundary proposal overlays validate only affected closures, and paged
+checkpoints emit content-addressed deltas.
 
 Archive retention uses a COW root handoff. Pending work protects only its new
 object delta and proposed current pages while the prior committed root protects
@@ -207,7 +221,7 @@ budget, or that the legal runtime refuses, changes nothing and is recorded as a
 A refusal found before the runtime changed costs no reload or copy; only a
 failure after a change (an archive commit, a non-procedural adoption that
 fails after its reservation, or a broken invariant) restarts the
-pass from a copy taken once after loading. A pending proposal whose host
+pass from the runtime loaded again. A pending proposal whose host
 compare-and-set no longer holds, whose culture dependency was retired, whose
 adoption guard can never hold, or whose adoption would exceed a lifetime budget
 is rejected with a `canwu.law.proposal_rejected.v1` event. A refused archive
@@ -220,11 +234,63 @@ Settlement takes at most `max_mutations_per_boundary` units of work (plus at
 most the first unit of each kind) in a fixed order; work past it stays pending
 and the plugin schedules a zero-delay continuation wake, so the next boundary
 at the same time settles the next slice, and `advance_canonical` settles them
-all before time advances. Work whose state growth does not fit waits for state
+all before time advances. The check that rejects stale pending proposals
+before settlement visits at most `max_mutations_per_boundary` dirty
+procedures, in the order settlement selects them; a dirty procedure after the
+last one checked is not advanced at that boundary and waits for the
+continuation, so a pile-up of dirty procedures costs one check per procedure
+per boundary that reaches it. Work whose state growth does not fit waits for state
 an archive compaction frees. What can still fail a boundary: an invalid or
 missing persisted legal record, a broken runtime invariant or counter
 overflow, and a read of evidence outside what every run holds
 (`EvidenceContentUnavailable`), which is an engine-rule violation.
+
+## Aggregate caseload
+
+A plan may declare a `CaseloadProfileDefinition`: the case classes a host
+reports in aggregate, the review levels whose queues it tracks, how many
+settled periods each jurisdiction keeps, and how many reports one boundary
+settles. A host queues `caseload_intake_v1` packets (`enqueue_caseload_intake`)
+carrying `CaseloadIntakeReport`s: per jurisdiction and period, the intake and
+resolved counts per class and the cases that entered and left each review
+level. The law admission system settles them in order into
+`AggregateCaseloadRecord`s: it carries the pending stocks from period to
+period (opening plus intake minus resolved per class, opening plus entered
+minus concluded per review level) and computes the clearance rate (resolved
+over intake, in basis points). Periods of a jurisdiction are contiguous; the
+first report may state the opening stocks, and a later one may state them to
+check them. A report that repeats the latest settled period is already
+settled, one that names it with other content conflicts (both decided before
+its evidence is looked at, comparing evidence as data, so a retry at a later
+boundary is already settled even when its evidence can no longer be cited),
+and a report that would leave a negative stock, names an unknown jurisdiction,
+class, or level, cites more than 16 evidence references or 2,048 bytes of
+them or unavailable evidence, or comes past the boundary's report budget is
+refused: each refusal changes nothing and is recorded with
+`canwu.law.caseload_rejected.v1`, whose summary names a stable reason code.
+
+The aggregate path does not load the legal runtime and its records do not count
+toward the legal state budget: per jurisdiction, one `LegalCaseloadHead` and
+one record per kept period, in `retained_periods` slots that a new period
+overwrites, so a report writes two small records whatever the retention
+(measured: 1,400 jurisdictions with eight classes and three review levels
+settle in one boundary in 60 to 100 ms, steady with twelve kept periods). The
+plan bounds them: a profile compiles only if, summed over the plan's
+jurisdictions, one head plus `retained_periods` records at the widest a
+report can make (`CaseloadProfileDefinition::max_state_bytes`) stays within
+`MAX_CASELOAD_STATE_BYTES` (256 MiB). The
+records cite their evidence as data and declare none, so they never hold a seal
+back, and every decision reads committed caseload records, the plan, and the
+boundary's admitted packets, so a sealed run decides as its replay does.
+`load_legal_caseload` reads one jurisdiction's kept periods.
+
+A host chooses per class of cases: classes it reports in aggregate are the
+profile's, and a case it wants to follow on its own (a party a player knows,
+an appeal to the capital) it records as a `LegalCase` too, still counting it in
+its class's intake so the aggregate stays the complete count. A case can cite
+the jurisdiction's current caseload period record version as evidence; since
+a slot record is overwritten by later periods and its ID names only its slot,
+the case should carry the period and its ordinal in its own data.
 
 This crate is experimental and intentionally does not implement natural
 language interpretation, universal moral judgment, or a dense person-by-rule

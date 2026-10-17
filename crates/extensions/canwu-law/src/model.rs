@@ -65,9 +65,23 @@ pub struct LawBudgets {
     /// Provider packets the legal provider index keeps, so a later legal
     /// mutation can cite one that an earlier boundary admitted. The packet with
     /// the lowest ingress ID is forgotten first; citing a forgotten packet is
-    /// refused.
+    /// refused. Default [`DEFAULT_PROVIDER_PACKETS`].
+    ///
+    /// The index is part of the coordinator shard and of the evidence
+    /// declaration, which every boundary that settles legal work decodes and
+    /// writes, so each kept packet costs about 9 µs of every such boundary
+    /// (measured in 0.18.0: 1.1 ms with an empty index, 2.8 ms with 256
+    /// packets, 40 ms with 4,096). A host that cites provider packets long
+    /// after they were admitted raises it knowing that cost.
     #[serde(default = "default_provider_packets")]
     pub max_provider_packets: usize,
+}
+
+/// Default of [`LawBudgets::max_provider_packets`].
+pub const DEFAULT_PROVIDER_PACKETS: usize = 256;
+
+const fn default_provider_packets() -> usize {
+    DEFAULT_PROVIDER_PACKETS
 }
 
 impl LawBudgets {
@@ -104,16 +118,12 @@ impl LawBudgets {
             max_text_bytes: 8 * 1024,
             max_state_bytes: MAX_LEGAL_STATE_BYTES,
             max_memory_bytes: MAX_LEGAL_MEMORY_BYTES,
-            max_provider_packets: 4_096,
+            max_provider_packets: DEFAULT_PROVIDER_PACKETS,
         }
     }
 }
 
 const fn default_retirement_dependency_records() -> usize {
-    4_096
-}
-
-const fn default_provider_packets() -> usize {
     4_096
 }
 
@@ -536,6 +546,11 @@ pub struct LegalDefinition {
     pub precedence_profiles: Vec<PrecedenceProfileDefinition>,
     pub id_blocks: LawIdBlocks,
     pub budgets: LawBudgets,
+    /// The aggregate caseload contract, when hosts report caseload per
+    /// jurisdiction and period ([`crate::CaseloadIntakeReport`]). Omitted from
+    /// JSON when absent, so a plan without one keeps its encoding and hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caseload: Option<crate::CaseloadProfileDefinition>,
 }
 
 impl LegalDefinition {
@@ -556,6 +571,7 @@ impl LegalDefinition {
             precedence_profiles: Vec::new(),
             id_blocks: LawIdBlocks::default(),
             budgets: LawBudgets::default(),
+            caseload: None,
         }
     }
 }
@@ -626,7 +642,7 @@ pub struct CompiledProcedureSeatAuthority {
     pub decision_controller_id: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CompiledLawPlan {
     pub plan_version: u32,
     pub definition_id: String,
@@ -655,6 +671,9 @@ pub struct CompiledLawPlan {
     pub jurisdiction_adjacency_by_profile: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     pub seat_authority_by_procedure:
         BTreeMap<String, BTreeMap<String, CompiledProcedureSeatAuthority>>,
+    /// The canonical caseload profile, omitted when the plan has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caseload: Option<crate::CaseloadProfileDefinition>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1310,6 +1329,16 @@ marker!(
     "archive_head_state",
     crate::LegalArchiveHeadState
 );
+marker!(
+    LegalCaseloadHeadRecord,
+    "caseload_head",
+    crate::LegalCaseloadHead
+);
+marker!(
+    LegalCaseloadPeriodRecord,
+    "caseload_period",
+    crate::AggregateCaseloadRecord
+);
 
 pub fn typed_ref<T: DomainRecordType>(id: impl Into<String>) -> TypedDomainRecordRef<T> {
     TypedDomainRecordRef::new(id)
@@ -1346,6 +1375,37 @@ pub fn legal_archive_head_state_reference(
         "archive:{}",
         canonical_hash("canwu.law.archive-head-record-id.v1", shard)?
     )))
+}
+
+/// Record ID of a jurisdiction's caseload head.
+#[must_use]
+pub fn caseload_head_record_id(jurisdiction: &str) -> String {
+    format!("caseload:{jurisdiction}")
+}
+
+/// Record ID of the caseload period record in `slot` of a jurisdiction.
+#[must_use]
+pub fn caseload_period_record_id(jurisdiction: &str, slot: u64) -> String {
+    format!("caseload:{jurisdiction}:{slot}")
+}
+
+/// The caseload head of one jurisdiction ([`crate::LegalCaseloadHead`]).
+#[must_use]
+pub fn legal_caseload_head_reference(
+    jurisdiction: &str,
+) -> TypedDomainRecordRef<LegalCaseloadHeadRecord> {
+    TypedDomainRecordRef::new(caseload_head_record_id(jurisdiction))
+}
+
+/// The caseload period record in `slot` of one jurisdiction
+/// ([`crate::AggregateCaseloadRecord`]); the period with ordinal `n` is in
+/// slot `(n - 1) % retained_periods`.
+#[must_use]
+pub fn legal_caseload_period_reference(
+    jurisdiction: &str,
+    slot: u64,
+) -> TypedDomainRecordRef<LegalCaseloadPeriodRecord> {
+    TypedDomainRecordRef::new(caseload_period_record_id(jurisdiction, slot))
 }
 
 pub(crate) fn invalid(message: impl Into<String>) -> CanwuError {

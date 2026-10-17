@@ -98,6 +98,9 @@ pub fn compile_law(definition: &LegalDefinition) -> Result<CompiledLawPlan, Canw
         profile.jurisdiction_traversal.sort();
         profile.jurisdiction_traversal.dedup();
     }
+    if let Some(caseload) = &mut canonical.caseload {
+        caseload.canonicalize();
+    }
     for forum in &mut canonical.forums {
         forum.legal_orders.sort();
         forum.legal_orders.dedup();
@@ -295,6 +298,7 @@ pub fn compile_law(definition: &LegalDefinition) -> Result<CompiledLawPlan, Canw
         precedence_profile_by_id,
         jurisdiction_adjacency_by_profile,
         seat_authority_by_procedure,
+        caseload: canonical.caseload,
     };
     Ok(plan)
 }
@@ -366,6 +370,7 @@ pub fn validate_compiled_law_plan(plan: &CompiledLawPlan) -> Result<(), CanwuErr
         precedence_profiles: plan.precedence_profiles.clone(),
         id_blocks: plan.id_blocks.clone(),
         budgets: plan.budgets.clone(),
+        caseload: plan.caseload.clone(),
     };
     let rebuilt = compile_law(&definition)?;
     if &rebuilt != plan {
@@ -432,6 +437,21 @@ pub fn validate_definition(definition: &LegalDefinition) -> Result<(), CanwuErro
         || definition.budgets.max_memory_bytes > MAX_LEGAL_MEMORY_BYTES
     {
         return Err(invalid("legal budgets must be greater than zero"));
+    }
+    if let Some(caseload) = &definition.caseload {
+        caseload.validate()?;
+        let bound = caseload.max_state_bytes(
+            definition
+                .jurisdictions
+                .iter()
+                .map(|jurisdiction| jurisdiction.id.as_str()),
+        );
+        if bound > crate::MAX_CASELOAD_STATE_BYTES {
+            return Err(invalid(format!(
+                "caseload records could reach {bound} bytes, more than {}",
+                crate::MAX_CASELOAD_STATE_BYTES
+            )));
+        }
     }
     let authored_value = serde_json::to_value(definition)
         .map_err(|error| invalid(format!("legal definition cannot be encoded: {error}")))?;

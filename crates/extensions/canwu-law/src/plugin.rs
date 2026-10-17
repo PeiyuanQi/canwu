@@ -8,16 +8,17 @@ use crate::{
 use canwu_api::{
     ArchiveReachabilityManifest, BoundaryContext, BoundaryDirective, BoundaryPhase,
     BoundaryProposal, CanwuError, CauseRef, Command, CommandContext, DecisionOrigin,
-    DecisionRequestId, DecisionTicketId, DomainRecord, DomainRecordMutation, DomainRecordRef,
-    DomainRecordSchema, EntityRef, ErrorCode, EvidenceRef, IDENTITY_EVIDENCE_DEPENDENCIES_FIELD,
-    IngressClass, IngressPayload, KnowledgeHolderRef, OwnerAuthorizedMaintenanceRequest,
-    OwnerAuthorizedParticipantDraft, OwnerAuthorizedParticipantRole,
-    OwnerAuthorizedRecordExpectation, PayloadProperty, PayloadSchema, PayloadValueType,
-    PluginActionDescriptor, PluginArchiveObjectProvider, PluginArchiveRetention,
-    PluginIngressDescriptor, PluginIngressPermit, PluginRegistrar, SimulationPlugin,
-    SimulationView, StateKey, StateVisibility, SystemCadence, SystemDirective, canonical_hash,
-    identity_evidence_dependencies_property_v1,
+    DecisionRequestId, DecisionTicketId, DomainRecord, DomainRecordDraft, DomainRecordMutation,
+    DomainRecordRef, DomainRecordSchema, EntityRef, ErrorCode, EvidenceRef,
+    IDENTITY_EVIDENCE_DEPENDENCIES_FIELD, IngressClass, IngressPayload, KnowledgeHolderRef,
+    OwnerAuthorizedMaintenanceRequest, OwnerAuthorizedParticipantDraft,
+    OwnerAuthorizedParticipantRole, OwnerAuthorizedRecordExpectation, PayloadProperty,
+    PayloadSchema, PayloadValueType, PluginActionDescriptor, PluginArchiveObjectProvider,
+    PluginArchiveRetention, PluginIngressDescriptor, PluginIngressPermit, PluginRegistrar,
+    SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence, SystemDirective,
+    canonical_hash, identity_evidence_dependencies_property_v1,
 };
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -193,6 +194,13 @@ impl SimulationPlugin for LawPlugin {
             class: IngressClass::Information,
             payload_schema: PayloadSchema::Any,
         })?;
+        registrar.register_ingress(PluginIngressDescriptor {
+            name: crate::LAW_CASELOAD_INGRESS.to_owned(),
+            description: "Settle host-reported aggregate caseload per jurisdiction and period"
+                .to_owned(),
+            class: IngressClass::Information,
+            payload_schema: PayloadSchema::Any,
+        })?;
         registrar.register_command(law_command_descriptor(), submit_pending_intent)?;
         let persisted_states = law_record_schemas()
             .into_iter()
@@ -217,6 +225,7 @@ impl SimulationPlugin for LawPlugin {
         admission.emits = vec![
             LAW_INGRESS_REJECTED_EVENT.to_owned(),
             LAW_PROPOSAL_REJECTED_EVENT.to_owned(),
+            crate::LAW_CASELOAD_REJECTED_EVENT.to_owned(),
         ];
         registrar.register_boundary_system(admission, admit_legal_ingress)
     }
@@ -288,26 +297,7 @@ fn law_archive_reachability(
     for directory_root in pending_directory_roots {
         extend_directory_root_reachability(manifest, &provider, &directory_root)?;
     }
-    let (plan_record, plan_state, directory_record, directory, plan) =
-        load_legal_header_from_view(view)?;
-    let scope = directory
-        .directory
-        .active_shards
-        .iter()
-        .chain(directory.directory.archive_only_shards.iter())
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let runtime = load_legal_runtime_from_view_scope(
-        view,
-        plan_record,
-        plan_state,
-        directory_record,
-        directory,
-        &plan,
-        &scope,
-        false,
-    )?;
-    runtime.extend_archive_reachability(manifest, &provider)
+    load_full_runtime_from_view(view)?.extend_archive_reachability(manifest, &provider)
 }
 
 fn extend_directory_root_reachability(
@@ -411,6 +401,59 @@ pub fn enqueue_legal_mutation_at<H: canwu_api::CanwuRun + ?Sized>(
         at,
         serde_json::json!({ "mutation": mutation }),
     ))
+}
+
+/// Queue one batch of aggregate caseload reports for the current boundary.
+///
+/// The law admission system settles the reports in order; each one it
+/// refuses changes nothing and is recorded with
+/// [`crate::LAW_CASELOAD_REJECTED_EVENT`]. A batch with more reports than the
+/// plan's `max_reports_per_boundary` is refused whole.
+pub fn enqueue_caseload_intake<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
+    reports: &[crate::CaseloadIntakeReport],
+) -> Result<canwu_api::IngressReceipt, CanwuError> {
+    canwu.enqueue_plugin_ingress(canwu_api::PluginIngressRequest::new(
+        PLUGIN_NAME,
+        crate::LAW_CASELOAD_INGRESS,
+        canwu.time(),
+        serde_json::json!({ "reports": reports }),
+    ))
+}
+
+/// Read one jurisdiction's settled caseload, if any report of it settled:
+/// its kept periods, oldest first.
+pub fn load_legal_caseload<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
+    plan: &crate::CompiledLawPlan,
+    jurisdiction: &str,
+) -> Result<Option<crate::LegalCaseloadState>, CanwuError> {
+    let Some(head) =
+        canwu_api::typed_domain_record(canwu, &crate::legal_caseload_head_reference(jurisdiction))
+    else {
+        return Ok(None);
+    };
+    let head = head.decode_payload::<crate::LegalCaseloadHeadRecord>()?;
+    let profile = plan
+        .caseload
+        .as_ref()
+        .ok_or_else(|| invalid_record("the legal plan compiles no caseload profile"))?;
+    let mut periods = Vec::new();
+    for ordinal in crate::caseload::kept_ordinals(profile, head.settled_periods) {
+        let slot = crate::caseload::caseload_slot(profile, ordinal);
+        let period = canwu_api::typed_domain_record(
+            canwu,
+            &crate::legal_caseload_period_reference(jurisdiction, slot),
+        )
+        .ok_or_else(|| invalid_record("a caseload head names a missing period record"))?
+        .decode_payload::<crate::LegalCaseloadPeriodRecord>()?;
+        periods.push(period);
+    }
+    Ok(Some(crate::LegalCaseloadState {
+        jurisdiction: head.jurisdiction,
+        settled_periods: head.settled_periods,
+        periods,
+    }))
 }
 
 /// Stores, reads back, verifies, and queues one legal cold-archive transition
@@ -568,7 +611,7 @@ fn submit_pending_intent(
 }
 
 /// The law packet types the admission system settles, in no particular order.
-const LAW_PACKET_TYPES: [&str; 8] = [
+const LAW_PACKET_TYPES: [&str; 9] = [
     LAW_INTENT_INGRESS,
     LAW_ACTOR_CONTEXT_INGRESS,
     LAW_MUTATION_INGRESS,
@@ -577,6 +620,7 @@ const LAW_PACKET_TYPES: [&str; 8] = [
     LAW_OUTBOX_ACK_INGRESS,
     LAW_ARCHIVE_COMMIT_INGRESS,
     LAW_ARCHIVE_RETENTION_ACK_INGRESS,
+    crate::LAW_CASELOAD_INGRESS,
 ];
 
 /// One admitted law packet, decoded and checked on its own.
@@ -716,7 +760,7 @@ struct Refusal {
 ///
 /// The runtime is loaded once. A refusal found before a unit changed the
 /// working runtime costs nothing more; one found after it restarts the pass
-/// from a copy taken after loading, without the refused unit.
+/// from the runtime loaded again, without the refused unit.
 #[allow(clippy::too_many_lines)]
 fn admit_legal_ingress(
     view: &SimulationView<'_>,
@@ -724,6 +768,7 @@ fn admit_legal_ingress(
 ) -> Result<BoundaryProposal, CanwuError> {
     let mut refusals = Vec::new();
     let mut decoded = Vec::new();
+    let mut caseload_packets = Vec::new();
     let mut plugin_packets = Vec::new();
     for ingress_id in &context.admitted_ingress {
         // The view shows a law system only law packets; any other admitted
@@ -742,6 +787,13 @@ fn admit_legal_ingress(
         else {
             continue;
         };
+        if packet_type == crate::LAW_CASELOAD_INGRESS {
+            match decode_caseload_packet(ingress) {
+                Ok(reports) => caseload_packets.push((ingress.id, reports)),
+                Err(error) => refuse(&mut refusals, ingress.id, packet_type, error)?,
+            }
+            continue;
+        }
         match decode_law_packet(view, context, ingress, packet_type) {
             Ok(packet) => decoded.push((ingress.id, packet_type, packet)),
             Err(error) => refuse(&mut refusals, ingress.id, packet_type, error)?,
@@ -751,7 +803,15 @@ fn admit_legal_ingress(
     let Some(installed_plan) = view.typed_domain_record(&legal_plan_state_reference())? else {
         // Without an installed legal plan there is no legal work: every law
         // packet is refused and no provider packet is recorded.
-        for (ingress, packet_type, _) in decoded {
+        let unplanned = decoded
+            .into_iter()
+            .map(|(ingress, packet_type, _)| (ingress, packet_type))
+            .chain(
+                caseload_packets
+                    .into_iter()
+                    .map(|(ingress, _)| (ingress, crate::LAW_CASELOAD_INGRESS)),
+            );
+        for (ingress, packet_type) in unplanned {
             refuse(
                 &mut refusals,
                 ingress,
@@ -765,16 +825,22 @@ fn admit_legal_ingress(
             ..BoundaryProposal::default()
         });
     };
+    // Aggregate caseload settles on its own records and never loads the
+    // legal runtime.
+    let caseload = settle_caseload_packets(
+        view,
+        context,
+        installed_plan,
+        caseload_packets,
+        &mut refusals,
+    )?;
     let provider_packets = admitted_provider_packets(view, installed_plan, plugin_packets)?;
     if decoded.is_empty() && provider_packets.is_empty() {
         push_refusal_events(&mut directives, refusals);
-        return Ok(BoundaryProposal {
-            directives,
-            ..BoundaryProposal::default()
-        });
+        return Ok(caseload.into_proposal(directives));
     }
-    let (plan_record, plan_state, directory_record, directory, plan) =
-        load_legal_header_from_view(view)?;
+    let header = load_live_legal_header(view)?;
+    let (plan, directory) = (&header.plan, &header.directory);
     let units = group_law_units(
         decoded,
         plan.budgets.max_mutations_per_boundary,
@@ -785,8 +851,8 @@ fn admit_legal_ingress(
     let mut selected_units = Vec::new();
     for unit in units {
         let mut scope = BTreeSet::new();
-        match select_unit_scope(&unit.work, &plan, &directory, &mut scope)
-            .and_then(|()| require_held_shards(&directory, &scope))
+        match select_unit_scope(&unit.work, plan, directory, &mut scope)
+            .and_then(|()| require_routable_shards(plan, directory, &scope))
         {
             Ok(()) => {
                 selected_shards.extend(scope);
@@ -797,48 +863,38 @@ fn admit_legal_ingress(
     }
     if selected_units.is_empty() && provider_packets.is_empty() {
         push_refusal_events(&mut directives, refusals);
-        return Ok(BoundaryProposal {
-            directives,
-            ..BoundaryProposal::default()
-        });
+        return Ok(caseload.into_proposal(directives));
     }
-    let load = |shards: &BTreeSet<LegalShardKey>| -> Result<LegalRuntime, CanwuError> {
-        let runtime = load_legal_runtime_from_view_scope(
-            view,
-            plan_record.clone(),
-            plan_state.clone(),
-            directory_record.clone(),
-            directory.clone(),
-            &plan,
-            shards,
-            true,
-        )?;
-        runtime.validate_live_plan_binding(&plan)?;
-        Ok(runtime)
-    };
-    let mut runtime = load(&selected_shards)?;
+    let mut runtime = load_scoped_runtime_from_view(view, &header, &selected_shards)?;
     if !selected_units.is_empty() {
         // Work an earlier boundary deferred stays pending in the coordinator
         // while its records live in their own shards; a boundary that may
         // settle loads them too, at most once more.
         let pending = runtime.pending_work_routes(context.at);
         if !pending.is_subset(&selected_shards) {
-            require_held_shards(&directory, &pending)?;
+            require_routable_shards(plan, directory, &pending)?;
             selected_shards.extend(pending);
-            runtime = load(&selected_shards)?;
+            runtime = load_scoped_runtime_from_view(view, &header, &selected_shards)?;
         }
     }
     let mut changed = false;
-    for (id, packet) in provider_packets {
-        changed |= runtime.record_provider_packet(id, packet)?;
+    for (id, packet) in &provider_packets {
+        changed |= runtime.record_provider_packet(*id, packet.clone())?;
     }
     // Apply the units in their canonical order. A unit that fails is refused
     // and dropped. A failure found before the unit changed the working
     // runtime leaves it as it was; one found after starts the pass again from
-    // the copy taken here, without the refused unit, so a refused unit leaves
-    // nothing behind. A refused archive commit records its terminal in place
-    // of its work. Each restart drops one more unit.
-    let loaded = runtime.clone();
+    // the runtime as loaded (loaded again, with the provider packets recorded
+    // again, so the common pass copies nothing), without the refused unit, so
+    // a refused unit leaves nothing behind. A refused archive commit records
+    // its terminal in place of its work. Each restart drops one more unit.
+    let reload = || -> Result<LegalRuntime, CanwuError> {
+        let mut runtime = load_scoped_runtime_from_view(view, &header, &selected_shards)?;
+        for (id, packet) in &provider_packets {
+            runtime.record_provider_packet(*id, packet.clone())?;
+        }
+        Ok(runtime)
+    };
     let mut refused_units = BTreeMap::<usize, String>::new();
     let mut unrecorded_terminals = BTreeSet::new();
     loop {
@@ -859,7 +915,7 @@ fn admit_legal_ingress(
                 }
                 continue;
             }
-            if let Err(failure) = apply_law_unit(view, context, &plan, &mut runtime, &unit.work) {
+            if let Err(failure) = apply_law_unit(view, context, plan, &mut runtime, &unit.work) {
                 refuse_unit(&mut refusals, unit, &failure.error)?;
                 refused_units.insert(index, failure.error.message.clone());
                 if failure.changed_runtime {
@@ -871,7 +927,7 @@ fn admit_legal_ingress(
         if !restart {
             break;
         }
-        runtime = loaded.clone();
+        runtime = reload()?;
     }
     let settles = refused_units.len() < selected_units.len();
     changed |= settles
@@ -882,15 +938,18 @@ fn admit_legal_ingress(
         });
     if !changed {
         push_refusal_events(&mut directives, refusals);
-        return Ok(BoundaryProposal {
-            directives,
-            ..BoundaryProposal::default()
-        });
+        return Ok(caseload.into_proposal(directives));
     }
     let mut rejected_proposals = Vec::new();
     if settles {
-        rejected_proposals = reject_stale_pending_proposals(view, &mut runtime)?;
-        let result = runtime.settle_boundary(&plan, context.at, &[])?;
+        let check = reject_stale_pending_proposals(
+            view,
+            &mut runtime,
+            plan.budgets.max_mutations_per_boundary,
+        )?;
+        rejected_proposals = check.rejected;
+        let result =
+            runtime.settle_checked_boundary(plan, context.at, check.checked_through.as_deref())?;
         rejected_proposals.extend(
             result
                 .rejected_proposals
@@ -930,19 +989,10 @@ fn admit_legal_ingress(
             });
         }
     }
+    // The plan record never changes after it is installed: only the
+    // directory and the loaded shards are drafted and compared.
     let mut state_directives = Vec::new();
-    let mut selected_records = BTreeSet::from([
-        legal_plan_state_reference().into_untyped(),
-        legal_directory_state_reference().into_untyped(),
-    ]);
-    for shard in &selected_shards {
-        selected_records.insert(legal_shard_state_reference(shard)?.into_untyped());
-        selected_records.insert(legal_archive_head_state_reference(shard)?.into_untyped());
-    }
-    for mut draft in runtime.to_record_drafts()? {
-        if !selected_records.contains(&draft.reference) {
-            continue;
-        }
+    for mut draft in runtime.to_live_record_drafts(&selected_shards)? {
         match view.domain_record(&draft.reference)? {
             Some(record)
                 if record.payload == draft.payload && record.references == draft.references => {}
@@ -972,10 +1022,303 @@ fn admit_legal_ingress(
             affected: Vec::new(),
         });
     }
-    Ok(BoundaryProposal {
-        directives,
-        ..BoundaryProposal::default()
-    })
+    Ok(caseload.into_proposal(directives))
+}
+
+/// What one boundary's caseload packets settle: the caseload record writes
+/// and one refusal event per refused report.
+#[derive(Default)]
+struct CaseloadSettlement {
+    mutations: Vec<BoundaryDirective>,
+    events: Vec<BoundaryDirective>,
+}
+
+impl CaseloadSettlement {
+    /// The boundary proposal: caseload writes, then the other law
+    /// directives, then the caseload refusal events.
+    fn into_proposal(self, directives: Vec<BoundaryDirective>) -> BoundaryProposal {
+        let mut all = self.mutations;
+        all.extend(directives);
+        all.extend(self.events);
+        BoundaryProposal {
+            directives: all,
+            ..BoundaryProposal::default()
+        }
+    }
+}
+
+fn decode_caseload_packet(
+    ingress: &canwu_api::IngressRecord,
+) -> Result<Vec<crate::CaseloadIntakeReport>, CanwuError> {
+    let IngressPayload::Plugin { payload, .. } = &ingress.payload else {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPayload,
+            "legal caseload intake is not a plugin packet",
+        ));
+    };
+    let reports: Vec<crate::CaseloadIntakeReport> =
+        decode_field(payload, "reports", "legal caseload intake")?;
+    if reports.is_empty() {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPayload,
+            "legal caseload intake carries no report",
+        ));
+    }
+    Ok(reports)
+}
+
+/// Settles this boundary's caseload reports, packet by packet in admission
+/// order and report by report in packet order.
+///
+/// The profile and the jurisdiction index are read from the installed plan
+/// record without decoding the plan; each touched jurisdiction's head and
+/// newest period are read once, and its records written once. Every examined
+/// report counts against the profile's `max_reports_per_boundary`, settled or
+/// refused; a refused report changes nothing and is recorded with
+/// [`crate::LAW_CASELOAD_REJECTED_EVENT`]. A repeat of the newest period is
+/// decided first, comparing evidence as data; only a report that would settle
+/// has its evidence checked. A packet that does not fit the budget on its
+/// own, or a plan without a caseload profile, refuses the whole packet with
+/// [`LAW_INGRESS_REJECTED_EVENT`]. Every decision reads committed caseload
+/// records, the plan, and this boundary's evidence rule, so a sealed run
+/// decides as its unsealed replay does.
+fn settle_caseload_packets(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    installed_plan: &DomainRecord,
+    packets: Vec<(canwu_api::IngressId, Vec<crate::CaseloadIntakeReport>)>,
+    refusals: &mut Vec<Refusal>,
+) -> Result<CaseloadSettlement, CanwuError> {
+    use crate::CaseloadRefusalReason as Reason;
+    let mut settlement = CaseloadSettlement::default();
+    if packets.is_empty() {
+        return Ok(settlement);
+    }
+    let plan = installed_plan
+        .payload
+        .pointer("/fields/plan")
+        .ok_or_else(|| invalid_record("law plan state is missing its compiled plan"))?;
+    let profile = plan
+        .get("caseload")
+        .filter(|profile| !profile.is_null())
+        .map(crate::CaseloadProfileDefinition::deserialize)
+        .transpose()
+        .map_err(|error| {
+            invalid_record(format!("law plan caseload profile is invalid: {error}"))
+        })?;
+    let Some(profile) = profile else {
+        for (ingress, _) in packets {
+            refuse(
+                refusals,
+                ingress,
+                crate::LAW_CASELOAD_INGRESS,
+                invalid_record("the legal plan compiles no caseload profile"),
+            )?;
+        }
+        return Ok(settlement);
+    };
+    let jurisdictions = plan
+        .get("jurisdiction_by_id")
+        .and_then(Value::as_object)
+        .ok_or_else(|| invalid_record("law plan state lacks its jurisdiction index"))?;
+    let budget = usize::try_from(profile.max_reports_per_boundary).unwrap_or(usize::MAX);
+    let mut examined = 0_usize;
+    // Each touched jurisdiction's caseload as this boundary leaves it.
+    let mut works = BTreeMap::<String, CaseloadWork>::new();
+    let no_declarations = BTreeSet::new();
+    for (ingress, reports) in packets {
+        if reports.len() > budget {
+            refuse(
+                refusals,
+                ingress,
+                crate::LAW_CASELOAD_INGRESS,
+                CanwuError::new(
+                    ErrorCode::ValueOutOfRange,
+                    "legal caseload intake carries more reports than one boundary settles",
+                ),
+            )?;
+            continue;
+        }
+        for (index, report) in reports.iter().enumerate() {
+            let outcome = if examined >= budget {
+                Err((
+                    Reason::BoundaryBudget,
+                    "this boundary settled its caseload report budget".to_owned(),
+                ))
+            } else if !jurisdictions.contains_key(&report.jurisdiction) {
+                examined += 1;
+                Err((
+                    Reason::JurisdictionUnknown,
+                    "the plan compiles no such jurisdiction".to_owned(),
+                ))
+            } else {
+                examined += 1;
+                let work = match works.entry(report.jurisdiction.clone()) {
+                    std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(CaseloadWork::load(view, &profile, &report.jurisdiction)?)
+                    }
+                };
+                // A repeat of the newest period is decided before its
+                // evidence is looked at, so a retry at a later boundary is
+                // already settled even if its evidence is no longer citable.
+                if let Some(repeat) =
+                    crate::caseload::repeat_of_newest(work.latest.as_ref(), report)
+                {
+                    Err(repeat)
+                } else if let Err(refusal) = crate::caseload::check_caseload_evidence_budget(report)
+                {
+                    Err(refusal)
+                } else {
+                    match verify_evidence(view, &no_declarations, report.evidence.iter().cloned()) {
+                        Err(error) if error.code == ErrorCode::EvidenceContentUnavailable => {
+                            return Err(error);
+                        }
+                        Err(error) => Err((Reason::EvidenceUnavailable, error.message)),
+                        Ok(()) => match crate::caseload::settle_caseload_report(
+                            &profile,
+                            work.latest.as_ref(),
+                            report,
+                            EvidenceRef::Ingress(ingress),
+                            context.at,
+                        ) {
+                            Ok(period) => {
+                                work.settle(view, &profile, period)?;
+                                Ok(())
+                            }
+                            Err(refusal) => Err(refusal),
+                        },
+                    }
+                }
+            };
+            if let Err((reason, detail)) = outcome {
+                settlement.events.push(BoundaryDirective::Emit {
+                    event_type: crate::LAW_CASELOAD_REJECTED_EVENT.to_owned(),
+                    summary: format!(
+                        "legal caseload report {index} of ingress {ingress} for jurisdiction {} \
+                         period [{}, {}) rejected: {}: {detail}",
+                        report.jurisdiction,
+                        report.period.start.as_minutes(),
+                        report.period.end.as_minutes(),
+                        reason.code(),
+                    ),
+                    affected: Vec::new(),
+                });
+            }
+        }
+    }
+    for (jurisdiction, work) in works {
+        work.write(&jurisdiction, &mut settlement.mutations)?;
+    }
+    Ok(settlement)
+}
+
+/// One jurisdiction's caseload while a boundary settles its reports: the
+/// head, the newest period, and the period slots this boundary rewrites.
+struct CaseloadWork {
+    head_version: Option<u64>,
+    settled: u64,
+    latest: Option<crate::AggregateCaseloadRecord>,
+    /// Slot, its committed record version, and the period written to it.
+    slots: BTreeMap<u64, (Option<u64>, crate::AggregateCaseloadRecord)>,
+}
+
+impl CaseloadWork {
+    fn load(
+        view: &SimulationView<'_>,
+        profile: &crate::CaseloadProfileDefinition,
+        jurisdiction: &str,
+    ) -> Result<Self, CanwuError> {
+        let Some(head) =
+            view.typed_domain_record(&crate::legal_caseload_head_reference(jurisdiction))?
+        else {
+            return Ok(Self {
+                head_version: None,
+                settled: 0,
+                latest: None,
+                slots: BTreeMap::new(),
+            });
+        };
+        let settled = head
+            .decode_payload::<crate::LegalCaseloadHeadRecord>()?
+            .settled_periods;
+        let slot = crate::caseload::caseload_slot(profile, settled);
+        let latest = view
+            .typed_domain_record(&crate::legal_caseload_period_reference(jurisdiction, slot))?
+            .ok_or_else(|| invalid_record("a caseload head names a missing period record"))?
+            .decode_payload::<crate::LegalCaseloadPeriodRecord>()?;
+        Ok(Self {
+            head_version: Some(head.version),
+            settled,
+            latest: Some(latest),
+            slots: BTreeMap::new(),
+        })
+    }
+
+    fn settle(
+        &mut self,
+        view: &SimulationView<'_>,
+        profile: &crate::CaseloadProfileDefinition,
+        period: crate::AggregateCaseloadRecord,
+    ) -> Result<(), CanwuError> {
+        let slot = crate::caseload::caseload_slot(profile, period.ordinal);
+        let version = match self.slots.get(&slot) {
+            Some((version, _)) => *version,
+            None => view
+                .typed_domain_record(&crate::legal_caseload_period_reference(
+                    &period.jurisdiction,
+                    slot,
+                ))?
+                .map(|record| record.version),
+        };
+        self.settled = period.ordinal;
+        self.latest = Some(period.clone());
+        self.slots.insert(slot, (version, period));
+        Ok(())
+    }
+
+    fn write(
+        self,
+        jurisdiction: &str,
+        mutations: &mut Vec<BoundaryDirective>,
+    ) -> Result<(), CanwuError> {
+        if self.slots.is_empty() {
+            return Ok(());
+        }
+        let mutate =
+            |record: DomainRecordDraft, version: Option<u64>| BoundaryDirective::MutateRecord {
+                mutation: match version {
+                    Some(expected_version) => DomainRecordMutation::Update {
+                        record,
+                        expected_version,
+                    },
+                    None => DomainRecordMutation::Create { record },
+                },
+                summary: "Settle one aggregate legal caseload period".to_owned(),
+            };
+        let head = crate::LegalCaseloadHead {
+            format_version: crate::LEGAL_CASELOAD_FORMAT_VERSION,
+            jurisdiction: jurisdiction.to_owned(),
+            settled_periods: self.settled,
+        };
+        mutations.push(mutate(
+            DomainRecordDraft::from_typed(
+                crate::legal_caseload_head_reference(jurisdiction),
+                &head,
+            )?,
+            self.head_version,
+        ));
+        for (slot, (version, period)) in self.slots {
+            mutations.push(mutate(
+                DomainRecordDraft::from_typed(
+                    crate::legal_caseload_period_reference(jurisdiction, slot),
+                    &period,
+                )?,
+                version,
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// The compiled provider packets this boundary admits, each with the payload
@@ -1470,17 +1813,39 @@ fn group_law_units(
     Ok(units)
 }
 
+fn directory_holds(directory: &crate::LegalDirectoryState, shard: &LegalShardKey) -> bool {
+    directory.directory.active_shards.contains(shard)
+        || directory.directory.archive_only_shards.contains(shard)
+}
+
+/// Whether `shard` is a shard of the plan: the coordinator, the culture
+/// dependency shard, a compiled order's shard, or a compiled jurisdiction's.
+/// An order or jurisdiction shard exists only once it holds something.
+fn plan_compiles_shard(plan: &crate::CompiledLawPlan, shard: &LegalShardKey) -> bool {
+    match (shard.kind, &shard.jurisdiction) {
+        (crate::LegalShardKind::Order, None) => plan.order_by_id.contains_key(&shard.legal_order),
+        (crate::LegalShardKind::Jurisdiction, Some(jurisdiction)) => {
+            shard.legal_order == plan.definition_id
+                && plan.jurisdiction_by_id.contains_key(jurisdiction)
+        }
+        (crate::LegalShardKind::Coordinator | crate::LegalShardKind::CultureDependency, None) => {
+            shard.legal_order == plan.definition_id
+        }
+        _ => false,
+    }
+}
+
 /// Refuses a working set that names a shard the legal directory does not
-/// hold, such as one of an order or jurisdiction the plan does not compile;
-/// loading it would fail the whole boundary.
-fn require_held_shards(
+/// hold and the plan does not compile, such as one of an order or
+/// jurisdiction the plan does not compile; loading it would fail the whole
+/// boundary.
+fn require_routable_shards(
+    plan: &crate::CompiledLawPlan,
     directory: &crate::LegalDirectoryState,
     scope: &BTreeSet<LegalShardKey>,
 ) -> Result<(), CanwuError> {
     for shard in scope {
-        if !directory.directory.active_shards.contains(shard)
-            && !directory.directory.archive_only_shards.contains(shard)
-        {
+        if !directory_holds(directory, shard) && !plan_compiles_shard(plan, shard) {
             return Err(invalid_record(
                 "legal ingress names a shard the legal directory does not hold",
             ));
@@ -2105,19 +2470,46 @@ fn verify_publicity_provenance(
     ))
 }
 
+/// What [`reject_stale_pending_proposals`] did: the proposals it rejected,
+/// each with the reason, and the last dirty procedure it checked when its
+/// budget stopped it before the end of the dirty set.
+struct StaleProposalCheck {
+    rejected: Vec<(String, String)>,
+    checked_through: Option<String>,
+}
+
 /// Rejects every pending proposal this boundary will work on whose host
 /// compare-and-set no longer holds or that depends on a retired culture
 /// generation, and closes its procedure, before the boundary settles.
 ///
 /// Such a proposal can never be adopted. Rejecting it, as a failed law-local
 /// head compare-and-set already is at adoption, keeps it from failing every
-/// boundary that touches it. Returns each rejected proposal with the reason.
+/// boundary that touches it.
+///
+/// The pass checks at most `budget` dirty procedures, in procedure-ID order
+/// (the order settlement selects them in), so a pile-up of dirty procedures
+/// costs one check per procedure per boundary that reaches it rather than
+/// one per dirty procedure at every boundary of its continuation chain. When
+/// the budget stops the pass, settlement leaves the dirty procedures after
+/// the last one checked for a continuation boundary at the same time
+/// ([`StaleProposalCheck::checked_through`]), so no procedure is advanced
+/// at a boundary that did not check it.
 fn reject_stale_pending_proposals(
     view: &SimulationView<'_>,
     runtime: &mut LegalRuntime,
-) -> Result<Vec<(String, String)>, CanwuError> {
+    budget: usize,
+) -> Result<StaleProposalCheck, CanwuError> {
     let mut rejected = Vec::new();
-    for procedure_id in runtime.dirty_procedures.clone() {
+    let mut checked = Vec::new();
+    let mut checked_through = None;
+    for procedure_id in &runtime.dirty_procedures {
+        if checked.len() >= budget.max(1) {
+            checked_through = checked.last().cloned();
+            break;
+        }
+        checked.push(procedure_id.clone());
+    }
+    for procedure_id in checked {
         let Some(proposal) = runtime
             .procedures
             .get(&procedure_id)
@@ -2141,7 +2533,10 @@ fn reject_stale_pending_proposals(
         runtime.reject_open_procedure(&procedure_id)?;
         rejected.push((proposal_id, reason.to_owned()));
     }
-    Ok(rejected)
+    Ok(StaleProposalCheck {
+        rejected,
+        checked_through,
+    })
 }
 
 fn verify_outbox_can_reprepare(
@@ -2413,55 +2808,27 @@ fn assemble_runtime_from_records(
     LegalRuntime::from_persistence_image(plan, plan_state, directory_state, &shards, heads)
 }
 
-fn load_legal_header_from_view(
-    view: &SimulationView<'_>,
-) -> Result<
-    (
-        DomainRecord,
-        LegalPlanState,
-        DomainRecord,
-        crate::LegalDirectoryState,
-        crate::CompiledLawPlan,
-    ),
-    CanwuError,
-> {
+/// Loads the whole legal runtime from the view, for a reader that needs
+/// every shard (archive reachability). It decodes every law record.
+fn load_full_runtime_from_view(view: &SimulationView<'_>) -> Result<LegalRuntime, CanwuError> {
     let plan_record = view
         .typed_domain_record(&legal_plan_state_reference())?
-        .ok_or_else(|| invalid_record("law plan state is missing"))?
-        .clone();
-    let plan_state = plan_record.decode_payload::<LegalPlanStateRecord>()?;
-    let plan = decode_compiled_plan(&plan_state)?;
+        .ok_or_else(|| invalid_record("law plan state is missing"))?;
+    let plan = decode_compiled_plan(&plan_record.decode_payload::<LegalPlanStateRecord>()?)?;
     let directory_record = view
         .typed_domain_record(&legal_directory_state_reference())?
-        .ok_or_else(|| invalid_record("law directory state is missing"))?
-        .clone();
+        .ok_or_else(|| invalid_record("law directory state is missing"))?;
     let directory = directory_record.decode_payload::<LegalDirectoryStateRecord>()?;
-    Ok((plan_record, plan_state, directory_record, directory, plan))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn load_legal_runtime_from_view_scope(
-    view: &SimulationView<'_>,
-    plan_record: DomainRecord,
-    plan_state: LegalPlanState,
-    directory_record: DomainRecord,
-    directory: crate::LegalDirectoryState,
-    plan: &crate::CompiledLawPlan,
-    scope: &BTreeSet<LegalShardKey>,
-    partial: bool,
-) -> Result<LegalRuntime, CanwuError> {
     let mut records = BTreeMap::from([
-        (plan_record.reference.clone(), plan_record),
-        (directory_record.reference.clone(), directory_record),
+        (plan_record.reference.clone(), plan_record.clone()),
+        (directory_record.reference.clone(), directory_record.clone()),
     ]);
-    for shard in scope {
-        if !directory.directory.active_shards.contains(shard)
-            && !directory.directory.archive_only_shards.contains(shard)
-        {
-            return Err(invalid_record(
-                "legal working set requests an unknown shard",
-            ));
-        }
+    for shard in directory
+        .directory
+        .active_shards
+        .iter()
+        .chain(directory.directory.archive_only_shards.iter())
+    {
         for reference in [
             legal_shard_state_reference(shard)?.into_untyped(),
             legal_archive_head_state_reference(shard)?.into_untyped(),
@@ -2473,36 +2840,119 @@ fn load_legal_runtime_from_view_scope(
             records.insert(reference, record);
         }
     }
-    if partial {
-        let mut shards = BTreeMap::new();
-        let mut heads = BTreeMap::new();
-        for shard in scope {
-            let shard_record = records
-                .get(&legal_shard_state_reference(shard)?.into_untyped())
-                .ok_or_else(|| invalid_record("legal working-set shard is missing"))?;
-            let head_record = records
-                .get(&legal_archive_head_state_reference(shard)?.into_untyped())
-                .ok_or_else(|| invalid_record("legal working-set archive head is missing"))?;
-            shards.insert(
-                shard.clone(),
-                shard_record.decode_payload::<LegalShardStateRecord>()?,
-            );
-            heads.insert(
-                shard.clone(),
-                head_record.decode_payload::<LegalArchiveHeadStateRecord>()?,
-            );
-        }
-        LegalRuntime::from_scoped_persistence_image(
-            plan,
-            plan_state,
-            directory,
-            &shards,
-            heads,
-            Some(scope),
-        )
-    } else {
-        assemble_runtime_from_records(&records, plan)
+    assemble_runtime_from_records(&records, &plan)
+}
+
+/// The plan and directory a live boundary works with, decoded from the view
+/// without copying the plan record.
+struct LiveLegalHeader {
+    /// The plan record's identity: format, plan hash, and evidence
+    /// declaration. Its fields are left empty; a scoped load takes the plan,
+    /// its hash, and its budgets from [`Self::plan`].
+    plan_state: LegalPlanState,
+    directory: crate::LegalDirectoryState,
+    plan: crate::CompiledLawPlan,
+}
+
+fn load_live_legal_header(view: &SimulationView<'_>) -> Result<LiveLegalHeader, CanwuError> {
+    let plan_record = view
+        .typed_domain_record(&legal_plan_state_reference())?
+        .ok_or_else(|| invalid_record("law plan state is missing"))?;
+    let payload = &plan_record.payload;
+    let format_version = payload
+        .get("format_version")
+        .and_then(Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .ok_or_else(|| invalid_record("law plan state lacks its format version"))?;
+    let plan_hash = payload
+        .get("plan_hash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_record("law plan state lacks its plan hash"))?
+        .to_owned();
+    let evidence_dependencies = payload
+        .get(IDENTITY_EVIDENCE_DEPENDENCIES_FIELD)
+        .map(canwu_api::IdentityEvidenceDependenciesV1::deserialize)
+        .transpose()
+        .map_err(|error| invalid_record(format!("law plan state declaration is invalid: {error}")))?
+        .ok_or_else(|| invalid_record("law plan state lacks its evidence declaration"))?;
+    let plan = payload
+        .pointer("/fields/plan")
+        .map(crate::CompiledLawPlan::deserialize)
+        .transpose()
+        .map_err(|error| {
+            invalid_record(format!(
+                "law plan state contains an invalid compiled plan: {error}"
+            ))
+        })?
+        .ok_or_else(|| invalid_record("law plan state is missing its compiled plan"))?;
+    if plan.content_hash != plan_hash {
+        return Err(invalid_record(
+            "law plan state hash does not match the compiled plan",
+        ));
     }
+    let directory_record = view
+        .typed_domain_record(&legal_directory_state_reference())?
+        .ok_or_else(|| invalid_record("law directory state is missing"))?;
+    let directory = crate::LegalDirectoryState::deserialize(&directory_record.payload)
+        .map_err(|error| invalid_record(format!("law directory state is invalid: {error}")))?;
+    Ok(LiveLegalHeader {
+        plan_state: LegalPlanState {
+            format_version,
+            plan_hash,
+            fields: BTreeMap::new(),
+            evidence_dependencies,
+        },
+        directory,
+        plan,
+    })
+}
+
+/// Loads the shards of `scope` the directory holds; a compiled order or
+/// jurisdiction shard that does not exist yet holds nothing and is skipped.
+fn load_scoped_runtime_from_view(
+    view: &SimulationView<'_>,
+    header: &LiveLegalHeader,
+    scope: &BTreeSet<LegalShardKey>,
+) -> Result<LegalRuntime, CanwuError> {
+    let mut shards = BTreeMap::new();
+    let mut heads = BTreeMap::new();
+    for shard in scope {
+        if !directory_holds(&header.directory, shard) {
+            if plan_compiles_shard(&header.plan, shard) {
+                continue;
+            }
+            return Err(invalid_record(
+                "legal working set requests an unknown shard",
+            ));
+        }
+        let decode = |reference: DomainRecordRef| {
+            view.domain_record(&reference)?
+                .ok_or_else(|| invalid_record("law directory references a missing record"))
+        };
+        let shard_record = decode(legal_shard_state_reference(shard)?.into_untyped())?;
+        let head_record = decode(legal_archive_head_state_reference(shard)?.into_untyped())?;
+        shards.insert(
+            shard.clone(),
+            crate::LegalShardState::deserialize(&shard_record.payload)
+                .map_err(|error| invalid_record(format!("legal shard is invalid: {error}")))?,
+        );
+        heads.insert(
+            shard.clone(),
+            crate::LegalArchiveHeadState::deserialize(&head_record.payload).map_err(|error| {
+                invalid_record(format!("legal archive head is invalid: {error}"))
+            })?,
+        );
+    }
+    let runtime = LegalRuntime::from_scoped_persistence_image(
+        &header.plan,
+        header.plan_state.clone(),
+        header.directory.clone(),
+        &shards,
+        heads,
+        Some(scope),
+    )?;
+    runtime.validate_live_plan_binding(&header.plan)?;
+    Ok(runtime)
 }
 
 #[must_use]
@@ -2523,7 +2973,70 @@ pub fn law_record_schemas() -> Vec<DomainRecordSchema> {
         schema::<LegalDirectoryStateRecord>(),
         schema::<LegalShardStateRecord>(),
         schema::<LegalArchiveHeadStateRecord>(),
+        // Caseload records cite evidence as data and declare none, so a seal
+        // never has to keep anything for them.
+        DomainRecordSchema::for_record::<crate::LegalCaseloadHeadRecord>(),
+        DomainRecordSchema::for_record::<crate::LegalCaseloadPeriodRecord>(),
     ]
+}
+
+/// Checks every caseload head and period record against the installed
+/// plan's profile and jurisdictions: each head keeps exactly its retained
+/// periods, each in its slot and chained to the one before, and no period
+/// record lacks its head.
+fn validate_caseload_records<'a>(
+    plan: Option<&crate::CompiledLawPlan>,
+    records: impl IntoIterator<Item = &'a DomainRecord>,
+) -> Result<(), CanwuError> {
+    let mut heads = BTreeMap::new();
+    let mut periods =
+        BTreeMap::<String, BTreeMap<u64, (String, crate::AggregateCaseloadRecord)>>::new();
+    for record in records {
+        if plan.is_none() {
+            return Err(invalid_record(
+                "a law caseload record exists without an installed legal plan",
+            ));
+        }
+        if record.reference.kind.name == crate::LAW_CASELOAD_HEAD {
+            let head = record.decode_payload::<crate::LegalCaseloadHeadRecord>()?;
+            heads.insert(record.reference.id.clone(), head);
+        } else {
+            let period = record.decode_payload::<crate::LegalCaseloadPeriodRecord>()?;
+            let slot = record
+                .reference
+                .id
+                .rsplit_once(':')
+                .and_then(|(_, slot)| slot.parse::<u64>().ok())
+                .ok_or_else(|| invalid_record("a caseload period record ID names no slot"))?;
+            if periods
+                .entry(period.jurisdiction.clone())
+                .or_default()
+                .insert(slot, (record.reference.id.clone(), period))
+                .is_some()
+            {
+                return Err(invalid_record("two caseload period records share one slot"));
+            }
+        }
+    }
+    let Some(plan) = plan else {
+        return Ok(());
+    };
+    for (head_id, head) in &heads {
+        let kept = periods.remove(&head.jurisdiction).unwrap_or_default();
+        crate::caseload::validate_caseload_records(
+            plan.caseload.as_ref(),
+            |jurisdiction| plan.jurisdiction_by_id.contains_key(jurisdiction),
+            head_id,
+            head,
+            &kept,
+        )?;
+    }
+    if !periods.is_empty() {
+        return Err(invalid_record(
+            "a caseload period record has no head of its jurisdiction",
+        ));
+    }
+    Ok(())
 }
 
 fn encoded_runtime_payload_len(record: &DomainRecord) -> Result<usize, CanwuError> {
@@ -2618,7 +3131,10 @@ fn validate_law_records<H: canwu_api::CanwuRun + ?Sized>(canwu: &H) -> Result<()
             LAW_PLAN_STATE if record.reference == legal_plan_state_reference().into_untyped() => {}
             LAW_DIRECTORY_STATE
                 if record.reference == legal_directory_state_reference().into_untyped() => {}
-            LAW_SHARD_STATE | LAW_ARCHIVE_HEAD_STATE => {}
+            LAW_SHARD_STATE
+            | LAW_ARCHIVE_HEAD_STATE
+            | crate::LAW_CASELOAD_HEAD
+            | crate::LAW_CASELOAD_PERIOD => {}
             unknown => {
                 return Err(CanwuError::new(
                     ErrorCode::InvalidDomainRecord,
@@ -2634,10 +3150,20 @@ fn validate_law_activation_records(records: &[DomainRecord]) -> Result<(), Canwu
     let mut plan_seen = false;
     let mut directory_seen = false;
     let mut encoded_bytes = 0_usize;
+    let mut caseload_records = Vec::new();
     for record in records
         .iter()
         .filter(|record| record.reference.kind.namespace == crate::PLUGIN_NAMESPACE)
     {
+        // Caseload records are bounded by their profile, not by the legal
+        // state budget; they are checked against the plan below.
+        if matches!(
+            record.reference.kind.name.as_str(),
+            crate::LAW_CASELOAD_HEAD | crate::LAW_CASELOAD_PERIOD
+        ) {
+            caseload_records.push(record);
+            continue;
+        }
         match record.reference.kind.name.as_str() {
             LAW_RUNTIME_STATE => {
                 return Err(invalid_record(
@@ -2704,6 +3230,9 @@ fn validate_law_activation_records(records: &[DomainRecord]) -> Result<(), Canwu
             .map(|record| (record.reference.clone(), record.clone()))
             .collect::<BTreeMap<_, _>>();
         assemble_runtime_from_records(&records_by_ref, &plan)?;
+        validate_caseload_records(Some(&plan), caseload_records)?;
+    } else {
+        validate_caseload_records(None, caseload_records)?;
     }
     Ok(())
 }

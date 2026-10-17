@@ -29,12 +29,13 @@ pub use model::{
     AudienceMembershipProofV1, AudiencePayload, AuthenticityFinding, AuthorityAssignmentPayload,
     ChannelCapability, ChannelPayload, ClaimedSourceRef, ContentDerivation, ContentDigest,
     ContentPayload, ContentRelation, ContentSourceEdge, ContentSourceRole,
+    DELEGATED_AUTHORITY_LEDGER_FORMAT_VERSION, DelegatedAuthorityLedgerPayload,
     DelegatedAuthorityPayload, DelegationAuthorityGrant, DelegationClaimV1,
-    DelegationEvidenceSelector, DeliveryAttemptPayload, DeliveryAttemptStatus, DigestAlgorithm,
-    DispatchPayload, DispatchStatus, DispatchTarget, InformationBody, InformationLimitsV1,
-    InstancePayload, InstanceStatus, InterpretationAuthority, InterpretationPayload,
-    InterpretationStatus, MAX_AUTHENTICITY_BASIS_BYTES, ReleasePayload, ReleaseScope,
-    ReleaseStatus, RepresentationPayload, RepresentationSourceEdge,
+    DelegationEvidenceSelector, DelegationExpiry, DeliveryAttemptPayload, DeliveryAttemptStatus,
+    DigestAlgorithm, DispatchPayload, DispatchStatus, DispatchTarget, InformationBody,
+    InformationLimitsV1, InstancePayload, InstanceStatus, InterpretationAuthority,
+    InterpretationPayload, InterpretationStatus, MAX_AUTHENTICITY_BASIS_BYTES, ReleasePayload,
+    ReleaseScope, ReleaseStatus, RepresentationPayload, RepresentationSourceEdge,
 };
 pub use operation::{
     InformationAdmissionRef, InformationContinuation, InformationOperation,

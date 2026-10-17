@@ -3,8 +3,8 @@ use crate::lifecycle::{
     validate_delegation_claim, validate_delegation_grant,
 };
 use crate::model::{
-    DelegatedAuthorityPayload, DelegationAuthorityGrant, DelegationClaimV1,
-    DelegationEvidenceSelector, DeliveryAttemptStatus, InformationLimitsV1,
+    DelegatedAuthorityLedgerPayload, DelegatedAuthorityPayload, DelegationAuthorityGrant,
+    DelegationClaimV1, DelegationEvidenceSelector, DeliveryAttemptStatus, InformationLimitsV1,
     InterpretationAuthority, ReleaseStatus,
 };
 use crate::operation::{
@@ -51,7 +51,7 @@ pub const AUTHORITY_COMMAND_TYPE: &str = "delegate_interpretation_v1";
 pub const INFORMATION_REJECTION_EVENT: &str = "canwu.information.ingress_rejected.v1";
 
 const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
-const SEMANTIC_HASH: &str = "6f43035879633c586ca55e153b5c038f8b7a2276dd4bb8e0844b47b25707623d";
+const SEMANTIC_HASH: &str = "2782046f054331dde79e730434a6126c92b7d4b58244d08fe26051c4a7c5ba2d";
 const AUTHORITY_GRANTS_HASH: &str =
     "1f956d1dbee04d6cf7a076f778bb058e47a0a6155cd778c4163f78ccbbfe4b5c";
 const INPUT_HASH_DOMAIN: &str = "canwu.information.operation-input.v1";
@@ -303,7 +303,7 @@ fn apply_lifecycle_boundary(
 ) -> Result<BoundaryProposal, CanwuError> {
     let records = load_information_records(view)?;
     let mut directives = Vec::new();
-    let delegations = record_admitted_delegations(view, context, &mut directives)?;
+    let delegations = settle_delegations(view, context, &mut directives)?;
     let admitted_ingress = context
         .admitted_ingress
         .iter()
@@ -491,6 +491,7 @@ fn apply_lifecycle_boundary(
             envelope,
             &delegations,
             &admitted_ingress,
+            context.at,
         ) else {
             let mut proposed = previous.clone();
             proposed.status = InformationOperationStatus::Rejected;
@@ -600,50 +601,73 @@ fn reject_ingress(directives: &mut Vec<BoundaryDirective>, ingress: IngressId, e
     });
 }
 
-/// The record that holds the claim of a delegation granted by `command`
-/// under the authority grant `authority_grant`.
+/// The ledger of the live delegations granted under the command grant
+/// `authority_grant` ([`DelegatedAuthorityLedgerPayload`]).
 ///
-/// The information lifecycle system creates it when it sees the command
-/// admitted (see [`DelegatedAuthorityPayload`]); an interpretation citing the
-/// command reads this record.
+/// The information lifecycle system writes it when it sees a delegation
+/// command admitted or a recorded delegation expire; an interpretation citing
+/// a delegation command reads it.
 #[must_use]
 pub fn delegated_authority_reference(
     authority_grant: &str,
-    command: CommandId,
 ) -> TypedDomainRecordRef<DelegatedAuthority> {
-    TypedDomainRecordRef::new(format!("{authority_grant}:command:{}", command.get()))
+    TypedDomainRecordRef::new(authority_grant)
 }
 
-/// Records the delegation claim of every command admitted at this boundary
-/// that a [`DelegationEvidenceSelector::Command`] grant names.
+/// The earliest expiry of a ledger record, read without decoding the ledger.
+fn ledger_next_expiry(record: &DomainRecord) -> Result<Option<canwu_api::SimTime>, CanwuError> {
+    record
+        .payload
+        .pointer("/expiring/0/expires_at")
+        .map(canwu_api::SimTime::deserialize)
+        .transpose()
+        .map_err(|error| invalid_record(format!("delegation ledger expiry is invalid: {error}")))
+}
+
+fn decode_ledger(record: &DomainRecord) -> Result<DelegatedAuthorityLedgerPayload, CanwuError> {
+    let ledger = record.decode_payload::<DelegatedAuthority>()?;
+    ledger.validate().map_err(invalid_record)?;
+    Ok(ledger)
+}
+
+/// Retires expired delegations and records the delegation claim of every
+/// command admitted at this boundary that a
+/// [`DelegationEvidenceSelector::Command`] grant names, one ledger record per
+/// grant.
 ///
-/// The commands read here are the ones this boundary admits, which every run
-/// still holds, sealed or not. Returns the delegations recorded in this pass,
-/// so an interpretation advanced in the same pass can cite them.
-fn record_admitted_delegations(
+/// A ledger is read only when this boundary admits a command its grant names
+/// or its earliest expiry, read without decoding it, has come; it is then
+/// rewritten once. Every delegation whose `expires_at` is at or before the
+/// boundary time leaves the ledger, and a claim already expired when its
+/// command is admitted is not recorded. The commands read here are the ones
+/// this boundary admits, which every run still holds, sealed or not, and the
+/// ledger is committed state, so a sealed run decides as its unsealed replay
+/// does. Returns the ledgers read in this pass, after the pass, so an
+/// interpretation advanced in the same pass reads them.
+fn settle_delegations(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
     directives: &mut Vec<BoundaryDirective>,
-) -> Result<BTreeMap<DomainRecordRef, DelegatedAuthorityPayload>, CanwuError> {
-    let grants = information_authority_grants();
-    let mut recorded = BTreeMap::new();
-    for command_id in &context.admitted_commands {
-        let Some(record) = view.command(*command_id)? else {
-            continue;
-        };
-        let Command::Plugin {
-            plugin,
-            command,
-            payload,
-        } = &record.envelope.command
+) -> Result<BTreeMap<String, DelegatedAuthorityLedgerPayload>, CanwuError> {
+    let mut ledgers = BTreeMap::new();
+    for grant in information_authority_grants() {
+        let DelegationEvidenceSelector::Command {
+            producer_plugin,
+            command_type,
+        } = &grant.selector
         else {
             continue;
         };
-        for grant in &grants {
-            let DelegationEvidenceSelector::Command {
-                producer_plugin,
-                command_type,
-            } = &grant.selector
+        let mut admitted = Vec::new();
+        for command_id in &context.admitted_commands {
+            let Some(record) = view.command(*command_id)? else {
+                continue;
+            };
+            let Command::Plugin {
+                plugin,
+                command,
+                payload,
+            } = &record.envelope.command
             else {
                 continue;
             };
@@ -656,27 +680,57 @@ fn record_admitted_delegations(
             else {
                 continue;
             };
-            let reference = delegated_authority_reference(&grant.code, *command_id);
-            if recorded.contains_key(reference.as_untyped())
-                || view.typed_domain_record(&reference)?.is_some()
+            if claim
+                .expires_at
+                .is_some_and(|expires_at| expires_at <= context.at)
             {
                 continue;
             }
-            let delegation = DelegatedAuthorityPayload {
+            admitted.push(DelegatedAuthorityPayload {
                 authority_grant: grant.code.clone(),
                 command: *command_id,
                 claim,
-            };
-            directives.push(mutate(
-                DomainRecordMutation::Create {
-                    record: DomainRecordDraft::from_typed(reference.clone(), &delegation)?,
-                },
-                "Record an admitted interpretation delegation",
-            ));
-            recorded.insert(reference.into_untyped(), delegation);
+            });
         }
+        let reference = delegated_authority_reference(&grant.code);
+        let existing = view.typed_domain_record(&reference)?;
+        let due = existing
+            .map(ledger_next_expiry)
+            .transpose()?
+            .flatten()
+            .is_some_and(|expires_at| expires_at <= context.at);
+        if admitted.is_empty() && !due {
+            continue;
+        }
+        let mut ledger = existing
+            .map(decode_ledger)
+            .transpose()?
+            .unwrap_or_else(|| DelegatedAuthorityLedgerPayload::new(grant.code.clone()));
+        if ledger.authority_grant != grant.code {
+            return Err(invalid_record(
+                "delegation ledger does not belong to its grant",
+            ));
+        }
+        let mut changed = ledger.retire_expired(context.at) > 0;
+        for delegation in admitted {
+            changed |= ledger.insert(delegation);
+        }
+        if changed {
+            let record = DomainRecordDraft::from_typed(reference, &ledger)?;
+            directives.push(mutate(
+                match existing {
+                    Some(existing) => DomainRecordMutation::Update {
+                        record,
+                        expected_version: existing.version,
+                    },
+                    None => DomainRecordMutation::Create { record },
+                },
+                "Record admitted and retire expired interpretation delegations",
+            ));
+        }
+        ledgers.insert(grant.code.clone(), ledger);
     }
-    Ok(recorded)
+    Ok(ledgers)
 }
 
 fn schedule_operation_progress(
@@ -1384,8 +1438,9 @@ fn record_state<T: DomainRecordType>() -> StateKey {
 fn validate_runtime_interpretation_authority(
     view: &SimulationView<'_>,
     envelope: &InformationOperationEnvelope,
-    delegations: &BTreeMap<DomainRecordRef, DelegatedAuthorityPayload>,
+    delegations: &BTreeMap<String, DelegatedAuthorityLedgerPayload>,
     admitted_ingress: &BTreeSet<IngressId>,
+    at: canwu_api::SimTime,
 ) -> Result<Option<String>, CanwuError> {
     let LifecycleRequest::RecordInterpretation {
         binding,
@@ -1436,7 +1491,7 @@ fn validate_runtime_interpretation_authority(
     }
     let claim_value = match (&grant.selector, &evidence) {
         (DelegationEvidenceSelector::Command { .. }, EvidenceRef::Command(command)) => {
-            serde_json::to_value(recorded_delegation(view, delegations, grant, *command)?.claim)
+            serde_json::to_value(recorded_delegation(view, delegations, grant, *command, at)?.claim)
                 .map_err(|error| encode_error(&error))?
         }
         _ => extract_claim_value(
@@ -1462,28 +1517,38 @@ fn validate_runtime_interpretation_authority(
         .map_err(|error| invalid_record(error.to_string()))
 }
 
-/// The delegation a command granted under `grant`, as the lifecycle system
-/// recorded it when the command was admitted.
+/// The live delegation a command granted under `grant`, as the lifecycle
+/// system recorded it when the command was admitted. A delegation whose
+/// claim's `expires_at` has come at boundary time `at` authorizes nothing,
+/// whether or not its ledger has removed it yet.
 fn recorded_delegation(
     view: &SimulationView<'_>,
-    delegations: &BTreeMap<DomainRecordRef, DelegatedAuthorityPayload>,
+    ledgers: &BTreeMap<String, DelegatedAuthorityLedgerPayload>,
     grant: &DelegationAuthorityGrant,
     command: CommandId,
+    at: canwu_api::SimTime,
 ) -> Result<DelegatedAuthorityPayload, CanwuError> {
-    let reference = delegated_authority_reference(&grant.code, command);
-    let delegation = match delegations.get(reference.as_untyped()) {
-        Some(delegation) => delegation.clone(),
+    let unrecorded = || invalid_record("delegation command evidence names no recorded delegation");
+    let delegation = match ledgers.get(&grant.code) {
+        Some(ledger) => ledger.delegation(command).cloned(),
         None => view
-            .typed_domain_record(&reference)?
-            .ok_or_else(|| {
-                invalid_record("delegation command evidence names no recorded delegation")
-            })?
-            .decode_payload::<DelegatedAuthority>()?,
-    };
+            .typed_domain_record(&delegated_authority_reference(&grant.code))?
+            .map(decode_ledger)
+            .transpose()?
+            .and_then(|ledger| ledger.delegation(command).cloned()),
+    }
+    .ok_or_else(unrecorded)?;
     if delegation.authority_grant != grant.code || delegation.command != command {
         return Err(invalid_record(
             "recorded delegation does not match its grant and command",
         ));
+    }
+    if delegation
+        .claim
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= at)
+    {
+        return Err(invalid_record("the recorded delegation has expired"));
     }
     Ok(delegation)
 }

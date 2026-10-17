@@ -240,8 +240,13 @@ pub struct LegalCanwuBoundaryScaleMetrics {
 }
 
 /// Mutable, serializable legal ledger for one exact compiled plan.
+///
+/// The ledger's JSON form leaves the compiled plan out: the plan is stored
+/// once, in the immutable plan record, and every load sets [`Self::plan`]
+/// from the plan it is given after checking it against `plan_hash`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LegalRuntime {
+    #[serde(skip)]
     pub plan: CompiledLawPlan,
     pub plan_hash: String,
     pub budgets: LawBudgets,
@@ -590,7 +595,7 @@ impl LegalRuntime {
             )?
             .ok_or_else(|| invalid("legal runtime scale probe produced no archive batch"))?;
         let prepare_elapsed_micros = started.elapsed().as_micros() as u64;
-        let image = runtime.persistence_image()?;
+        let image = runtime.persistence_image(true)?;
         let coordinator = crate::LegalShardKey::coordinator(runtime.plan.definition_id.clone());
         let candidate_shard =
             crate::LegalShardKey::culture_dependency(runtime.plan.definition_id.clone());
@@ -785,6 +790,10 @@ impl LegalRuntime {
     }
 
     pub fn from_state(plan: &CompiledLawPlan, mut state: Self) -> Result<Self, CanwuError> {
+        if state.plan_hash != plan.content_hash {
+            return Err(invalid("legal runtime plan hash mismatch"));
+        }
+        state.plan = plan.clone();
         state.rebuild_archive_payload_indexes()?;
         state.rebuild_archive_projection()?;
         state.reaccount_state_budget()?;
@@ -1056,7 +1065,15 @@ impl LegalRuntime {
         &self,
         plan: &CompiledLawPlan,
     ) -> Result<(), CanwuError> {
-        self.ensure_plan_identity(plan)?;
+        // A live load sets the runtime's plan from the plan it was given, so
+        // the hash and budgets are the binding; full plan equality is checked
+        // on cold load.
+        if self.plan_hash != plan.content_hash
+            || self.plan.content_hash != plan.content_hash
+            || self.budgets != plan.budgets
+        {
+            return Err(invalid("legal runtime plan or budget identity mismatch"));
+        }
         if self.proposals.len() > plan.budgets.max_procedures
             || self.procedures.len() > plan.budgets.max_procedures
             || self.sources.len() > plan.budgets.max_sources
@@ -3538,7 +3555,30 @@ impl LegalRuntime {
         at: SimTime,
         signals: &[LegalSignal],
     ) -> Result<LegalBoundaryResult, CanwuError> {
-        let work = self.select_boundary_work(plan, at, signals)?;
+        self.settle_boundary_within(plan, at, signals, None)
+    }
+
+    /// Settles a plugin boundary whose stale-proposal pass checked the dirty
+    /// procedures up to `checked_through` (all of them when `None`): a dirty
+    /// procedure after it is not advanced at this boundary and waits for a
+    /// continuation boundary, as work past the mutation budget does.
+    pub(crate) fn settle_checked_boundary(
+        &mut self,
+        plan: &CompiledLawPlan,
+        at: SimTime,
+        checked_through: Option<&str>,
+    ) -> Result<LegalBoundaryResult, CanwuError> {
+        self.settle_boundary_within(plan, at, &[], checked_through)
+    }
+
+    fn settle_boundary_within(
+        &mut self,
+        plan: &CompiledLawPlan,
+        at: SimTime,
+        signals: &[LegalSignal],
+        checked_through: Option<&str>,
+    ) -> Result<LegalBoundaryResult, CanwuError> {
+        let work = self.select_boundary_work(plan, at, signals, checked_through)?;
         self.reserve_state_growth(work.growth)?;
         self.boundary_index = self
             .boundary_index
@@ -3673,6 +3713,7 @@ impl LegalRuntime {
         plan: &CompiledLawPlan,
         at: SimTime,
         signals: &[LegalSignal],
+        checked_through: Option<&str>,
     ) -> Result<BoundaryWork, CanwuError> {
         if self.plan_hash != plan.content_hash {
             return Err(invalid("legal runtime plan hash mismatch"));
@@ -3749,10 +3790,18 @@ impl LegalRuntime {
             }
         }
 
-        // Procedures due for work, each with its pending intents.
+        // Procedures due for work, each with its pending intents. A dirty
+        // procedure the stale-proposal pass did not reach waits for a
+        // continuation boundary with its intents.
         let mut adoptions = AdoptionCounts::default();
         first = true;
         for procedure_id in &candidates {
+            if checked_through.is_some_and(|last| procedure_id.as_str() > last)
+                && self.dirty_procedures.contains(procedure_id)
+            {
+                work.deferred = true;
+                continue;
+            }
             let intents = grouped
                 .get(procedure_id.as_str())
                 .map_or(&[][..], Vec::as_slice);
@@ -8635,7 +8684,7 @@ impl LegalRuntime {
     /// must apply the complete set in one kernel mutation bundle; no shard is
     /// an independently committable legal transaction.
     pub fn to_record_drafts(&self) -> Result<Vec<DomainRecordDraft>, CanwuError> {
-        let image = self.persistence_image()?;
+        let image = self.persistence_image(true)?;
         let mut drafts = Vec::with_capacity(2 + image.shards.len() + image.archive_heads.len());
         drafts.push(DomainRecordDraft::from_typed(
             crate::legal_plan_state_reference(),
@@ -8674,25 +8723,83 @@ impl LegalRuntime {
         Ok(drafts)
     }
 
-    fn persistence_image(&self) -> Result<LegalPersistenceImage, CanwuError> {
+    /// The directory, shard, and archive-head drafts of the shards in
+    /// `shards` that this runtime holds, for a live boundary that loaded
+    /// those shards. The plan record never changes after it is installed, so
+    /// it is not drafted; the state budget is kept by the runtime's reserved
+    /// byte account rather than by re-measuring every draft.
+    pub(crate) fn to_live_record_drafts(
+        &self,
+        shards: &BTreeSet<crate::LegalShardKey>,
+    ) -> Result<Vec<DomainRecordDraft>, CanwuError> {
+        let image = self.persistence_image(false)?;
+        // A shard the boundary did not load cannot gain content: drafting the
+        // directory without its record would leave the directory naming a
+        // record that does not exist.
+        if image.directory.directory.active_shards.iter().any(|shard| {
+            !shards.contains(shard)
+                && !self.storage.directory.active_shards.contains(shard)
+                && !self.storage.directory.archive_only_shards.contains(shard)
+        }) {
+            return Err(invalid(
+                "legal state gained a shard outside the boundary's working set",
+            ));
+        }
+        let mut drafts = vec![DomainRecordDraft::from_typed(
+            crate::legal_directory_state_reference(),
+            &image.directory,
+        )?];
+        for (shard, payload) in image
+            .shards
+            .iter()
+            .filter(|(shard, _)| shards.contains(*shard))
+        {
+            drafts.push(DomainRecordDraft::from_typed(
+                crate::legal_shard_state_reference(shard)?,
+                payload,
+            )?);
+        }
+        for (shard, payload) in image
+            .archive_heads
+            .iter()
+            .filter(|(shard, _)| shards.contains(*shard))
+        {
+            drafts.push(DomainRecordDraft::from_typed(
+                crate::legal_archive_head_state_reference(shard)?,
+                payload,
+            )?);
+        }
+        Ok(drafts)
+    }
+
+    /// Splits the ledger into its persisted records.
+    ///
+    /// The plan record holds only the immutable plan, its hash, and its
+    /// budgets, and declares no evidence; the ledger counters live in the
+    /// coordinator shard and the identity-evidence declaration in the
+    /// directory. Order and jurisdiction shards exist only once they hold
+    /// something, so a plan with many jurisdictions does not carry one empty
+    /// shard and archive head per jurisdiction. With `include_plan` false the
+    /// plan record's fields omit the plan itself, for a caller that does not
+    /// write the plan record.
+    fn persistence_image(&self, include_plan: bool) -> Result<LegalPersistenceImage, CanwuError> {
         let declaration = self.identity_evidence_dependencies();
-        let mut root = serde_json::to_value(self)
+        let serde_json::Value::Object(mut root) = serde_json::to_value(self)
             .map_err(|error| invalid(format!("legal runtime cannot be encoded: {error}")))?
-            .as_object()
-            .cloned()
-            .ok_or_else(|| invalid("legal runtime payload must be an object"))?;
+        else {
+            return Err(invalid("legal runtime payload must be an object"));
+        };
 
         let mut plan_fields = BTreeMap::new();
-        for field in [
-            "plan",
-            "plan_hash",
-            "budgets",
-            "reserved_state_bytes",
-            "boundary_index",
-            "last_settled_at",
-            "next_outbox_sequence",
-            "next_source_ordinal",
-        ] {
+        if include_plan {
+            plan_fields.insert(
+                "plan".to_owned(),
+                serde_json::to_value(&self.plan).map_err(|error| {
+                    invalid(format!("legal compiled plan cannot be encoded: {error}"))
+                })?,
+            );
+        }
+        for field in ["plan_hash", "budgets"] {
             let value = root
                 .remove(field)
                 .ok_or_else(|| invalid(format!("legal runtime is missing field {field}")))?;
@@ -8705,19 +8812,6 @@ impl LegalRuntime {
             BTreeMap::<crate::LegalShardKey, BTreeMap<String, serde_json::Value>>::new();
         fields_by_shard.entry(coordinator.clone()).or_default();
         fields_by_shard.entry(culture.clone()).or_default();
-        for order in &self.plan.orders {
-            fields_by_shard
-                .entry(crate::LegalShardKey::order(order.source_id.clone()))
-                .or_default();
-        }
-        for jurisdiction in &self.plan.jurisdictions {
-            fields_by_shard
-                .entry(crate::LegalShardKey::jurisdiction(
-                    self.plan.definition_id.clone(),
-                    jurisdiction.source_id.clone(),
-                ))
-                .or_default();
-        }
 
         partition_object_field(&mut root, &mut fields_by_shard, "proposals", |id, _| {
             self.proposals
@@ -9004,7 +9098,7 @@ impl LegalRuntime {
                 format_version: crate::LEGAL_SHARD_PAYLOAD_FORMAT_VERSION,
                 plan_hash: self.plan_hash.clone(),
                 fields: plan_fields,
-                evidence_dependencies: declaration.clone(),
+                evidence_dependencies: IdentityEvidenceDependenciesV1::new(Vec::new()),
             },
             directory: crate::LegalDirectoryState {
                 format_version: crate::LEGAL_SHARD_PAYLOAD_FORMAT_VERSION,
@@ -9051,10 +9145,19 @@ impl LegalRuntime {
                 "legal persistence image has an unsupported format or plan",
             ));
         }
-        let declaration = &plan_state.evidence_dependencies;
-        if directory_state.evidence_dependencies != *declaration {
+        // The directory declares the ledger's identity evidence; the plan
+        // record, which never changes after it is installed, declares none.
+        let declaration = &directory_state.evidence_dependencies;
+        if plan_state.evidence_dependencies != IdentityEvidenceDependenciesV1::new(Vec::new()) {
+            return Err(invalid("the legal plan record must declare no evidence"));
+        }
+        if loaded_scope.is_some_and(|scope| {
+            !scope.contains(&crate::LegalShardKey::coordinator(
+                plan.definition_id.clone(),
+            ))
+        }) {
             return Err(invalid(
-                "legal directory evidence declaration differs from the plan record",
+                "a scoped legal load must include the coordinator shard",
             ));
         }
         directory_state
@@ -9073,17 +9176,30 @@ impl LegalRuntime {
             })?;
 
         let mut root = if loaded_scope.is_some() {
-            serde_json::to_value(Self::new(plan))
-                .map_err(|error| {
+            let serde_json::Value::Object(root) =
+                serde_json::to_value(Self::new(plan)).map_err(|error| {
                     invalid(format!("empty legal runtime cannot be encoded: {error}"))
                 })?
-                .as_object()
-                .cloned()
-                .ok_or_else(|| invalid("empty legal runtime payload must be an object"))?
+            else {
+                return Err(invalid("empty legal runtime payload must be an object"));
+            };
+            root
         } else {
             serde_json::Map::new()
         };
         root.extend(plan_state.fields);
+        // The ledger takes `plan` as given; a cold load checks that the plan
+        // record holds exactly that plan.
+        let persisted = root.remove("plan");
+        if loaded_scope.is_none()
+            && persisted
+                .as_ref()
+                .and_then(|persisted| CompiledLawPlan::deserialize(persisted).ok())
+                .as_ref()
+                != Some(plan)
+        {
+            return Err(invalid("legal plan record does not hold the given plan"));
+        }
         let mut initialized_scoped_fields = BTreeSet::new();
         for shard in directory_state
             .directory
@@ -9118,6 +9234,7 @@ impl LegalRuntime {
             .unwrap_or_default();
         let mut runtime = serde_json::from_value::<Self>(serde_json::Value::Object(root))
             .map_err(|error| invalid(format!("legal shards cannot be assembled: {error}")))?;
+        runtime.plan = plan.clone();
         for storage_shard in storage_shards {
             runtime.storage.install_shard_state(storage_shard)?;
         }

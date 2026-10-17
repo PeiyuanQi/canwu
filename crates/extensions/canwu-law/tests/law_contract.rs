@@ -485,6 +485,7 @@ fn definition() -> LegalDefinition {
         }],
         id_blocks: LawIdBlocks::default(),
         budgets: LawBudgets::default(),
+        caseload: None,
     }
 }
 
@@ -2474,12 +2475,13 @@ fn live_proposal_mutation_is_settled_inside_kernel_record_cas() {
     assert_eq!(persisted.boundary_index, 1);
     assert!(persisted.proposals.contains_key("suffrage"));
     assert!(persisted.open_procedures.contains("procedure:suffrage"));
+    // The plan record is written once, when the plan is installed.
     assert_eq!(
         canwu
             .typed_domain_record(&legal_plan_state_reference())
             .expect("legal plan state")
             .version,
-        2
+        1
     );
 }
 
@@ -3486,8 +3488,8 @@ fn law_plugin_activation_rejects_a_forged_identity_evidence_declaration() {
     let mut initial = persisted_law_records(&runtime);
     initial
         .iter_mut()
-        .find(|record| record.reference.kind.name == LAW_PLAN_STATE)
-        .expect("plan state")
+        .find(|record| record.reference.kind.name == LAW_DIRECTORY_STATE)
+        .expect("directory state")
         .payload[IDENTITY_EVIDENCE_DEPENDENCIES_FIELD]["dependencies"] = serde_json::json!([]);
     let error = Canwu::new_with_plugins(
         7,
@@ -3665,7 +3667,9 @@ fn legal_persistence_exports_independently_versioned_format8_shards() {
             references: draft.references,
         })
         .collect::<Vec<_>>();
-    assert_eq!(records.len(), 10);
+    // Plan, directory, and the coordinator, culture, and order shards with
+    // their archive heads; the empty jurisdiction shard is not created.
+    assert_eq!(records.len(), 8);
     assert!(
         records
             .iter()
@@ -5779,7 +5783,7 @@ fn recovery_rebuilds_latest_participation_index() {
 
 #[test]
 fn plugin_registers_all_legal_schemas_and_pending_intent_command() {
-    assert_eq!(law_record_schemas().len(), 4);
+    assert_eq!(law_record_schemas().len(), 6);
     assert_eq!(law_command_descriptor().name, LAW_COMMAND);
     canwu_api::Canwu::new_with_plugins(7, Scenario::new(SimTime::EPOCH, Vec::new()), &[&LawPlugin])
         .expect("law plugin registration");

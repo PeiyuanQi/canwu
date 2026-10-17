@@ -18,16 +18,17 @@ use canwu_information::{
     AudienceAccessEvidence, AudienceMembership, AudiencePayload, AuthorityAssignment,
     AuthorityAssignmentPayload, Channel, ChannelCapability, ChannelPayload, ClaimedSourceRef,
     Content, ContentPayload, ContentRelation, DELEGATED_AUTHORITY_GRANT, DelegatedAuthority,
-    DelegationClaimV1, DeliveryAttempt, DeliveryAttemptPayload, DeliveryAttemptStatus, Dispatch,
-    DispatchPayload, DispatchStatus, DispatchTarget, INFORMATION_COMMAND, INFORMATION_INGRESS,
-    INFORMATION_REJECTION_EVENT, INSTITUTIONAL_AUTHORITY_GRANT, InformationBody,
-    InformationLimitsV1, InformationOperation, InformationOperationEnvelope,
-    InformationOperationId, InformationOperationPayload, InformationOperationRecord,
-    InformationOperationStatus, InformationOutputKind, InformationOutputSlot, InformationPlugin,
-    Interpretation, InterpretationAuthority, InterpretationPayload, InterpretationStatus,
-    LifecycleRequest, PLUGIN_NAME, RecordBinding, Release, ReleasePayload, ReleaseScope,
-    ReleaseStatus, Representation, RepresentationPayload, audience_membership_root_v1,
-    delegated_authority_reference, derive_operation_record_ref, derive_output_record_ref,
+    DelegationClaimV1, DelegationExpiry, DeliveryAttempt, DeliveryAttemptPayload,
+    DeliveryAttemptStatus, Dispatch, DispatchPayload, DispatchStatus, DispatchTarget,
+    INFORMATION_COMMAND, INFORMATION_INGRESS, INFORMATION_REJECTION_EVENT,
+    INSTITUTIONAL_AUTHORITY_GRANT, InformationBody, InformationLimitsV1, InformationOperation,
+    InformationOperationEnvelope, InformationOperationId, InformationOperationPayload,
+    InformationOperationRecord, InformationOperationStatus, InformationOutputKind,
+    InformationOutputSlot, InformationPlugin, Interpretation, InterpretationAuthority,
+    InterpretationPayload, InterpretationStatus, LifecycleRequest, PLUGIN_NAME, RecordBinding,
+    Release, ReleasePayload, ReleaseScope, ReleaseStatus, Representation, RepresentationPayload,
+    audience_membership_root_v1, delegated_authority_reference, derive_operation_record_ref,
+    derive_output_record_ref,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -1458,14 +1459,14 @@ fn delegated_interpretation_decides_alike_after_its_delegation_is_sealed() {
         AUTHORITY_COMMAND_PRODUCER,
         json!({"claim": authority_claim()}),
     );
-    let recorded = base
-        .typed_domain_record(&delegated_authority_reference(
-            DELEGATED_AUTHORITY_GRANT,
-            authority_command,
-        ))
+    let ledger = base
+        .typed_domain_record(&delegated_authority_reference(DELEGATED_AUTHORITY_GRANT))
         .expect("the admitted delegation is recorded")
         .decode_payload::<DelegatedAuthority>()
-        .expect("recorded delegation decodes");
+        .expect("the delegation ledger decodes");
+    let recorded = ledger
+        .delegation(authority_command)
+        .expect("the ledger holds the delegation");
     assert_eq!(recorded.claim, authority_claim());
     assert_eq!(recorded.command, authority_command);
     settle(&mut base);
@@ -1534,6 +1535,96 @@ fn delegated_interpretation_decides_alike_after_its_delegation_is_sealed() {
             .snapshot_with_segments(vec![segment])
             .expect("the sealed run reconstructs a full snapshot")
     );
+}
+
+/// A delegation stays in its grant's ledger only while it can authorize: the
+/// lifecycle system removes it at the first boundary it runs at or after the
+/// claim's `expires_at`, without a wake of its own, and from that time the
+/// delegation authorizes nothing, not even an interpretation dated inside its
+/// window. Exact replay reproduces the run.
+#[test]
+fn an_expired_delegation_leaves_its_ledger_and_authorizes_nothing() {
+    let (scenario, access, representation, result_content) = interpretation_scenario();
+    let plugin = InformationPlugin;
+    let plugins: [&dyn SimulationPlugin; 2] = [&AUTHORITY_PLUGIN, &plugin];
+    let mut canwu = Canwu::new_with_plugins(47, scenario, &plugins)
+        .expect("interpretation fixture should initialize");
+    let mut claim = authority_claim();
+    claim.expires_at = Some(SimTime::from_minutes(10));
+    let command = queue_authority_command(
+        &mut canwu,
+        1,
+        AUTHORITY_COMMAND_PRODUCER,
+        json!({ "claim": claim }),
+    );
+    let ledger = |canwu: &Canwu| {
+        canwu
+            .typed_domain_record(&delegated_authority_reference(DELEGATED_AUTHORITY_GRANT))
+            .expect("the delegation ledger exists")
+            .decode_payload::<DelegatedAuthority>()
+            .expect("the delegation ledger decodes")
+    };
+    assert_eq!(
+        ledger(&canwu).expiring,
+        [DelegationExpiry {
+            expires_at: SimTime::from_minutes(10),
+            command,
+        }]
+    );
+    let delegated = || InterpretationAuthority::Delegated {
+        evidence: EvidenceRef::Command(command),
+        authority_grant: DELEGATED_AUTHORITY_GRANT.to_owned(),
+    };
+    let in_force = record_interpretation_operation(
+        access.clone(),
+        representation.clone(),
+        result_content.clone(),
+        "in-force",
+        delegated(),
+    );
+    settle_to_terminal(&mut canwu, &in_force, 2);
+    assert_eq!(
+        operation_payload(&canwu, &in_force.id).status,
+        InformationOperationStatus::Completed
+    );
+
+    // From the expiry on, the delegation authorizes nothing, and the first
+    // lifecycle boundary at or after it removes it from the ledger.
+    canwu
+        .settle_boundary(BoundaryRequest::at(SimTime::from_minutes(10)))
+        .expect("a boundary at the expiry");
+    let expired = record_interpretation_operation(
+        access,
+        representation,
+        result_content,
+        "expired",
+        delegated(),
+    );
+    let at = canwu.time();
+    let revision = canwu.revision();
+    canwu
+        .enqueue_command(
+            at,
+            0,
+            CommandRequest::new(
+                CommandRequestId::new(3),
+                revision,
+                plugin_command(&expired).at_time(at),
+            ),
+        )
+        .expect("information command should enter canonical ingress");
+    for _ in 0..5 {
+        settle(&mut canwu);
+    }
+    let expired = operation_payload(&canwu, &expired.id);
+    assert_eq!(expired.status, InformationOperationStatus::Rejected);
+    assert_eq!(expired.rejection_code.as_deref(), Some("invalid_authority"));
+    let retired = ledger(&canwu);
+    assert!(retired.delegations.is_empty() && retired.expiring.is_empty());
+
+    let replayed = Canwu::replay_from_journal(&plugins, &canwu.replay_journal())
+        .expect("the run replays exactly");
+    assert_eq!(replayed.snapshot(), canwu.snapshot());
 }
 
 #[test]

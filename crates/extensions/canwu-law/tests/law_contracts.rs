@@ -470,7 +470,7 @@ fn plugin_registers_owned_records_and_the_pending_intent_command() {
         .find(|descriptor| descriptor.name == "canwu-law")
         .expect("law descriptor");
     assert_eq!(descriptor.commands.len(), 1);
-    assert_eq!(descriptor.record_schemas.len(), 4);
+    assert_eq!(descriptor.record_schemas.len(), 6);
     assert_eq!(
         descriptor.maintenance_dependency_resolvers[0].target_namespace,
         "canwu.culture"

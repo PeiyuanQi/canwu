@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 pub const LEGAL_STORAGE_FORMAT_VERSION: u32 = 2;
-pub const LEGAL_SHARD_PAYLOAD_FORMAT_VERSION: u32 = 1;
+pub const LEGAL_SHARD_PAYLOAD_FORMAT_VERSION: u32 = 2;
 pub const LEGAL_ARCHIVE_BLOB_FORMAT_VERSION: u32 = 1;
 pub const LEGAL_ARCHIVE_INDEX_FORMAT_VERSION: u32 = 2;
 pub const LEGAL_ARCHIVE_RETENTION_FORMAT_VERSION: u32 = 1;

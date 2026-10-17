@@ -360,24 +360,18 @@ pub struct AuthorityAssignmentPayload {
 }
 
 /// A delegation claim the information plugin recorded when the command that
-/// grants it was admitted.
+/// grants it was admitted: one entry of a [`DelegatedAuthorityLedgerPayload`].
 ///
 /// A [`DelegationEvidenceSelector::Command`] grant names commands of another
 /// plugin. When the information plugin's lifecycle system sees such a
 /// command admitted at a boundary, it stores the claim found at the grant's
-/// claim path in one create-only record, keyed by the grant code and the
-/// command ID (see [`crate::delegated_authority_reference`]). An
+/// claim path in the grant's ledger, keyed by the command ID. An
 /// [`InterpretationAuthority::Delegated`] interpretation that cites the
-/// command is checked against this record, never against the command
+/// command is checked against this entry, never against the command
 /// itself, so the check does not depend on whether a seal has removed the
 /// command's payload. A command whose payload has no decodable claim at the
-/// claim path is not recorded, and citing it is refused as before.
-///
-/// The records are kept for the run: one per admitted command that a
-/// command grant names, never retired, so they grow with the number of such
-/// commands. A claim authorizes only interpretations dated inside its
-/// `[not_before, expires_at)` window; its record stays after the window
-/// closes.
+/// claim path, or whose claim has already expired, is not recorded, and
+/// citing it is refused as before.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DelegatedAuthorityPayload {
@@ -387,6 +381,139 @@ pub struct DelegatedAuthorityPayload {
     pub command: CommandId,
     /// The claim found at the grant's claim path, as the command carried it.
     pub claim: DelegationClaimV1,
+}
+
+/// Wire version of [`DelegatedAuthorityLedgerPayload`].
+pub const DELEGATED_AUTHORITY_LEDGER_FORMAT_VERSION: u32 = 1;
+
+/// The delegations of one command grant that are still in force, in one
+/// record per grant (see [`crate::delegated_authority_reference`]).
+///
+/// A delegation stays while its claim can still authorize: the lifecycle
+/// system, at every boundary it runs, removes each delegation whose
+/// `expires_at` is at or before the boundary time, found through
+/// [`Self::expiring`] without scanning the ledger, and a delegation whose
+/// `expires_at` has come authorizes nothing even before it is removed. So
+/// the ledger holds the live delegations only; a claim with no `expires_at`
+/// stays for the run. A removed delegation leaves nothing in state: the
+/// interpretations that relied on it keep the hash of its claim
+/// (`authority_claim_hash` of their operation), and its command stays in the
+/// evidence journal until a seal removes it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegatedAuthorityLedgerPayload {
+    pub format_version: u32,
+    /// Code of the command grant whose delegations these are.
+    pub authority_grant: String,
+    /// Live delegations, by ascending command ID.
+    pub delegations: Vec<DelegatedAuthorityPayload>,
+    /// The live delegations that expire, by ascending expiry time and then
+    /// command ID; the first is the next to be removed.
+    pub expiring: Vec<DelegationExpiry>,
+}
+
+/// When one live delegation expires.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationExpiry {
+    pub expires_at: SimTime,
+    pub command: CommandId,
+}
+
+impl DelegatedAuthorityLedgerPayload {
+    /// An empty ledger for `authority_grant`.
+    #[must_use]
+    pub fn new(authority_grant: impl Into<String>) -> Self {
+        Self {
+            format_version: DELEGATED_AUTHORITY_LEDGER_FORMAT_VERSION,
+            authority_grant: authority_grant.into(),
+            delegations: Vec::new(),
+            expiring: Vec::new(),
+        }
+    }
+
+    /// The live delegation `command` granted, if it is recorded.
+    #[must_use]
+    pub fn delegation(&self, command: CommandId) -> Option<&DelegatedAuthorityPayload> {
+        self.delegations
+            .binary_search_by_key(&command, |delegation| delegation.command)
+            .ok()
+            .map(|index| &self.delegations[index])
+    }
+
+    /// Records a delegation; returns `false` when its command is already
+    /// recorded.
+    pub fn insert(&mut self, delegation: DelegatedAuthorityPayload) -> bool {
+        let Err(index) = self
+            .delegations
+            .binary_search_by_key(&delegation.command, |recorded| recorded.command)
+        else {
+            return false;
+        };
+        if let Some(expires_at) = delegation.claim.expires_at {
+            let expiry = DelegationExpiry {
+                expires_at,
+                command: delegation.command,
+            };
+            let position = self.expiring.partition_point(|entry| *entry < expiry);
+            self.expiring.insert(position, expiry);
+        }
+        self.delegations.insert(index, delegation);
+        true
+    }
+
+    /// Removes every delegation whose `expires_at` is at or before `at`;
+    /// returns how many it removed.
+    pub fn retire_expired(&mut self, at: SimTime) -> usize {
+        let due = self
+            .expiring
+            .partition_point(|entry| entry.expires_at <= at);
+        for expiry in self.expiring.drain(..due) {
+            if let Ok(index) = self
+                .delegations
+                .binary_search_by_key(&expiry.command, |delegation| delegation.command)
+            {
+                self.delegations.remove(index);
+            }
+        }
+        due
+    }
+
+    /// Checks the ledger's own invariants: sorted unique delegations of this
+    /// grant, and one expiry entry for each delegation that expires.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.format_version != DELEGATED_AUTHORITY_LEDGER_FORMAT_VERSION
+            || self
+                .delegations
+                .windows(2)
+                .any(|pair| pair[0].command >= pair[1].command)
+            || self
+                .delegations
+                .iter()
+                .any(|delegation| delegation.authority_grant != self.authority_grant)
+            || self.expiring.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err("delegation ledger is not canonical".to_owned());
+        }
+        let mut expected = self
+            .delegations
+            .iter()
+            .filter_map(|delegation| {
+                delegation
+                    .claim
+                    .expires_at
+                    .map(|expires_at| DelegationExpiry {
+                        expires_at,
+                        command: delegation.command,
+                    })
+            })
+            .collect::<Vec<_>>();
+        expected.sort();
+        if expected != self.expiring {
+            return Err("delegation ledger expiry index does not match its delegations".to_owned());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

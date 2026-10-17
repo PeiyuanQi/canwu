@@ -1,6 +1,6 @@
 use crate::model::{
     AccessPayload, AudiencePayload, AuthorityAssignmentPayload, ChannelPayload, ContentPayload,
-    DelegatedAuthorityPayload, DeliveryAttemptPayload, DispatchPayload, InstancePayload,
+    DelegatedAuthorityLedgerPayload, DeliveryAttemptPayload, DispatchPayload, InstancePayload,
     InterpretationPayload, ReleasePayload, RepresentationPayload,
 };
 use crate::operation::InformationOperationPayload;
@@ -52,7 +52,7 @@ information_record_type!(
 information_record_type!(
     DelegatedAuthority,
     "delegated_authority",
-    DelegatedAuthorityPayload
+    DelegatedAuthorityLedgerPayload
 );
 
 /// Human-readable descriptor for one neutral holder-facing schema.
@@ -473,11 +473,12 @@ pub fn information_record_schemas() -> Vec<DomainRecordSchema> {
             ],
         ),
         record_schema::<DelegatedAuthority>(
-            true,
+            false,
             object_schema(&[
                 ("authority_grant", PayloadValueType::String, true),
-                ("claim", PayloadValueType::Object, true),
-                ("command", PayloadValueType::Integer, true),
+                ("delegations", PayloadValueType::Array, true),
+                ("expiring", PayloadValueType::Array, true),
+                ("format_version", PayloadValueType::Integer, true),
             ]),
             vec![],
         ),
@@ -636,7 +637,6 @@ mod tests {
         for name in [
             Channel::NAME,
             Content::NAME,
-            DelegatedAuthority::NAME,
             Representation::NAME,
             Access::NAME,
             Interpretation::NAME,
@@ -651,6 +651,16 @@ mod tests {
                 DomainRecordMutationPolicy::CreateOnly
             );
         }
+        // The delegation ledger is rewritten as delegations are recorded and
+        // expire.
+        let ledger = schemas
+            .iter()
+            .find(|schema| schema.kind.name == DelegatedAuthority::NAME)
+            .expect("delegation ledger schema");
+        assert_eq!(
+            ledger.mutation_policy,
+            DomainRecordMutationPolicy::Versioned
+        );
     }
 
     #[test]
