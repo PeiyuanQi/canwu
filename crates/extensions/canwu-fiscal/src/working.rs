@@ -393,18 +393,6 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
         Ok(scopes)
     }
 
-    /// The `rank`-th scope one index lists.
-    pub(crate) fn index_scope(
-        &mut self,
-        owner: &FiscalIndexOwner,
-        rank: u32,
-    ) -> Result<Option<String>, CanwuError> {
-        let (page, place) = FiscalIndexOwner::locate(rank);
-        Ok(self
-            .index_page(owner, page)?
-            .and_then(|scopes| scopes.get(place).cloned()))
-    }
-
     /// One page of an index. A page is read and decoded once per working
     /// set; a later read finds it by owner and number, without naming its
     /// record, so a run of rows of one office costs one decode per page.
@@ -439,6 +427,48 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
             .get(owner)
             .and_then(|pages| pages.get(&page))
             .and_then(Option::as_ref))
+    }
+
+    /// Reads every page of one index that the scopes ranked `ranks` are on,
+    /// for [`Self::index_scopes_in`].
+    pub(crate) fn read_index_pages(
+        &mut self,
+        owner: &FiscalIndexOwner,
+        ranks: std::ops::Range<u32>,
+    ) -> Result<(), CanwuError> {
+        if ranks.is_empty() {
+            return Ok(());
+        }
+        let (first, _) = FiscalIndexOwner::locate(ranks.start);
+        let (last, _) = FiscalIndexOwner::locate(ranks.end - 1);
+        for page in first..=last {
+            self.index_page(owner, page)?;
+        }
+        Ok(())
+    }
+
+    /// The scopes ranked `ranks` in one index, each with its rank, from the
+    /// pages [`Self::read_index_pages`] read: borrowed, so a run of rows
+    /// lists its scopes without copying them. An error when the index lists
+    /// fewer scopes, or a page was not read.
+    pub(crate) fn index_scopes_in(
+        &self,
+        owner: &FiscalIndexOwner,
+        ranks: std::ops::Range<u32>,
+    ) -> Result<Vec<(u32, &str)>, CanwuError> {
+        let short = || invalid("a fiscal office index lists fewer scopes than its office has");
+        let pages = self.index.get(owner);
+        ranks
+            .map(|rank| {
+                let (page, place) = FiscalIndexOwner::locate(rank);
+                pages
+                    .and_then(|pages| pages.get(&page))
+                    .and_then(Option::as_ref)
+                    .and_then(|scopes| scopes.get(place))
+                    .map(|scope| (rank, scope.as_str()))
+                    .ok_or_else(short)
+            })
+            .collect()
     }
 
     /// What admission reads of a scope's ledger, without decoding it.

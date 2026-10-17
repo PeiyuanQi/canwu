@@ -34,7 +34,7 @@ use canwu_fiscal::{
     FiscalReportBudget, FiscalReportCadence, FiscalReportGranularity, FiscalReportRecord,
     FiscalScopeBinding, compute_projection, enqueue_fiscal_archive,
     finalize_fiscal_archive_retention, fiscal_report_knowledge_schema_id, fiscal_reports,
-    load_fiscal_state,
+    prepare_fiscal_archive,
 };
 use std::collections::BTreeSet;
 use support::{
@@ -235,12 +235,8 @@ fn archive_all<H: CanwuRun + ?Sized>(
     store: &MemoryArchiveStore,
     settle: impl Fn(&mut H),
 ) {
-    let prepared = load_fiscal_state(run)
-        .expect("fiscal state")
-        .expect("a fiscal state")
-        .prepare_fiscal_archive(64, store, None)
-        .expect("archive batch");
-    let receipt = enqueue_fiscal_archive(run, &prepared, store, None).expect("archive queued");
+    let prepared = prepare_fiscal_archive(run, 64, store).expect("archive batch");
+    let receipt = enqueue_fiscal_archive(run, &prepared, store).expect("archive queued");
     settle(run);
     finalize_fiscal_archive_retention(run, store, &receipt).expect("retention finalized");
     settle(run);

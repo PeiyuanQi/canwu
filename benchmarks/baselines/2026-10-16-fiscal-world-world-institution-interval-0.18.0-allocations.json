@@ -1,0 +1,641 @@
+{
+  "archive_commits": {
+    "256": {
+      "acknowledgement_boundary_allocation_operations": {
+        "median": 12262.0,
+        "min": 12262.0,
+        "p95": 12262.0
+      },
+      "applied": 256,
+      "audit_after_allocation_operations": {
+        "median": 6013.146,
+        "min": 6013.146,
+        "p95": 6013.146
+      },
+      "books": 256,
+      "drain_boundaries": 0,
+      "drain_boundaries_allocation_operations": {
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "finalize_retention_allocation_operations": {
+        "median": 114.0,
+        "min": 114.0,
+        "p95": 114.0
+      },
+      "prepare_allocation_operations": {
+        "median": 33767.0,
+        "min": 33767.0,
+        "p95": 33767.0
+      },
+      "record_changes": 299,
+      "rejected": 0,
+      "report_records_published": 0,
+      "settlement_boundary_allocation_operations": {
+        "median": 100257.0,
+        "min": 100257.0,
+        "p95": 100257.0
+      },
+      "store_object_bytes": 427004,
+      "store_objects": 210,
+      "verify_and_enqueue_allocation_operations": {
+        "median": 64384.0,
+        "min": 64384.0,
+        "p95": 64384.0
+      }
+    },
+    "4096": {
+      "acknowledgement_boundary_allocation_operations": {
+        "median": 12466.0,
+        "min": 12466.0,
+        "p95": 12466.0
+      },
+      "applied": 4096,
+      "audit_after_allocation_operations": {
+        "median": 2939.012,
+        "min": 2939.012,
+        "p95": 2939.012
+      },
+      "books": 4096,
+      "drain_boundaries": 0,
+      "drain_boundaries_allocation_operations": {
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "finalize_retention_allocation_operations": {
+        "median": 318.0,
+        "min": 318.0,
+        "p95": 318.0
+      },
+      "prepare_allocation_operations": {
+        "median": 389516.0,
+        "min": 389516.0,
+        "p95": 389516.0
+      },
+      "record_changes": 4109,
+      "rejected": 0,
+      "report_records_published": 0,
+      "settlement_boundary_allocation_operations": {
+        "median": 1219917.0,
+        "min": 1219917.0,
+        "p95": 1219917.0
+      },
+      "store_object_bytes": 6213397,
+      "store_objects": 2997,
+      "verify_and_enqueue_allocation_operations": {
+        "median": 802921.0,
+        "min": 802921.0,
+        "p95": 802921.0
+      }
+    }
+  },
+  "assessing_bursts": {
+    "1024": {
+      "boundaries": {
+        "admission_boundary_allocation_operations": {
+          "median": 3585622.0,
+          "min": 3585622.0,
+          "p95": 3585622.0
+        },
+        "applied": 1024,
+        "audit_after_allocation_operations": {
+          "median": 1442.277,
+          "min": 1442.277,
+          "p95": 1442.277
+        },
+        "drain_boundaries": 0,
+        "drain_boundaries_allocation_operations": {
+          "median": 0.0,
+          "min": 0.0,
+          "p95": 0.0
+        },
+        "record_changes": 1802,
+        "rejected": 0,
+        "report_records_published": 0,
+        "settlement_boundary_allocation_operations": {
+          "median": 603407.0,
+          "min": 603407.0,
+          "p95": 603407.0
+        }
+      },
+      "entries": 1024
+    },
+    "16384": {
+      "boundaries": {
+        "admission_boundary_allocation_operations": {
+          "median": 19913571.0,
+          "min": 19913571.0,
+          "p95": 19913571.0
+        },
+        "applied": 16384,
+        "audit_after_allocation_operations": {
+          "median": 2028.112,
+          "min": 2028.112,
+          "p95": 2028.112
+        },
+        "drain_boundaries": 0,
+        "drain_boundaries_allocation_operations": {
+          "median": 0.0,
+          "min": 0.0,
+          "p95": 0.0
+        },
+        "record_changes": 20135,
+        "rejected": 0,
+        "report_records_published": 0,
+        "settlement_boundary_allocation_operations": {
+          "median": 7358837.0,
+          "min": 7358837.0,
+          "p95": 7358837.0
+        }
+      },
+      "entries": 16384
+    },
+    "4096": {
+      "boundaries": {
+        "admission_boundary_allocation_operations": {
+          "median": 9521634.0,
+          "min": 9521634.0,
+          "p95": 9521634.0
+        },
+        "applied": 4096,
+        "audit_after_allocation_operations": {
+          "median": 2005.5,
+          "min": 2005.5,
+          "p95": 2005.5
+        },
+        "drain_boundaries": 0,
+        "drain_boundaries_allocation_operations": {
+          "median": 0.0,
+          "min": 0.0,
+          "p95": 0.0
+        },
+        "record_changes": 6027,
+        "rejected": 0,
+        "report_records_published": 0,
+        "settlement_boundary_allocation_operations": {
+          "median": 2081016.0,
+          "min": 2081016.0,
+          "p95": 2081016.0
+        }
+      },
+      "entries": 4096
+    },
+    "64": {
+      "boundaries": {
+        "admission_boundary_allocation_operations": {
+          "median": 325304.0,
+          "min": 325304.0,
+          "p95": 325304.0
+        },
+        "applied": 64,
+        "audit_after_allocation_operations": {
+          "median": 2141.26,
+          "min": 2141.26,
+          "p95": 2141.26
+        },
+        "drain_boundaries": 0,
+        "drain_boundaries_allocation_operations": {
+          "median": 0.0,
+          "min": 0.0,
+          "p95": 0.0
+        },
+        "record_changes": 138,
+        "rejected": 0,
+        "report_records_published": 0,
+        "settlement_boundary_allocation_operations": {
+          "median": 63878.0,
+          "min": 63878.0,
+          "p95": 63878.0
+        }
+      },
+      "entries": 64
+    },
+    "all": {
+      "boundaries": {
+        "admission_boundary_allocation_operations": {
+          "median": 27522113.0,
+          "min": 27522113.0,
+          "p95": 27522113.0
+        },
+        "applied": 50000,
+        "audit_after_allocation_operations": {
+          "median": 3037.71,
+          "min": 3037.71,
+          "p95": 3037.71
+        },
+        "drain_boundaries": 0,
+        "drain_boundaries_allocation_operations": {
+          "median": 0.0,
+          "min": 0.0,
+          "p95": 0.0
+        },
+        "record_changes": 54334,
+        "rejected": 0,
+        "report_records_published": 0,
+        "settlement_boundary_allocation_operations": {
+          "median": 20836582.0,
+          "min": 20836582.0,
+          "p95": 20836582.0
+        }
+      },
+      "entries": 50000
+    },
+    "spread_day": {
+      "boundaries": {
+        "admission_boundary_allocation_operations": {
+          "median": 669810.0,
+          "min": 669810.0,
+          "p95": 669810.0
+        },
+        "applied": 137,
+        "audit_after_allocation_operations": {
+          "median": 1790.077,
+          "min": 1790.077,
+          "p95": 1790.077
+        },
+        "drain_boundaries": 0,
+        "drain_boundaries_allocation_operations": {
+          "median": 0.0,
+          "min": 0.0,
+          "p95": 0.0
+        },
+        "record_changes": 296,
+        "rejected": 0,
+        "report_records_published": 0,
+        "settlement_boundary_allocation_operations": {
+          "median": 111562.0,
+          "min": 111562.0,
+          "p95": 111562.0
+        }
+      },
+      "entries": 137
+    }
+  },
+  "close_every_book": {
+    "admission_boundary_allocation_operations": {
+      "median": 25336270.0,
+      "min": 25336270.0,
+      "p95": 25336270.0
+    },
+    "applied": 50000,
+    "audit_after_allocation_operations": {
+      "median": 11054.964,
+      "min": 11054.964,
+      "p95": 11054.964
+    },
+    "drain_boundaries": 0,
+    "drain_boundaries_allocation_operations": {
+      "median": 0.0,
+      "min": 0.0,
+      "p95": 0.0
+    },
+    "record_changes": 50000,
+    "rejected": 0,
+    "report_records_published": 0,
+    "settlement_boundary_allocation_operations": {
+      "median": 19890434.0,
+      "min": 19890434.0,
+      "p95": 19890434.0
+    }
+  },
+  "dimensions": {
+    "courts": "institution",
+    "cycle": "annual, one cycle",
+    "institutions": 4200,
+    "largest_partition_scopes": 6000,
+    "observers": 4000,
+    "partitions": 200,
+    "report_cadence": "monthly, staggered over thirty days",
+    "scopes": 50000
+  },
+  "idle_boundary": {
+    "every_scope_assessed": {
+      "boundary_allocation_operations": {
+        "median": 11123.0,
+        "min": 11123.0,
+        "p95": 11124.0
+      }
+    },
+    "initial": {
+      "boundary_allocation_operations": {
+        "median": 11123.0,
+        "min": 11122.0,
+        "p95": 11124.0
+      }
+    }
+  },
+  "initial_report_publication": {
+    "applied": 0,
+    "audit_after_allocation_operations": {
+      "median": 1862.859,
+      "min": 1862.859,
+      "p95": 1862.859
+    },
+    "drain_boundaries": 0,
+    "drain_boundaries_allocation_operations": {
+      "median": 0.0,
+      "min": 0.0,
+      "p95": 0.0
+    },
+    "record_changes": 136,
+    "rejected": 0,
+    "report_records_published": 0,
+    "settlement_boundary_allocation_operations": {
+      "median": 63055.0,
+      "min": 63055.0,
+      "p95": 63055.0
+    }
+  },
+  "interval_reports": {
+    "due_instant": {
+      "boundaries": {
+        "applied": 0,
+        "audit_after_allocation_operations": {
+          "median": 3418.4,
+          "min": 3418.4,
+          "p95": 3418.4
+        },
+        "drain_boundaries": 0,
+        "drain_boundaries_allocation_operations": {
+          "median": 0.0,
+          "min": 0.0,
+          "p95": 0.0
+        },
+        "heap_peak_bytes": {
+          "median": 305576473.0,
+          "min": 305576473.0,
+          "p95": 305576473.0
+        },
+        "publication": {
+          "bodies": 9603,
+          "directives": 10,
+          "entries": 9603,
+          "holders": 4000,
+          "payload_bytes": 5545628
+        },
+        "record_changes": 6563,
+        "rejected": 0,
+        "report_records_published": 9603,
+        "settlement_boundary_allocation_operations": {
+          "median": 4261604.0,
+          "min": 4261604.0,
+          "p95": 4261604.0
+        }
+      },
+      "initial_report_publication": {
+        "applied": 0,
+        "audit_after_allocation_operations": {
+          "median": 1145.763,
+          "min": 1145.763,
+          "p95": 1145.763
+        },
+        "drain_boundaries": 0,
+        "drain_boundaries_allocation_operations": {
+          "median": 0.0,
+          "min": 0.0,
+          "p95": 0.0
+        },
+        "record_changes": 2563,
+        "rejected": 0,
+        "report_records_published": 0,
+        "settlement_boundary_allocation_operations": {
+          "median": 547715.0,
+          "min": 547715.0,
+          "p95": 547715.0
+        }
+      },
+      "observers_due": 4000
+    },
+    "spread_due_day": {
+      "boundaries": {
+        "applied": 0,
+        "audit_after_allocation_operations": {
+          "median": 3067.198,
+          "min": 3067.198,
+          "p95": 3067.198
+        },
+        "drain_boundaries": 0,
+        "drain_boundaries_allocation_operations": {
+          "median": 0.0,
+          "min": 0.0,
+          "p95": 0.0
+        },
+        "heap_peak_bytes": {
+          "median": 28703523.0,
+          "min": 28703523.0,
+          "p95": 28703523.0
+        },
+        "publication": {
+          "bodies": 304,
+          "directives": 1,
+          "entries": 304,
+          "holders": 134,
+          "payload_bytes": 156327
+        },
+        "record_changes": 267,
+        "rejected": 0,
+        "report_records_published": 304,
+        "settlement_boundary_allocation_operations": {
+          "median": 155798.0,
+          "min": 155798.0,
+          "p95": 155798.0
+        }
+      },
+      "day": 1,
+      "observers_due": 134
+    }
+  },
+  "machine": "local-windows-x86_64",
+  "metric": "allocation_operations",
+  "preset": "world",
+  "profile": "fiscal-world",
+  "receipt_boundaries": {
+    "1024": {
+      "applied": 1024,
+      "audit_after_allocation_operations": {
+        "median": 3944.13,
+        "min": 3944.13,
+        "p95": 3944.13
+      },
+      "drain_boundaries": 0,
+      "drain_boundaries_allocation_operations": {
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "record_changes": 1024,
+      "rejected": 0,
+      "report_records_published": 0,
+      "settlement_boundary_allocation_operations": {
+        "median": 630480.0,
+        "min": 630480.0,
+        "p95": 630480.0
+      }
+    },
+    "16384": {
+      "applied": 16384,
+      "audit_after_allocation_operations": {
+        "median": 4335.748,
+        "min": 4335.748,
+        "p95": 4335.748
+      },
+      "drain_boundaries": 0,
+      "drain_boundaries_allocation_operations": {
+        "median": 0.0,
+        "min": 0.0,
+        "p95": 0.0
+      },
+      "record_changes": 16384,
+      "rejected": 0,
+      "report_records_published": 0,
+      "settlement_boundary_allocation_operations": {
+        "median": 9569016.0,
+        "min": 9569016.0,
+        "p95": 9569016.0
+      }
+    }
+  },
+  "recorded_on": "2026-10-16",
+  "samples": 3,
+  "seed": 4049338390,
+  "state": {
+    "activation_allocation_operations": 40804620.0,
+    "audit_every_record_allocation_operations": 1784.8545,
+    "every_scope_assessed": {
+      "fiscal_record_json_bytes": 58291705,
+      "fiscal_records": 67991,
+      "largest_record": {
+        "json_bytes": 68023,
+        "record": "canwu.fiscal.catalog:primary"
+      },
+      "per_kind": {
+        "archive": {
+          "json_bytes": 125,
+          "largest_json_bytes": 125,
+          "records": 1
+        },
+        "catalog": {
+          "json_bytes": 68023,
+          "largest_json_bytes": 68023,
+          "records": 1
+        },
+        "directory": {
+          "json_bytes": 284368,
+          "largest_json_bytes": 427,
+          "records": 2612
+        },
+        "index": {
+          "json_bytes": 1909994,
+          "largest_json_bytes": 15431,
+          "records": 4414
+        },
+        "jurisdiction": {
+          "json_bytes": 29672,
+          "largest_json_bytes": 154,
+          "records": 200
+        },
+        "ledger": {
+          "json_bytes": 51371792,
+          "largest_json_bytes": 1029,
+          "records": 50000
+        },
+        "observer": {
+          "json_bytes": 2299428,
+          "largest_json_bytes": 4214,
+          "records": 4000
+        },
+        "office": {
+          "json_bytes": 2055881,
+          "largest_json_bytes": 499,
+          "records": 4200
+        },
+        "report-queue": {
+          "json_bytes": 226692,
+          "largest_json_bytes": 348,
+          "records": 2561
+        },
+        "report-schedule": {
+          "json_bytes": 45361,
+          "largest_json_bytes": 45361,
+          "records": 1
+        },
+        "root": {
+          "json_bytes": 369,
+          "largest_json_bytes": 369,
+          "records": 1
+        }
+      }
+    },
+    "initial": {
+      "fiscal_record_json_bytes": 34666948,
+      "fiscal_records": 67991,
+      "largest_record": {
+        "json_bytes": 68023,
+        "record": "canwu.fiscal.catalog:primary"
+      },
+      "per_kind": {
+        "archive": {
+          "json_bytes": 125,
+          "largest_json_bytes": 125,
+          "records": 1
+        },
+        "catalog": {
+          "json_bytes": 68023,
+          "largest_json_bytes": 68023,
+          "records": 1
+        },
+        "directory": {
+          "json_bytes": 284368,
+          "largest_json_bytes": 427,
+          "records": 2612
+        },
+        "index": {
+          "json_bytes": 1909994,
+          "largest_json_bytes": 15431,
+          "records": 4414
+        },
+        "jurisdiction": {
+          "json_bytes": 29672,
+          "largest_json_bytes": 154,
+          "records": 200
+        },
+        "ledger": {
+          "json_bytes": 28221792,
+          "largest_json_bytes": 566,
+          "records": 50000
+        },
+        "observer": {
+          "json_bytes": 2299428,
+          "largest_json_bytes": 4214,
+          "records": 4000
+        },
+        "office": {
+          "json_bytes": 1584380,
+          "largest_json_bytes": 385,
+          "records": 4200
+        },
+        "report-queue": {
+          "json_bytes": 223953,
+          "largest_json_bytes": 348,
+          "records": 2561
+        },
+        "report-schedule": {
+          "json_bytes": 44847,
+          "largest_json_bytes": 44847,
+          "records": 1
+        },
+        "root": {
+          "json_bytes": 366,
+          "largest_json_bytes": 366,
+          "records": 1
+        }
+      }
+    },
+    "partition_allocation_operations": 5183967.0,
+    "restore_allocation_operations": 273668416.0,
+    "snapshot_encode_allocation_operations": 5110.5309,
+    "snapshot_json_bytes": 661800813
+  }
+}

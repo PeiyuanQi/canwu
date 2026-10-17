@@ -25,7 +25,6 @@ use crate::records::{
     FiscalArchiveRecord, FiscalJurisdictionRecord, FiscalLedgerRecord, FiscalObserverRecord,
     FiscalOfficeRecord, FiscalRecordKind, FiscalReportQueueRecord, FiscalRootRecord,
     OBSERVER_HOLDER_ROLE, ROOT_CATALOG_ROLE, audit_fiscal_record_set, fiscal_archive_reference,
-    fiscal_records_of,
 };
 use crate::report::{fiscal_report_knowledge_schema, materialize_reports};
 use crate::settle::{
@@ -39,14 +38,13 @@ use canwu_api::{
     BoundarySystemContract, CanwuError, CanwuRun, CauseRef, Command, CommandContext,
     CommandIngress, CoreEntityKind, DecisionOrigin, DomainRecord, DomainRecordKind,
     DomainRecordMutationPolicy, DomainRecordSchema, DomainRecordType, DomainRecordVersionRef,
-    DomainReferenceSchema, DomainReferenceTargetKind, EntityRef, ErrorCode, EvidenceCursor,
-    IngressClass, IngressId, IngressPayload, IngressReceipt, Issuer, KnowledgeHolderRef,
-    KnowledgeRetention, KnowledgeWriteGrant, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
-    PayloadSchema, PersonId, PluginActionDescriptor, PluginArchiveObjectProvider,
-    PluginArchiveRetention, PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest,
-    PluginRegistrar, SimTime, SimulationPlugin, SimulationView, StateKey, StateVisibility,
-    SystemCadence, SystemDirective, canonical_hash,
-    payload_required_evidence_continuation_property_v1,
+    DomainReferenceSchema, DomainReferenceTargetKind, EntityRef, ErrorCode, IngressClass,
+    IngressId, IngressPayload, IngressReceipt, Issuer, KnowledgeHolderRef, KnowledgeRetention,
+    KnowledgeWriteGrant, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD, PayloadSchema, PersonId,
+    PluginActionDescriptor, PluginArchiveObjectProvider, PluginArchiveRetention,
+    PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest, PluginRegistrar, SimTime,
+    SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence, SystemDirective,
+    canonical_hash, payload_required_evidence_continuation_property_v1,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -107,8 +105,8 @@ pub const FISCAL_ACTION_SETTLED_EVENT: &str = "canwu.fiscal.action_settled.v1";
 /// Event recorded for every settled archive commit, applied or stale.
 pub const FISCAL_ARCHIVE_MAINTENANCE_EVENT: &str = "canwu.fiscal.archive_maintenance.v1";
 
-const PLUGIN_VERSION: &str = "0.4.0-experimental";
-const SEMANTIC_HASH: &str = "e1550867aa531e3e15c623dd1685603ba0ff01d188eea61569e899945a3292ec";
+const PLUGIN_VERSION: &str = "0.5.0-experimental";
+const SEMANTIC_HASH: &str = "e3ed464eaa0fe274cf92d07477c0525c7a3b0a62249a61ad11553f72891cdb72";
 
 static ARCHIVE_COMMIT_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static ARCHIVE_RETENTION_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
@@ -2038,14 +2036,130 @@ pub struct FiscalArchiveIngressReceiptV1 {
     pub directory_root: String,
 }
 
+/// The records of a run that an archive commit of up to `book_limit` books
+/// is prepared from, as a partial state: the root, the archive head, the
+/// ledgers that hold the first `book_limit` closed books in (scope, cycle)
+/// order, and those ledgers' offices. Every other ledger is read only far
+/// enough to see that its hot books are open, and no other record is read.
+fn archive_candidates<H: CanwuRun + ?Sized>(
+    runtime: &H,
+    book_limit: usize,
+) -> Result<FiscalState, FiscalArchiveError> {
+    let host = HostRecords(runtime);
+    let mut working =
+        Working::new(&host)?.ok_or_else(|| missing("fiscal state is not configured"))?;
+    working.ensure_archive()?;
+    // Refused before any ledger is read; preparing checks it again.
+    if working.state.archive.pending_handles.len() >= crate::MAX_FISCAL_ARCHIVE_PENDING_HANDLES {
+        return Err(FiscalArchiveError::Backpressure);
+    }
+    let mut closed = BTreeMap::<&str, usize>::new();
+    for record in runtime.domain_records() {
+        if !record.reference.kind.matches_type::<FiscalLedgerRecord>()
+            || record.lifecycle != canwu_api::DomainRecordLifecycle::Active
+        {
+            continue;
+        }
+        // An open book's status is the text `open`; a closed one's is an
+        // object naming who closed it.
+        let books = record
+            .payload
+            .get("books")
+            .and_then(Value::as_object)
+            .map_or(0, |books| {
+                books
+                    .values()
+                    .filter(|book| book.get("status").and_then(Value::as_str) != Some("open"))
+                    .count()
+            });
+        if books > 0 {
+            closed.insert(record.reference.id.as_str(), books);
+        }
+    }
+    let mut taken = 0_usize;
+    for (scope, books) in closed {
+        if taken >= book_limit {
+            break;
+        }
+        if !working.ensure_ledger(scope)? {
+            return Err(missing("a fiscal ledger is not active").into());
+        }
+        let office = working
+            .state
+            .ledgers
+            .get(scope)
+            .map(|ledger| ledger.office.clone())
+            .ok_or_else(|| missing("a fiscal ledger is not loaded"))?;
+        working.ensure_office_key(&office)?;
+        taken += books;
+    }
+    Ok(working.state)
+}
+
+/// Prepares one archive commit of a run: up to `book_limit` closed books, in
+/// (scope, cycle) order, together with the receipt of the commit at the head
+/// and the institution totals of every cycle whose last hot books it takes.
+/// It takes fewer books when those records would not fit
+/// [`crate::MAX_FISCAL_ARCHIVE_COMMIT_RECORDS`].
+///
+/// It reads only the records the commit is prepared from: the root and the
+/// archive head, every ledger far enough to see whether it holds a closed
+/// book, and the ledgers of the books it may select with their offices, so
+/// its cost follows the number of ledgers and the books selected, not the
+/// size of the fiscal state.
+///
+/// The records are cut into blobs of
+/// [`crate::MAX_FISCAL_ARCHIVE_RECORDS_PER_BLOB`], each with its membership
+/// and temporal page, and the directory commits to the cumulative lookup
+/// index extended by them. Extending the index reads the head's directory
+/// and the lookup pages on the paths of the new keys from `store`; nothing
+/// is written until [`PreparedFiscalArchiveBatchV1::store_and_verify`]. The
+/// result is a function of the run's fiscal records, its sealed cut, and
+/// the stored index alone.
+///
+/// A run that seals its evidence ([`CanwuRun::sealed_evidence_cursor`] is
+/// `Some`) cannot archive a book that cites a version a boundary established
+/// after that cut: the book's declaration of the version ends when it is
+/// archived, so the version must already be in a sealed segment. Such a
+/// book is refused with [`FiscalArchiveError::UnsealedCitations`]; seal,
+/// then archive. The cut is the run's own, so a host cannot pass a wrong
+/// one. A run that retains all its evidence (a `Canwu`, a never-sealed
+/// `CompactedCanwu`, or one restored from a checkpoint and its journal until
+/// its next seal) refuses none, and its archived books' citations reach a
+/// sealed segment only at its next seal: seal before each continuation
+/// checkpoint, or those versions are lost to the saved run.
+///
+/// It refuses, as [`FiscalArchiveError::Backpressure`], while the archive
+/// head holds [`crate::MAX_FISCAL_ARCHIVE_PENDING_HANDLES`] retention
+/// handles, of applied or stale commits, that the host has not
+/// acknowledged, and with [`FiscalArchiveError::NothingToArchive`] when no
+/// book is closed and no receipt waits.
+pub fn prepare_fiscal_archive<H: CanwuRun + ?Sized>(
+    runtime: &H,
+    book_limit: usize,
+    store: &dyn FiscalArchiveStore,
+) -> Result<PreparedFiscalArchiveBatchV1, FiscalArchiveError> {
+    if book_limit == 0 || book_limit > crate::MAX_FISCAL_ARCHIVE_COMMIT_RECORDS {
+        return Err(FiscalArchiveError::Mismatch(
+            "fiscal archive book limit is invalid".to_owned(),
+        ));
+    }
+    archive_candidates(runtime, book_limit)?.prepare_archive_batch(
+        book_limit,
+        store,
+        runtime.sealed_evidence_cursor().as_ref(),
+    )
+}
+
 /// Stores, reads back, verifies, and queues one fiscal archive commit, due
 /// now.
 ///
-/// The batch must equal what [`FiscalState::prepare_fiscal_archive`] derives
-/// from the run's current fiscal state, `store`, and `sealed_cut` for the
-/// same number of books, lookup pages included: a batch prepared before a
+/// The batch must equal what [`prepare_fiscal_archive`] derives from the
+/// run's current fiscal records, its sealed cut, and `store` for the same
+/// number of books, lookup pages included: a batch prepared before a
 /// boundary that changed a selected book, an affected office's cycle
-/// bookkeeping, or the archive head is refused here. The boundary that
+/// bookkeeping, or the archive head is refused here. Like preparing, this
+/// reads only the records the commit is prepared from. The boundary that
 /// settles the commit reads no archive object: it applies the commit when
 /// those are still as prepared, and otherwise records it as stale. Prepare
 /// and enqueue in one gap between boundaries.
@@ -2053,11 +2167,8 @@ pub fn enqueue_fiscal_archive<H: CanwuRun + ?Sized>(
     runtime: &mut H,
     prepared: &PreparedFiscalArchiveBatchV1,
     store: &dyn FiscalArchiveStore,
-    sealed_cut: Option<&EvidenceCursor>,
 ) -> Result<FiscalArchiveIngressReceiptV1, FiscalArchiveError> {
-    let state = FiscalState::from_records(fiscal_records_of(&*runtime))?;
-    let canonical =
-        state.prepare_fiscal_archive(prepared.selected_books.len().max(1), store, sealed_cut)?;
+    let canonical = prepare_fiscal_archive(&*runtime, prepared.selected_books.len().max(1), store)?;
     if canonical != *prepared {
         return Err(FiscalArchiveError::Mismatch(
             "fiscal archive batch differs from the exact current archive candidates".to_owned(),
@@ -2105,7 +2216,7 @@ pub fn enqueue_fiscal_archive<H: CanwuRun + ?Sized>(
 
 /// Finalizes the store-side retention of one settled commit and queues the
 /// acknowledgement that retires its handle, and every stale receipt recorded
-/// under it, from the archive head.
+/// under it, from the archive head. It reads the archive head alone.
 ///
 /// The handle must be in the head, settled. An acknowledgement that settles
 /// after another one retired the handle is a no-op, so calling this twice
@@ -2119,9 +2230,10 @@ pub fn finalize_fiscal_archive_retention<H: CanwuRun + ?Sized>(
     store: &dyn FiscalArchiveStore,
     receipt: &FiscalArchiveIngressReceiptV1,
 ) -> Result<IngressReceipt, FiscalArchiveError> {
-    let state = FiscalState::from_records(fiscal_records_of(&*runtime))?;
-    let handle: &FiscalArchiveRetentionHandleV1 = state
-        .archive
+    let head = active_record(&HostRecords(&*runtime), &fiscal_archive_reference())?
+        .ok_or_else(|| missing("the fiscal archive record is missing"))?
+        .decode_payload::<FiscalArchiveRecord>()?;
+    let handle: &FiscalArchiveRetentionHandleV1 = head
         .pending_handles
         .get(&receipt.retention_handle_id)
         .ok_or_else(|| {

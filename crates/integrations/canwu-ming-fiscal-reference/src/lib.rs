@@ -34,6 +34,7 @@ use canwu_fiscal::{
     FiscalState, MAX_FISCAL_ARCHIVE_COMMIT_RECORDS, audit_fiscal_records,
     enqueue_execution_receipts, enqueue_fiscal_archive, finalize_fiscal_archive_retention,
     fiscal_action_command, fiscal_catalog_reference, fiscal_target_revision, load_fiscal_state,
+    prepare_fiscal_archive,
 };
 use canwu_ming_fiscal::{MingFiscalFixture, compile_ming_fiscal, ming_fiscal_fixture};
 use canwu_reference_world::{ReferenceWorldIds, ReferenceWorldPlugin, demo_scenario};
@@ -516,13 +517,14 @@ pub fn archive_ming_fiscal_books(
 ) -> Result<u64, FiscalArchiveError> {
     let before = fiscal_state(canwu)?.archive.archived_book_count;
     loop {
-        let state = fiscal_state(canwu)?;
-        if !state.books().any(|(_, book)| !book.is_open()) {
-            break;
-        }
-        let prepared =
-            state.prepare_fiscal_archive(MAX_FISCAL_ARCHIVE_COMMIT_RECORDS, store, None)?;
-        let receipt = enqueue_fiscal_archive(canwu, &prepared, store, None)?;
+        // A commit of the head receipt alone waits for the next archive.
+        let prepared = match prepare_fiscal_archive(canwu, MAX_FISCAL_ARCHIVE_COMMIT_RECORDS, store)
+        {
+            Ok(prepared) if !prepared.selected_books.is_empty() => prepared,
+            Ok(_) | Err(FiscalArchiveError::NothingToArchive) => break,
+            Err(error) => return Err(error),
+        };
+        let receipt = enqueue_fiscal_archive(canwu, &prepared, store)?;
         canwu.advance_canonical(SimDuration::minutes(1))?;
         finalize_fiscal_archive_retention(canwu, store, &receipt)?;
         canwu.advance_canonical(SimDuration::minutes(1))?;

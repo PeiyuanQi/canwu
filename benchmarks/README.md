@@ -557,9 +557,11 @@ land rule implemented and one annual cycle. Identifiers are generated
 - receipt boundaries of 1,024 and 16,384 receipts (packets of 4,096), after
   their collections are authorized and their evidence recorded;
 - a close of every book; and
-- archive commits of 256 and 4,096 closed books: assembling the state,
-  preparing and storing the batch, verifying and queueing it, the settling
-  boundary, finalizing the retention, and the acknowledging boundary.
+- archive commits of 256 and 4,096 closed books: preparing the batch from
+  the run's records (`prepare_fiscal_archive`), storing, verifying, and
+  queueing it, the settling boundary, finalizing the retention, and the
+  acknowledging boundary. Up to 0.17.0 the host first assembled the whole
+  state (`assemble_state_ms`).
 
 Each boundary figure has, in an elapsed build, the share of the fiscal
 handlers (`settlement_fiscal_handlers_ms`, and each handler in
@@ -629,6 +631,12 @@ default report retention the held knowledge stays flat.
 
 The gate preset is `--preset world --courts institution --cadence interval
 --held-cycles 24`.
+
+`--rows interval`, with `--cadence interval` and no `--held-cycles`, measures
+only the state, the idle boundaries, the spread due day, and the due
+instant, on a run whose every scope is assessed without timing the bursts:
+the rows of the due instant in a fresh process, in a few minutes rather than
+the whole profile's hour.
 
 The 2026-10-15 runs were recorded from the world-scale change's Phase 2
 (before the version bump), on one machine, the elapsed runs with nothing else
@@ -714,6 +722,68 @@ month from the fifth. That growth is not fiscal state or knowledge, which
 stay flat, but the engine's request index, which keeps the idempotency
 outcome of every tracked command (about 440 bytes a command on the smoke
 preset). Restoring the 293 MB checkpoint takes 58 s.
+
+The 0.18.0 runs (see
+[`docs/proposals/fiscal-archive-and-due-instant-cost.md`](../docs/proposals/fiscal-archive-and-due-instant-cost.md))
+measure the change that reads a book's figures without decoding its ledger,
+encodes a report part compactly (version 6 of the `fiscal_report` schema),
+and prepares archive commits from the run's records instead of the
+assembled state. They were recorded on the same machine while other
+workers' builds and a second profile ran, so their elapsed figures move by
+a third or more between runs and are context; allocator calls, heap peaks,
+and payload bytes do not depend on load. The
+[allocation run](baselines/2026-10-16-fiscal-world-world-institution-interval-0.18.0-allocations.json)
+(`--preset world --courts institution --cadence interval`) against the
+0.17.0 one:
+
+| Boundary | 0.17.0 allocator calls | 0.18.0 | 0.17.0 heap peak | 0.18.0 | Payload, 0.17.0 to 0.18.0 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Due instant (4,000 observers due) | 6,516,716 | 4,261,604 | 472.1 MB | 305.6 MB | 15,671,758 to 5,545,628 bytes |
+| Spread due day (134 observers due) | 213,438 | 155,798 | 33.3 MB | 28.7 MB | 437,768 to 156,327 bytes |
+| Idle (one tick, nothing fiscal due) | 11,123 | 11,123 | | | |
+| Archive commit of 256 books, host side | 6,154,725 | 98,265 | | | |
+| Archive commit of 4,096 books, host side | 6,901,382 | 1,192,755 | | | |
+
+The host side of an archive commit is preparing, verifying and queueing,
+and finalizing (in 0.17.0 also assembling the state first); every other row
+is within 0.01 % of 0.17.0.
+
+The due instant in a fresh process, `--rows interval`, three rounds
+alternating a build of the 0.17.0 code with this harness against the change
+(`2026-10-16-fiscal-world-interval-rows-{0.17.0,0.18.0}-round{1,2,3}-elapsed.json`),
+medians in milliseconds with the fiscal handlers' share:
+
+| Round | 0.17.0 due instant | 0.18.0 due instant | 0.17.0 spread day | 0.18.0 spread day |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 1,827 (fiscal 1,108) | 1,546 (869) | 67.4 (35.9) | 62.7 (34.0) |
+| 2 | 2,205 (1,492) | 1,259 (714) | 191 (65.6) | 65.4 (28.0) |
+| 3 | 4,054 (2,424) | 1,858 (1,082) | 68.6 (34.9) | 46.2 (21.3) |
+
+A 0.17.0 round recorded with less load before the alternation
+([`round0`](baselines/2026-10-16-fiscal-world-interval-rows-0.17.0-round0-elapsed.json))
+took 1,259 ms at the due instant (fiscal 789, engine 470) and 45.4 ms on the
+spread day: in a fresh process the due instant costs fiscal about 80 µs a
+record against about 73 µs on a spread day, so the 2,504 ms of the 0.17.0
+gate run, measured after its 24 held months in the same process, was mostly
+that process's state.
+
+The [gate run](baselines/2026-10-16-fiscal-world-world-institution-interval-0.18.0-elapsed.json)
+(`--preset world --courts institution --cadence interval --held-cycles 24`)
+ran with the machine at 77 to 94 % load from other builds, so rows the
+change does not touch took 1.1 to 3.4 times their 0.17.0 times (assessing
+every scope 8,102 ms against 4,568, closing every book 5,693 against 5,052,
+restoring the 24-month continuation checkpoint 196 s against 58 s): read it
+for what the change does, not as a timing of the release. Even so, the due
+instant took 2,160 ms (fiscal 1,219, engine 941) against 2,504 (fiscal
+1,821, engine 676), and the host side of an archive commit 166 ms for 256
+books (preparing 77, verifying and queueing 89, finalizing 0.06) against
+1,402, and 501 ms for 4,096 books (167, 334, 0.1) against 1,813. A month's
+wall time (100 to 240 s, following the load) does not compare with
+0.17.0's. Held knowledge stays flat at 14,138 bodies and entries, now
+5.67 MB of payload against 15.13 MB, and the continuation checkpoint is
+about 10 MB smaller (162 MB after the first month and 284 MB after the
+24th, against 172 and 293), still growing about 3.9 MB a month through the
+engine's request index.
 
 ## Knowledge-ledger profile
 

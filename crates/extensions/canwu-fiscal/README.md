@@ -141,7 +141,8 @@ audited institution's proposals are touched. Each party has room for
 policy, so no party can take another's; admission refuses a further one as
 `ValueOutOfRange`. Each policy keeps its latest
 `MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY` (64) resolved proposals and drops
-older ones. Authority and what a decision cites are
+older ones; a dropped proposal is not archived, and who made and decided it
+stays in the settled events of the actions that did. Authority and what a decision cites are
 checked when the command is admitted and again when the action settles, and
 every refusal is recorded: a rejected command at admission, a rejected
 outcome at settlement. The binding names the decision in `rebound_by` and the
@@ -310,10 +311,11 @@ Every host helper takes either run handle, `Canwu` or a sealed
 `CompactedCanwu`, through `canwu_api::CanwuRun`: `fiscal_action_target`,
 `fiscal_target_revision`, `fiscal_recent_outcome`,
 `enqueue_execution_receipts`, `load_fiscal_state`, `audit_fiscal_records`,
-`fiscal_reports_of_holder`, `enqueue_fiscal_archive`, and
-`finalize_fiscal_archive_retention`. They read only current records and the
-current-version index, so a run that sealed its evidence reads and settles
-as its unsealed fork does.
+`fiscal_reports_of_holder`, `prepare_fiscal_archive`, `enqueue_fiscal_archive`,
+and `finalize_fiscal_archive_retention`. They read only current records, the
+current-version index, and, to prepare an archive commit, the run's sealed
+cut (`CanwuRun::sealed_evidence_cursor`), so a run that sealed its evidence
+reads and settles as its unsealed fork does.
 
 A boundary decodes only the records its packets touch: a ledger or office read
 when an entry names it, a directory bucket to find the office of a binding, an
@@ -368,8 +370,8 @@ objects, and every reference to one names its scope: `GrantRemission`,
   payment form) is assessed at most once for the life of a run without
   reading the archive. Cycle IDs compare in byte order; name them so that
   they sort (`"1644"`, `"1644-03"`).
-- The host archives. `FiscalState::prepare_fiscal_archive` selects closed
-  books, in (scope, cycle) order, up to a book limit and
+- The host archives. `prepare_fiscal_archive(run, book_limit, store)` selects
+  closed books, in (scope, cycle) order, up to a book limit and
   `MAX_FISCAL_ARCHIVE_COMMIT_RECORDS` (4,096) records, and builds the blobs
   (`MAX_FISCAL_ARCHIVE_RECORDS_PER_BLOB`, 64, records each), membership,
   temporal, and lookup-index pages, and directory of a
@@ -377,14 +379,24 @@ objects, and every reference to one names its scope: `GrantRemission`,
   them in a `FiscalArchiveStore`, persists the retention handle, and queues
   the commit (`fiscal_archive_commit_v1`); `finalize_fiscal_archive_retention`
   queues its acknowledgement once the commit has settled. Prepare and enqueue
-  in one gap between boundaries. Both work on either run handle (any
-  `canwu_api::CanwuRun`) and assemble the committed state from every fiscal
-  record, which costs time proportional to the state. On a run that has
-  sealed evidence, pass the end cursor of its last sealed segment: a book
-  citing an evidence version established after it is refused at preparation
-  (`FiscalArchiveError::UnsealedCitations`) until a seal covers it. The cut is
-  the host's to pass; the functions cannot read it from the run, so a sealing
-  host that passes `None` skips that refusal. Preparation refuses
+  in one gap between boundaries. All three work on either run handle (any
+  `canwu_api::CanwuRun`) and read only the records a commit needs: preparing
+  and enqueueing read the root, the archive head, every ledger only far
+  enough to see whether it holds a closed book, and the ledgers and offices
+  of the books a commit may take; finalizing reads the archive head. On a
+  run that has sealed evidence (its `sealed_evidence_cursor` is `Some`), a
+  book citing an evidence version established after the run's last sealed
+  cut is refused at preparation (`FiscalArchiveError::UnsealedCitations`)
+  until a seal covers it: seal, then archive. The cut is the run's own; a
+  host cannot pass a wrong one. A run that retains all its evidence (a
+  `Canwu`, a `CompactedCanwu` that has never sealed, or one restored from a
+  checkpoint and its journal, until its next seal) refuses nothing, and the
+  versions its archived books cited reach a sealed segment only at its next
+  seal. So every archived citation is in a sealed segment only if the host
+  seals before it writes a continuation checkpoint: seal at each save. A
+  host that saves without sealing archives freely in that session and, once
+  restored (its cut is then the checkpoint's settled cut), sees the same
+  kind of citation refused. Preparation refuses
   (`FiscalArchiveError::Backpressure`) while the archive head holds
   `MAX_FISCAL_ARCHIVE_PENDING_HANDLES` (64) unacknowledged retention handles,
   of applied or stale commits.
@@ -484,9 +496,15 @@ holds, keyed by binding ID, or, as a trusted host and for any holder, a
 government included, with `fiscal_reports_of_holder`. A complete report's
 `projection` is what `compute_projection` derives from the fiscal state of
 the boundary that published it, at its `as_of`. A report record on its own
-(`FiscalReportRecord`, version 5 of the `fiscal_report` knowledge schema) is
+(`FiscalReportRecord`, version 6 of the `fiscal_report` knowledge schema) is
 the summary or one part, not a report; the summary names the binding's
-granularity and cadence.
+granularity and cadence. A part is encoded compactly: its rows' institutions
+once each in an `institutions` table, each row as `[row, institution,
+mechanism, scope_binding_id, facts]` (an index into the table, and an empty
+scope for an institution row), and each fact as `[unit, payment_form,
+assessed minimum, assessed maximum, collected minimum, collected maximum,
+outstanding minimum, outstanding maximum]`; read parts as
+`FiscalReportPart`, never by their JSON shape.
 
 - Every report record is about the binding's own observer record, and its
   report line is named by roles on that record: the summary on line 0, and
@@ -547,9 +565,9 @@ granularity and cadence.
   bounds, so a boundary that publishes to thousands of holders makes a few
   directives and a few `KnowledgePublished` events. With the default share
   one dirty cycle owed to every observer of a world of 4,000 observers (9,603
-  records and 15.7 MB, 15,671,758 bytes, of payload in
-  `benchmarks/baselines/2026-10-16-fiscal-world-world-institution-interval-elapsed.json`)
-  is published in one boundary.
+  records and 5.5 MB, 5,545,628 bytes, of payload in
+  `benchmarks/baselines/2026-10-16-fiscal-world-world-institution-interval-0.18.0-allocations.json`;
+  15.7 MB before parts were encoded compactly) is published in one boundary.
   `FiscalPlugin::with_report_budget` raises or lowers the share, between
   `FiscalReportBudget::MINIMUM` and the engine's per-boundary limits;
   registration refuses any other. The parts of a report are cut by count

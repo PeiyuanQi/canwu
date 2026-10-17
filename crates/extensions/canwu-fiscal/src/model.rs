@@ -2169,63 +2169,34 @@ impl FiscalCycleBook {
     /// The scope-level totals of the book, one per (unit, payment form)
     /// partition, in partition order, under the scope's `mechanism`.
     pub fn totals(&self, mechanism: FiscalMechanism) -> Result<Vec<FiscalCycleTotal>, CanwuError> {
-        let mut totals = BTreeMap::<(&str, FiscalPaymentForm), FiscalCycleTotal>::new();
-        let mut partitions = BTreeMap::new();
-        for assessment in self.assessments.values() {
-            let key = (assessment.unit.as_str(), assessment.payment_form);
-            partitions.insert(assessment.id.as_str(), key);
-            let total = totals.entry(key).or_insert_with(|| {
-                FiscalCycleTotal::empty(mechanism, &assessment.unit, assessment.payment_form)
-            });
-            total.assessed = sum(total.assessed, assessment.quantity)?;
-        }
-        for remission in self.remissions.values() {
-            let key = partitions
-                .get(remission.assessment_id.as_str())
-                .ok_or_else(|| invalid("fiscal remission has no assessment in its book"))?;
-            let total = totals
-                .get_mut(key)
-                .ok_or_else(|| invalid("fiscal remission partition is unavailable"))?;
-            total.remission_granted = sum(total.remission_granted, remission.quantity)?;
-        }
-        let mut requests = BTreeMap::new();
-        for request in self.execution_requests.values() {
-            let key = partitions
-                .get(request.assessment_id.as_str())
-                .ok_or_else(|| invalid("fiscal execution request has no assessment in its book"))?;
-            requests.insert(request.id.as_str(), (*key, request.kind));
-        }
-        for receipt in self
-            .execution_receipts
-            .values()
-            .filter(|receipt| receipt.disposition.counts_as_fulfillment())
-        {
-            let (key, kind) = requests
-                .get(receipt.request_id.as_str())
-                .ok_or_else(|| invalid("fiscal receipt has no execution request in its book"))?;
-            let total = totals
-                .get_mut(key)
-                .ok_or_else(|| invalid("fiscal receipt partition is unavailable"))?;
-            let target = match kind {
-                FiscalExecutionKind::Collect => &mut total.collected,
-                FiscalExecutionKind::Remit => &mut total.remitted,
-                FiscalExecutionKind::Disburse => &mut total.disbursed,
-                FiscalExecutionKind::Reserve => &mut total.reserved,
-                FiscalExecutionKind::Return => &mut total.returned,
-            };
-            *target = sum(*target, receipt.quantity)?;
-        }
-        totals
-            .into_values()
-            .map(|mut total| {
-                total.outstanding = total
-                    .assessed
-                    .checked_sub(total.remission_granted)
-                    .and_then(|value| value.checked_sub(total.collected))
-                    .ok_or_else(|| invalid("fiscal cycle total underflowed"))?;
-                Ok(total)
-            })
-            .collect()
+        cycle_totals(
+            mechanism,
+            self.assessments.values().map(|assessment| {
+                (
+                    assessment.id.as_str(),
+                    assessment.unit.as_str(),
+                    assessment.payment_form,
+                    assessment.quantity,
+                )
+            }),
+            self.remissions
+                .values()
+                .map(|remission| (remission.assessment_id.as_str(), remission.quantity)),
+            self.execution_requests.values().map(|request| {
+                (
+                    request.id.as_str(),
+                    request.assessment_id.as_str(),
+                    request.kind,
+                )
+            }),
+            self.execution_receipts.values().map(|receipt| {
+                (
+                    receipt.request_id.as_str(),
+                    receipt.disposition,
+                    receipt.quantity,
+                )
+            }),
+        )
     }
 
     /// The evidence versions the book's hot objects cite: its assessments'
@@ -2347,6 +2318,151 @@ pub(crate) fn sum_report_totals(into: &mut Vec<FiscalCycleTotal>, totals: &[Fisc
 fn sum(left: u64, right: u64) -> Result<u64, CanwuError> {
     left.checked_add(right)
         .ok_or_else(|| invalid("fiscal cycle total overflowed"))
+}
+
+/// The totals of one book, one per (unit, payment form) partition, in
+/// partition order, from the fields of its objects that they depend on:
+/// each assessment's ID, unit, payment form, and quantity; each remission's
+/// assessment and quantity; each execution request's ID, assessment, and
+/// kind; and each receipt's request, disposition, and quantity. Both
+/// [`FiscalCycleBook::totals`] and the report system's read of a book in its
+/// record ([`BookFigures`]) compute them here.
+pub(crate) fn cycle_totals<'a>(
+    mechanism: FiscalMechanism,
+    assessments: impl IntoIterator<Item = (&'a str, &'a str, FiscalPaymentForm, u64)>,
+    remissions: impl IntoIterator<Item = (&'a str, u64)>,
+    requests: impl IntoIterator<Item = (&'a str, &'a str, FiscalExecutionKind)>,
+    receipts: impl IntoIterator<Item = (&'a str, FiscalReceiptDisposition, u64)>,
+) -> Result<Vec<FiscalCycleTotal>, CanwuError> {
+    let mut totals = BTreeMap::<(&str, FiscalPaymentForm), FiscalCycleTotal>::new();
+    let mut partitions = BTreeMap::new();
+    for (id, unit, payment_form, quantity) in assessments {
+        let key = (unit, payment_form);
+        partitions.insert(id, key);
+        let total = totals
+            .entry(key)
+            .or_insert_with(|| FiscalCycleTotal::empty(mechanism, unit, payment_form));
+        total.assessed = sum(total.assessed, quantity)?;
+    }
+    for (assessment_id, quantity) in remissions {
+        let key = partitions
+            .get(assessment_id)
+            .ok_or_else(|| invalid("fiscal remission has no assessment in its book"))?;
+        let total = totals
+            .get_mut(key)
+            .ok_or_else(|| invalid("fiscal remission partition is unavailable"))?;
+        total.remission_granted = sum(total.remission_granted, quantity)?;
+    }
+    let mut request_keys = BTreeMap::new();
+    for (id, assessment_id, kind) in requests {
+        let key = partitions
+            .get(assessment_id)
+            .ok_or_else(|| invalid("fiscal execution request has no assessment in its book"))?;
+        request_keys.insert(id, (*key, kind));
+    }
+    for (request_id, _, quantity) in receipts
+        .into_iter()
+        .filter(|(_, disposition, _)| disposition.counts_as_fulfillment())
+    {
+        let (key, kind) = request_keys
+            .get(request_id)
+            .ok_or_else(|| invalid("fiscal receipt has no execution request in its book"))?;
+        let total = totals
+            .get_mut(key)
+            .ok_or_else(|| invalid("fiscal receipt partition is unavailable"))?;
+        let target = match kind {
+            FiscalExecutionKind::Collect => &mut total.collected,
+            FiscalExecutionKind::Remit => &mut total.remitted,
+            FiscalExecutionKind::Disburse => &mut total.disbursed,
+            FiscalExecutionKind::Reserve => &mut total.reserved,
+            FiscalExecutionKind::Return => &mut total.returned,
+        };
+        *target = sum(*target, quantity)?;
+    }
+    totals
+        .into_values()
+        .map(|mut total| {
+            total.outstanding = total
+                .assessed
+                .checked_sub(total.remission_granted)
+                .and_then(|value| value.checked_sub(total.collected))
+                .ok_or_else(|| invalid("fiscal cycle total underflowed"))?;
+            Ok(total)
+        })
+        .collect()
+}
+
+/// What a book's totals depend on, read from the book's encoded form in its
+/// ledger record and borrowing its text, so that the report system sums a
+/// book without decoding it: every other field of the book and of its
+/// objects is skipped.
+#[derive(Deserialize)]
+pub(crate) struct BookFigures<'a> {
+    #[serde(default, borrow)]
+    assessments: BTreeMap<&'a str, AssessmentFigures<'a>>,
+    #[serde(default, borrow)]
+    remissions: BTreeMap<&'a str, RemissionFigures<'a>>,
+    #[serde(default, borrow)]
+    execution_requests: BTreeMap<&'a str, RequestFigures<'a>>,
+    #[serde(default, borrow)]
+    execution_receipts: BTreeMap<&'a str, ReceiptFigures<'a>>,
+}
+
+#[derive(Deserialize)]
+struct AssessmentFigures<'a> {
+    id: &'a str,
+    unit: &'a str,
+    payment_form: FiscalPaymentForm,
+    quantity: u64,
+}
+
+#[derive(Deserialize)]
+struct RemissionFigures<'a> {
+    assessment_id: &'a str,
+    quantity: u64,
+}
+
+#[derive(Deserialize)]
+struct RequestFigures<'a> {
+    id: &'a str,
+    assessment_id: &'a str,
+    kind: FiscalExecutionKind,
+}
+
+#[derive(Deserialize)]
+struct ReceiptFigures<'a> {
+    request_id: &'a str,
+    disposition: FiscalReceiptDisposition,
+    quantity: u64,
+}
+
+impl BookFigures<'_> {
+    /// The book's totals, as [`FiscalCycleBook::totals`] gives them.
+    pub(crate) fn totals(
+        &self,
+        mechanism: FiscalMechanism,
+    ) -> Result<Vec<FiscalCycleTotal>, CanwuError> {
+        cycle_totals(
+            mechanism,
+            self.assessments.values().map(|assessment| {
+                (
+                    assessment.id,
+                    assessment.unit,
+                    assessment.payment_form,
+                    assessment.quantity,
+                )
+            }),
+            self.remissions
+                .values()
+                .map(|remission| (remission.assessment_id, remission.quantity)),
+            self.execution_requests
+                .values()
+                .map(|request| (request.id, request.assessment_id, request.kind)),
+            self.execution_receipts
+                .values()
+                .map(|receipt| (receipt.request_id, receipt.disposition, receipt.quantity)),
+        )
+    }
 }
 
 /// One scope binding with everything the state holds for it: its adoptions,
@@ -3230,7 +3346,18 @@ mod part_bitmaps {
 /// may carry: it cites the current version of each office its rows belong
 /// to and counts in `books_summed` the books it summed, which is weaker
 /// provenance than a scope part's.
+///
+/// A part is encoded compactly: the institutions of its rows once each, in
+/// an `institutions` table in the order its rows first name them, and each
+/// row as `[row, institution, mechanism, scope_binding_id, facts]`, with
+/// `institution` an index into the table and `scope_binding_id` empty for
+/// an institution row, and each fact as `[unit, payment_form, assessed
+/// minimum, assessed maximum, collected minimum, collected maximum,
+/// outstanding minimum, outstanding maximum]`, arrays rather than objects,
+/// so that a part's payload stays small. A [`FiscalReportRow`] on its own
+/// keeps its object form.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "FiscalReportPartWire", into = "FiscalReportPartWire")]
 pub struct FiscalReportPart {
     pub observer_id: String,
     pub accounting_cycle_id: String,
@@ -3246,6 +3373,156 @@ pub struct FiscalReportPart {
     /// not republish the part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub books_summed: Option<u32>,
+}
+
+/// The encoded form of a [`FiscalReportPart`], as its documentation describes.
+#[derive(Clone, Deserialize, Serialize)]
+struct FiscalReportPartWire {
+    observer_id: String,
+    accounting_cycle_id: String,
+    slot: u16,
+    part: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    institutions: Vec<EntityRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rows: Vec<FiscalReportRowWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    books_summed: Option<u32>,
+}
+
+/// One encoded row: the row, the index of its institution in the part's
+/// table, its mechanism, its scope (empty for an institution row), and its
+/// facts.
+#[derive(Clone, Deserialize, Serialize)]
+struct FiscalReportRowWire(
+    u32,
+    u32,
+    FiscalMechanism,
+    String,
+    Vec<FiscalReportRowFactWire>,
+);
+
+/// One encoded fact: its unit and payment form, and the minimum and maximum
+/// of what was assessed, collected, and is outstanding.
+#[derive(Clone, Deserialize, Serialize)]
+struct FiscalReportRowFactWire(String, FiscalPaymentForm, u64, u64, u64, u64, u64, u64);
+
+impl From<FiscalReportPart> for FiscalReportPartWire {
+    fn from(part: FiscalReportPart) -> Self {
+        let mut institutions: Vec<EntityRef> = Vec::new();
+        let rows = part
+            .rows
+            .into_iter()
+            .map(|row| {
+                let index = institutions
+                    .iter()
+                    .position(|institution| *institution == row.institution)
+                    .unwrap_or_else(|| {
+                        institutions.push(row.institution);
+                        institutions.len() - 1
+                    });
+                FiscalReportRowWire(
+                    row.row,
+                    u32::try_from(index).unwrap_or(u32::MAX),
+                    row.mechanism,
+                    row.scope_binding_id,
+                    row.facts
+                        .into_iter()
+                        .map(|fact| {
+                            FiscalReportRowFactWire(
+                                fact.unit,
+                                fact.payment_form,
+                                fact.assessed.minimum,
+                                fact.assessed.maximum,
+                                fact.collected.minimum,
+                                fact.collected.maximum,
+                                fact.outstanding.minimum,
+                                fact.outstanding.maximum,
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        Self {
+            observer_id: part.observer_id,
+            accounting_cycle_id: part.accounting_cycle_id,
+            slot: part.slot,
+            part: part.part,
+            institutions,
+            rows,
+            books_summed: part.books_summed,
+        }
+    }
+}
+
+impl TryFrom<FiscalReportPartWire> for FiscalReportPart {
+    type Error = String;
+
+    fn try_from(wire: FiscalReportPartWire) -> Result<Self, String> {
+        let rows = wire
+            .rows
+            .into_iter()
+            .map(
+                |FiscalReportRowWire(row, institution, mechanism, scope, facts)| {
+                    let institution = usize::try_from(institution)
+                        .ok()
+                        .and_then(|index| wire.institutions.get(index))
+                        .cloned()
+                        .ok_or_else(|| {
+                            "a fiscal report row names an institution its part does not list"
+                                .to_owned()
+                        })?;
+                    Ok(FiscalReportRow {
+                        row,
+                        institution,
+                        mechanism,
+                        scope_binding_id: scope,
+                        facts: facts
+                            .into_iter()
+                            .map(
+                                |FiscalReportRowFactWire(
+                                    unit,
+                                    payment_form,
+                                    a0,
+                                    a1,
+                                    c0,
+                                    c1,
+                                    o0,
+                                    o1,
+                                )| {
+                                    FiscalReportRowFact {
+                                        unit,
+                                        payment_form,
+                                        assessed: FiscalAmountEstimate {
+                                            minimum: a0,
+                                            maximum: a1,
+                                        },
+                                        collected: FiscalAmountEstimate {
+                                            minimum: c0,
+                                            maximum: c1,
+                                        },
+                                        outstanding: FiscalAmountEstimate {
+                                            minimum: o0,
+                                            maximum: o1,
+                                        },
+                                    }
+                                },
+                            )
+                            .collect(),
+                    })
+                },
+            )
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(Self {
+            observer_id: wire.observer_id,
+            accounting_cycle_id: wire.accounting_cycle_id,
+            slot: wire.slot,
+            part: wire.part,
+            rows,
+            books_summed: wire.books_summed,
+        })
+    }
 }
 
 /// One scope's facts of one cycle, or one institution's of one mechanism.
@@ -3323,7 +3600,7 @@ impl FiscalReport {
 /// adoption counts and transition candidates in its [`FiscalJurisdiction`];
 /// each observer binding with its report bookkeeping in its
 /// [`FiscalObserver`]. Closed books leave through the fiscal archive (see
-/// [`FiscalState::prepare_fiscal_archive`]). Nothing grows for the life of a
+/// [`crate::prepare_fiscal_archive`]). Nothing grows for the life of a
 /// run: every action target keeps its recent outcomes in a
 /// [`FiscalOutcomeRing`], and the archive keeps every archived book and
 /// institution total for good.

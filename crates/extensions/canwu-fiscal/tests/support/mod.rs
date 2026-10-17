@@ -40,7 +40,7 @@ use canwu_fiscal::{
     FiscalScopeBinding, FiscalSettledAction, FiscalState, FiscalTransitionDefinition,
     HistoricalConfidence, HistoricalYearWindow, audit_fiscal_records, compile_fiscal_content,
     enqueue_fiscal_archive, finalize_fiscal_archive_retention, fiscal_action_command,
-    fiscal_action_target, fiscal_reports, fiscal_target_revision,
+    fiscal_action_target, fiscal_reports, fiscal_target_revision, prepare_fiscal_archive,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1102,7 +1102,10 @@ pub fn enqueue_tick(canwu: &mut Canwu) {
 }
 
 #[must_use]
-pub fn current_commission(canwu: &Canwu, commission: &str) -> DomainRecordVersionRef {
+pub fn current_commission<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
+    commission: &str,
+) -> DomainRecordVersionRef {
     canwu
         .current_domain_record_version(&commission_reference(commission).into_untyped())
         .expect("current commission version query")
@@ -1344,10 +1347,8 @@ pub fn enqueue_archive(
     store: &MemoryArchiveStore,
     books: usize,
 ) -> FiscalArchiveIngressReceiptV1 {
-    let prepared = fiscal_state(canwu)
-        .prepare_fiscal_archive(books, store, None)
-        .expect("archive batch");
-    enqueue_fiscal_archive(canwu, &prepared, store, None).expect("archive commit queued")
+    let prepared = prepare_fiscal_archive(canwu, books, store).expect("archive batch");
+    enqueue_fiscal_archive(canwu, &prepared, store).expect("archive commit queued")
 }
 
 /// Archives up to `books` closed books: prepares, stores, verifies, and

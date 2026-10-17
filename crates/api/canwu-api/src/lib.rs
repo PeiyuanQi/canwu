@@ -289,6 +289,10 @@ pub trait CanwuRun {
     /// How many items each evidence journal holds, sealed and retained
     /// together.
     fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError>;
+    /// The cut through the evidence the run no longer retains (where its
+    /// last seal ended), or `None` while it retains all of it; see
+    /// [`CompactedCanwu::sealed_evidence_cursor`].
+    fn sealed_evidence_cursor(&self) -> Option<EvidenceCursor>;
     /// The boundaries of the half-open window `from..to`.
     fn boundaries_between(&self, from: SimTime, to: SimTime) -> Result<BoundaryWindow, CanwuError>;
     /// How far back the run keeps settled boundaries.
@@ -356,6 +360,9 @@ macro_rules! impl_canwu_run {
             }
             fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError> {
                 Self::evidence_cursor(self)
+            }
+            fn sealed_evidence_cursor(&self) -> Option<EvidenceCursor> {
+                Self::sealed_evidence_cursor(self)
             }
             fn boundaries_between(
                 &self,
@@ -807,6 +814,15 @@ impl Canwu {
 
     pub fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError> {
         self.simulation.evidence_cursor()
+    }
+
+    /// The cut through the evidence this run no longer retains, or `None`
+    /// while it retains all its evidence, as a run of this handle does; a
+    /// run seals through [`CompactedCanwu`]. See
+    /// [`CompactedCanwu::sealed_evidence_cursor`].
+    #[must_use]
+    pub fn sealed_evidence_cursor(&self) -> Option<EvidenceCursor> {
+        self.simulation.sealed_evidence_cursor()
     }
 
     pub fn checkpoint(&self) -> Result<SimulationCheckpoint, CanwuError> {
@@ -1762,6 +1778,16 @@ impl CompactedCanwu {
 
     pub fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError> {
         self.simulation.evidence_cursor()
+    }
+
+    /// The cut through the evidence this run no longer retains: the end of
+    /// its last sealed segment, or the settled cut of the continuation
+    /// checkpoint it was restored from. `None` while it retains all its
+    /// evidence: it has never sealed, or it was restored with its whole
+    /// journal (whose first seal starts again at the zero cut).
+    #[must_use]
+    pub fn sealed_evidence_cursor(&self) -> Option<EvidenceCursor> {
+        self.simulation.sealed_evidence_cursor()
     }
 
     /// Copies the compact runtime for a look-ahead or an alternative

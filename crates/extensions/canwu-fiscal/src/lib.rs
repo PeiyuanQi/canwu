@@ -38,7 +38,7 @@ pub use plugin::{
     FiscalArchiveIngressReceiptV1, FiscalPlugin, PLUGIN_NAME, enqueue_execution_receipts,
     enqueue_fiscal_archive, finalize_fiscal_archive_retention, fiscal_action_command,
     fiscal_action_target, fiscal_historical_context_ingress, fiscal_recent_outcome,
-    fiscal_target_revision,
+    fiscal_target_revision, prepare_fiscal_archive,
 };
 pub use projection::{load_fiscal_catalog, load_fiscal_state};
 pub use records::{

@@ -29,15 +29,16 @@ use canwu_fiscal::{
     FiscalIssuerRole, FiscalObserverBinding, FiscalPaymentForm, FiscalRebinding,
     FiscalSettledAction, FiscalState, PLUGIN_NAME, archived_fiscal_record, audit_fiscal_archive,
     enqueue_execution_receipts, enqueue_fiscal_archive, finalize_fiscal_archive_retention,
+    prepare_fiscal_archive,
 };
 use std::collections::BTreeSet;
 use support::{
     AUDITOR, AUDITOR_COMMISSION, DEPUTY, Draft, Fixture, GRANARY_PRINCIPAL, MemoryArchiveStore,
     MemoryEvidenceArchive, PRINCIPAL, RULE, SUCCESSOR, TREASURY_AUTHORITY, archive, assessment,
-    close, collection, current_commission, draft, enqueue_archive, enqueue_renewal,
-    execution_claim, fiscal_report, fiscal_state, ledger_revision, observer_binding,
-    published_report_records, receipt_packet, record_results, refusals, scenario, seal,
-    sealed_fiscal_state, settle, submit, submit_sealed, treasury, treasury_scope,
+    close, collection, current_commission, draft, enqueue_archive, execution_claim, fiscal_report,
+    fiscal_state, ledger_revision, observer_binding, published_report_records, receipt_packet,
+    record_results, refusals, renewal_at, scenario, seal, sealed_fiscal_state, settle, submit,
+    submit_sealed, treasury, treasury_scope,
 };
 
 fn by_principal(drafts: impl IntoIterator<Item = Draft>) -> Vec<(PersonId, Draft)> {
@@ -427,29 +428,23 @@ fn a_commit_spans_several_blobs_and_the_index_is_cumulative() {
         }
     }));
     let store = MemoryArchiveStore::default();
-    let state = fiscal_state(&canwu);
-    let prepared = state
-        .prepare_fiscal_archive(70, &store, None)
-        .expect("a large batch");
+    let prepared = prepare_fiscal_archive(&canwu, 70, &store).expect("a large batch");
     // In (scope, cycle) order: every book of the first three scopes and the
     // first ten of the last, and the totals of the ten cycles they empty.
     assert_eq!(prepared.selected_books.len(), 70);
     assert_eq!(prepared.pages.len(), 2);
     assert_eq!(prepared.selected_count(), 80);
-    let first = enqueue_fiscal_archive(&mut canwu, &prepared, &store, None).expect("queued");
+    let first = enqueue_fiscal_archive(&mut canwu, &prepared, &store).expect("queued");
     settle(&mut canwu);
     finalize_fiscal_archive_retention(&mut canwu, &store, &first).expect("finalized");
     settle(&mut canwu);
     assert_eq!(store.count(FISCAL_ARCHIVE_BLOB_NAMESPACE), 2);
 
-    let state = fiscal_state(&canwu);
-    let second = state
-        .prepare_fiscal_archive(64, &store, None)
-        .expect("the rest");
+    let second = prepare_fiscal_archive(&canwu, 64, &store).expect("the rest");
     assert_eq!(second.selected_receipts.len(), 1);
     assert_eq!(second.selected_books.len(), 10);
     assert!(!second.superseded_lookup_pages.is_empty());
-    let receipt = enqueue_fiscal_archive(&mut canwu, &second, &store, None).expect("queued");
+    let receipt = enqueue_fiscal_archive(&mut canwu, &second, &store).expect("queued");
     settle(&mut canwu);
     finalize_fiscal_archive_retention(&mut canwu, &store, &receipt).expect("finalized");
     settle(&mut canwu);
@@ -498,22 +493,16 @@ fn stale_and_duplicate_commits_terminate_and_commits_settle_first() {
         closed_book(state, 2, "2026", 300);
     }));
     let store = MemoryArchiveStore::default();
-    let state = fiscal_state(&canwu);
-    let one = state
-        .prepare_fiscal_archive(1, &store, None)
-        .expect("one book");
-    let two = state
-        .prepare_fiscal_archive(2, &store, None)
-        .expect("two books");
+    let one = prepare_fiscal_archive(&canwu, 1, &store).expect("one book");
+    let two = prepare_fiscal_archive(&canwu, 2, &store).expect("two books");
     // The same batch queued three times: the first applies, and its copies
     // settle as stale duplicates that record nothing.
-    let first = enqueue_fiscal_archive(&mut canwu, &one, &store, None).expect("queued");
+    let first = enqueue_fiscal_archive(&mut canwu, &one, &store).expect("queued");
     for _ in 0..2 {
-        let duplicate =
-            enqueue_fiscal_archive(&mut canwu, &one, &store, None).expect("queued again");
+        let duplicate = enqueue_fiscal_archive(&mut canwu, &one, &store).expect("queued again");
         assert_eq!(first.retention_handle_id, duplicate.retention_handle_id);
     }
-    let other = enqueue_fiscal_archive(&mut canwu, &two, &store, None).expect("queued");
+    let other = enqueue_fiscal_archive(&mut canwu, &two, &store).expect("queued");
     settle(&mut canwu);
     let maintenance: Vec<_> = canwu
         .events()
@@ -586,9 +575,7 @@ fn stale_and_duplicate_commits_terminate_and_commits_settle_first() {
     // With no closed book left, a batch archives the head receipt alone. An
     // action on a book it does not select leaves it current: it binds the
     // head and the books it selects, nothing else.
-    let prepared = state
-        .prepare_fiscal_archive(64, &store, None)
-        .expect("the head receipt alone");
+    let prepared = prepare_fiscal_archive(&canwu, 64, &store).expect("the head receipt alone");
     assert!(prepared.selected_books.is_empty());
     assert_eq!(prepared.selected_receipts.len(), 1);
     submit(
@@ -602,17 +589,14 @@ fn stale_and_duplicate_commits_terminate_and_commits_settle_first() {
     );
     assert!(applied(&canwu, "after"));
     assert_eq!(
-        fiscal_state(&canwu)
-            .prepare_fiscal_archive(64, &store, None)
-            .expect("the same batch"),
+        prepare_fiscal_archive(&canwu, 64, &store).expect("the same batch"),
         prepared
     );
-    enqueue_fiscal_archive(&mut canwu, &prepared, &store, None)
-        .expect("a batch that is still current");
+    enqueue_fiscal_archive(&mut canwu, &prepared, &store).expect("a batch that is still current");
     settle(&mut canwu);
     // Once a commit moved the head, the same batch is of an earlier head and
     // is refused at enqueue.
-    let error = enqueue_fiscal_archive(&mut canwu, &prepared, &store, None)
+    let error = enqueue_fiscal_archive(&mut canwu, &prepared, &store)
         .expect_err("a batch of an earlier head");
     assert!(matches!(error, FiscalArchiveError::Mismatch(_)), "{error}");
     fixture.assert_restore_and_replay(&canwu);
@@ -633,14 +617,11 @@ fn stale_commits_past_the_heads_room_are_refused_without_failing_the_boundary() 
         }
     }));
     let store = MemoryArchiveStore::default();
-    let state = fiscal_state(&canwu);
     let batches = 130;
     let mut receipts = Vec::new();
     for limit in 1..=batches {
-        let prepared = state
-            .prepare_fiscal_archive(limit, &store, None)
-            .expect("a batch");
-        receipts.push(enqueue_fiscal_archive(&mut canwu, &prepared, &store, None).expect("queued"));
+        let prepared = prepare_fiscal_archive(&canwu, limit, &store).expect("a batch");
+        receipts.push(enqueue_fiscal_archive(&mut canwu, &prepared, &store).expect("queued"));
     }
     let refused_before = refusals(&canwu).len();
     settle(&mut canwu);
@@ -732,9 +713,12 @@ fn archive_maintenance_alone_publishes_no_report() {
 }
 
 /// Archiving a book ends its declaration of the versions it cites, so on a
-/// run that seals its evidence a book whose citations are newer than the last
-/// sealed cut is refused at preparation: the host seals first, then archives.
+/// run that seals its evidence a book whose citations are newer than the
+/// run's last sealed cut is refused at preparation: the host seals first,
+/// then archives. The cut is the run's own, so a host cannot pass a wrong
+/// one.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_book_citing_evidence_newer_than_the_last_seal_is_refused_until_it_is_sealed() {
     let fixture = Fixture::new();
     let plugins = fixture.plugins();
@@ -742,20 +726,26 @@ fn a_book_citing_evidence_newer_than_the_last_seal_is_refused_until_it_is_sealed
     canwu
         .settle_boundary(BoundaryRequest::at(canwu.time()))
         .expect("a quiet boundary");
-    // The cut of a seal the host made here, before the quote existed.
-    let earlier_cut = canwu
-        .evidence_cursor()
-        .expect("the cursor of an earlier seal");
-    enqueue_renewal(&mut canwu, AUDITOR_COMMISSION);
-    settle(&mut canwu);
-    let quote = current_commission(&canwu, AUDITOR_COMMISSION);
+    assert_eq!(canwu.sealed_evidence_cursor(), None);
+    let mut sealed = canwu.into_compacted().expect("compact interface");
+    let evidence = MemoryEvidenceArchive::default();
+    // A seal made here, before the quote exists.
+    let earlier = seal(&mut sealed, &evidence);
+    assert_eq!(sealed.sealed_evidence_cursor(), Some(earlier.end));
+    sealed
+        .enqueue_plugin_ingress(renewal_at(sealed.time(), AUDITOR_COMMISSION))
+        .expect("commission renewal ingress");
+    sealed
+        .advance_canonical(canwu_api::SimDuration::minutes(1))
+        .expect("the renewal settles");
+    let quote = current_commission(&sealed, AUDITOR_COMMISSION);
     assert!(matches!(
         quote.established_by,
         canwu_api::DomainRecordVersionSource::BoundaryChange { .. }
     ));
     let scope = treasury_scope(0);
-    submit(
-        &mut canwu,
+    submit_sealed(
+        &mut sealed,
         by_principal([draft(
             "quoted",
             TREASURY_AUTHORITY,
@@ -771,16 +761,19 @@ fn a_book_citing_evidence_newer_than_the_last_seal_is_refused_until_it_is_sealed
             },
         )]),
     );
-    assert!(applied(&canwu, "quoted"));
-    submit(&mut canwu, by_principal([close("close", &scope, "2026")]));
-    canwu
-        .settle_boundary(BoundaryRequest::at(canwu.time()))
-        .expect("a quiet boundary before sealing");
+    submit_sealed(&mut sealed, by_principal([close("close", &scope, "2026")]));
+    let settled = FiscalSettledAction::from_events(sealed.events());
+    for action in ["quoted", "close"] {
+        assert!(
+            settled.iter().any(|outcome| outcome.action_id == action
+                && outcome.disposition == FiscalActionDisposition::Applied),
+            "{action} applies"
+        );
+    }
 
     let store = MemoryArchiveStore::default();
-    let error = fiscal_state(&canwu)
-        .prepare_fiscal_archive(64, &store, Some(&earlier_cut))
-        .expect_err("the quote is newer than the earlier seal");
+    let error = prepare_fiscal_archive(&sealed, 64, &store)
+        .expect_err("the quote is newer than the run's last seal");
     assert_eq!(
         error,
         FiscalArchiveError::UnsealedCitations {
@@ -789,15 +782,12 @@ fn a_book_citing_evidence_newer_than_the_last_seal_is_refused_until_it_is_sealed
         }
     );
 
-    // Sealed, the quote is in a segment, and the book archives.
-    let mut sealed = canwu.into_compacted().expect("compact interface");
-    let segment = seal(&mut sealed, &MemoryEvidenceArchive::default());
-    let state = sealed_fiscal_state(&sealed);
-    let prepared = state
-        .prepare_fiscal_archive(64, &store, Some(&segment.end))
-        .expect("every citation is sealed");
-    let receipt = enqueue_fiscal_archive(&mut sealed, &prepared, &store, Some(&segment.end))
-        .expect("queued on the compact run");
+    // Sealed again, the quote is in a segment, and the book archives.
+    let segment = seal(&mut sealed, &evidence);
+    assert_eq!(sealed.sealed_evidence_cursor(), Some(segment.end));
+    let prepared = prepare_fiscal_archive(&sealed, 64, &store).expect("every citation is sealed");
+    let receipt =
+        enqueue_fiscal_archive(&mut sealed, &prepared, &store).expect("queued on the compact run");
     sealed
         .advance_canonical(canwu_api::SimDuration::minutes(1))
         .expect("the commit settles");
@@ -815,14 +805,15 @@ fn a_book_citing_evidence_newer_than_the_last_seal_is_refused_until_it_is_sealed
         !record.payload.to_string().contains(&quote.record.id),
         "the archived book's quote is no longer declared"
     );
+    let segments = vec![earlier, segment];
     let journal = sealed
-        .replay_journal_with_segments(vec![segment.clone()])
+        .replay_journal_with_segments(segments.clone())
         .expect("an exact replay journal");
     let replayed = Canwu::replay_from_journal(&plugins, &journal).expect("the sealed run replays");
     assert_eq!(
         replayed.snapshot(),
         sealed
-            .snapshot_with_segments(vec![segment])
+            .snapshot_with_segments(segments)
             .expect("the full snapshot")
     );
 }
@@ -936,11 +927,9 @@ fn a_sealed_run_archives_as_its_fork_restore_and_replay_do() {
     let mut roots = Vec::new();
     for run in [&mut sealed, &mut from_sealed] {
         let store = MemoryArchiveStore::default();
-        let prepared = sealed_fiscal_state(run)
-            .prepare_fiscal_archive(64, &store, Some(&segment.end))
-            .expect("the archive batch");
-        let receipt = enqueue_fiscal_archive(run, &prepared, &store, Some(&segment.end))
-            .expect("queued on the compact run");
+        let prepared = prepare_fiscal_archive(&*run, 64, &store).expect("the archive batch");
+        let receipt =
+            enqueue_fiscal_archive(run, &prepared, &store).expect("queued on the compact run");
         run.advance_canonical(canwu_api::SimDuration::minutes(1))
             .expect("the commit settles");
         finalize_fiscal_archive_retention(run, &store, &receipt).expect("finalized");

@@ -1905,6 +1905,12 @@ impl CompactedSimulation {
         self.simulation.evidence_cursor()
     }
 
+    /// The cut through sealed evidence; see [`Simulation::sealed_evidence_cursor`].
+    #[must_use]
+    pub fn sealed_evidence_cursor(&self) -> Option<EvidenceCursor> {
+        self.simulation.sealed_evidence_cursor()
+    }
+
     /// Copies the compact runtime, sharing persistent structures, with
     /// profiling off. The copy keeps the seal tokens already committed, so it
     /// treats a repeated commit of one of them as the original does. It
@@ -3855,6 +3861,15 @@ impl Simulation {
     /// Returns the current monotonic cut through every append-only journal.
     pub fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError> {
         EvidenceCursor::from_evidence(&self.state.evidence)
+    }
+
+    /// The cut through the evidence this run no longer retains: where its
+    /// last seal ended, or the settled cut of the continuation checkpoint it
+    /// was restored from. `None` while it retains all its evidence.
+    #[must_use]
+    pub fn sealed_evidence_cursor(&self) -> Option<EvidenceCursor> {
+        let cut = self.state.evidence.archived;
+        (cut != EvidenceCursor::default()).then_some(cut)
     }
 
     fn checkpoint_with_paged_payloads(

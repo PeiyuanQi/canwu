@@ -11,7 +11,10 @@
 //! boundaries with that work pending, a run restored from a full save, and
 //! runs restored from a continuation checkpoint take the same inputs and must
 //! agree on every receipt, checkpoint hash, and state hash, and write
-//! byte-equal continuation checkpoints. The scenario runs on a 1 MiB thread,
+//! byte-equal continuation checkpoints. Each answers `sealed_evidence_cursor`
+//! as its kind and its seals say: `None` while it retains all its evidence,
+//! the end of its last sealed segment, or the settled cut it was restored
+//! from. The scenario runs on a 1 MiB thread,
 //! so a debug build proves the runtime fits the smallest common thread
 //! stack.
 
@@ -722,6 +725,14 @@ impl Run {
         }
     }
 
+    /// The cut through the evidence the run no longer retains.
+    fn sealed_cut(&self) -> Option<canwu_api::EvidenceCursor> {
+        match self {
+            Self::Unsealed(run) => run.sealed_evidence_cursor(),
+            Self::Compact(run) => run.sealed_evidence_cursor(),
+        }
+    }
+
     fn continuation(&self) -> (ContinuationCheckpoint, String) {
         match self {
             Self::Unsealed(run) => run.continuation_checkpoint(),
@@ -782,6 +793,10 @@ fn lockstep() {
     let unsealed = Canwu::new_with_plugins(1601, scenario(), &plugins).expect("fixture starts");
     let sealed = unsealed.fork().into_compacted().expect("compact copy");
     let mut runs = vec![Run::Unsealed(unsealed), Run::Compact(sealed)];
+    // What each run answers for `sealed_evidence_cursor`: `None` while it
+    // retains all its evidence, then the end of its last sealed segment or
+    // the settled cut it was restored from.
+    let mut cuts: Vec<Option<canwu_api::EvidenceCursor>> = vec![None, None];
     let mut sealed_pinned_cancellation = false;
     let mut known_versions_seen = false;
     let mut pinned_payload_seen = false;
@@ -885,12 +900,20 @@ fn lockstep() {
         // The sealed run seals every five boundaries with work in flight;
         // the restored runs seal on the same days.
         if d % 5 == 0 {
-            for run in &mut runs[1..] {
+            for (run, cut) in runs[1..].iter_mut().zip(&mut cuts[1..]) {
                 if let Run::Compact(compact) = run {
-                    compact
+                    let segment = compact
                         .seal_evidence()
                         .expect("a run with work in flight seals")
                         .expect("the settled tail seals");
+                    *cut = Some(segment.end);
+                    // An idle reseal moves nothing, and a fork answers alike.
+                    assert!(
+                        compact.seal_evidence().expect("an idle reseal").is_none(),
+                        "nothing is left to seal at day {d}"
+                    );
+                    assert_eq!(compact.sealed_evidence_cursor(), *cut, "day {d}");
+                    assert_eq!(compact.fork().sealed_evidence_cursor(), *cut, "day {d}");
                 }
             }
         }
@@ -930,7 +953,14 @@ fn lockstep() {
                     .code,
                 ErrorCode::EvidenceUnavailable
             );
+            // A continuation restore no longer retains what precedes its
+            // base: its sealed cut is the checkpoint's settled cut.
+            assert_eq!(
+                restored.continuation_base().map(|base| base.cut),
+                Some(checkpoint.settled_cut)
+            );
             runs.push(Run::Compact(restored));
+            cuts.push(Some(checkpoint.settled_cut));
             // A full save of the same run restores and joins the lockstep.
             let Run::Unsealed(unsealed) = &runs[0] else {
                 unreachable!("the first run is unsealed");
@@ -939,14 +969,23 @@ fn lockstep() {
             let restored = Canwu::from_checkpoint_journal_json_with_plugins(&save, &plugins)
                 .expect("the full save restores");
             runs.push(Run::Unsealed(restored));
+            cuts.push(None);
         }
         if d == RESTORE_AT + 20 {
             let (checkpoint, hash) = runs[2].continuation();
+            let settled = checkpoint.settled_cut;
             let restored =
                 CompactedCanwu::from_continuation_checkpoint_verified(checkpoint, &hash, &plugins)
                     .expect("the second restore");
+            assert_eq!(
+                restored.continuation_base().map(|base| base.cut),
+                Some(settled)
+            );
             runs.push(Run::Compact(restored));
+            cuts.push(Some(settled));
         }
+        let answered: Vec<_> = runs.iter().map(Run::sealed_cut).collect();
+        assert_eq!(answered, cuts, "sealed evidence cursors at day {d}");
         // Every fifth boundary from the first restore, and the boundary after
         // each seal, when the holder declares a version that its establishing
         // boundary's seal left only in the version this boundary replaced

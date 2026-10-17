@@ -373,8 +373,8 @@ pub(crate) fn office_draft(office: &FiscalOffice) -> Result<DomainRecordDraft, C
 /// The draft of a ledger record. Its payload declares, as required evidence,
 /// the versions its hot books cite that a boundary established: their
 /// commutation quotes and their receipts' evidence. An archived book's
-/// citations stop being declared; [`FiscalState::prepare_fiscal_archive`]
-/// refuses a book whose citations a seal has not covered yet.
+/// citations stop being declared; [`crate::prepare_fiscal_archive`] refuses
+/// a book whose citations a seal has not covered yet.
 pub(crate) fn ledger_draft(ledger: &FiscalScopeLedger) -> Result<DomainRecordDraft, CanwuError> {
     let mut draft =
         DomainRecordDraft::from_typed(fiscal_ledger_reference(&ledger.scope.id), ledger)?;

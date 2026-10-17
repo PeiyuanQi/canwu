@@ -49,7 +49,7 @@ use canwu_fiscal::{
     HistoricalConfidence, HistoricalYearWindow, MAX_FISCAL_BATCH_ENTRIES,
     MAX_FISCAL_RECEIPTS_PER_PACKET, PLUGIN_NAME, audit_fiscal_records, compile_fiscal_content,
     enqueue_execution_receipts, enqueue_fiscal_archive, finalize_fiscal_archive_retention,
-    fiscal_action_command, fiscal_target_revision, load_fiscal_state,
+    fiscal_action_command, fiscal_target_revision, prepare_fiscal_archive,
 };
 use serde_json::{Value, json};
 #[cfg(feature = "allocation-counting")]
@@ -1279,7 +1279,6 @@ fn refusals(canwu: &Canwu) -> usize {
 /// Prepares, stores, verifies, and queues archive commits of `books` closed
 /// books, and settles them, with the retention acknowledgement after.
 fn measured_archive(base: &Canwu, preset: &Preset, books: usize) -> Fallible<Value> {
-    let mut assemble = Vec::new();
     let mut prepare = Vec::new();
     let mut enqueue = Vec::new();
     let mut finalize = Vec::new();
@@ -1291,14 +1290,10 @@ fn measured_archive(base: &Canwu, preset: &Preset, books: usize) -> Fallible<Val
         let mut run = base.fork();
         let store = MemoryArchiveStore::default();
         let started = Meter::start();
-        let state = load_fiscal_state(&run)?.ok_or("no fiscal state")?;
-        let assembled = started.finish();
-        let started = Meter::start();
-        let prepared = state.prepare_fiscal_archive(books, &store, None)?;
+        let prepared = prepare_fiscal_archive(&run, books, &store)?;
         let prepared_cost = started.finish();
-        drop(state);
         let started = Meter::start();
-        let receipt = enqueue_fiscal_archive(&mut run, &prepared, &store, None)?;
+        let receipt = enqueue_fiscal_archive(&mut run, &prepared, &store)?;
         let enqueued = started.finish();
         let (commit, settled, split) = timed_boundary(&mut run)?;
         if last {
@@ -1317,7 +1312,6 @@ fn measured_archive(base: &Canwu, preset: &Preset, books: usize) -> Fallible<Val
         }
         objects = store.objects.borrow().len();
         object_bytes = store.objects.borrow().values().map(Vec::len).sum();
-        assemble.push(assembled);
         prepare.push(prepared_cost);
         enqueue.push(enqueued);
         finalize.push(finalized);
@@ -1335,8 +1329,7 @@ fn measured_archive(base: &Canwu, preset: &Preset, books: usize) -> Fallible<Val
     map.insert("books".to_owned(), json!(books));
     map.insert("store_objects".to_owned(), json!(objects));
     map.insert("store_object_bytes".to_owned(), json!(object_bytes));
-    map.insert("assemble_state_ms".to_owned(), summary(&assemble));
-    map.insert("prepare_and_store_ms".to_owned(), summary(&prepare));
+    map.insert("prepare_ms".to_owned(), summary(&prepare));
     map.insert("verify_and_enqueue_ms".to_owned(), summary(&enqueue));
     map.insert("finalize_retention_ms".to_owned(), summary(&finalize));
     if let Some(host) = map.remove("host_ms") {
@@ -1467,13 +1460,13 @@ fn held_over_cycles(
         }
         run.advance_canonical(SimDuration::ZERO)?;
         loop {
-            let state = load_fiscal_state(&run)?.ok_or("no fiscal state")?;
-            if state.books().next().is_none() {
-                break;
-            }
-            let prepared = state.prepare_fiscal_archive(4_096, &store, None)?;
-            drop(state);
-            let receipt = enqueue_fiscal_archive(&mut run, &prepared, &store, None)?;
+            // A commit of the head receipt alone waits for the next month.
+            let prepared = match prepare_fiscal_archive(&run, 4_096, &store) {
+                Ok(prepared) if !prepared.selected_books.is_empty() => prepared,
+                Ok(_) | Err(FiscalArchiveError::NothingToArchive) => break,
+                Err(error) => return Err(error.into()),
+            };
+            let receipt = enqueue_fiscal_archive(&mut run, &prepared, &store)?;
             run.advance_canonical(SimDuration::ZERO)?;
             finalize_fiscal_archive_retention(&mut run, &store, &receipt)?;
             run.advance_canonical(SimDuration::ZERO)?;
@@ -1628,6 +1621,10 @@ struct Options {
     interval: bool,
     /// Monthly cycles of the held-knowledge measurement; none when zero.
     held_cycles: usize,
+    /// Only the rows of interval reports (`--rows interval`): the idle
+    /// boundaries, the spread due day, and the due instant, on a run whose
+    /// every scope is assessed without measuring the bursts.
+    interval_rows_only: bool,
     seed: u64,
     machine: String,
     recorded_on: String,
@@ -1641,6 +1638,7 @@ fn options() -> Fallible<Options> {
         courts: FiscalReportGranularity::Scope,
         interval: false,
         held_cycles: 0,
+        interval_rows_only: false,
         seed: 0xF15C_0016,
         machine: "unspecified".to_owned(),
         recorded_on: "unspecified".to_owned(),
@@ -1670,6 +1668,13 @@ fn options() -> Fallible<Options> {
                 };
             }
             "--held-cycles" => options.held_cycles = value()?.parse()?,
+            "--rows" => {
+                options.interval_rows_only = match value()?.as_str() {
+                    "all" => false,
+                    "interval" => true,
+                    other => return Err(format!("unsupported rows {other}").into()),
+                };
+            }
             "--cadence" => {
                 options.interval = match value()?.as_str() {
                     "on-change" => false,
@@ -1685,7 +1690,8 @@ fn options() -> Fallible<Options> {
                 println!(
                     "fiscal-world-profile [--mode elapsed|allocations] [--preset smoke|world] \
                      [--courts scope|institution] [--cadence on-change|interval] \
-                     [--held-cycles N] [--seed N] [--machine LABEL] [--recorded-on DATE] [--output PATH]"
+                     [--held-cycles N] [--rows all|interval] [--seed N] [--machine LABEL] \
+                     [--recorded-on DATE] [--output PATH]"
                 );
                 std::process::exit(0);
             }
@@ -1703,6 +1709,9 @@ fn main() -> Fallible<()> {
     }
     if !options.count_allocations && cfg!(feature = "allocation-counting") {
         return Err("elapsed mode must be built without the allocation-counting feature".into());
+    }
+    if options.interval_rows_only && (!options.interval || options.held_cycles > 0) {
+        return Err("--rows interval needs --cadence interval and no --held-cycles".into());
     }
     COUNT_ALLOCATIONS.store(options.count_allocations, Ordering::Relaxed);
     let preset = preset(&options.preset)?;
@@ -1739,7 +1748,10 @@ fn main() -> Fallible<()> {
     random.shuffle(&mut order);
     let mut bursts = serde_json::Map::new();
     let mut assessed = None;
-    for (label, count) in &preset.bursts {
+    if options.interval_rows_only {
+        assessed = Some(action_boundaries(&base, &world, assessments(&order), None)?);
+    }
+    for (label, count) in preset.bursts.iter().filter(|_| !options.interval_rows_only) {
         let scopes = order[..*count].to_vec();
         let (samples, run) =
             measured_actions(&base, &world, &preset, &|| Ok(assessments(&scopes)))?;
@@ -1769,6 +1781,43 @@ fn main() -> Fallible<()> {
             "spread_due_day".to_owned(),
             json!({ "day": 1, "observers_due": due, "boundaries": samples.render() }),
         );
+    }
+    if options.interval_rows_only {
+        drop((assessed, base));
+        let value = due_instant(&world, &preset, options.courts, &order, &plugins)?;
+        eprintln!("due instant: {value}");
+        cadence_rows.insert("due_instant".to_owned(), value);
+        let mut report = json!({
+            "profile": "fiscal-world",
+            "preset": preset.name,
+            "rows": "interval",
+            "metric": if options.count_allocations { "allocation_operations" } else { "elapsed_ms" },
+            "machine": options.machine,
+            "recorded_on": options.recorded_on,
+            "seed": options.seed,
+            "dimensions": {
+                "partitions": preset.partitions,
+                "scopes": preset.scopes,
+                "observers": preset.partitions * OBSERVERS_PER_PARTITION,
+                "courts": options.courts,
+                "report_cadence": "monthly, staggered over thirty days",
+            },
+            "samples": preset.samples,
+            "state": {
+                "partition_ms": partition_cost,
+                "activation_ms": activation,
+                "audit_every_record_ms": audit_base,
+                "initial": sizes_initial,
+                "every_scope_assessed": sizes_assessed,
+            },
+            "initial_report_publication": initial_reports,
+            "idle_boundary": {
+                "initial": idle_initial,
+                "every_scope_assessed": idle_assessed,
+            },
+            "interval_reports": cadence_rows,
+        });
+        return write_report(&options, &mut report);
     }
     let snapshot_started = Instant::now();
     let snapshot = assessed.snapshot_json()?;
@@ -1888,10 +1937,16 @@ fn main() -> Fallible<()> {
     if let Some(held) = held {
         report["held_knowledge"] = held;
     }
+    write_report(&options, &mut report)
+}
+
+/// Prints the report, and writes it to `--output` when one is given; in
+/// allocation mode its `*_ms` keys are relabelled first.
+fn write_report(options: &Options, report: &mut Value) -> Fallible<()> {
     if options.count_allocations {
-        relabel(&mut report);
+        relabel(report);
     }
-    let rendered = serde_json::to_string_pretty(&report)?;
+    let rendered = serde_json::to_string_pretty(report)?;
     if let Some(path) = &options.output {
         fs::write(path, format!("{rendered}\n"))?;
     }

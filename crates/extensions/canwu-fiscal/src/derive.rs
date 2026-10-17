@@ -178,7 +178,10 @@ pub(crate) fn institution_row_of_totals(
     )
 }
 
-fn rendered_row(
+/// The row of `institution` and `mechanism` whose books of the cycle have
+/// these totals: a scope row when `scope_binding_id` names the scope, an
+/// institution row when it is empty. `None` when there is no total.
+pub(crate) fn rendered_row(
     row: u32,
     institution: &EntityRef,
     mechanism: FiscalMechanism,

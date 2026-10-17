@@ -18,29 +18,29 @@
 //! at the same instant continues.
 
 use crate::derive::assemble_fiscal_reports;
-use crate::derive::{institution_row_of_totals, part_entry, parts_of, report_row_of_totals};
+use crate::derive::{institution_row_of_totals, part_entry, parts_of, rendered_row};
 use crate::model::{
-    CompiledFiscalCatalog, EMPTY_PART_ENTRY, FISCAL_PARKED_CHECKS_PER_BOUNDARY,
-    FISCAL_REPORT_ROWS_PER_PART, FiscalCycleBook, FiscalCycleTotal, FiscalMechanism,
-    FiscalObserver, FiscalObserverBinding, FiscalReport, FiscalReportBudget, FiscalReportCycleSlot,
+    BookFigures, CompiledFiscalCatalog, EMPTY_PART_ENTRY, FISCAL_PARKED_CHECKS_PER_BOUNDARY,
+    FISCAL_REPORT_ROWS_PER_PART, FiscalCycleTotal, FiscalMechanism, FiscalObserver,
+    FiscalObserverBinding, FiscalReport, FiscalReportBudget, FiscalReportCycleSlot,
     FiscalReportGranularity, FiscalReportQueueEntry, FiscalReportRow, FiscalReportSummary,
-    FiscalScopeBinding, MAX_FISCAL_REPORT_CYCLE_SLOTS, MAX_FISCAL_REPORT_PARTS_PER_CYCLE, invalid,
-    sum_report_totals,
+    MAX_FISCAL_REPORT_CYCLE_SLOTS, MAX_FISCAL_REPORT_PARTS_PER_CYCLE, invalid, sum_report_totals,
 };
 use crate::plugin::{FISCAL_REPORT_DRAIN_INGRESS, PLUGIN_NAME, encode_error};
 use crate::records::{
     FiscalIndexOwner, FiscalObserverRecord, fiscal_ledger_reference, fiscal_observer_reference,
     fiscal_root_reference, office_reference, report_queue_page,
 };
-use crate::working::{Working, active_record, bound_queue_entry, field};
+use crate::working::{RecordSource, Working, active_record, bound_queue_entry, field};
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryProposal, CanwuError, CanwuRun, CanwuViewer,
-    DomainRecordKind, DomainRecordVersionRef, EvidenceRef, KnowledgeHolderRef, KnowledgeLimitsV1,
-    KnowledgeOrigin, KnowledgePublicationBudget, KnowledgePublicationGroup, KnowledgeQuery,
-    KnowledgeRecordDraft, KnowledgeRecordKind, KnowledgeRetention, KnowledgeSchemaId,
-    KnowledgeSubject, KnowledgeSubjectSchema, KnowledgeSubjectTarget, KnowledgeSubjectTargetKind,
-    KnowledgeSupersession, LifeState, MAX_KNOWLEDGE_PAGE_SIZE, PayloadSchema,
-    PluginKnowledgeSchema, SimTime, SimulationView, StateVisibility,
+    DomainRecordKind, DomainRecordLifecycle, DomainRecordRef, DomainRecordVersionRef, EvidenceRef,
+    KnowledgeHolderRef, KnowledgeLimitsV1, KnowledgeOrigin, KnowledgePublicationBudget,
+    KnowledgePublicationGroup, KnowledgeQuery, KnowledgeRecordDraft, KnowledgeRecordKind,
+    KnowledgeRetention, KnowledgeSchemaId, KnowledgeSubject, KnowledgeSubjectSchema,
+    KnowledgeSubjectTarget, KnowledgeSubjectTargetKind, KnowledgeSupersession, LifeState,
+    MAX_KNOWLEDGE_PAGE_SIZE, PayloadSchema, PluginKnowledgeSchema, SimTime, SimulationView,
+    StateVisibility,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -55,10 +55,12 @@ const FISCAL_REPORT_KNOWLEDGE: &str = "fiscal_report";
 /// cuts parts by scope rows and cycle slots, and lists the cycles in the
 /// summary. Version 5 carries the binding's granularity and cadence in the
 /// summary, institution rows (with no scope) and an institution part's
-/// `books_summed`.
-const FISCAL_REPORT_SCHEMA_VERSION: u32 = 5;
+/// `books_summed`. Version 6 encodes a part compactly: its institutions
+/// once each in a table, and its rows and facts as arrays
+/// ([`crate::FiscalReportPart`]).
+const FISCAL_REPORT_SCHEMA_VERSION: u32 = 6;
 const FISCAL_REPORT_SCHEMA_HASH: &str =
-    "aa24052180abc9b96b891493bbe77ff6f5f010efdde9942a70a31cee7b9dcd9a";
+    "29bc8d2c97c4c4e08b6d280d2935b65d90dfd1295757ec1850464db505a1c78c";
 /// The subject role every fiscal report record carries, on its observer
 /// record.
 const REPORT_OBSERVER_ROLE: &str = "fiscal_observer";
@@ -512,7 +514,6 @@ fn publish_observer(
         .get(observer_id)
         .cloned()
         .ok_or_else(|| invalid("fiscal observer is not loaded"))?;
-    let original = observer.clone();
     let source = view
         .current_domain_record_version(fiscal_observer_reference(observer_id).as_untyped())?
         .ok_or_else(|| invalid("fiscal observer record has no current version"))?;
@@ -557,8 +558,10 @@ fn publish_observer(
         publisher.publish(&holder, vec![record], bytes)?;
         publisher.progress = true;
     }
+    // The loaded observer stays in the working set as it was until it is
+    // replaced, so it is what a changed one is compared with.
     let finish = |working: &mut Working<'_, SimulationView<'_>>, observer: FiscalObserver| {
-        if observer != original {
+        if working.state.observers.get(observer_id) != Some(&observer) {
             working
                 .state
                 .observers
@@ -828,17 +831,13 @@ fn publish_observer(
     Ok(false)
 }
 
-/// What the rows of one scope are made of in one cycle: its binding, its
-/// book's totals, and its ledger's current version.
-type ScopeRead = (
-    FiscalScopeBinding,
-    Vec<FiscalCycleTotal>,
-    Option<DomainRecordVersionRef>,
-);
-
-/// A scope's read of one cycle; `None` when the scope has no book of the
-/// cycle.
-type ScopeCycle = Option<ScopeRead>;
+/// What the rows of one scope are made of in one cycle: its mechanism and
+/// its book's totals. Its institution is its office's, and its ledger
+/// version is read for a scope row when the row cites it.
+struct ScopeBook {
+    mechanism: FiscalMechanism,
+    totals: Vec<FiscalCycleTotal>,
+}
 
 /// One institution's hot books of one cycle summed per mechanism: the totals
 /// per (unit, payment form), and how many books with an assessment were
@@ -849,12 +848,16 @@ type InstitutionCycle = BTreeMap<FiscalMechanism, (Vec<FiscalCycleTotal>, u32)>;
 /// publishes to: every observer of an office reads the same books.
 #[derive(Default)]
 pub(crate) struct ReportReads {
-    /// Each scope's book of each cycle, by scope and cycle.
-    scopes: BTreeMap<(String, String), ScopeCycle>,
-    /// Each office's books of each cycle summed, by office key and cycle.
-    institutions: BTreeMap<(String, String), InstitutionCycle>,
+    /// Each scope's book of each cycle, by cycle and scope; `None` when the
+    /// scope has no book of the cycle.
+    books: BTreeMap<String, BTreeMap<String, Option<ScopeBook>>>,
+    /// Each office's books of each cycle summed, by cycle and office key.
+    institutions: BTreeMap<String, BTreeMap<String, InstitutionCycle>>,
     /// Each office record's current version, by office key.
     offices: BTreeMap<String, Option<DomainRecordVersionRef>>,
+    /// The reference of a ledger record, reused for every scope read
+    /// ([`ledger_reference`]).
+    ledger: Option<DomainRecordRef>,
     /// The buffer part digests are encoded into.
     digest: Vec<u8>,
 }
@@ -874,6 +877,9 @@ struct PartRows {
 /// summed. A scope's row is read from its ledger record's book of the cycle
 /// without decoding the rest; an office's index pages are decoded once per
 /// boundary.
+///
+/// A scope row's institution is its block's: an office's index lists only
+/// the scopes of the office's institution, and is never rewritten.
 fn part_rows(
     working: &mut Working<'_, SimulationView<'_>>,
     reads: &mut ReportReads,
@@ -896,27 +902,37 @@ fn part_rows(
         match granularity {
             FiscalReportGranularity::Scope => {
                 let owner = FiscalIndexOwner::Office(block.office.clone());
-                for row in low..high {
-                    let Some(scope) = working.index_scope(&owner, row - block.first_row)? else {
-                        return Err(invalid(
-                            "a fiscal office index lists fewer scopes than its office has",
-                        ));
-                    };
-                    let Some((binding, totals, version)) =
-                        scope_cycle(working, reads, scope, cycle)?
-                    else {
+                let ranks = low - block.first_row..high - block.first_row;
+                working.read_index_pages(&owner, ranks.clone())?;
+                for (rank, scope) in working.index_scopes_in(&owner, ranks)? {
+                    let Some(book) = scope_book(working, reads, scope, cycle)? else {
                         continue;
                     };
-                    if let Some(row) = report_row_of_totals(row, binding, totals, confidence) {
-                        read.rows.push(row);
-                        read.evidence
-                            .extend(version.clone().map(EvidenceRef::DomainRecordVersion));
-                    }
+                    let Some(row) = rendered_row(
+                        block.first_row + rank,
+                        &block.institution,
+                        book.mechanism,
+                        scope,
+                        &book.totals,
+                        confidence,
+                    ) else {
+                        continue;
+                    };
+                    read.rows.push(row);
+                    read.evidence.extend(
+                        working
+                            .source()
+                            .current_domain_record_version(ledger_reference(
+                                &mut reads.ledger,
+                                scope,
+                            ))?
+                            .map(EvidenceRef::DomainRecordVersion),
+                    );
                 }
             }
             FiscalReportGranularity::Institution => {
                 institution_cycle(working, reads, &block.office, block.scopes, cycle)?;
-                let sums = &reads.institutions[&(block.office.clone(), cycle.to_owned())];
+                let sums = &reads.institutions[cycle][&block.office];
                 let mut cited = false;
                 for row in low..high {
                     let Some(mechanism) = usize::try_from(row - block.first_row)
@@ -964,19 +980,34 @@ fn part_rows(
     Ok(read)
 }
 
+/// The reference of `scope`'s ledger record, written into `slot`, which is
+/// reused for every scope a run of the report system reads.
+fn ledger_reference<'s>(slot: &'s mut Option<DomainRecordRef>, scope: &str) -> &'s DomainRecordRef {
+    let reference = slot.get_or_insert_with(|| fiscal_ledger_reference("").into_untyped());
+    reference.id.clear();
+    reference.id.push_str(scope);
+    reference
+}
+
 /// A scope's book of one cycle, read once per run of the report system.
-fn scope_cycle<'r>(
+fn scope_book<'r>(
     working: &Working<'_, SimulationView<'_>>,
     reads: &'r mut ReportReads,
-    scope: String,
+    scope: &str,
     cycle: &str,
-) -> Result<Option<&'r ScopeRead>, CanwuError> {
-    let key = (scope, cycle.to_owned());
-    if !reads.scopes.contains_key(&key) {
-        let read = ledger_book(working, &key.0, cycle)?;
-        reads.scopes.insert(key.clone(), read);
+) -> Result<Option<&'r ScopeBook>, CanwuError> {
+    if !reads.books.contains_key(cycle) {
+        reads.books.insert(cycle.to_owned(), BTreeMap::new());
     }
-    Ok(reads.scopes.get(&key).and_then(Option::as_ref))
+    let books = reads
+        .books
+        .get_mut(cycle)
+        .ok_or_else(|| invalid("fiscal report reads lost a cycle"))?;
+    if !books.contains_key(scope) {
+        let read = ledger_book(working, ledger_reference(&mut reads.ledger, scope), cycle)?;
+        books.insert(scope.to_owned(), read);
+    }
+    Ok(books.get(scope).and_then(Option::as_ref))
 }
 
 /// Sums an office's hot books of one cycle per mechanism, once per run of
@@ -989,57 +1020,60 @@ fn institution_cycle(
     scopes: u32,
     cycle: &str,
 ) -> Result<(), CanwuError> {
-    let key = (office.to_owned(), cycle.to_owned());
-    if reads.institutions.contains_key(&key) {
+    if reads
+        .institutions
+        .get(cycle)
+        .is_some_and(|offices| offices.contains_key(office))
+    {
         return Ok(());
     }
     let owner = FiscalIndexOwner::Office(office.to_owned());
+    working.read_index_pages(&owner, 0..scopes)?;
     let mut sums = InstitutionCycle::new();
-    for rank in 0..scopes {
-        let Some(scope) = working.index_scope(&owner, rank)? else {
-            return Err(invalid(
-                "a fiscal office index lists fewer scopes than its office has",
-            ));
-        };
-        let Some((binding, totals, _)) = scope_cycle(working, reads, scope, cycle)? else {
+    for (_, scope) in working.index_scopes_in(&owner, 0..scopes)? {
+        let Some(book) = scope_book(working, reads, scope, cycle)? else {
             continue;
         };
-        if totals.is_empty() {
+        if book.totals.is_empty() {
             continue;
         }
-        let (sum, books) = sums.entry(binding.mechanism).or_default();
-        sum_report_totals(sum, totals);
+        let (sum, books) = sums.entry(book.mechanism).or_default();
+        sum_report_totals(sum, &book.totals);
         *books = books.saturating_add(1);
     }
-    reads.institutions.insert(key, sums);
+    reads
+        .institutions
+        .entry(cycle.to_owned())
+        .or_default()
+        .insert(office.to_owned(), sums);
     Ok(())
 }
 
-/// A scope's binding and its book's totals of one cycle, read from its
-/// ledger record without decoding the rest, and the ledger's current
-/// version.
+/// A scope's mechanism and its book's totals of one cycle, read from its
+/// ledger record without decoding it: the scope's mechanism, and of the
+/// book only what its totals are summed from ([`BookFigures`]).
 fn ledger_book(
     working: &Working<'_, SimulationView<'_>>,
-    scope: &str,
+    reference: &DomainRecordRef,
     cycle: &str,
-) -> Result<ScopeCycle, CanwuError> {
-    let reference = fiscal_ledger_reference(scope);
-    let view = working.source();
-    let version = view.current_domain_record_version(reference.as_untyped())?;
-    if let Some(ledger) = working.state.ledgers.get(scope) {
+) -> Result<Option<ScopeBook>, CanwuError> {
+    if let Some(ledger) = working.state.ledgers.get(&reference.id) {
         return ledger
             .books
             .get(cycle)
             .map(|book| {
-                Ok((
-                    ledger.scope.clone(),
-                    book.totals(ledger.scope.mechanism)?,
-                    version,
-                ))
+                Ok(ScopeBook {
+                    mechanism: ledger.scope.mechanism,
+                    totals: book.totals(ledger.scope.mechanism)?,
+                })
             })
             .transpose();
     }
-    let Some(record) = active_record(view, &reference)? else {
+    let Some(record) = working
+        .source()
+        .fiscal_record(reference)?
+        .filter(|record| record.lifecycle == DomainRecordLifecycle::Active)
+    else {
         return Ok(None);
     };
     let Some(book) = record
@@ -1050,16 +1084,18 @@ fn ledger_book(
         return Ok(None);
     };
     let decode = |error: serde_json::Error| invalid(format!("fiscal ledger is invalid: {error}"));
-    let binding = record
+    let mechanism = record
         .payload
         .get("scope")
-        .map(FiscalScopeBinding::deserialize)
+        .and_then(|scope| scope.get("mechanism"))
+        .map(FiscalMechanism::deserialize)
         .transpose()
         .map_err(decode)?
         .ok_or_else(|| invalid("fiscal ledger has no scope binding"))?;
-    let book = FiscalCycleBook::deserialize(book).map_err(decode)?;
-    let totals = book.totals(binding.mechanism)?;
-    Ok(Some((binding, totals, version)))
+    let totals = BookFigures::deserialize(book)
+        .map_err(decode)?
+        .totals(mechanism)?;
+    Ok(Some(ScopeBook { mechanism, totals }))
 }
 
 /// Checks the holders of the next [`FISCAL_PARKED_CHECKS_PER_BOUNDARY`]
@@ -1232,7 +1268,10 @@ fn summary_payload(summary: &FiscalReportSummary) -> Result<Value, CanwuError> {
 
 /// The payload of a part record, built directly from its rows, which it
 /// takes: what `serde_json::to_value(FiscalReportRecord::Part(part))` gives,
-/// without the intermediate record or copies of the rows.
+/// without the intermediate record or copies of the rows. A part is encoded
+/// compactly (see [`crate::FiscalReportPart`]): each institution once, and
+/// each row and fact as an array, so its value holds a few arrays per row
+/// rather than an object per row, fact, and amount.
 fn part_payload(
     observer_id: &str,
     cycle: &str,
@@ -1248,46 +1287,42 @@ fn part_payload(
     map.insert("slot".to_owned(), Value::from(slot));
     map.insert("part".to_owned(), Value::from(part));
     if !rows.is_empty() {
-        let mut institutions = BTreeMap::<canwu_api::EntityRef, Value>::new();
+        let mut institutions: Vec<canwu_api::EntityRef> = Vec::new();
+        let mut table = Vec::new();
         let mut encoded = Vec::with_capacity(rows.len());
         for row in rows {
-            let institution = if let Some(value) = institutions.get(&row.institution) {
-                value.clone()
+            let known = institutions
+                .iter()
+                .position(|institution| *institution == row.institution);
+            let index = if let Some(index) = known {
+                index
             } else {
-                let value = json(&row.institution)?;
-                institutions.insert(row.institution.clone(), value.clone());
-                value
+                table.push(json(&row.institution)?);
+                institutions.push(row.institution);
+                institutions.len() - 1
             };
-            let mut fields = serde_json::Map::new();
-            fields.insert("row".to_owned(), Value::from(row.row));
-            fields.insert("institution".to_owned(), institution);
-            fields.insert("mechanism".to_owned(), json(&row.mechanism)?);
-            if !row.scope_binding_id.is_empty() {
-                fields.insert(
-                    "scope_binding_id".to_owned(),
-                    Value::from(row.scope_binding_id),
-                );
-            }
             let mut facts = Vec::with_capacity(row.facts.len());
             for fact in row.facts {
-                let mut values = serde_json::Map::new();
-                values.insert("unit".to_owned(), Value::from(fact.unit));
-                values.insert("payment_form".to_owned(), json(&fact.payment_form)?);
-                for (name, amount) in [
-                    ("assessed", fact.assessed),
-                    ("collected", fact.collected),
-                    ("outstanding", fact.outstanding),
-                ] {
-                    let mut range = serde_json::Map::new();
-                    range.insert("minimum".to_owned(), Value::from(amount.minimum));
-                    range.insert("maximum".to_owned(), Value::from(amount.maximum));
-                    values.insert(name.to_owned(), Value::Object(range));
-                }
-                facts.push(Value::Object(values));
+                facts.push(Value::Array(vec![
+                    Value::from(fact.unit),
+                    json(&fact.payment_form)?,
+                    Value::from(fact.assessed.minimum),
+                    Value::from(fact.assessed.maximum),
+                    Value::from(fact.collected.minimum),
+                    Value::from(fact.collected.maximum),
+                    Value::from(fact.outstanding.minimum),
+                    Value::from(fact.outstanding.maximum),
+                ]));
             }
-            fields.insert("facts".to_owned(), Value::Array(facts));
-            encoded.push(Value::Object(fields));
+            encoded.push(Value::Array(vec![
+                Value::from(row.row),
+                Value::from(u32::try_from(index).unwrap_or(u32::MAX)),
+                json(&row.mechanism)?,
+                Value::from(row.scope_binding_id),
+                Value::Array(facts),
+            ]));
         }
+        map.insert("institutions".to_owned(), Value::Array(table));
         map.insert("rows".to_owned(), Value::Array(encoded));
     }
     if let Some(books) = books_summed {
@@ -1439,6 +1474,11 @@ mod tests {
         for (rows, books_summed) in [
             (vec![row(16, "scope.a"), row(17, "scope.b")], None),
             (vec![row(32, ""), row(47, "")], Some(6_000)),
+            // Two institutions: the table lists each once, in first use.
+            (
+                vec![row(16, "scope.a"), row(32, ""), row(48, "scope.c")],
+                None,
+            ),
             (Vec::new(), Some(0)),
             (Vec::new(), None),
         ] {
@@ -1450,10 +1490,15 @@ mod tests {
                 rows: rows.clone(),
                 books_summed,
             };
+            let payload = part_payload("observer.court", "1644", 3, 2, rows, books_summed)
+                .expect("part payload");
             assert_eq!(
-                part_payload("observer.court", "1644", 3, 2, rows, books_summed)
-                    .expect("part payload"),
-                serde_json::to_value(FiscalReportRecord::Part(part)).expect("part")
+                payload,
+                serde_json::to_value(FiscalReportRecord::Part(part.clone())).expect("part")
+            );
+            assert_eq!(
+                serde_json::from_value::<FiscalReportRecord>(payload).expect("decoded part"),
+                FiscalReportRecord::Part(part)
             );
         }
     }

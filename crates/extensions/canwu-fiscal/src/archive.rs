@@ -3,7 +3,7 @@
 //! for good in a store the host application owns.
 //!
 //! The commit protocol is the resource and production archives': a host
-//! prepares a batch from the fiscal state ([`FiscalState::prepare_fiscal_archive`]),
+//! prepares a batch from a run's fiscal records ([`crate::prepare_fiscal_archive`]),
 //! stores and verifies it ([`PreparedFiscalArchiveBatchV1::store_and_verify`]),
 //! queues it ([`crate::enqueue_fiscal_archive`]), and finalizes its retention
 //! once it settled ([`crate::finalize_fiscal_archive_retention`]). Lookups
@@ -796,37 +796,13 @@ impl FiscalState {
         selected
     }
 
-    /// Prepares one archive commit of up to `book_limit` closed books, in
-    /// (scope, cycle) order, together with the receipt of the commit at the
-    /// head and the institution totals of every cycle whose last hot books it
-    /// takes. It takes fewer books when those records would not fit
-    /// [`MAX_FISCAL_ARCHIVE_COMMIT_RECORDS`].
-    ///
-    /// The records are cut into blobs of [`MAX_FISCAL_ARCHIVE_RECORDS_PER_BLOB`],
-    /// each with its membership and temporal page, and the directory commits
-    /// to the cumulative lookup index extended by them. Extending the index
-    /// reads the head's directory and the lookup pages on the paths of the
-    /// new keys from `store`; nothing is written until
-    /// [`PreparedFiscalArchiveBatchV1::store_and_verify`]. The result is a
-    /// function of this state and the stored index alone.
-    ///
-    /// `sealed_cut` is the run's last sealed evidence cut, for a run that
-    /// seals its evidence; a run that keeps all its evidence passes `None`.
-    /// A selected book that cites a version a boundary established after the
-    /// cut is refused ([`FiscalArchiveError::UnsealedCitations`]): its
-    /// declaration of that version ends when it is archived, so the version
-    /// must already be in a sealed segment.
-    ///
-    /// It refuses, as [`FiscalArchiveError::Backpressure`], while the state
-    /// holds [`MAX_FISCAL_ARCHIVE_PENDING_HANDLES`] retention handles, of
-    /// applied or stale commits, that the host has not acknowledged.
-    ///
-    /// The cut is the host's to pass: a run that seals its evidence passes
-    /// the end cursor of its last sealed segment, and one that has never
-    /// sealed passes `None`. The function cannot read a run's last cut
-    /// itself, so a sealing host that passes `None` skips the refusal of
-    /// unsealed citations.
-    pub fn prepare_fiscal_archive(
+    /// Prepares one archive commit of up to `book_limit` closed books from
+    /// this state, which holds at least the archive head, the ledgers of the
+    /// first `book_limit` closed books in (scope, cycle) order, and their
+    /// offices; see [`crate::prepare_fiscal_archive`], which reads them from a
+    /// run, for what the commit holds and when it is refused. `sealed_cut` is
+    /// the run's [`canwu_api::CanwuRun::sealed_evidence_cursor`].
+    pub(crate) fn prepare_archive_batch(
         &self,
         book_limit: usize,
         store: &dyn FiscalArchiveStore,

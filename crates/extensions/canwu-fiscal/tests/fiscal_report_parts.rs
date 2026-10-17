@@ -1103,7 +1103,7 @@ fn a_scenario_with_a_version_one_report_record_is_refused() {
     let fixture = Fixture::new();
     let holder = KnowledgeHolderRef::Person(PRINCIPAL);
     let mut version_one = fiscal_report_knowledge_schema_id();
-    assert_eq!(version_one.version, 5);
+    assert_eq!(version_one.version, 6);
     version_one.version = 1;
     let mut scenario = scenario(|_| {});
     let id = KnowledgeRecordId::new(1);

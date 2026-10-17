@@ -23,7 +23,7 @@ use canwu_fiscal::{
     FiscalArchivedRecordV1, FiscalExecutionEvidence, FiscalExecutionKind, FiscalPaymentForm,
     FiscalSettledAction, FiscalState, MAX_FISCAL_ARCHIVE_COMMIT_RECORDS, archived_fiscal_record,
     audit_fiscal_archive, enqueue_execution_receipts, enqueue_fiscal_archive,
-    finalize_fiscal_archive_retention,
+    finalize_fiscal_archive_retention, prepare_fiscal_archive,
 };
 use std::collections::BTreeSet;
 use support::{
@@ -240,14 +240,12 @@ fn queue_maintenance(
     if let Some(commit) = commit {
         finalize_fiscal_archive_retention(canwu, store, &commit).expect("finalized");
     }
-    let state = fiscal_state(canwu);
-    if state.books().all(|(_, book)| book.is_open()) {
+    if fiscal_state(canwu).books().all(|(_, book)| book.is_open()) {
         return None;
     }
-    let prepared = state
-        .prepare_fiscal_archive(MAX_FISCAL_ARCHIVE_COMMIT_RECORDS, store, None)
+    let prepared = prepare_fiscal_archive(canwu, MAX_FISCAL_ARCHIVE_COMMIT_RECORDS, store)
         .expect("the closed books");
-    Some(enqueue_fiscal_archive(canwu, &prepared, store, None).expect("queued"))
+    Some(enqueue_fiscal_archive(canwu, &prepared, store).expect("queued"))
 }
 
 /// Settles a round's commands in two boundaries: the first admits them, as

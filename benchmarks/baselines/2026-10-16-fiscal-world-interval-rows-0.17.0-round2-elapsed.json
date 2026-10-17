@@ -1,0 +1,377 @@
+{
+  "dimensions": {
+    "courts": "institution",
+    "observers": 4000,
+    "partitions": 200,
+    "report_cadence": "monthly, staggered over thirty days",
+    "scopes": 50000
+  },
+  "idle_boundary": {
+    "every_scope_assessed": {
+      "boundary_ms": {
+        "median": 1.044,
+        "min": 0.641,
+        "p95": 1.113
+      },
+      "fiscal_handlers_ms": {
+        "median": 0.001,
+        "min": 0.0,
+        "p95": 0.001
+      }
+    },
+    "initial": {
+      "boundary_ms": {
+        "median": 1.034,
+        "min": 0.919,
+        "p95": 1.135
+      },
+      "fiscal_handlers_ms": {
+        "median": 0.001,
+        "min": 0.0,
+        "p95": 0.001
+      }
+    }
+  },
+  "initial_report_publication": {
+    "applied": 0,
+    "audit_after_ms": {
+      "median": 1378.403,
+      "min": 1378.403,
+      "p95": 1378.403
+    },
+    "drain_boundaries": 0,
+    "drain_boundaries_ms": {
+      "median": 0.0,
+      "min": 0.0,
+      "p95": 0.0
+    },
+    "record_changes": 136,
+    "rejected": 0,
+    "report_records_published": 0,
+    "settlement_boundary_ms": {
+      "median": 28.615,
+      "min": 28.615,
+      "p95": 28.615
+    },
+    "settlement_engine_ms": {
+      "median": 15.623,
+      "min": 15.623,
+      "p95": 15.623
+    },
+    "settlement_fiscal_handler_ms": {
+      "materialize-fiscal-reports-v1": {
+        "median": 12.434,
+        "min": 12.434,
+        "p95": 12.434
+      },
+      "settle-fiscal-ingress-v1": {
+        "median": 0.148,
+        "min": 0.148,
+        "p95": 0.148
+      }
+    },
+    "settlement_fiscal_handlers_ms": {
+      "median": 12.582,
+      "min": 12.582,
+      "p95": 12.582
+    }
+  },
+  "interval_reports": {
+    "due_instant": {
+      "boundaries": {
+        "applied": 0,
+        "audit_after_ms": {
+          "median": 3239.732,
+          "min": 3239.732,
+          "p95": 3239.732
+        },
+        "drain_boundaries": 0,
+        "drain_boundaries_ms": {
+          "median": 0.0,
+          "min": 0.0,
+          "p95": 0.0
+        },
+        "publication": {
+          "bodies": 9603,
+          "directives": 10,
+          "entries": 9603,
+          "holders": 4000,
+          "payload_bytes": 15671758
+        },
+        "record_changes": 6563,
+        "rejected": 0,
+        "report_records_published": 9603,
+        "settlement_boundary_ms": {
+          "median": 2205.145,
+          "min": 1718.497,
+          "p95": 2205.145
+        },
+        "settlement_engine_ms": {
+          "median": 688.727,
+          "min": 639.951,
+          "p95": 688.727
+        },
+        "settlement_fiscal_handler_ms": {
+          "materialize-fiscal-reports-v1": {
+            "median": 1492.223,
+            "min": 1078.539,
+            "p95": 1492.223
+          },
+          "settle-fiscal-ingress-v1": {
+            "median": 0.003,
+            "min": 0.002,
+            "p95": 0.003
+          }
+        },
+        "settlement_fiscal_handlers_ms": {
+          "median": 1492.225,
+          "min": 1078.542,
+          "p95": 1492.225
+        }
+      },
+      "initial_report_publication": {
+        "applied": 0,
+        "audit_after_ms": {
+          "median": 1647.228,
+          "min": 1647.228,
+          "p95": 1647.228
+        },
+        "drain_boundaries": 0,
+        "drain_boundaries_ms": {
+          "median": 0.0,
+          "min": 0.0,
+          "p95": 0.0
+        },
+        "record_changes": 2563,
+        "rejected": 0,
+        "report_records_published": 0,
+        "settlement_boundary_ms": {
+          "median": 168.694,
+          "min": 168.694,
+          "p95": 168.694
+        },
+        "settlement_engine_ms": {
+          "median": 85.676,
+          "min": 85.676,
+          "p95": 85.676
+        },
+        "settlement_fiscal_handler_ms": {
+          "materialize-fiscal-reports-v1": {
+            "median": 83.01,
+            "min": 83.01,
+            "p95": 83.01
+          },
+          "settle-fiscal-ingress-v1": {
+            "median": 0.003,
+            "min": 0.003,
+            "p95": 0.003
+          }
+        },
+        "settlement_fiscal_handlers_ms": {
+          "median": 83.013,
+          "min": 83.013,
+          "p95": 83.013
+        }
+      },
+      "observers_due": 4000
+    },
+    "spread_due_day": {
+      "boundaries": {
+        "applied": 0,
+        "audit_after_ms": {
+          "median": 4342.033,
+          "min": 4342.033,
+          "p95": 4342.033
+        },
+        "drain_boundaries": 0,
+        "drain_boundaries_ms": {
+          "median": 0.0,
+          "min": 0.0,
+          "p95": 0.0
+        },
+        "publication": {
+          "bodies": 304,
+          "directives": 1,
+          "entries": 304,
+          "holders": 134,
+          "payload_bytes": 437768
+        },
+        "record_changes": 267,
+        "rejected": 0,
+        "report_records_published": 304,
+        "settlement_boundary_ms": {
+          "median": 191.435,
+          "min": 182.234,
+          "p95": 191.435
+        },
+        "settlement_engine_ms": {
+          "median": 125.487,
+          "min": 76.98,
+          "p95": 125.487
+        },
+        "settlement_fiscal_handler_ms": {
+          "materialize-fiscal-reports-v1": {
+            "median": 65.467,
+            "min": 54.905,
+            "p95": 65.467
+          },
+          "settle-fiscal-ingress-v1": {
+            "median": 0.249,
+            "min": 0.167,
+            "p95": 0.249
+          }
+        },
+        "settlement_fiscal_handlers_ms": {
+          "median": 65.634,
+          "min": 55.183,
+          "p95": 65.634
+        }
+      },
+      "day": 1,
+      "observers_due": 134
+    }
+  },
+  "machine": "local-windows-x86_64",
+  "metric": "elapsed_ms",
+  "preset": "world",
+  "profile": "fiscal-world",
+  "recorded_on": "2026-10-16",
+  "rows": "interval",
+  "samples": 3,
+  "seed": 4049338390,
+  "state": {
+    "activation_ms": 11640.012,
+    "audit_every_record_ms": 1540.6200000000001,
+    "every_scope_assessed": {
+      "fiscal_record_json_bytes": 58291705,
+      "fiscal_records": 67991,
+      "largest_record": {
+        "json_bytes": 68023,
+        "record": "canwu.fiscal.catalog:primary"
+      },
+      "per_kind": {
+        "archive": {
+          "json_bytes": 125,
+          "largest_json_bytes": 125,
+          "records": 1
+        },
+        "catalog": {
+          "json_bytes": 68023,
+          "largest_json_bytes": 68023,
+          "records": 1
+        },
+        "directory": {
+          "json_bytes": 284368,
+          "largest_json_bytes": 427,
+          "records": 2612
+        },
+        "index": {
+          "json_bytes": 1909994,
+          "largest_json_bytes": 15431,
+          "records": 4414
+        },
+        "jurisdiction": {
+          "json_bytes": 29672,
+          "largest_json_bytes": 154,
+          "records": 200
+        },
+        "ledger": {
+          "json_bytes": 51371792,
+          "largest_json_bytes": 1029,
+          "records": 50000
+        },
+        "observer": {
+          "json_bytes": 2299428,
+          "largest_json_bytes": 4214,
+          "records": 4000
+        },
+        "office": {
+          "json_bytes": 2055881,
+          "largest_json_bytes": 499,
+          "records": 4200
+        },
+        "report-queue": {
+          "json_bytes": 226692,
+          "largest_json_bytes": 348,
+          "records": 2561
+        },
+        "report-schedule": {
+          "json_bytes": 45361,
+          "largest_json_bytes": 45361,
+          "records": 1
+        },
+        "root": {
+          "json_bytes": 369,
+          "largest_json_bytes": 369,
+          "records": 1
+        }
+      }
+    },
+    "initial": {
+      "fiscal_record_json_bytes": 34666948,
+      "fiscal_records": 67991,
+      "largest_record": {
+        "json_bytes": 68023,
+        "record": "canwu.fiscal.catalog:primary"
+      },
+      "per_kind": {
+        "archive": {
+          "json_bytes": 125,
+          "largest_json_bytes": 125,
+          "records": 1
+        },
+        "catalog": {
+          "json_bytes": 68023,
+          "largest_json_bytes": 68023,
+          "records": 1
+        },
+        "directory": {
+          "json_bytes": 284368,
+          "largest_json_bytes": 427,
+          "records": 2612
+        },
+        "index": {
+          "json_bytes": 1909994,
+          "largest_json_bytes": 15431,
+          "records": 4414
+        },
+        "jurisdiction": {
+          "json_bytes": 29672,
+          "largest_json_bytes": 154,
+          "records": 200
+        },
+        "ledger": {
+          "json_bytes": 28221792,
+          "largest_json_bytes": 566,
+          "records": 50000
+        },
+        "observer": {
+          "json_bytes": 2299428,
+          "largest_json_bytes": 4214,
+          "records": 4000
+        },
+        "office": {
+          "json_bytes": 1584380,
+          "largest_json_bytes": 385,
+          "records": 4200
+        },
+        "report-queue": {
+          "json_bytes": 223953,
+          "largest_json_bytes": 348,
+          "records": 2561
+        },
+        "report-schedule": {
+          "json_bytes": 44847,
+          "largest_json_bytes": 44847,
+          "records": 1
+        },
+        "root": {
+          "json_bytes": 366,
+          "largest_json_bytes": 366,
+          "records": 1
+        }
+      }
+    },
+    "partition_ms": 1069.5243
+  }
+}
