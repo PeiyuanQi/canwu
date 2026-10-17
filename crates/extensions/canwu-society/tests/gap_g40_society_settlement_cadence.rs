@@ -1,5 +1,6 @@
 //! Downstream gap G-40: a settlement cadence option on the society plugin,
-//! and no root rewrite in a settlement that changes nothing but timestamps.
+//! no root rewrite in a settlement that changes nothing but timestamps, and
+//! (0.18.0) one root write in a settlement that changes something.
 
 use canwu_api::{
     BoundaryRequest, Canwu, DomainRecord, ErrorCode, Scenario, SimDuration, SimTime,
@@ -31,8 +32,8 @@ fn gap_g40_society_settlement_cadence() {
     let monthly_plugins: [&dyn SimulationPlugin; 1] = [&monthly_plugin];
     let daily_plugins: [&dyn SimulationPlugin; 1] = [&SocietyPlugin::DAILY];
 
-    // The cadence is part of the persisted plugin descriptor: the four
-    // settlement systems carry it and the event-driven intakes do not.
+    // The cadence is part of the persisted plugin descriptor: the settlement
+    // system carries it and the event-driven intakes do not.
     let mut monthly = simulation(diffusion(DAILY_RATE * DAYS), &monthly_plugins);
     let cadences = monthly
         .plugin_descriptors()
@@ -47,7 +48,7 @@ fn gap_g40_society_settlement_cadence() {
             .iter()
             .filter(|cadence| **cadence == SystemCadence::Monthly)
             .count(),
-        4
+        1
     );
     assert!(
         cadences
@@ -141,11 +142,11 @@ fn gap_g40_society_idle_settlement_writes_no_root() {
     let plugins: [&dyn SimulationPlugin; 1] = [&SocietyPlugin::DAILY];
 
     // A society whose only rule has a zero rate. The first settlement
-    // materializes the three derived views; transitions change nothing, so
-    // the phase-7 system writes nothing and stamps nothing.
+    // materializes the three derived views in one write; transitions change
+    // nothing, so it stamps no transition.
     let mut idle = simulation(observed(0), &plugins);
     settle(&mut idle, 1, &[SystemCadence::Daily]);
-    assert_eq!(root_changes(&idle), 3);
+    assert_eq!(root_changes(&idle), 1);
     let materialized = load_society_state(&idle).expect("materialized state");
     assert_eq!(materialized.last_transition_at, None);
     assert_eq!(materialized.last_mobilization_at, Some(day(1)));
@@ -166,11 +167,11 @@ fn gap_g40_society_idle_settlement_writes_no_root() {
     assert_eq!(state.aggregates, compute_aggregates(&state));
 
     // A rate of 100 per million moves one of 2,000 people every fifth
-    // settlement. The four settlements between carry a remainder: one write
-    // by the phase-7 system, which leaves the derived views valid.
+    // settlement. The four settlements between carry a remainder: one write,
+    // which leaves the derived views valid.
     let mut carrying = simulation(observed(100), &plugins);
     settle(&mut carrying, 1, &[SystemCadence::Daily]);
-    assert_eq!(root_changes(&carrying), 4);
+    assert_eq!(root_changes(&carrying), 1);
     for days in 2..=4 {
         settle(&mut carrying, days, &[SystemCadence::Daily]);
         assert_eq!(root_changes(&carrying), 1);
@@ -181,11 +182,11 @@ fn gap_g40_society_idle_settlement_writes_no_root() {
         assert_eq!(aware(&carrying), 0);
     }
     // The settlement that moves a person clears the aggregates and the
-    // mobilization candidates, and the same boundary materializes them
-    // again. The observer cannot detect awareness, so its estimate did not
+    // mobilization candidates and materializes them again in the same
+    // write. The observer cannot detect awareness, so its estimate did not
     // change and its projection is kept with the time it last changed.
     settle(&mut carrying, 5, &[SystemCadence::Daily]);
-    assert_eq!(root_changes(&carrying), 3);
+    assert_eq!(root_changes(&carrying), 1);
     assert_eq!(aware(&carrying), 1);
     let moved = load_society_state(&carrying).expect("moved state");
     assert_eq!(moved.last_aggregation_at, Some(day(5)));
@@ -206,14 +207,15 @@ fn gap_g40_society_idle_settlement_writes_no_root() {
     assert_eq!(root_changes(&carrying), 0);
     assert_eq!(load_society_state(&carrying).expect("same instant"), moved);
 
-    // A society that moves people in every settlement writes its four
-    // versions per settlement, as it always did. A view that comes out empty
-    // (nobody is mobilized, nobody observes) is still stamped once after
-    // each change that cleared it.
+    // A society that moves people in every settlement writes one version
+    // per settlement, with every view it cleared materialized again; until
+    // 0.18.0 it wrote four. A view that comes out empty (nobody is
+    // mobilized, nobody observes) is still stamped once after each change
+    // that cleared it.
     let mut active = simulation(diffusion(DAILY_RATE), &plugins);
     for days in 1..=3 {
         settle(&mut active, days, &[SystemCadence::Daily]);
-        assert_eq!(root_changes(&active), 4);
+        assert_eq!(root_changes(&active), 1);
         let state = load_society_state(&active).expect("active state");
         let now = Some(day(i64::from(days)));
         assert_eq!(state.last_transition_at, now);

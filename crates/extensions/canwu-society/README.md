@@ -21,9 +21,11 @@ a `SystemCadence` category: `Daily` for `SocietyPlugin::DAILY` and
 `SocietyPlugin::with_settlement_cadence`. Canwu keeps no calendar, so the host
 decides which boundaries carry the category; a host that wants a week or
 another declared period schedules a category it does not otherwise use, for
-example `EraScheduled`, at that period. The four settlement systems run on the
-cadence; the two event-driven intakes queue admitted work at any boundary, and
-the next settlement applies it. The cadence is recorded in the persisted
+example `EraScheduled`, at that period. The settlement system runs on the
+cadence; the event-driven intakes queue admitted work at any boundary, and the
+next settlement applies it (an intergroup relation revision, which the
+settlement does not use, applies in the boundary that admits it; see below).
+The cadence is recorded in the persisted
 plugin descriptor, so a run is restored and replayed only with a plugin of the
 same cadence (`PluginManifestMismatch` otherwise).
 
@@ -72,10 +74,19 @@ time of the last settlement in which a transition changed a distribution or a
 carried remainder, and transition state changes at most once per instant.
 `last_mobilization_at` and `last_aggregation_at` are the times those views
 were last materialized: while one is set its view matches the authoritative
-state, a change the view depends on clears it, and the next settlement
-materializes the view once and sets it, also when the view comes out empty.
-A settlement that moves people therefore writes the root up to four times, as
-before, and one that changes only a remainder writes it once.
+state, a change the view depends on clears it, and the settlement that makes
+the change materializes the view again and sets it in the same write, also
+when the view comes out empty. A settlement therefore writes the root at most
+once. Until 0.18.0 three later systems (phases 10, 12, and 13) each
+materialized one view in a write of their own, so a settlement that moved
+people wrote the root up to four times; the final root is the same.
+
+Each step of a settlement checks only what it changes: a rebase or a cohort
+transfer reads and writes its cohorts and their distributions and builds
+each new distribution canonical, and the whole root is validated once, before
+it is written. At 4,000 cohorts (a 10 MB root) a settlement that moves people
+takes about 0.3 s and journals about 20 MB, against 0.9 s and 53 MB before,
+and 4,000 queued rebases settle in about 0.5 s instead of 32 s.
 
 An observer's projection changes only with that observer's estimate. After
 its changes the settlement recomputes each observer's entries and keeps the
@@ -163,8 +174,11 @@ transfer), or that no longer fits, settles as a terminal ledger outcome
 (`stale_source` or `rejected`) instead of failing later boundaries; a retry
 needs a new operation ID. Transfers and rebases clear the materialized
 aggregates, mobilization candidates, and projections, which the same
-settlement boundary rematerializes. The society plugin remains the only writer
-of `canwu.society:state`.
+settlement rematerializes. The society plugin remains the only writer
+of `canwu.society:state`. The boundary that queues a transfer rewrites the
+pending record without the transfers the ledger records as settled, so the
+record holds the transfers in flight rather than every transfer of the run;
+the ledger outcome of a settled transfer is what makes a resend a no-op.
 
 How a settlement checks the transfers due at it is an option of the plugin,
 `SocietyPlugin::with_transfer_settlement(mode)`, recorded in its identity like
@@ -235,3 +249,71 @@ the latest rejected outcome of each alignment, naming the decision version,
 its digest, the issuer, the command, and the admitted packet; every outcome is
 also emitted as a `society_pressure_revised_v1` or
 `society_pressure_revision_rejected_v1` event.
+
+The cohort exchange ledger keeps every rebase and lifecycle delta outcome for
+the life of the run by default (`OutcomeRetention::Keep`), and a settlement
+that records outcomes rewrites it whole: at 4,000 rebases a month it grows by
+1.4 MB a month. `SocietyPlugin::with_outcome_retention(OutcomeRetention::LatestSettlement)`
+makes a settlement that records rebase or lifecycle delta outcomes first drop
+those recorded at an earlier time, so the ledger holds one settlement's
+outcomes (and those of packets refused for a full queue since); a host reads
+them before the next such settlement. Transfer outcomes, which make a resent
+transfer idempotent, and the latest pressure revision outcomes of each
+alignment are kept under both. The retention is part of the plugin's
+identity, like the transfer settlement mode.
+
+`SocietyState::relation_vocabulary` bounds the kinds an `OrganizationRelation`
+may name: while it is empty any canonical identifier is admitted, otherwise a
+root whose relation names another kind is refused by validation. It is
+omitted from the encoding while empty.
+
+Intergroup relations state how the cohorts of one class regard those of
+another within a region. A class is the set of cohorts that carry one
+classification value (`CohortClass { dimension, value }`). An
+`IntergroupRelationEdge` is directed (the source class's stance toward the
+target class) and typed by a `kind`; it names a region (a territory, a
+government, or an application's domain entity) or none for wherever the
+classes live;
+it carries `acceptance_per_mille`, `tension_per_mille`, and `trust_per_mille`,
+up to `MAX_INTERGROUP_RELATION_EVIDENCE` evidence references as the
+application gave them, and a `revision` that starts at one and counts its
+changes, with the packet (`revised_by`) and the time (`revised_at`) of the
+latest. Its kind, classes, and region are its identity and never change; no
+two edges share them. The edges live in their own record,
+`IntergroupRelations` (`canwu.society:intergroup-relations` / `root`, schema
+version 1), at most `MAX_INTERGROUP_RELATIONS` (4,096) of them, with
+`kinds`, a vocabulary that works as `relation_vocabulary` does. A scenario
+authors the record with `IntergroupRelations::into_record`; the run's creation
+checks that some cohort carries each class an edge names. At runtime the
+public `intergroup_relation_revision_v1` packet (`IntergroupRelationRevisionV1`,
+up to 1,024 changes in ascending ID order) creates an edge (`expected_revision`
+zero) or revises one (its current revision); the society applies it as a
+whole or not at all, in phase 7 of the boundary that admits it. A refused
+revision (`stale_revision`, `identity_conflict`, `unknown_kind`,
+`unknown_class`, `unknown_region`, `relations_full`, or `malformed_payload`)
+changes nothing and is reported by one `society_intergroup_relation_rejected_v1`
+event; the boundary commits. Edges are kept for the life of the run, and
+their earlier values stay in the record-change evidence until it is sealed.
+
+A region is an identifier, not a record reference: the society checks it
+once, when an edge is created (an existing territory or government, or an
+active domain entity), and the relations record binds no references, so the
+region's owner can still retire or delete it without its boundary failing.
+An edge whose region was retired or deleted since keeps it as history: the
+host read returns it as stored, a revision of the edge still applies, and a
+new edge cannot name that region (`unknown_region`). An edge at the last
+revision (`u64::MAX`) refuses further revisions as `stale_revision`. A
+class is the classification's authored text, compared exactly: any
+non-empty dimension and value of at most `MAX_COHORT_CLASS_TEXT_BYTES`
+(4,096) bytes, spaces and non-ASCII text included.
+
+The relations are a state primitive for hosts: the society settlement neither
+reads nor writes them, and no transition, mobilization candidate, or
+projection depends on them, so a revision never rewrites the society root and
+a settlement never rewrites the relations. `load_intergroup_relations` reads
+them as authoritative state, as `load_society_state` reads the root. Society
+keeps no observer model for relations, so an actor learns of one through the
+knowledge an application publishes, which can cite the record version it read.
+A revision boundary rewrites the whole record: about 1 MB and 30 to 40 ms at
+4,096 edges, whatever the number of edges it changes, so a host that revises
+many relations sends them in one packet per period.

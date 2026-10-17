@@ -266,6 +266,20 @@ impl TransitionSignalIndex {
 pub fn settle_transitions(state: &mut SocietyState, at: SimTime) -> Result<bool, CanwuError> {
     state.canonicalize()?;
     state.validate()?;
+    let changed = settle_valid_transitions(state, at)?;
+    if changed {
+        state.validate()?;
+    }
+    Ok(changed)
+}
+
+/// [`settle_transitions`] for a state the caller holds canonical and valid:
+/// the society settlement, which validates the root once before it writes
+/// it. The result is canonical.
+pub(crate) fn settle_valid_transitions(
+    state: &mut SocietyState,
+    at: SimTime,
+) -> Result<bool, CanwuError> {
     if state.last_transition_at.is_some_and(|last| at <= last) {
         return Ok(false);
     }
@@ -349,7 +363,6 @@ pub fn settle_transitions(state: &mut SocietyState, at: SimTime) -> Result<bool,
         state.invalidate_derived_state();
     }
     state.canonicalize()?;
-    state.validate()?;
     Ok(true)
 }
 

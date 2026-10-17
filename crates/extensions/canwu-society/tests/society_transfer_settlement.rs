@@ -7,7 +7,9 @@
 //! the one that no longer fits is a recorded rejection. One by one, the first
 //! in operation-ID order completes and the others are stale. Either way the
 //! boundary commits, people are conserved, the mode is part of the plugin's
-//! identity, and restore and exact replay agree.
+//! identity, and restore and exact replay agree. The pending record keeps
+//! only the transfers in flight, and a packet that arrives after its
+//! operation settled is checked against the ledger.
 
 use canwu_api::{
     BoundaryRequest, Canwu, Command, CommandAuthority, CommandEnvelope, CommandRequest,
@@ -17,9 +19,10 @@ use canwu_api::{
 use canwu_society::{
     AffiliationTarget, AwarenessBand, COHORT_TRANSFER_INSUFFICIENT_SOURCE, CohortTransferIntent,
     DispositionBucket, DispositionDistribution, DispositionProfile, InstitutionalAlignment,
-    SocietyCohort, SocietyCohortExchangeLedgerRecord, SocietyPlugin, SocietyState,
-    TransferSettlement, distribution_id, load_society_state,
-    society_cohort_exchange_ledger_reference, society_state_reference,
+    SOCIETY_INGRESS_REJECTED_EVENT, SocietyCohort, SocietyCohortExchangeLedgerRecord,
+    SocietyCohortTransferPendingRecord, SocietyPlugin, SocietyState, TransferSettlement,
+    distribution_id, load_society_state, society_cohort_exchange_ledger_reference,
+    society_cohort_transfer_pending_reference, society_state_reference,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -113,23 +116,38 @@ fn run(plugin: &SocietyPlugin) -> Canwu {
 /// market to the village, each decided against the same society root and
 /// due on day 10, and settles the month.
 fn transfer_and_settle(canwu: &mut Canwu) {
+    transfer(
+        canwu,
+        &[("move-c", 500), ("move-b", 300), ("move-a", 400)],
+        day(10),
+    );
+    canwu
+        .advance_canonical(day(2) - canwu.time())
+        .expect("admit the transfers and queue their packets");
+    canwu
+        .settle_boundary(BoundaryRequest::at(day(30)).with_cadence(SystemCadence::Monthly))
+        .expect("the Monthly settlement commits");
+}
+
+/// Queues, in this order, one transfer command per `(operation, quantity)`
+/// from the market to the village, each decided against the current society
+/// root.
+fn transfer(canwu: &mut Canwu, transfers: &[(&str, u64)], due_time: SimTime) {
     let ids = Canwu::demo_ids();
     let version = canwu
         .typed_domain_record(&society_state_reference())
         .expect("society root")
         .version;
     let revision = canwu.revision();
-    for (offset, (operation_id, quantity)) in
-        (0_u64..).zip([("move-c", 500), ("move-b", 300), ("move-a", 400)])
-    {
+    for (offset, (operation_id, quantity)) in (0_u64..).zip(transfers) {
         let intent = CohortTransferIntent {
-            operation_id: operation_id.to_owned(),
+            operation_id: (*operation_id).to_owned(),
             authority_alignment_id: "council-alignment".to_owned(),
             source_cohort_id: "market".to_owned(),
             destination_cohort_id: "village".to_owned(),
-            quantity,
+            quantity: *quantity,
             expected_source_version: version,
-            due_time: day(10),
+            due_time,
         };
         canwu
             .enqueue_command(
@@ -158,12 +176,18 @@ fn transfer_and_settle(canwu: &mut Canwu) {
             )
             .expect("queue a transfer");
     }
+}
+
+/// The operation IDs the pending record holds.
+fn pending(canwu: &Canwu) -> BTreeSet<String> {
     canwu
-        .advance_canonical(day(2) - canwu.time())
-        .expect("admit the transfers and queue their packets");
-    canwu
-        .settle_boundary(BoundaryRequest::at(day(30)).with_cadence(SystemCadence::Monthly))
-        .expect("the Monthly settlement commits");
+        .typed_domain_record(&society_cohort_transfer_pending_reference())
+        .expect("pending record")
+        .decode_payload::<SocietyCohortTransferPendingRecord>()
+        .expect("pending payload")
+        .transfers
+        .into_keys()
+        .collect()
 }
 
 fn results(canwu: &Canwu) -> BTreeMap<String, String> {
@@ -232,6 +256,7 @@ fn one_by_one_completes_one_transfer_of_a_cohort_per_settlement() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_batch_completes_every_transfer_that_still_fits() {
     let plugin = SocietyPlugin::with_settlement_cadence(SystemCadence::Monthly);
     assert_eq!(plugin.transfer_settlement(), TransferSettlement::Batch);
@@ -255,6 +280,85 @@ fn a_batch_completes_every_transfer_that_still_fits() {
         ])
     );
     assert_eq!(headcounts(&canwu), (200, 2_800));
+    assert_restores_and_replays(&canwu, &plugin);
+
+    // The pending record holds the transfers in flight, not every transfer
+    // of the run: the boundary that queues the next one drops the three the
+    // ledger records as settled, and the new one settles as usual.
+    assert_eq!(pending(&canwu).len(), 3);
+    transfer(&mut canwu, &[("move-d", 50)], day(40));
+    canwu
+        .advance_canonical(day(32) - canwu.time())
+        .expect("admit the transfer and queue its packet");
+    assert_eq!(pending(&canwu), BTreeSet::from(["move-d".to_owned()]));
+    canwu
+        .settle_boundary(BoundaryRequest::at(day(60)).with_cadence(SystemCadence::Monthly))
+        .expect("the next Monthly settlement commits");
+    assert_eq!(results(&canwu)["move-d"], "completed");
+    assert_eq!(headcounts(&canwu), (150, 2_850));
+    assert_restores_and_replays(&canwu, &plugin);
+
+    // A packet can arrive after its operation settled and was pruned from
+    // the pending record: commands with one operation ID are decided before
+    // the first packet arrives, a day after its command. The intake checks
+    // the ledger, so the late packet with other data is refused as
+    // `operation_id_conflict` and the late packet with the same data is a
+    // silent no-op; neither returns to the pending record or moves anyone.
+    let start = canwu.time();
+    let hours = |hours: i64| start + SimDuration::hours(hours);
+    let refusals = |canwu: &Canwu, from: usize| {
+        canwu.events()[from..]
+            .iter()
+            .filter(|event| {
+                event.kind.plugin_identity()
+                    == Some(("canwu-society", SOCIETY_INGRESS_REJECTED_EVENT))
+            })
+            .map(|event| event.summary.clone())
+            .collect::<Vec<_>>()
+    };
+    transfer(&mut canwu, &[("move-e", 10)], hours(25));
+    canwu
+        .advance_canonical(SimDuration::hours(6))
+        .expect("admit the first command");
+    transfer(&mut canwu, &[("move-f", 20)], day(120));
+    canwu
+        .advance_canonical(SimDuration::hours(6))
+        .expect("admit the other transfer");
+    transfer(&mut canwu, &[("move-e", 15)], hours(25));
+    canwu
+        .advance_canonical(SimDuration::hours(1))
+        .expect("admit the conflicting command");
+    transfer(&mut canwu, &[("move-e", 10)], hours(25));
+    canwu
+        .advance_canonical(hours(24) + SimDuration::minutes(30) - canwu.time())
+        .expect("queue the first packet");
+    assert_eq!(pending(&canwu), BTreeSet::from(["move-e".to_owned()]));
+    canwu
+        .settle_boundary(BoundaryRequest::at(hours(25)).with_cadence(SystemCadence::Monthly))
+        .expect("the settlement of the first transfer");
+    assert_eq!(results(&canwu)["move-e"], "completed");
+    canwu
+        .advance_canonical(hours(31) - canwu.time())
+        .expect("the other packet prunes the settled transfer");
+    assert_eq!(pending(&canwu), BTreeSet::from(["move-f".to_owned()]));
+    let events = canwu.events().len();
+    canwu
+        .advance_canonical(hours(36) + SimDuration::minutes(30) - canwu.time())
+        .expect("the late packet with other data is refused, not a failure");
+    let refused = refusals(&canwu, events);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert!(
+        refused[0].ends_with("operation_id_conflict"),
+        "{}",
+        refused[0]
+    );
+    let events = canwu.events().len();
+    canwu
+        .advance_canonical(hours(38) - canwu.time())
+        .expect("the late packet with the same data changes nothing");
+    assert_eq!(refusals(&canwu, events), Vec::<String>::new());
+    assert_eq!(pending(&canwu), BTreeSet::from(["move-f".to_owned()]));
+    assert_eq!(headcounts(&canwu), (140, 2_860));
     assert_restores_and_replays(&canwu, &plugin);
 
     // The mode is part of the plugin's identity: the run is restored only

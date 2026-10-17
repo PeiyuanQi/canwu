@@ -340,6 +340,10 @@ pub struct SocietyCohort {
     pub id: String,
     pub territory: TerritoryId,
     pub headcount: u64,
+    /// Classification values by dimension, as authored text. Each entry
+    /// places the cohort in one cohort class ([`crate::CohortClass`]), which
+    /// an intergroup relation can name when both texts are non-empty and
+    /// within [`crate::MAX_COHORT_CLASS_TEXT_BYTES`].
     #[serde(default)]
     pub classification: BTreeMap<String, String>,
 }
@@ -401,6 +405,8 @@ pub struct OrganizationRelation {
     pub id: String,
     pub source_organization_id: String,
     pub target_organization_id: String,
+    /// The relation's kind: a canonical identifier, and one of
+    /// [`SocietyState::relation_vocabulary`] when that set is not empty.
     pub relation: String,
     pub strength_per_mille: u16,
 }
@@ -577,8 +583,9 @@ pub struct SocietyState {
     /// Time the mobilization candidates were last materialized. While it is
     /// set the candidates are current: they match the authoritative state
     /// now, not only as of this time. A change they depend on clears it, and
-    /// the next settlement materializes them again and sets it, also when
-    /// the state yields no candidate.
+    /// the society settlement materializes them again and sets it in the
+    /// same write as the change (a root authored without them, in its first
+    /// settlement), also when the state yields no candidate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_mobilization_at: Option<SimTime>,
     /// Time the aggregates were last materialized, with the same meaning as
@@ -588,12 +595,19 @@ pub struct SocietyState {
     /// Time the projections were last completed. While it is set every
     /// observer has a projection that matches the authoritative state. A
     /// change that alters an observer's estimate clears it and that
-    /// observer's projection; the next settlement materializes the missing
-    /// projections and sets it. A projection that is present always matches
+    /// observer's projection; the society settlement materializes the
+    /// missing projections and sets it in the same write as the change. A
+    /// projection that is present always matches
     /// the authoritative state, and its own `observed_at` may be earlier
     /// than this time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_projection_at: Option<SimTime>,
+    /// The kinds an [`OrganizationRelation::relation`] may name. While it is
+    /// empty any canonical identifier is admitted; otherwise validation
+    /// refuses a relation whose kind is not in the set. Omitted from the
+    /// encoding while empty.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub relation_vocabulary: BTreeSet<String>,
 }
 
 impl Default for SocietyState {
@@ -619,6 +633,7 @@ impl Default for SocietyState {
             last_mobilization_at: None,
             last_aggregation_at: None,
             last_projection_at: None,
+            relation_vocabulary: BTreeSet::new(),
         }
     }
 }
@@ -629,8 +644,8 @@ impl SocietyState {
     ///
     /// Every owner-side change to cohort headcounts or distributions (a
     /// cohort transfer, a rebase, or a transition) calls this, so the derived
-    /// state is rematerialized by the next phase-10, phase-12, and phase-13
-    /// systems instead of failing exact derived-state validation.
+    /// state is rematerialized by the settlement before it writes the root
+    /// instead of failing exact derived-state validation.
     pub(crate) fn invalidate_derived_state(&mut self) {
         self.aggregates.clear();
         self.mobilization_candidates.clear();
@@ -834,6 +849,9 @@ impl SocietyState {
                 "organization concealment",
             )?;
         }
+        for kind in &self.relation_vocabulary {
+            validate_identifier(kind, "organization relation vocabulary kind")?;
+        }
         for relation in self.organization_relations.values() {
             if !self
                 .organizations
@@ -848,6 +866,14 @@ impl SocietyState {
                 )));
             }
             validate_identifier(&relation.relation, "organization relation kind")?;
+            if !self.relation_vocabulary.is_empty()
+                && !self.relation_vocabulary.contains(&relation.relation)
+            {
+                return Err(invalid(format!(
+                    "organization relation {} has kind {} outside the relation vocabulary",
+                    relation.id, relation.relation
+                )));
+            }
             validate_per_mille(
                 relation.strength_per_mille,
                 "organization relation strength",
@@ -1134,7 +1160,7 @@ fn validate_compound_keyed<T>(
     Ok(())
 }
 
-fn validate_identifier(value: &str, label: &str) -> Result<(), CanwuError> {
+pub(crate) fn validate_identifier(value: &str, label: &str) -> Result<(), CanwuError> {
     if value.is_empty()
         || value.contains("::")
         || !value
@@ -1148,7 +1174,7 @@ fn validate_identifier(value: &str, label: &str) -> Result<(), CanwuError> {
     Ok(())
 }
 
-fn validate_per_mille(value: u16, label: &str) -> Result<(), CanwuError> {
+pub(crate) fn validate_per_mille(value: u16, label: &str) -> Result<(), CanwuError> {
     if value > 1_000 {
         return Err(invalid(format!("{label} {value} exceeds 1000 permille")));
     }

@@ -13,11 +13,11 @@ use canwu_api::{
 };
 use canwu_society::{
     AffiliationTarget, COHORT_REBASE_INGRESS, CohortHeadcountRebaseV1, DispositionBucket,
-    DispositionDistribution, DispositionProfile, MAX_SOCIETY_INGRESS_QUEUE, RebaseReason,
-    SOCIETY_INGRESS_QUEUE_FULL_REJECTION, SOCIETY_INGRESS_REJECTED_EVENT, SocietyCohort,
-    SocietyCohortExchangeLedger, SocietyCohortExchangeLedgerRecord, SocietyIngressBatchRecord,
-    SocietyIngressStatus, SocietyPlugin, SocietyState, distribution_id, load_society_state,
-    society_cohort_exchange_ledger_reference, society_ingress_batch_reference,
+    DispositionDistribution, DispositionProfile, MAX_SOCIETY_INGRESS_QUEUE, OutcomeRetention,
+    RebaseReason, SOCIETY_INGRESS_QUEUE_FULL_REJECTION, SOCIETY_INGRESS_REJECTED_EVENT,
+    SocietyCohort, SocietyCohortExchangeLedger, SocietyCohortExchangeLedgerRecord,
+    SocietyIngressBatchRecord, SocietyIngressStatus, SocietyPlugin, SocietyState, distribution_id,
+    load_society_state, society_cohort_exchange_ledger_reference, society_ingress_batch_reference,
     society_ingress_queue_entries, validate_society_runtime,
 };
 use serde::{Deserialize, Serialize};
@@ -439,4 +439,77 @@ fn a_packet_that_finds_the_queue_full_is_refused_with_a_recorded_outcome() {
         replayed.snapshot_json().expect("replayed snapshot"),
         snapshot
     );
+}
+
+/// Under `OutcomeRetention::LatestSettlement` a settlement that records
+/// rebase outcomes first drops those of earlier settlements, so the ledger,
+/// which each such settlement rewrites whole, stays the size of one
+/// settlement's outcomes; under the default `Keep` it holds every outcome of
+/// the run. The retention is part of the plugin's identity, and a run on it
+/// restores and replays exactly.
+#[test]
+fn latest_settlement_retention_bounds_the_rebase_outcomes() {
+    let stock_plugin = StockPlugin;
+    let keep = SocietyPlugin::with_settlement_cadence(SystemCadence::Monthly);
+    assert_eq!(keep.outcome_retention(), OutcomeRetention::Keep);
+    let latest = keep
+        .clone()
+        .with_outcome_retention(OutcomeRetention::LatestSettlement);
+    for (society, settled) in [(&keep, 2 * 3), (&latest, 3)] {
+        let plugins: [&dyn SimulationPlugin; 2] = [society, &stock_plugin];
+        let (mut canwu, stock) = monthly_society(&plugins);
+        for month in 1..=2_i64 {
+            for offset in 0..3 {
+                canwu
+                    .enqueue_plugin_ingress(rebase(
+                        day(month * MONTH - 2),
+                        1_000 + u64::try_from(month * 10 + offset).expect("headcount"),
+                        &stock,
+                    ))
+                    .expect("rebase");
+            }
+            canwu
+                .settle_boundary(boundary(day(month * MONTH - 2), false))
+                .expect("the admitting boundary");
+            canwu
+                .settle_boundary(boundary(day(month * MONTH), true))
+                .expect("the Monthly settlement");
+        }
+        let outcomes =
+            ledger(canwu.typed_domain_record(&society_cohort_exchange_ledger_reference())).rebases;
+        assert_eq!(outcomes.len(), settled);
+        assert!(
+            outcomes
+                .values()
+                .all(|outcome| outcome.status == SocietyIngressStatus::Applied)
+        );
+        assert_eq!(market(&canwu), 1_022);
+        if *society == latest {
+            assert!(
+                outcomes
+                    .values()
+                    .all(|outcome| outcome.settled_at == day(2 * MONTH))
+            );
+            let snapshot = canwu.snapshot_json().expect("snapshot");
+            let restored =
+                Canwu::from_snapshot_json_with_plugins(&snapshot, &plugins).expect("restored run");
+            assert_eq!(
+                restored.snapshot_json().expect("restored snapshot"),
+                snapshot
+            );
+            let replayed = Canwu::replay_from_journal(&plugins, &canwu.replay_journal())
+                .expect("replayed run");
+            assert_eq!(
+                replayed.snapshot_json().expect("replayed snapshot"),
+                snapshot
+            );
+            assert_eq!(
+                Canwu::from_snapshot_json_with_plugins(&snapshot, &[&keep, &stock_plugin])
+                    .err()
+                    .expect("a Keep plugin cannot restore a LatestSettlement run")
+                    .code,
+                canwu_api::ErrorCode::PluginManifestMismatch
+            );
+        }
+    }
 }

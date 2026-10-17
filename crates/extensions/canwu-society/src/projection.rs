@@ -4,8 +4,9 @@ use crate::ingress::{
     SocietyIngressQueueRecord, queue_entries, rebase_admission_rejection,
     society_ingress_batch_reference, society_ingress_queue_reference,
 };
+use crate::intergroup::{IntergroupRelations, intergroup_relations_reference};
 use crate::lifecycle::SOCIETY_LIFECYCLE_DELTA_INGRESS;
-use crate::plugin::{PLUGIN_NAME, policy_decision_key, validate_policy_decision};
+use crate::plugin::{PLUGIN_NAME, decode_relations, policy_decision_key, validate_policy_decision};
 use crate::revision::{SOCIETY_PRESSURE_REVISION_INGRESS, pressure_revision_admission_rejection};
 use crate::{
     SocietyPlugin, SocietyProjection, SocietyState, SocietyStateRecord, society_state_reference,
@@ -340,7 +341,37 @@ pub fn from_society_snapshot_json_with_plugin(
 /// record.
 pub fn validate_society_runtime(canwu: &Canwu) -> Result<(), CanwuError> {
     load_society_state(canwu)?;
+    load_intergroup_relations(canwu)?;
     validate_queued_ingress(canwu)
+}
+
+/// Loads and validates the society's intergroup relations: no relations when
+/// the record does not exist.
+///
+/// This is a host and research read of the authoritative relations, like
+/// [`load_society_state`]. Society keeps no observer model for relations, so
+/// it has no actor-relative form: an actor learns a relation through the
+/// knowledge an application publishes, which can cite the record version
+/// it read.
+///
+/// # Errors
+///
+/// Returns an error when the record is malformed, violates its invariants,
+/// carries references other than the regions its edges name, or names a
+/// class no cohort of the society root carries.
+pub fn load_intergroup_relations(canwu: &Canwu) -> Result<IntergroupRelations, CanwuError> {
+    let Some(record) = canwu.typed_domain_record(&intergroup_relations_reference()) else {
+        return Ok(IntergroupRelations::empty());
+    };
+    let relations = decode_relations(record)?;
+    let classes = canwu
+        .typed_domain_record(&society_state_reference())
+        .map(canwu_api::DomainRecord::decode_payload::<SocietyStateRecord>)
+        .transpose()?
+        .map(|state| state.cohort_classes())
+        .unwrap_or_default();
+    relations.validate_classes(&classes)?;
+    Ok(relations)
 }
 
 fn validate_policy_components(canwu: &Canwu, state: &SocietyState) -> Result<(), CanwuError> {

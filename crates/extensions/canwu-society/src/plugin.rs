@@ -5,15 +5,20 @@ use crate::ingress::{
     SocietyIngressQueue, SocietyIngressQueueRecord, is_queued_packet, queue_entries,
     rebase_admission_rejection, society_ingress_batch_reference, society_ingress_queue_reference,
 };
+use crate::intergroup::{
+    INTERGROUP_RELATION_INGRESS, INTERGROUP_RELATION_REJECTED_EVENT, IntergroupRelationRevisionV1,
+    IntergroupRelations, IntergroupRelationsRecord, cohort_classes, intergroup_relations_reference,
+    is_region_kind,
+};
 use crate::lifecycle::{SOCIETY_LIFECYCLE_DELTA_INGRESS, SocietyLifecycleDeltaV1};
 use crate::model::{
     CohortHeadcountRebaseOutcome, CohortTransferIntent, CohortTransferOutcome, DispositionBucket,
-    InstitutionalAlignment, PendingCohortTransfer, PolicyDecision, SocietyCohortExchangeLedger,
-    SocietyCohortExchangeLedgerRecord, SocietyCohortTransferPending,
-    SocietyCohortTransferPendingRecord, SocietyIngressStatus, SocietyLifecycleDeltaOutcome,
-    SocietyState, SocietyStateRecord, core_reference_schemas, invalid,
-    society_cohort_exchange_ledger_reference, society_cohort_transfer_pending_reference,
-    society_state_reference,
+    DispositionDistribution, DispositionProfile, InstitutionalAlignment, PendingCohortTransfer,
+    PolicyDecision, SocietyCohort, SocietyCohortExchangeLedger, SocietyCohortExchangeLedgerRecord,
+    SocietyCohortTransferPending, SocietyCohortTransferPendingRecord, SocietyIngressStatus,
+    SocietyLifecycleDeltaOutcome, SocietyProjection, SocietyState, SocietyStateRecord,
+    core_reference_schemas, invalid, society_cohort_exchange_ledger_reference,
+    society_cohort_transfer_pending_reference, society_state_reference,
 };
 use crate::revision::{
     PRESSURE_REVISION_AUTHORITY_REJECTION, PRESSURE_REVISION_COMMAND,
@@ -24,16 +29,19 @@ use crate::revision::{
     SOCIETY_PRESSURE_REVISION_REJECTED_EVENT, SocietyPressureRevisionV1,
     pressure_revision_admission_rejection,
 };
-use crate::settle_transitions;
-use crate::solver::{compute_aggregates, compute_mobilization_candidates, compute_projections};
+use crate::solver::{
+    compute_aggregates, compute_mobilization_candidates, compute_projections,
+    settle_valid_transitions,
+};
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundarySystemContract,
-    CanwuError, CommandId, DecisionOrigin, DomainRecord, DomainRecordDraft, DomainRecordMutation,
-    DomainRecordSchema, DomainRecordType, ErrorCode, IngressClass, IngressPayload, Issuer,
-    PayloadProperty, PayloadSchema, PayloadValueType, PluginActionDescriptor,
-    PluginIngressDescriptor, PluginRegistrar, SimTime, SimulationPlugin, SimulationView, StateKey,
-    StateVisibility, SystemCadence, SystemDirective,
+    CanwuError, CommandId, DecisionOrigin, DomainRecord, DomainRecordClass, DomainRecordDraft,
+    DomainRecordMutation, DomainRecordSchema, DomainRecordType, EntityRef, ErrorCode, IngressClass,
+    IngressPayload, Issuer, PayloadProperty, PayloadSchema, PayloadValueType,
+    PluginActionDescriptor, PluginIngressDescriptor, PluginRegistrar, SimTime, SimulationPlugin,
+    SimulationView, StateKey, StateVisibility, SystemCadence, SystemDirective,
 };
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -53,11 +61,13 @@ pub const PLUGIN_NAME: &str = "canwu-society";
 /// period schedules a category it does not otherwise use, for example
 /// `EraScheduled`, at that period.
 ///
-/// The four settlement systems (`settle-social-transitions` in phase 7,
-/// `evaluate-mobilization-candidates` in phase 10, `aggregate-social-state`
-/// in phase 12, and `materialize-society-projections` in phase 13) run on
-/// that cadence. The two event-driven intakes do not: they queue admitted
-/// work at any boundary, and the next settlement applies it.
+/// The settlement system `settle-social-transitions` (phase 7) runs on that
+/// cadence. The event-driven intakes do not: the cohort-transfer and
+/// owner-side queue intakes queue admitted work at any boundary for the next
+/// settlement, and the intergroup relation intake applies an admitted
+/// relation revision in the boundary that admits it (see
+/// [`crate::IntergroupRelations`]), since the settlement does not use the
+/// relations.
 ///
 /// A transition rate is **per settlement**, not per unit of simulated time
 /// (see [`crate::settle_transitions`]), so an application authors each rate
@@ -87,13 +97,44 @@ pub const PLUGIN_NAME: &str = "canwu-society";
 /// batch record and the queue's small head (see
 /// [`crate::SocietyIngressQueue`]).
 ///
-/// A settlement that changes nothing writes nothing. The first settlement
-/// after a change materializes each derived view that the change cleared
-/// (see the `last_*_at` fields of [`crate::SocietyState`]).
+/// A settlement writes the society root at most once: it materializes, in
+/// that write, each derived view its own changes cleared (see the `last_*_at`
+/// fields of [`crate::SocietyState`]). Until 0.18.0 three further systems in
+/// phases 10, 12, and 13 did that, each with its own write. A settlement
+/// that changes nothing writes nothing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SocietyPlugin {
     settlement_cadence: SystemCadence,
     transfer_settlement: TransferSettlement,
+    outcome_retention: OutcomeRetention,
+}
+
+/// How long the cohort exchange ledger keeps the outcomes of queued rebases
+/// and lifecycle deltas.
+///
+/// The retention is part of the plugin's identity, like the
+/// [`TransferSettlement`] mode: a run is restored and replayed only with a
+/// plugin of the retention it was registered with
+/// (`PluginManifestMismatch` otherwise). Cohort transfer outcomes and the
+/// latest pressure revision outcomes of each alignment are kept under every
+/// retention: a transfer's outcome is what makes a resent transfer
+/// idempotent, and the revision outcomes are already one or two per
+/// alignment.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum OutcomeRetention {
+    /// Every rebase and lifecycle delta outcome stays in the ledger for the
+    /// life of the run, so the ledger, which a settlement rewrites whole,
+    /// grows with every packet. The default, and the rule of every release
+    /// before 0.18.0.
+    #[default]
+    Keep,
+    /// A settlement that records rebase or lifecycle delta outcomes first
+    /// drops those recorded before it, so the ledger holds the outcomes of
+    /// the latest settlement that recorded any, and of packets refused for a
+    /// full queue since then. A host reads the outcomes before the next such
+    /// settlement; the record-change evidence keeps the earlier ledger
+    /// versions until the history is sealed.
+    LatestSettlement,
 }
 
 /// How a society settlement checks the cohort transfers due at it.
@@ -136,10 +177,12 @@ impl SocietyPlugin {
     pub const DAILY: Self = Self {
         settlement_cadence: SystemCadence::Daily,
         transfer_settlement: TransferSettlement::Batch,
+        outcome_retention: OutcomeRetention::Keep,
     };
 
-    /// Returns the society plugin whose settlement systems run on `cadence`,
-    /// with the default [`TransferSettlement::Batch`] transfers.
+    /// Returns the society plugin whose settlement system runs on `cadence`,
+    /// with the default [`TransferSettlement::Batch`] transfers and
+    /// [`OutcomeRetention::Keep`].
     ///
     /// Registration fails with `InvalidPluginRegistration` for
     /// `SystemCadence::EventDriven`, which is not a category a host
@@ -149,7 +192,25 @@ impl SocietyPlugin {
         Self {
             settlement_cadence: cadence,
             transfer_settlement: TransferSettlement::Batch,
+            outcome_retention: OutcomeRetention::Keep,
         }
+    }
+
+    /// Returns this plugin with the cohort exchange ledger keeping rebase and
+    /// lifecycle delta outcomes as `retention` says; see
+    /// [`OutcomeRetention`].
+    #[must_use]
+    pub fn with_outcome_retention(self, retention: OutcomeRetention) -> Self {
+        Self {
+            outcome_retention: retention,
+            ..self
+        }
+    }
+
+    /// How long the ledger keeps rebase and lifecycle delta outcomes.
+    #[must_use]
+    pub const fn outcome_retention(&self) -> OutcomeRetention {
+        self.outcome_retention
     }
 
     /// Returns this plugin with due cohort transfers settled in `mode`; see
@@ -193,14 +254,20 @@ impl SimulationPlugin for SocietyPlugin {
     fn semantic_hash(&self) -> &'static str {
         // The handlers are the same for every settlement cadence; the cadence
         // itself is part of the descriptor's boundary-system contracts. The
-        // transfer settlement mode changes what the settlement handler does,
-        // so each mode has its own hash.
-        match self.transfer_settlement {
-            TransferSettlement::OneByOne => {
-                "861d2d23531f6ac5270cb8d02829e7f1c6f21190f0b101607da0b6457d337521"
+        // transfer settlement mode and the outcome retention change what the
+        // settlement handler does, so each pair has its own hash.
+        match (self.transfer_settlement, self.outcome_retention) {
+            (TransferSettlement::OneByOne, OutcomeRetention::Keep) => {
+                "1e22be0ca947972377b255ae265b8fcdae388a280d3ac9eecd76a377445def0b"
             }
-            TransferSettlement::Batch => {
-                "95d0e58fde9d455689c9b87e1c61c055fc8ea80d02d921647d4b151e72869434"
+            (TransferSettlement::OneByOne, OutcomeRetention::LatestSettlement) => {
+                "e806c8d8059d55761ce8414edc2947e35c921afadf287fd73c7c5a30b98b19d9"
+            }
+            (TransferSettlement::Batch, OutcomeRetention::Keep) => {
+                "4cda4b31ad7c992b9b98d434fec07a87313e3ee5f95d1e9b8d04d37efb4863cc"
+            }
+            (TransferSettlement::Batch, OutcomeRetention::LatestSettlement) => {
+                "021a578a83db331be2f08d91496bd45b710b77bc5276dc5dea065696006efecb"
             }
         }
     }
@@ -209,6 +276,8 @@ impl SimulationPlugin for SocietyPlugin {
         let batch_kind = canwu_api::DomainRecordKind::for_type::<SocietyIngressBatchRecord>();
         let mut head = SocietyIngressQueue::empty();
         let mut batches = BTreeMap::new();
+        let mut relations = None;
+        let mut root = None;
         for record in records {
             if record.reference == society_ingress_queue_reference().into_untyped() {
                 head = record.decode_payload::<SocietyIngressQueueRecord>()?;
@@ -224,7 +293,24 @@ impl SimulationPlugin for SocietyPlugin {
                 record
                     .decode_payload::<SocietyCohortExchangeLedgerRecord>()?
                     .validate()?;
+            } else if record.reference == intergroup_relations_reference().into_untyped() {
+                relations = Some(record);
+            } else if record.reference == society_state_reference().into_untyped() {
+                root = Some(record);
             }
+        }
+        // Authored intergroup relations name classes some authored cohort
+        // carries; cohorts and their classifications never change at
+        // runtime, so the check holds for the whole run.
+        if let Some(record) = relations {
+            let relations = decode_relations(record)?;
+            let classes = match root {
+                Some(root) => root
+                    .decode_payload::<SocietyStateRecord>()?
+                    .cohort_classes(),
+                None => BTreeSet::new(),
+            };
+            relations.validate_classes(&classes)?;
         }
         // The slots in use hold the queue the head counts, in admission
         // order; every other slot is empty, waiting to be reused.
@@ -293,6 +379,49 @@ impl SimulationPlugin for SocietyPlugin {
             allow_additional: false,
         };
         registrar.register_record_schema(batch_schema)?;
+        let mut relations_schema = DomainRecordSchema::for_record::<IntergroupRelationsRecord>();
+        relations_schema.payload_schema = PayloadSchema::Object {
+            properties: BTreeMap::from([
+                (
+                    "schema_version".to_owned(),
+                    required(PayloadValueType::Integer),
+                ),
+                ("kinds".to_owned(), optional(PayloadValueType::Array)),
+                ("edges".to_owned(), optional(PayloadValueType::Object)),
+            ]),
+            allow_additional: false,
+        };
+        registrar.register_record_schema(relations_schema)?;
+        registrar.register_ingress(PluginIngressDescriptor {
+            name: INTERGROUP_RELATION_INGRESS.to_owned(),
+            description: "Create or revise intergroup relations between cohort classes".to_owned(),
+            class: IngressClass::Information,
+            payload_schema: PayloadSchema::Object {
+                properties: BTreeMap::from([(
+                    "changes".to_owned(),
+                    required(PayloadValueType::Array),
+                )]),
+                allow_additional: false,
+            },
+        })?;
+        let mut relation_intake = BoundarySystemContract::new(
+            "intake-intergroup-relations",
+            BoundaryPhase::DomainDeltaProposal,
+            SystemCadence::EventDriven,
+        );
+        relation_intake.reads = vec![
+            intergroup_relations_key(),
+            society_state_key(),
+            StateKey::core_domain_records(),
+            StateKey::core_governments(),
+            StateKey::core_ingress(),
+            StateKey::core_territories(),
+        ];
+        relation_intake.reads.sort();
+        relation_intake.writes = vec![intergroup_relations_key()];
+        relation_intake.emits = vec![INTERGROUP_RELATION_REJECTED_EVENT.to_owned()];
+        relation_intake.visibility = StateVisibility::SameBoundary;
+        registrar.register_boundary_system(relation_intake, intake_intergroup_relations)?;
 
         registrar.register_ingress(PluginIngressDescriptor {
             name: COHORT_REBASE_INGRESS.to_owned(),
@@ -385,9 +514,11 @@ impl SimulationPlugin for SocietyPlugin {
         );
         transfer_intake.reads = vec![
             society_state_key(),
+            cohort_exchange_ledger_key(),
             pending_transfer_key(),
             StateKey::core_ingress(),
         ];
+        transfer_intake.reads.sort();
         transfer_intake.writes = vec![pending_transfer_key()];
         transfer_intake.emits = vec![SOCIETY_INGRESS_REJECTED_EVENT.to_owned()];
         transfer_intake.visibility = StateVisibility::SameBoundary;
@@ -451,41 +582,23 @@ impl SimulationPlugin for SocietyPlugin {
             SOCIETY_PRESSURE_REVISION_REJECTED_EVENT.to_owned(),
         ];
         transition.visibility = StateVisibility::SameBoundary;
-        let settle: canwu_api::BoundarySystemHandler = match self.transfer_settlement {
-            TransferSettlement::OneByOne => settle_social_transitions_one_by_one,
-            TransferSettlement::Batch => settle_social_transitions_batch,
-        };
-        registrar.register_boundary_system(transition, settle)?;
-
-        let mut mobilization = BoundarySystemContract::new(
-            "evaluate-mobilization-candidates",
-            BoundaryPhase::HistoricalCandidateEvaluation,
-            cadence(),
-        );
-        mobilization.reads = vec![society_state_key()];
-        mobilization.writes = vec![society_state_key()];
-        mobilization.visibility = StateVisibility::SameBoundary;
-        registrar.register_boundary_system(mobilization, evaluate_mobilization)?;
-
-        let mut aggregate = BoundarySystemContract::new(
-            "aggregate-social-state",
-            BoundaryPhase::StrategicAggregation,
-            cadence(),
-        );
-        aggregate.reads = vec![society_state_key()];
-        aggregate.writes = vec![society_state_key()];
-        aggregate.visibility = StateVisibility::SameBoundary;
-        registrar.register_boundary_system(aggregate, aggregate_social_state)?;
-
-        let mut project = BoundarySystemContract::new(
-            "materialize-society-projections",
-            BoundaryPhase::PerspectiveAndReportMaterialization,
-            cadence(),
-        );
-        project.reads = vec![society_state_key()];
-        project.writes = vec![society_state_key()];
-        project.visibility = StateVisibility::SameBoundary;
-        registrar.register_boundary_system(project, materialize_projections)
+        // The one settlement system: it applies everything that waits for the
+        // cadence and materializes the derived views in the same write, so a
+        // settlement writes the society root at most once.
+        let settle: canwu_api::BoundarySystemHandler =
+            match (self.transfer_settlement, self.outcome_retention) {
+                (TransferSettlement::OneByOne, OutcomeRetention::Keep) => {
+                    settle_society_one_by_one_keep
+                }
+                (TransferSettlement::OneByOne, OutcomeRetention::LatestSettlement) => {
+                    settle_society_one_by_one_latest
+                }
+                (TransferSettlement::Batch, OutcomeRetention::Keep) => settle_society_batch_keep,
+                (TransferSettlement::Batch, OutcomeRetention::LatestSettlement) => {
+                    settle_society_batch_latest
+                }
+            };
+        registrar.register_boundary_system(transition, settle)
     }
 }
 
@@ -642,13 +755,21 @@ fn pending_transfer_key() -> StateKey {
 ///
 /// The system is total over what a packet can carry: a defective packet is
 /// skipped with a [`SOCIETY_INGRESS_REJECTED_EVENT`] and the boundary
-/// commits. Only an invalid society root or pending record is an error.
+/// commits. Only an invalid society root, ledger, or pending record is an
+/// error.
+///
+/// A boundary that queues a transfer rewrites the pending record without the
+/// transfers the ledger already records as settled, so the record holds the
+/// transfers in flight and those settled since the last intake, not every
+/// transfer of the run. A settled transfer needs no pending entry: its
+/// ledger outcome is what makes a resend or a second delivery a no-op, here
+/// and in the command, and what makes the settlement skip it.
 fn intake_cohort_transfer(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
     // This system runs in every boundary that admits an event or ingress of
-    // any plugin; it decodes the society root only when one of them is a
+    // any plugin; it reads society records only when one of them is a
     // cohort transfer.
     let mut packets = Vec::new();
     for ingress_id in &context.admitted_ingress {
@@ -665,19 +786,28 @@ fn intake_cohort_transfer(
     if packets.is_empty() {
         return Ok(BoundaryProposal::default());
     }
-    let state = load_state(view)?.map(|(_, state)| state);
+    // The intake reads two cohorts and one alignment of the committed root,
+    // and the ledger outcomes of the operations it sees, which their owner
+    // validated when it wrote them, so it decodes neither record whole.
+    let root = view
+        .typed_domain_record(&society_state_reference())?
+        .map(|record| &record.payload);
+    let outcomes = view
+        .typed_domain_record(&society_cohort_exchange_ledger_reference())?
+        .and_then(|record| record.payload.get("outcomes"));
     let (mut pending, pending_record) = load_pending(view)?;
     let mut directives = Vec::new();
     let mut changed = false;
     for ingress in packets {
-        match admitted_cohort_transfer(state.as_ref(), &pending, ingress) {
+        match admitted_cohort_transfer(root, outcomes, &pending, ingress)? {
             Ok(Some(transfer)) => {
                 pending
                     .transfers
                     .insert(transfer.intent.operation_id.clone(), transfer);
                 changed = true;
             }
-            // A second delivery of a transfer that is already pending.
+            // A second delivery of a transfer that is already pending or
+            // settled.
             Ok(None) => {}
             Err(reason) => directives.push(BoundaryDirective::Emit {
                 event_type: SOCIETY_INGRESS_REJECTED_EVENT.to_owned(),
@@ -690,20 +820,15 @@ fn intake_cohort_transfer(
         }
     }
     if changed {
-        let pending_ref = society_cohort_transfer_pending_reference();
-        let mutation = match pending_record {
-            Some(record) => DomainRecordMutation::Update {
-                record: DomainRecordDraft::from_typed(pending_ref, &pending)?,
-                expected_version: record.version,
-            },
-            None => DomainRecordMutation::Create {
-                record: DomainRecordDraft::from_typed(pending_ref, &pending)?,
-            },
-        };
-        directives.push(BoundaryDirective::MutateRecord {
-            mutation,
-            summary: "Persist admitted society cohort transfer".to_owned(),
+        pending.transfers.retain(|operation_id, _| {
+            outcomes.is_none_or(|outcomes| outcomes.get(operation_id).is_none())
         });
+        directives.push(record_write(
+            society_cohort_transfer_pending_reference(),
+            &pending,
+            pending_record.as_ref(),
+            "Persist admitted society cohort transfer",
+        )?);
     }
     Ok(BoundaryProposal {
         directives,
@@ -712,8 +837,8 @@ fn intake_cohort_transfer(
 }
 
 /// Decides one admitted cohort transfer packet: the pending transfer to
-/// queue, `None` for a second delivery of a pending one, or the reason the
-/// packet is rejected.
+/// queue, `None` for a second delivery of a pending or settled one, or the
+/// reason the packet is rejected.
 ///
 /// A packet is authentic exactly when its ingress record names, as its
 /// cause, the command its payload carries. Only the transfer command's
@@ -724,17 +849,18 @@ fn intake_cohort_transfer(
 /// again against the current root: the alignment must still authorize the
 /// actor for the institution the packet was queued for.
 fn admitted_cohort_transfer(
-    state: Option<&SocietyState>,
+    root: Option<&Value>,
+    outcomes: Option<&Value>,
     pending: &SocietyCohortTransferPending,
     ingress: &canwu_api::IngressRecord,
-) -> Result<Option<PendingCohortTransfer>, &'static str> {
+) -> Result<Result<Option<PendingCohortTransfer>, &'static str>, CanwuError> {
     let IngressPayload::Plugin {
         payload,
         affected_entities,
         ..
     } = &ingress.payload
     else {
-        return Err(SOCIETY_INGRESS_MALFORMED_REJECTION);
+        return Ok(Err(SOCIETY_INGRESS_MALFORMED_REJECTION));
     };
     let (Some(intent), Some(actor), Some(command_id)) = (
         payload
@@ -744,40 +870,74 @@ fn admitted_cohort_transfer(
         payload.get("actor").and_then(Value::as_u64),
         payload.get("command_id").and_then(Value::as_u64),
     ) else {
-        return Err(SOCIETY_INGRESS_MALFORMED_REJECTION);
+        return Ok(Err(SOCIETY_INGRESS_MALFORMED_REJECTION));
     };
     if ingress.cause != Some(canwu_api::CauseRef::Command(CommandId::new(command_id))) {
-        return Err(PRESSURE_REVISION_ORIGIN_REJECTION);
+        return Ok(Err(PRESSURE_REVISION_ORIGIN_REJECTION));
     }
     let actor = canwu_api::PersonId::new(actor);
-    let Some(state) = state else {
-        return Err(PRESSURE_REVISION_AUTHORITY_REJECTION);
+    let Some(root) = root else {
+        return Ok(Err(PRESSURE_REVISION_AUTHORITY_REJECTION));
     };
-    if !state
-        .institutional_alignments
-        .get(&intent.authority_alignment_id)
-        .is_some_and(|alignment| {
-            alignment.authorized_actor == Some(actor)
-                && affected_entities.contains(&alignment.institution)
-        })
-    {
-        return Err(PRESSURE_REVISION_AUTHORITY_REJECTION);
+    if !record_entry::<InstitutionalAlignment>(
+        root.get("institutional_alignments"),
+        &intent.authority_alignment_id,
+    )?
+    .is_some_and(|alignment| {
+        alignment.authorized_actor == Some(actor)
+            && affected_entities.contains(&alignment.institution)
+    }) {
+        return Ok(Err(PRESSURE_REVISION_AUTHORITY_REJECTION));
     }
-    let Ok(source_digest) = cohort_transfer_digest(state, &intent) else {
-        return Err(TRANSFER_UNKNOWN_COHORT);
+    let (Some(source), Some(destination)) = (
+        record_entry::<SocietyCohort>(root.get("cohorts"), &intent.source_cohort_id)?,
+        record_entry::<SocietyCohort>(root.get("cohorts"), &intent.destination_cohort_id)?,
+    ) else {
+        return Ok(Err(TRANSFER_UNKNOWN_COHORT));
     };
     let transfer = PendingCohortTransfer {
+        source_digest: cohort_pair_digest(&source, &destination)?,
         intent,
         actor,
         command_id,
-        source_digest,
     };
-    match pending.transfers.get(&transfer.intent.operation_id) {
+    let operation_id = &transfer.intent.operation_id;
+    // A settled transfer's outcome records its whole intent and its actor.
+    if let Some(settled) = record_entry::<CohortTransferOutcome>(outcomes, operation_id)? {
+        let intent = &transfer.intent;
+        let same = settled.source_record_version == intent.expected_source_version
+            && settled.source_cohort_id == intent.source_cohort_id
+            && settled.destination_cohort_id == intent.destination_cohort_id
+            && settled.quantity == intent.quantity
+            && settled.authority_alignment_id == intent.authority_alignment_id
+            && settled.due_time == intent.due_time
+            && settled.actor == actor;
+        return Ok(if same {
+            Ok(None)
+        } else {
+            Err(TRANSFER_OPERATION_CONFLICT)
+        });
+    }
+    Ok(match pending.transfers.get(operation_id) {
         None => Ok(Some(transfer)),
         // The same transfer delivered again, by the same or a resent command.
         Some(existing) if existing.intent == transfer.intent && existing.actor == actor => Ok(None),
         Some(_) => Err(TRANSFER_OPERATION_CONFLICT),
-    }
+    })
+}
+
+/// One entry of a map of a committed society record, decoded alone.
+fn record_entry<T: serde::de::DeserializeOwned>(
+    map: Option<&Value>,
+    id: &str,
+) -> Result<Option<T>, CanwuError> {
+    map.and_then(|entries| entries.get(id))
+        .map(|entry| {
+            T::deserialize(entry).map_err(|error| {
+                invalid(format!("society record entry {id} is malformed: {error}"))
+            })
+        })
+        .transpose()
 }
 
 fn load_pending(
@@ -800,18 +960,10 @@ fn load_pending(
     Ok((pending, Some(record.clone())))
 }
 
-fn cohort_transfer_digest(
-    state: &SocietyState,
-    intent: &CohortTransferIntent,
+fn cohort_pair_digest(
+    source: &SocietyCohort,
+    destination: &SocietyCohort,
 ) -> Result<String, CanwuError> {
-    let source = state
-        .cohorts
-        .get(&intent.source_cohort_id)
-        .ok_or_else(|| invalid("unknown source cohort"))?;
-    let destination = state
-        .cohorts
-        .get(&intent.destination_cohort_id)
-        .ok_or_else(|| invalid("unknown destination cohort"))?;
     // Bind only the cohorts the transfer moves between. Their dispositions
     // may keep changing through ordinary transitions; the transfer moves the
     // proportional share current when it settles.
@@ -843,6 +995,14 @@ fn validate_transfer_intent(intent: &CohortTransferIntent) -> Result<(), CanwuEr
     Ok(())
 }
 
+/// Moves one transfer's people, every distribution's proportional share,
+/// from its source cohort to its destination, or changes nothing and returns
+/// an error.
+///
+/// It reads and writes only the two cohorts and their distributions, and
+/// every new distribution is built canonical and totals its cohort's new
+/// headcount, so a valid state stays valid without a whole-state check; the
+/// settlement validates the whole root once, before it writes it.
 fn apply_cohort_transfer(
     state: &mut SocietyState,
     intent: &CohortTransferIntent,
@@ -852,75 +1012,116 @@ fn apply_cohort_transfer(
         .get(&intent.source_cohort_id)
         .ok_or_else(|| invalid("unknown source cohort"))?
         .headcount;
-    let destination_exists = state.cohorts.contains_key(&intent.destination_cohort_id);
-    if !destination_exists || intent.quantity >= source_count {
+    let destination_count = state
+        .cohorts
+        .get(&intent.destination_cohort_id)
+        .ok_or_else(|| invalid("unknown destination cohort"))?
+        .headcount;
+    if intent.quantity >= source_count {
         return Err(invalid(
-            "destination cohort is missing or transfer would leave an invalid source cohort",
+            "a cohort transfer would leave an invalid source cohort",
         ));
     }
-    let source_targets: BTreeSet<_> = state
-        .distributions
-        .values()
-        .filter(|d| d.cohort_id == intent.source_cohort_id)
-        .map(|d| d.target_id.clone())
-        .collect();
-    let destination_targets: BTreeSet<_> = state
-        .distributions
-        .values()
-        .filter(|d| d.cohort_id == intent.destination_cohort_id)
-        .map(|d| d.target_id.clone())
-        .collect();
+    let destination_total = destination_count
+        .checked_add(intent.quantity)
+        .ok_or_else(|| invalid("cohort transfer would overflow the destination cohort"))?;
+    let source_targets = cohort_distributions(state, &intent.source_cohort_id)
+        .map(|distribution| distribution.target_id.clone())
+        .collect::<BTreeSet<_>>();
+    let destination_targets = cohort_distributions(state, &intent.destination_cohort_id)
+        .map(|distribution| distribution.target_id.clone())
+        .collect::<BTreeSet<_>>();
     if source_targets != destination_targets || source_targets.is_empty() {
         return Err(invalid(
             "source and destination target sets must be equal and non-empty",
         ));
     }
+    let mut updates = Vec::with_capacity(2 * source_targets.len());
     for target_id in source_targets {
         let source_id = crate::distribution_id(&intent.source_cohort_id, &target_id);
         let destination_id = crate::distribution_id(&intent.destination_cohort_id, &target_id);
         let source = state
             .distributions
             .get(&source_id)
-            .cloned()
             .ok_or_else(|| invalid("missing source distribution"))?;
-        let allocations = proportional_allocations(&source.buckets, intent.quantity, source_count)?;
         let destination = state
             .distributions
-            .get_mut(&destination_id)
+            .get(&destination_id)
             .ok_or_else(|| invalid("missing destination distribution"))?;
-        for (index, moved) in allocations.into_iter().enumerate() {
-            destination.buckets.push(DispositionBucket {
-                profile: source.buckets[index].profile,
-                headcount: moved,
-            });
+        let allocations = proportional_allocations(&source.buckets, intent.quantity, source_count)?;
+        let mut remaining = BTreeMap::new();
+        let mut arrived = BTreeMap::new();
+        for bucket in &destination.buckets {
+            add_headcount(&mut arrived, bucket.profile, bucket.headcount)?;
         }
-        let source_mut = state
+        for (bucket, moved) in source.buckets.iter().zip(allocations) {
+            let left = bucket
+                .headcount
+                .checked_sub(moved)
+                .ok_or_else(|| invalid("cohort transfer allocation exceeds its bucket"))?;
+            add_headcount(&mut remaining, bucket.profile, left)?;
+            add_headcount(&mut arrived, bucket.profile, moved)?;
+        }
+        updates.push((source_id, canonical_buckets(remaining)));
+        updates.push((destination_id, canonical_buckets(arrived)));
+    }
+    for (id, buckets) in updates {
+        state
             .distributions
-            .get_mut(&source_id)
-            .expect("source distribution exists");
-        for (bucket, moved) in source_mut.buckets.iter_mut().zip(proportional_allocations(
-            &source.buckets,
-            intent.quantity,
-            source_count,
-        )?) {
-            bucket.headcount -= moved;
-        }
+            .get_mut(&id)
+            .ok_or_else(|| invalid("a transferred distribution disappeared"))?
+            .buckets = buckets;
     }
     state
         .cohorts
         .get_mut(&intent.source_cohort_id)
-        .expect("source exists")
-        .headcount -= intent.quantity;
-    let destination = state
+        .ok_or_else(|| invalid("the source cohort disappeared"))?
+        .headcount = source_count - intent.quantity;
+    state
         .cohorts
         .get_mut(&intent.destination_cohort_id)
-        .expect("destination exists");
-    destination.headcount = destination
-        .headcount
-        .checked_add(intent.quantity)
-        .ok_or_else(|| invalid("cohort transfer would overflow the destination cohort"))?;
+        .ok_or_else(|| invalid("the destination cohort disappeared"))?
+        .headcount = destination_total;
     state.invalidate_derived_state();
     Ok(())
+}
+
+/// The distributions of one cohort, from the contiguous key range its ID
+/// starts.
+pub(crate) fn cohort_distributions<'a>(
+    state: &'a SocietyState,
+    cohort_id: &'a str,
+) -> impl Iterator<Item = &'a DispositionDistribution> + 'a {
+    let prefix = format!("{cohort_id}::");
+    state
+        .distributions
+        .range(prefix.clone()..)
+        .take_while(move |(key, _)| key.starts_with(&prefix))
+        .map(|(_, distribution)| distribution)
+        .filter(move |distribution| distribution.cohort_id == cohort_id)
+}
+
+fn add_headcount(
+    buckets: &mut BTreeMap<DispositionProfile, u64>,
+    profile: DispositionProfile,
+    headcount: u64,
+) -> Result<(), CanwuError> {
+    let entry = buckets.entry(profile).or_default();
+    *entry = entry
+        .checked_add(headcount)
+        .ok_or_else(|| invalid("disposition bucket headcount overflowed"))?;
+    Ok(())
+}
+
+/// Buckets in canonical profile order, without empty ones.
+pub(crate) fn canonical_buckets(
+    buckets: BTreeMap<DispositionProfile, u64>,
+) -> Vec<DispositionBucket> {
+    buckets
+        .into_iter()
+        .filter(|(_, headcount)| *headcount > 0)
+        .map(|(profile, headcount)| DispositionBucket { profile, headcount })
+        .collect()
 }
 
 fn proportional_allocations(
@@ -942,10 +1143,11 @@ fn proportional_allocations(
         remainders.push((product % total, index));
     }
     remainders.sort_by(|a, b| b.cmp(a));
-    for (_, index) in remainders.into_iter().take(
-        usize::try_from(quantity - assigned)
-            .map_err(|_| invalid("cohort transfer remainder overflowed usize"))?,
-    ) {
+    let leftover = quantity
+        .checked_sub(assigned)
+        .and_then(|leftover| usize::try_from(leftover).ok())
+        .ok_or_else(|| invalid("cohort transfer remainder is out of range"))?;
+    for (_, index) in remainders.into_iter().take(leftover) {
         allocations[index] += 1;
     }
     Ok(allocations)
@@ -1220,18 +1422,52 @@ fn revise_society_pressure(
     }])
 }
 
-fn settle_social_transitions_one_by_one(
+fn settle_society_one_by_one_keep(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
-    settle_social_transitions(view, context, TransferSettlement::OneByOne)
+    settle_society(
+        view,
+        context,
+        TransferSettlement::OneByOne,
+        OutcomeRetention::Keep,
+    )
 }
 
-fn settle_social_transitions_batch(
+fn settle_society_one_by_one_latest(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
-    settle_social_transitions(view, context, TransferSettlement::Batch)
+    settle_society(
+        view,
+        context,
+        TransferSettlement::OneByOne,
+        OutcomeRetention::LatestSettlement,
+    )
+}
+
+fn settle_society_batch_keep(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+) -> Result<BoundaryProposal, CanwuError> {
+    settle_society(
+        view,
+        context,
+        TransferSettlement::Batch,
+        OutcomeRetention::Keep,
+    )
+}
+
+fn settle_society_batch_latest(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+) -> Result<BoundaryProposal, CanwuError> {
+    settle_society(
+        view,
+        context,
+        TransferSettlement::Batch,
+        OutcomeRetention::LatestSettlement,
+    )
 }
 
 /// Settles every cohort transfer due at `at`, as `mode` prescribes, and
@@ -1243,23 +1479,25 @@ fn settle_social_transitions_batch(
 /// as a terminal rejection, instead of failing every later settlement. One by
 /// one, the cohorts are compared with the in-progress state, in operation-ID
 /// order, so of the due transfers that share a cohort one completes and the
-/// others must be reissued. In a batch they are compared with the state at the
-/// start of the settlement, and the transfers apply in admission order (the
-/// order of the commands that admitted them), each to the state the earlier
-/// ones left, after a check that its quantity still fits its source cohort.
+/// others must be reissued. In a batch they are compared with the cohorts at
+/// the start of the settlement, and the transfers apply in admission order
+/// (the order of the commands that admitted them), each to the state the
+/// earlier ones left, after a check that its quantity still fits its source
+/// cohort.
 fn settle_due_transfers(
     state: &mut SocietyState,
     ledger: &mut SocietyCohortExchangeLedger,
-    pending: &mut SocietyCohortTransferPending,
+    pending: &SocietyCohortTransferPending,
     at: SimTime,
     mode: TransferSettlement,
 ) -> bool {
-    let mut due: Vec<PendingCohortTransfer> = pending
+    let mut due: Vec<&PendingCohortTransfer> = pending
         .transfers
         .values()
         .filter(|transfer| transfer.intent.due_time <= at)
-        .cloned()
         .collect();
+    // A transfer is checked against its two cohorts only, so a batch keeps
+    // the cohorts as the settlement found them, not the whole state.
     let start = match mode {
         TransferSettlement::OneByOne => None,
         TransferSettlement::Batch => {
@@ -1267,43 +1505,43 @@ fn settle_due_transfers(
                 (left.command_id, &left.intent.operation_id)
                     .cmp(&(right.command_id, &right.intent.operation_id))
             });
-            Some(state.clone())
+            Some(state.cohorts.clone())
         }
     };
     let mut changed = false;
     for transfer in due {
-        let operation_id = transfer.intent.operation_id.clone();
-        // An applied transfer stays in the intake-owned pending record; its
-        // ledger outcome, not its (now changed) source digest, settles it.
-        if ledger.outcomes.contains_key(&operation_id) {
-            pending.transfers.remove(&operation_id);
+        let operation_id = &transfer.intent.operation_id;
+        // A transfer settled earlier stays in the pending record until the
+        // next intake prunes it; its ledger outcome, not its (now changed)
+        // source digest, settles it.
+        if ledger.outcomes.contains_key(operation_id) {
             continue;
         }
-        let checked = start.as_ref().unwrap_or(state);
-        let result = match cohort_transfer_digest(checked, &transfer.intent) {
-            Ok(digest) if digest == transfer.source_digest => {
+        let cohorts = start.as_ref().unwrap_or(&state.cohorts);
+        let digest = cohorts
+            .get(&transfer.intent.source_cohort_id)
+            .zip(cohorts.get(&transfer.intent.destination_cohort_id))
+            .map(|(source, destination)| cohort_pair_digest(source, destination));
+        let result = match digest {
+            Some(Ok(digest)) if digest == transfer.source_digest => {
                 let fits = state
                     .cohorts
                     .get(&transfer.intent.source_cohort_id)
                     .is_some_and(|source| transfer.intent.quantity < source.headcount);
-                // A transfer that does not fit, or whose result is not a
-                // valid society state, is a terminal rejection.
-                let mut draft = state.clone();
+                // A transfer that does not fit, or whose result would not be
+                // a valid society state, is a terminal rejection; the apply
+                // changes nothing then.
                 if mode == TransferSettlement::Batch && !fits {
                     COHORT_TRANSFER_INSUFFICIENT_SOURCE
-                } else if apply_cohort_transfer(&mut draft, &transfer.intent).is_ok()
-                    && draft.canonicalize().is_ok()
-                    && draft.validate().is_ok()
-                {
-                    *state = draft;
+                } else if apply_cohort_transfer(state, &transfer.intent).is_ok() {
                     TRANSFER_COMPLETED
                 } else {
                     TRANSFER_REJECTED
                 }
             }
-            Ok(_) => TRANSFER_STALE_SOURCE,
+            Some(Ok(_)) => TRANSFER_STALE_SOURCE,
             // A cohort the pending transfer names no longer exists.
-            Err(_) => TRANSFER_REJECTED,
+            Some(Err(_)) | None => TRANSFER_REJECTED,
         };
         ledger.outcomes.insert(
             operation_id.clone(),
@@ -1320,25 +1558,37 @@ fn settle_due_transfers(
                 result: result.to_owned(),
             },
         );
-        pending.transfers.remove(&operation_id);
         changed = true;
     }
     changed
 }
 
-fn settle_social_transitions(
+/// The society settlement: the one system that runs on the settlement
+/// cadence and the only writer of the society root.
+///
+/// It settles due transfers, applies the queued rebases, lifecycle deltas,
+/// and pressure revisions in admission order, applies institutional
+/// decisions and transitions, and then completes every derived view those
+/// changes cleared (mobilization candidates, aggregates, and the projections
+/// of the observers whose estimates changed), so a settlement writes the
+/// root at most once. A settlement that changes nothing writes nothing.
+///
+/// Each step keeps a valid state valid and checks only what it changes; the
+/// whole root is validated once, before it is written.
+fn settle_society(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
     mode: TransferSettlement,
+    retention: OutcomeRetention,
 ) -> Result<BoundaryProposal, CanwuError> {
     let Some((record, mut state)) = load_state(view)? else {
         return Ok(BoundaryProposal::default());
     };
     let before = state.clone();
     let (mut ledger, ledger_record) = load_ledger(view)?;
-    let (mut pending, pending_record) = load_pending(view)?;
+    let (pending, _) = load_pending(view)?;
     let transfer_changed =
-        settle_due_transfers(&mut state, &mut ledger, &mut pending, context.at, mode);
+        settle_due_transfers(&mut state, &mut ledger, &pending, context.at, mode);
     // Queued rebases, lifecycle deltas, and pressure revisions apply in
     // admission order, after transfers and before institutional decisions
     // and transitions.
@@ -1356,23 +1606,33 @@ fn settle_social_transitions(
             &mut events,
         )?;
     }
+    if retention == OutcomeRetention::LatestSettlement
+        && queue.entries.iter().any(|entry| {
+            matches!(
+                entry.packet_type.as_str(),
+                COHORT_REBASE_INGRESS | SOCIETY_LIFECYCLE_DELTA_INGRESS
+            )
+        })
+    {
+        ledger
+            .rebases
+            .retain(|_, outcome| outcome.settled_at >= context.at);
+        ledger
+            .lifecycle_deltas
+            .retain(|_, outcome| outcome.settled_at >= context.at);
+    }
     apply_pending_policies(view, &mut state)?;
+    settle_valid_transitions(&mut state, context.at)?;
+    complete_views(&before, &mut state, context.at);
     // A settlement that changes nothing leaves the state, and so the root
     // record, untouched.
-    settle_transitions(&mut state, context.at)?;
-    carry_unchanged_projections(&before, &mut state, context.at);
-    if state == before
-        && !transfer_changed
-        && !queue_consumed
-        && pending_record.is_some()
-        && pending.transfers == load_pending(view)?.0.transfers
-    {
+    if state == before && !ledger_changed && !queue_consumed {
         return Ok(BoundaryProposal::default());
     }
     let mut proposal = if state == before {
         BoundaryProposal::default()
     } else {
-        update_state(&record, state, "Settled aggregate social transitions")?
+        update_state(&record, state, "Settled society")?
     };
     if queue_consumed {
         proposal.directives.extend(queue.consumed()?);
@@ -1380,27 +1640,13 @@ fn settle_social_transitions(
     proposal.directives.extend(events);
     if ledger_changed {
         ledger.validate()?;
-        let mutation = match ledger_record {
-            Some(record) => DomainRecordMutation::Update {
-                record: DomainRecordDraft::from_typed(
-                    society_cohort_exchange_ledger_reference(),
-                    &ledger,
-                )?,
-                expected_version: record.version,
-            },
-            None => DomainRecordMutation::Create {
-                record: DomainRecordDraft::from_typed(
-                    society_cohort_exchange_ledger_reference(),
-                    &ledger,
-                )?,
-            },
-        };
-        proposal.directives.push(BoundaryDirective::MutateRecord {
-            mutation,
-            summary: "Recorded society cohort exchange outcomes".to_owned(),
-        });
+        proposal.directives.push(record_write(
+            society_cohort_exchange_ledger_reference(),
+            &ledger,
+            ledger_record.as_ref(),
+            "Recorded society cohort exchange outcomes",
+        )?);
     }
-
     Ok(proposal)
 }
 
@@ -1430,7 +1676,7 @@ fn settle_queued_ingress(
                 (Some(reason), _) => Err(reason.clone()),
                 (None, None) => Err(SOCIETY_INGRESS_MALFORMED_REJECTION.to_owned()),
                 (None, Some(rebase)) => state
-                    .rebase_cohort(&rebase.cohort_id, rebase.new_headcount)
+                    .rebase_cohort_in_place(&rebase.cohort_id, rebase.new_headcount)
                     .map_err(|error| error.message),
             };
             let (status, rejection, previous_headcount) = match result {
@@ -2025,107 +2271,60 @@ fn batch_slot(id: &str) -> Result<u32, CanwuError> {
         .ok_or_else(|| invalid(format!("society ingress batch ID {id} is not a queue slot")))
 }
 
-/// Returns whether the visible society root carries the named
-/// materialization timestamp, without decoding the root.
+/// Completes, after the settlement's changes, every derived view they
+/// cleared, at the settlement's time: the mobilization candidates, the
+/// aggregates, and the projections. A view that is still current keeps its
+/// time.
 ///
-/// A set timestamp means the materialized view is current: every change a
-/// view depends on clears its timestamp in the same write, and a root whose
-/// timestamped view does not match its authoritative state fails validation
-/// before it is written and whenever it is loaded. The phase-7 settlement
-/// loads and validates the root in every boundary these systems run in.
-fn materialization_is_current(
-    view: &SimulationView<'_>,
-    timestamp: &str,
-) -> Result<bool, CanwuError> {
-    Ok(view
-        .typed_domain_record(&society_state_reference())?
-        .is_some_and(|record| {
-            record
-                .payload
-                .get(timestamp)
-                .is_some_and(|value| !value.is_null())
-        }))
-}
-
-/// Materializes the mobilization candidates once after a change they depend
-/// on cleared their timestamp, and sets it, also when the state yields no
-/// candidate. A boundary in which they are current writes nothing.
-fn evaluate_mobilization(
-    view: &SimulationView<'_>,
-    context: &BoundaryContext,
-) -> Result<BoundaryProposal, CanwuError> {
-    if materialization_is_current(view, "last_mobilization_at")? {
-        return Ok(BoundaryProposal::default());
+/// An observer whose estimate the changes left as it was keeps its
+/// projection and its `observed_at`; every other observer receives a
+/// projection observed now. Until 0.18.0 the views were completed by three
+/// later systems, each with its own write of the root; the result is the
+/// same root.
+fn complete_views(before: &SocietyState, state: &mut SocietyState, at: SimTime) {
+    let estimates = carry_unchanged_projections(before, state, at);
+    if state.last_mobilization_at.is_none() {
+        state.mobilization_candidates = compute_mobilization_candidates(state, at);
+        state.last_mobilization_at = Some(at);
     }
-    let Some((record, mut state)) = load_state(view)? else {
-        return Ok(BoundaryProposal::default());
-    };
-    state.mobilization_candidates = compute_mobilization_candidates(&state, context.at);
-    state.last_mobilization_at = Some(context.at);
-    update_state(&record, state, "Evaluated social mobilization candidates")
-}
-
-/// Materializes the aggregates under the rule of [`evaluate_mobilization`].
-fn aggregate_social_state(
-    view: &SimulationView<'_>,
-    context: &BoundaryContext,
-) -> Result<BoundaryProposal, CanwuError> {
-    if materialization_is_current(view, "last_aggregation_at")? {
-        return Ok(BoundaryProposal::default());
+    if state.last_aggregation_at.is_none() {
+        state.aggregates = compute_aggregates(state);
+        state.last_aggregation_at = Some(at);
     }
-    let Some((record, mut state)) = load_state(view)? else {
-        return Ok(BoundaryProposal::default());
-    };
-    state.aggregates = compute_aggregates(&state);
-    state.last_aggregation_at = Some(context.at);
-    update_state(&record, state, "Aggregated social state")
-}
-
-/// Completes the projections under the rule of [`evaluate_mobilization`].
-///
-/// An observer whose projection the phase-7 settlement kept, because its
-/// estimate did not change, keeps that projection and its `observed_at`;
-/// every other observer receives a projection observed at this boundary.
-fn materialize_projections(
-    view: &SimulationView<'_>,
-    context: &BoundaryContext,
-) -> Result<BoundaryProposal, CanwuError> {
-    if materialization_is_current(view, "last_projection_at")? {
-        return Ok(BoundaryProposal::default());
-    }
-    let Some((record, mut state)) = load_state(view)? else {
-        return Ok(BoundaryProposal::default());
-    };
-    let mut projections = compute_projections(&state, context.at);
-    for (key, projection) in &mut projections {
-        if let Some(kept) = state.projections.get(key)
-            && kept.actor == projection.actor
-            && kept.entries == projection.entries
-        {
-            projection.observed_at = kept.observed_at;
+    if state.last_projection_at.is_none() {
+        // The estimates read the distributions, the organizations, and the
+        // observer profiles, which nothing changes after the carry.
+        let mut projections = estimates.unwrap_or_else(|| compute_projections(state, at));
+        for (key, projection) in &mut projections {
+            if let Some(kept) = state.projections.get(key)
+                && kept.actor == projection.actor
+                && kept.entries == projection.entries
+            {
+                projection.observed_at = kept.observed_at;
+            }
         }
+        state.projections = projections;
+        state.last_projection_at = Some(at);
     }
-    state.projections = projections;
-    state.last_projection_at = Some(context.at);
-    update_state(
-        &record,
-        state,
-        "Materialized actor-relative society projections",
-    )
 }
 
-/// Restores, after the phase-7 changes, the projection of every observer
-/// whose estimate those changes left as it was, and leaves the projections
-/// of the others cleared for the phase-13 system.
+/// Restores, after the settlement's changes, the projection of every
+/// observer whose estimate those changes left as it was, leaves the
+/// projections of the others cleared, and returns the estimates it computed
+/// to compare them.
 ///
 /// An observer's `observed_at` therefore moves only in a settlement that
 /// changes that observer's own entries. Clearing every projection whenever
 /// any distribution moved would stamp every observer in that settlement and
 /// so tell an observer that something outside its scope, or beyond what it
 /// can detect, had changed.
-fn carry_unchanged_projections(before: &SocietyState, state: &mut SocietyState, at: SimTime) {
+fn carry_unchanged_projections(
+    before: &SocietyState,
+    state: &mut SocietyState,
+    at: SimTime,
+) -> Option<BTreeMap<String, SocietyProjection>> {
     if before.projections.is_empty() {
-        return;
+        return None;
     }
     // An estimate reads the distributions, the organizations, and the
     // observer profiles, and nothing else.
@@ -2135,7 +2334,7 @@ fn carry_unchanged_projections(before: &SocietyState, state: &mut SocietyState, 
     {
         state.projections.clone_from(&before.projections);
         state.last_projection_at = before.last_projection_at;
-        return;
+        return None;
     }
     let estimates = compute_projections(state, at);
     state.projections = before
@@ -2151,6 +2350,168 @@ fn carry_unchanged_projections(before: &SocietyState, state: &mut SocietyState, 
     state.last_projection_at = before
         .last_projection_at
         .filter(|_| state.projections.len() == estimates.len());
+    Some(estimates)
+}
+
+/// Applies every intergroup relation revision a boundary admits, in
+/// admission order, in phase 7 of that boundary, so the systems of later
+/// phases read the revised relations.
+///
+/// The system is total over what a packet can carry: a revision that does
+/// not decode, is malformed, or that the relations refuse (a stale revision,
+/// a changed identity, an unknown kind, class, or region, or a full set)
+/// changes nothing and is reported by one
+/// [`INTERGROUP_RELATION_REJECTED_EVENT`]; the boundary commits. A boundary
+/// whose revisions all apply writes the relations record once. It never
+/// reads or writes the society root's population state: it reads only the
+/// cohorts' classifications, which never change at runtime. Only an invalid
+/// relations record or society root fails the boundary.
+fn intake_intergroup_relations(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+) -> Result<BoundaryProposal, CanwuError> {
+    let mut packets = Vec::new();
+    for ingress_id in &context.admitted_ingress {
+        if let Some(ingress) = view.ingress(*ingress_id)?
+            && let IngressPayload::Plugin {
+                plugin,
+                packet_type,
+                payload,
+                ..
+            } = &ingress.payload
+            && plugin == PLUGIN_NAME
+            && packet_type == INTERGROUP_RELATION_INGRESS
+        {
+            packets.push((ingress.id, payload));
+        }
+    }
+    if packets.is_empty() {
+        return Ok(BoundaryProposal::default());
+    }
+    let (mut relations, record) = load_relations(view)?;
+    let classes = match view.typed_domain_record(&society_state_reference())? {
+        Some(root) => cohort_classes(
+            root_map::<SocietyCohort>(&root.payload, "cohorts")?
+                .values()
+                .collect::<Vec<_>>(),
+        ),
+        None => BTreeSet::new(),
+    };
+    let mut directives = Vec::new();
+    let mut changed = false;
+    for (ingress, payload) in packets {
+        let revision = serde_json::from_value::<IntergroupRelationRevisionV1>(payload.clone())
+            .ok()
+            .filter(|revision| revision.validate().is_ok());
+        let rejection = match revision {
+            None => Some((SOCIETY_INGRESS_MALFORMED_REJECTION, None)),
+            Some(revision) => {
+                let live_regions = live_regions(view, revision.regions())?;
+                relations
+                    .apply_revision(&revision, &classes, &live_regions, ingress, context.at)
+                    .err()
+                    .map(|rejection| (rejection.reason, rejection.relation))
+            }
+        };
+        match rejection {
+            None => changed = true,
+            Some((reason, relation)) => directives.push(BoundaryDirective::Emit {
+                event_type: INTERGROUP_RELATION_REJECTED_EVENT.to_owned(),
+                summary: match relation {
+                    Some(relation) => format!(
+                        "Rejected intergroup relation ingress {} at relation {relation}: {reason}",
+                        ingress.get()
+                    ),
+                    None => format!(
+                        "Rejected intergroup relation ingress {}: {reason}",
+                        ingress.get()
+                    ),
+                },
+                affected: Vec::new(),
+            }),
+        }
+    }
+    if changed {
+        relations.validate()?;
+        let draft = relations.record_draft()?;
+        directives.push(BoundaryDirective::MutateRecord {
+            mutation: match &record {
+                Some(existing) => DomainRecordMutation::Update {
+                    record: draft,
+                    expected_version: existing.version,
+                },
+                None => DomainRecordMutation::Create { record: draft },
+            },
+            summary: "Revised intergroup relations".to_owned(),
+        });
+    }
+    Ok(BoundaryProposal {
+        directives,
+        ..BoundaryProposal::default()
+    })
+}
+
+/// The regions among `regions` that a new edge may name now: a territory or
+/// a government that exists, or an active domain entity record.
+fn live_regions(
+    view: &SimulationView<'_>,
+    regions: BTreeSet<EntityRef>,
+) -> Result<BTreeSet<EntityRef>, CanwuError> {
+    let mut live = BTreeSet::new();
+    for region in regions {
+        let exists = match &region {
+            EntityRef::Territory(id) => view.territory(*id)?.is_some(),
+            EntityRef::Government(id) => view.government(*id)?.is_some(),
+            EntityRef::Domain(reference) => view.domain_record(reference)?.is_some_and(|record| {
+                record.class == DomainRecordClass::Entity && record.is_active()
+            }),
+            _ => false,
+        };
+        if exists && is_region_kind(&region) {
+            live.insert(region);
+        }
+    }
+    Ok(live)
+}
+
+/// One map of the committed society root, decoded alone.
+fn root_map<T: serde::de::DeserializeOwned>(
+    root: &Value,
+    map: &str,
+) -> Result<BTreeMap<String, T>, CanwuError> {
+    root.get(map).map_or_else(
+        || Ok(BTreeMap::new()),
+        |entries| {
+            BTreeMap::<String, T>::deserialize(entries)
+                .map_err(|error| invalid(format!("society root {map} are malformed: {error}")))
+        },
+    )
+}
+
+/// The society's intergroup relations as the view reads them, and their
+/// record; no relations when the record does not exist yet.
+fn load_relations(
+    view: &SimulationView<'_>,
+) -> Result<(IntergroupRelations, Option<DomainRecord>), CanwuError> {
+    let Some(record) = view.typed_domain_record(&intergroup_relations_reference())? else {
+        return Ok((IntergroupRelations::empty(), None));
+    };
+    Ok((decode_relations(record)?, Some(record.clone())))
+}
+
+/// Decodes and validates a relations record, which binds no references.
+pub(crate) fn decode_relations(record: &DomainRecord) -> Result<IntergroupRelations, CanwuError> {
+    let relations = record.decode_payload::<IntergroupRelationsRecord>()?;
+    relations.validate()?;
+    IntergroupRelations::validate_record_binding(record)?;
+    Ok(relations)
+}
+
+fn intergroup_relations_key() -> StateKey {
+    StateKey::new(
+        IntergroupRelationsRecord::NAMESPACE,
+        IntergroupRelationsRecord::NAME,
+    )
 }
 
 fn apply_pending_policies(
@@ -2451,6 +2812,10 @@ fn society_payload_schema() -> PayloadSchema {
             ),
             ("policies".to_owned(), required(PayloadValueType::Object)),
             ("projections".to_owned(), required(PayloadValueType::Object)),
+            (
+                "relation_vocabulary".to_owned(),
+                optional(PayloadValueType::Array),
+            ),
             ("remainders".to_owned(), required(PayloadValueType::Object)),
             (
                 "schema_version".to_owned(),

@@ -3,7 +3,7 @@
 
 use crate::PLUGIN_NAME;
 use crate::lifecycle::SOCIETY_LIFECYCLE_DELTA_INGRESS;
-use crate::model::{SocietyState, invalid};
+use crate::model::{DispositionProfile, SocietyState, invalid};
 use crate::revision::SOCIETY_PRESSURE_REVISION_INGRESS;
 use canwu_api::{
     BoundaryId, CanwuError, DomainRecordType, DomainRecordVersionRef, DomainValueKindClass,
@@ -11,7 +11,7 @@ use canwu_api::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Public society ingress carrying one [`CohortHeadcountRebaseV1`].
 pub const COHORT_REBASE_INGRESS: &str = "cohort_headcount_rebase_v1";
@@ -312,6 +312,24 @@ impl SocietyState {
         cohort_id: &str,
         new_headcount: u64,
     ) -> Result<u64, CanwuError> {
+        let mut draft = self.clone();
+        draft.canonicalize()?;
+        let previous = draft.rebase_cohort_in_place(cohort_id, new_headcount)?;
+        draft.validate()?;
+        *self = draft;
+        Ok(previous)
+    }
+
+    /// [`Self::rebase_cohort`] for a state the caller holds canonical and
+    /// valid, as the society settlement does: it reads and writes only the
+    /// cohort and its distributions, builds each new distribution canonical
+    /// and totalling the new headcount, and changes nothing when it fails,
+    /// so a valid state stays valid without a whole-state check.
+    pub(crate) fn rebase_cohort_in_place(
+        &mut self,
+        cohort_id: &str,
+        new_headcount: u64,
+    ) -> Result<u64, CanwuError> {
         let previous = self
             .cohorts
             .get(cohort_id)
@@ -323,37 +341,39 @@ impl SocietyState {
         if new_headcount == previous {
             return Ok(previous);
         }
-        let mut draft = self.clone();
-        // Merge duplicate buckets first so each profile is re-proportioned
-        // once.
-        draft.canonicalize()?;
-        for distribution in draft
-            .distributions
-            .values_mut()
-            .filter(|distribution| distribution.cohort_id == cohort_id)
-        {
-            let allocations = rebase_allocations(
-                distribution
-                    .buckets
-                    .iter()
-                    .map(|bucket| bucket.headcount)
-                    .collect(),
-                previous,
-                new_headcount,
-            )?;
-            for (bucket, headcount) in distribution.buckets.iter_mut().zip(allocations) {
-                bucket.headcount = headcount;
+        let mut updates = Vec::new();
+        for distribution in crate::plugin::cohort_distributions(self, cohort_id) {
+            // Merge duplicate buckets first so each profile is re-proportioned
+            // once.
+            let mut merged = BTreeMap::<DispositionProfile, u64>::new();
+            for bucket in &distribution.buckets {
+                let entry = merged.entry(bucket.profile).or_default();
+                *entry = entry
+                    .checked_add(bucket.headcount)
+                    .ok_or_else(|| invalid("disposition bucket headcount overflowed"))?;
             }
+            let allocations =
+                rebase_allocations(merged.values().copied().collect(), previous, new_headcount)?;
+            let buckets = merged
+                .into_keys()
+                .zip(allocations)
+                .collect::<BTreeMap<_, _>>();
+            updates.push((
+                distribution.id.clone(),
+                crate::plugin::canonical_buckets(buckets),
+            ));
         }
-        draft
-            .cohorts
+        for (id, buckets) in updates {
+            self.distributions
+                .get_mut(&id)
+                .ok_or_else(|| invalid("a rebased distribution disappeared"))?
+                .buckets = buckets;
+        }
+        self.cohorts
             .get_mut(cohort_id)
             .ok_or_else(|| invalid("rebased cohort disappeared"))?
             .headcount = new_headcount;
-        draft.invalidate_derived_state();
-        draft.canonicalize()?;
-        draft.validate()?;
-        *self = draft;
+        self.invalidate_derived_state();
         Ok(previous)
     }
 }
@@ -376,8 +396,10 @@ fn rebase_allocations(
         remainders.push((product % previous, index));
     }
     remainders.sort_by(|left, right| right.cmp(left));
-    let leftover = usize::try_from(target - assigned)
-        .map_err(|_| invalid("rebase remainder exceeded the platform range"))?;
+    let leftover = target
+        .checked_sub(assigned)
+        .and_then(|leftover| usize::try_from(leftover).ok())
+        .ok_or_else(|| invalid("rebase remainder is out of range"))?;
     for (_, index) in remainders.into_iter().take(leftover) {
         allocations[index] += 1;
     }
