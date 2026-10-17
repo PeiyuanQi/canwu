@@ -14,7 +14,7 @@
 //! first applies, the second is stale and settles as a no-op instead of
 //! failing the boundary. Its receipt is not an archive candidate, and the
 //! acknowledgement of its handle retires it, also when it arrives twice. The
-//! fourth queues one batch twice. The fifth queues a commit behind an
+//! fourth queues one batch again and again. The fifth queues a commit behind an
 //! operation admitted before it: the commit settles first and applies.
 //!
 //! Until the archive removes it, hot work declares the record versions
@@ -323,21 +323,27 @@ fn a_stale_archive_commit_terminates_when_the_applied_handles_are_full() {
 }
 
 #[test]
-fn the_same_archive_batch_queued_twice_leaves_no_stale_receipt() {
+fn the_same_archive_batch_queued_again_and_again_leaves_one_stale_receipt() {
     let plugin = ProductionPlugin;
     let archive = TestArchive::default();
     let mut canwu = runtime(&plugin, settled_state(1), &archive);
 
-    // One batch queued twice settles once as applied and once as stale under
-    // one retention handle, which stays the handle of the applied commit.
+    // One batch queued four times settles once as applied and three times as
+    // stale under one retention handle, which stays the handle of the applied
+    // commit. The stale settlements count on one receipt, so duplicates do
+    // not grow the root.
     let batch = production_state(&canwu)
         .prepare_production_archive(MAX_ARCHIVE_PREPARE_CANDIDATES, &archive)
         .expect("commit of every candidate");
-    let queued = [(); 2].map(|()| {
+    let queued = [(); 4].map(|()| {
         enqueue_production_archive(&mut canwu, &batch, &archive).expect("enqueue the same batch")
     });
     let handle = &queued[0].retention_handle_id;
-    assert_eq!(handle, &queued[1].retention_handle_id);
+    assert!(
+        queued
+            .iter()
+            .all(|receipt| &receipt.retention_handle_id == handle)
+    );
     settle(&mut canwu);
     let doubled = production_state(&canwu);
     assert_eq!(doubled.archive.committed_batch_count, 1);
@@ -345,15 +351,60 @@ fn the_same_archive_batch_queued_twice_leaves_no_stale_receipt() {
         (applied_receipts(&doubled), stale_receipts(&doubled)),
         (1, 1)
     );
+    let stale = doubled
+        .archive
+        .maintenance_receipts
+        .values()
+        .find(|receipt| receipt.disposition == ProductionArchiveRetentionPhaseV1::RejectedStale)
+        .expect("the stale receipt");
+    assert_eq!(stale.duplicate_settlements, 2);
     assert_eq!(
         doubled.archive.pending_handles[handle].phase,
         ProductionArchiveRetentionPhaseV1::Committed
     );
+    doubled.validate().expect("the settled root validates");
+
+    // Validation holds that shape: a second stale receipt under the handle,
+    // or duplicates counted on the applied commit's receipt, is invalid.
+    let reseal = |receipt: &mut ProductionArchiveMaintenanceReceiptV1| {
+        receipt.canonical_digest = String::new();
+        receipt.canonical_digest =
+            canwu_api::canonical_hash("canwu.production.archive-maintenance-receipt.v1", &*receipt)
+                .expect("receipt digest");
+    };
+    let mut two_stale = doubled.clone();
+    let mut copy = stale.clone();
+    copy.id = ProductionArchiveReceiptId::new(format!(
+        "canwu.production:archive-receipt:{}",
+        two_stale.archive.receipt_sequence + 1
+    ))
+    .expect("receipt id");
+    reseal(&mut copy);
+    two_stale.archive.receipt_sequence += 1;
+    two_stale
+        .archive
+        .maintenance_receipts
+        .insert(copy.id.clone(), copy);
+    let mut counted_applied = doubled.clone();
+    let applied = counted_applied
+        .archive
+        .maintenance_receipts
+        .values_mut()
+        .find(|receipt| receipt.disposition == ProductionArchiveRetentionPhaseV1::Committed)
+        .expect("the applied receipt");
+    applied.duplicate_settlements = 1;
+    reseal(applied);
+    for tampered in [two_stale, counted_applied] {
+        assert_eq!(
+            tampered.validate().expect_err("a tampered receipt").message,
+            "production archive maintenance receipt is invalid"
+        );
+    }
 
     // Its acknowledgement retires the handle and the stale receipt; the
     // applied receipt stays for the next commit to archive.
     finalize_production_archive_retention(&mut canwu, &archive, &queued[1])
-        .expect("finalize the batch queued twice");
+        .expect("finalize the batch queued again and again");
     settle(&mut canwu);
     let retired = production_state(&canwu);
     assert_eq!(
@@ -365,6 +416,126 @@ fn the_same_archive_batch_queued_twice_leaves_no_stale_receipt() {
         archive.retention.read().unwrap()[handle],
         ProductionArchiveRetentionPhaseV1::Committed
     );
+    restore_and_replay(&plugin, &canwu, &archive);
+}
+
+/// An outcome as the plugin records it: the envelope, its input hash, and
+/// its disposition.
+fn recorded_outcome(
+    state: &ProductionState,
+    id: &str,
+    operation: ProductionOperation,
+    work_order: Option<WorkOrderId>,
+    execution: Option<ProductionExecutionId>,
+    rejected: bool,
+) -> ProductionOperationOutcome {
+    let command = ProductionCommandEnvelope {
+        operation_id: ProductionOperationOutcomeId::new(id).expect("operation ID"),
+        holder: holder(),
+        expected_runtime_revision: state.revision,
+        operation,
+        scope: None,
+    };
+    ProductionOperationOutcome {
+        id: command.operation_id.clone(),
+        canonical_input_hash: canwu_api::canonical_hash(
+            "canwu.production.operation-input.v1",
+            &command,
+        )
+        .expect("input hash"),
+        command,
+        disposition: if rejected {
+            ProductionOperationDisposition::Rejected
+        } else {
+            ProductionOperationDisposition::Applied
+        },
+        work_order,
+        execution,
+        project: None,
+        rejection_code: rejected.then(|| "invalid_domain_record".to_owned()),
+        rejection_message: rejected.then(|| "fixture rejection".to_owned()),
+        settled_at: canwu_api::SimTime::EPOCH,
+    }
+}
+
+#[test]
+fn an_execution_archives_its_lease_outcome_and_an_unmatched_rejection_leaves_later() {
+    let plugin = ProductionPlugin;
+    let archive = TestArchive::default();
+    let mut state = settled_state(1);
+    let execution = state.executions.values().next().expect("execution").clone();
+    // The outcome of the request of the execution's own lease, which names
+    // no work order or execution.
+    let mut request = lease_request(
+        "claimed",
+        execution.completion_certificate.operation_key.clone(),
+        execution.started_at,
+    );
+    request.id = execution.completion_certificate.acquisition.clone();
+    let lease = recorded_outcome(
+        &state,
+        "production:request:claimed",
+        ProductionOperation::RequestCompletionLease { request },
+        None,
+        None,
+        false,
+    );
+    // A rejected start of another execution for the same work order: it names
+    // the order, but it is not one of this execution's operations.
+    let mut other = execution.clone();
+    other.id = ProductionExecutionId::new("production:execution:other").expect("execution");
+    let unmatched = recorded_outcome(
+        &state,
+        "production:start:other",
+        ProductionOperation::StartExecution {
+            execution: other.clone(),
+            allocations: Vec::new(),
+        },
+        Some(execution.work_order.clone()),
+        Some(other.id),
+        true,
+    );
+    for outcome in [&lease, &unmatched] {
+        state
+            .operation_outcomes
+            .insert(outcome.id.clone(), outcome.clone());
+    }
+    state.validate().expect("fixture with outcomes");
+    assert!(state.residue_archive_candidates().is_empty());
+    let mut canwu = runtime(&plugin, state, &archive);
+
+    // The execution archives its lease's outcome and not the unmatched
+    // rejection, which then names nothing hot and leaves with the next commit.
+    let first = commit_everything(&mut canwu, &archive);
+    settle(&mut canwu);
+    let archived = production_state(&canwu);
+    let Some(ProductionArchivedRecordV1::Execution(record)) =
+        archived_production_terminal_record(&archived, &archive, &execution_key(&execution.id))
+            .expect("execution lookup")
+    else {
+        panic!("the execution resolves");
+    };
+    let archived_outcomes = record
+        .operation_outcomes
+        .iter()
+        .map(|outcome| outcome.id.clone())
+        .collect::<Vec<_>>();
+    assert!(archived_outcomes.contains(&lease.id));
+    assert!(!archived_outcomes.contains(&unmatched.id));
+    assert!(!archived.operation_outcomes.contains_key(&lease.id));
+    assert_eq!(
+        archived.residue_archive_candidates(),
+        vec![ProductionTerminalArchiveKeyV1::OperationOutcome(
+            unmatched.id.clone()
+        )]
+    );
+    finalize_production_archive_retention(&mut canwu, &archive, &first)
+        .expect("finalize the first commit");
+    commit_everything(&mut canwu, &archive);
+    settle(&mut canwu);
+    let drained = production_state(&canwu);
+    assert!(drained.operation_outcomes.is_empty());
+    assert_eq!(drained.archive.archived_residue_count, 1);
     restore_and_replay(&plugin, &canwu, &archive);
 }
 

@@ -104,9 +104,80 @@ ticket. Resolution persists the Canwu ticket, trace, selected command attempt,
 holder observation digest, and a package receipt; forks and replay retain the
 same evidence.
 
+## Production roots, batches, and limits
+
+A world splits its sites into scopes chosen by the host application, such as
+one scope per county. Each scope is its own production root: a whole
+`ProductionState` with `scope` set, under the record
+`production_scope_runtime_reference(scope)`
+(`canwu.production:runtime:scope:{scope}`), beside the primary root
+`canwu.production:runtime` (`scope` absent). A root holds every site,
+facility, work order, execution, facility project, completion lease, outcome,
+report line, incident receipt, and archive chain of its scope and nothing of
+any other, so a boundary reads, validates, re-encodes, and journals only the
+roots its packets name, whatever the size of the world. Roots are installed
+with the scenario. Commands, completion steps, continuation witnesses,
+archive commits, retention acknowledgements, and wakes name their root
+(`scope` in their payload); an output acknowledgement is routed by the
+production source its execution pinned, and a resource participant's
+completion acknowledgement by its coordinator source. A packet naming no
+installed root is refused with a trace; a command naming none is a recorded
+command rejection. Identities are per root, and the resource-side keys a root
+names cannot collide with another root's: a scope root's completion
+acquisition ids and lease and output operation keys begin with `{scope}/` and
+the primary root's hold no `/` (`production_root_names_key`); a lease or start
+that breaks the rule is a recorded rejection. A root's local completion grant
+may lock only that root's own record. A downstream application that names
+completion leases and output keys follows the rule too: no `/` in the
+primary root's keys, and the `{scope}/` prefix in a scope root's.
+
+`apply_production_batch_v1` (`PRODUCTION_BATCH_COMMAND`) carries a
+`ProductionBatchEnvelopeV1`: many operations of one holder against one root,
+admitted as one tracked command (the issuer's authority over the holder
+once, the outcome room of every item) and settled in one boundary, item by
+item in order, each item recording its own `ProductionOperationOutcome`. With
+`expected_runtime_revision` set, a batch whose revision is not the root's is
+refused whole with a trace and records nothing, so it can be sent again; with
+it absent, each item is checked only by its own rules against the root the
+items before it left. A batch past the root's `max_operations_per_boundary`
+is refused whole the same way. An item already settled is skipped; a batch
+reusing an operation ID with other input, past `max_batch_items`, or carrying
+a degraded-facility choice is refused at admission, and so is a payload that
+is not its own canonical encoding. One `canwu.production.batch_settled.v1`
+event reports the counts and the first refused IDs. Each item costs one copy
+and one validation of its root, so roots are sized by scope.
+
+Each root carries its `ProductionLimitsV1` (`limits`, fixed by the scenario,
+default `ProductionLimitsV1::canonical()`: 16,384 sites, facilities, work
+orders, executions, and allocations, 32,768 outcomes; at most
+`ProductionLimitsV1::maximum()`, with `max_batch_items` at most
+`max_operations_per_boundary`, so every admitted batch can settle). Every
+bound is a recorded refusal: an operation past a count or the 256 MiB byte
+cap is rejected with its outcome, an operation whose outcome finds no room is
+refused with a trace and records nothing, a report past a report bound or
+the engine's publication budget waits as due work, and an incident candidate
+past the per-boundary bound waits for a later round. Production reserves no
+share of the publication budget; a host can hold one for it by registering
+it through `KnowledgeReservedPlugin`. `max_observation_records` and
+`max_observation_records_per_holder` count across every root, as the
+knowledge namespace does; every other bound is each root's own, so the
+budgets add up across the roots a boundary touches.
+
+The lifecycle system records the roots it wrote in the boundary activity
+record (`ProductionBoundaryActivityV1`), with the first packet that changed
+each one's production lifecycle: an applied operation or item, a settled
+output acknowledgement, or an accepted completion step. Incident evaluation
+runs only for such a root and cites that packet as its draw evidence; output
+dispatch and report publication run for such a root and for a root whose
+wake was admitted. A refused packet, a recorded rejection, a continuation
+witness, and archive maintenance therefore draw nothing and publish nothing.
+A root keeps the incident receipts of its latest incident boundary only and
+folds earlier ones into `incident_history`.
+
 ## Holder-relative reads
 
-`production_report` and `production_report_from_state` require an exact
+`production_report` (`production_report_in_root` for a scope root) and
+`production_report_from_state` require an exact
 `ProductionObserverGrant`. Operators, local owners, and delayed remote owners
 receive different typed facts and intervals. Unauthorized holders receive an
 authority error; the query never falls back to omniscient state. Reports are
@@ -164,14 +235,26 @@ package-owned archive protocol:
 - The host application acknowledges each settled commit;
   `prepare_production_archive` refuses as `archive_backpressure` while 64
   retention handles wait for it. The head commit's receipt is always a
-  candidate, so a host application commits when `archive_due_index` or
-  `project_archive_due_index` holds records; a batch that selects no
-  execution and no project archives only that receipt.
-- Building an execution's archive record scans the root's hot operation
-  outcomes and completion receipts, so preparing, enqueueing, and settling a
-  commit costs time in proportion to the records it selects times the hot
-  outcomes of the root. A host application that commits small batches often
-  keeps both small.
+  candidate, so a host application commits when `archive_due_index`,
+  `project_archive_due_index`, or `residue_archive_candidates()` holds
+  records; a batch that selects nothing else archives only that receipt.
+- An execution or project archives the outcomes of its own operations and of
+  the completion lease it bound, and the decision receipts they cite.
+  Everything else leaves as a residue (`ProductionResidueArchiveRecordV1`)
+  once the records it names are gone: a work order that ended without an
+  execution, a completion lease released or expired without binding one once
+  its participant grants ended, and any other outcome. Nothing a root settles
+  stays in it for life. An expired lease leaves only once the host passes
+  the resource participant's expiry back (`AcknowledgeParticipantReleased`
+  carrying the expired grant), since its participant grant must have ended.
+  A re-sent operation whose outcome was archived is applied again: once a
+  cancelled order's residue is archived, a re-sent `CreateWorkOrder`
+  recreates the order.
+- Preparing, enqueueing, and settling a commit group the root's outcomes and
+  lease receipts by the records that claim them once per commit, so a commit
+  costs its selected records and their claims plus one pass over the hot
+  outcomes. A stale commit under a handle that already has a stale receipt
+  counts on that receipt (`duplicate_settlements`).
 
 Every hot execution and facility project, terminal ones included, declares in
 its payload-required evidence continuation the record versions restore
@@ -191,20 +274,20 @@ nothing and emits `canwu.production.ingress_refused.v1`
 (`canwu.production.output_ack_refused.v1` for an acknowledgement); its
 boundary settles. An operation packet settles only when the admission of a
 tracked production command queued it, which checked the issuer's authority,
-the run policy, the outcome capacity, and any degraded-facility decision: its
+the run policy, the outcome capacity, and any degraded-facility decision (a
+choice without its persisted decision is a recorded command rejection): its
 cause must be that command and the command's payload its envelope. Any other
 operation packet is refused the same way, and so is a completion step or a
 continuation witness that production's checks refuse with an expected domain
 rejection.
 
-A production boundary can still fail on an archive commit or retention
-acknowledgement whose content is forged but decodes (only another plugin can
-send one), on a failed read of the evidence or archive stores, which settles
-once the store serves the object, on counter overflow, and on the 256 MiB
-byte cap of the root. Any admitted production packet, a refused one
-included, also triggers the incident and report systems, so a host
-application that queues junk public packets causes incident draws; that
-behavior is older than this crate's 0.16.0 changes.
+A completion step, a continuation witness, an archive commit, or a
+retention acknowledgement that production's checks refuse, whoever queued or
+scheduled it, is refused with a trace too. A production boundary can still
+fail on a failed read of the evidence or archive stores, which settles once
+the store serves the object, on an engine invariant, on counter overflow in
+a system's own write, and on a root at its 256 MiB byte cap that an
+incident, a report, or an output dispatch would take past it.
 
 The resource plugin may defer an output batch that finds no room and settle
 it later. The acknowledgement carries `settled_at`, the instant the credits
@@ -249,8 +332,12 @@ The `g3_contract` tests demonstrate:
 The `production_archive_volume` tests show a commit of several pages whose
 every record resolves through the lookup index, a chain of commits that keeps
 one receipt and one handle in the root, stale commits that settle as no-ops
-against a full handle budget or as a duplicate of the same batch, and a
-commit that applies although an operation was admitted before it.
+against a full handle budget or, counted on one receipt, as duplicates of the
+same batch, and a commit that applies although an operation was admitted
+before it. The `production_scope_roots` tests show scope roots that settle a
+batch alone and archive their residues, refused packets that draw no incident
+and publish no report, and a forged commit another plugin schedules refused
+with a trace.
 `production-archive-profile` in the performance harness runs the chain past
 8,192 commits. The `production_output_key_admission` tests show the refused
 output keys and output sets.

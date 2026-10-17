@@ -17,28 +17,38 @@ mod completion;
 mod model;
 mod plugin;
 mod query;
+mod residue;
+mod root;
 
 pub use archive::*;
 pub use completion::*;
 pub use model::*;
 pub use plugin::{
     PRODUCTION_ARCHIVE_COMMIT_INGRESS, PRODUCTION_ARCHIVE_RETENTION_ACK_INGRESS,
-    PRODUCTION_COMMAND, PRODUCTION_COMPLETION_INGRESS, PRODUCTION_OBSERVATION_WAKE_INGRESS,
-    PRODUCTION_OUTPUT_ACK_INGRESS, PRODUCTION_RESOURCE_CONTINUATION_INGRESS,
-    PRODUCTION_SEMANTIC_HASH, ProductionArchiveIngressReceiptV1, ProductionPlugin,
-    enqueue_production_archive, enqueue_production_completion_operation,
-    enqueue_production_resource_continuation, finalize_production_archive_retention,
+    PRODUCTION_BATCH_COMMAND, PRODUCTION_COMMAND, PRODUCTION_COMPLETION_INGRESS,
+    PRODUCTION_OBSERVATION_WAKE_INGRESS, PRODUCTION_OUTPUT_ACK_INGRESS,
+    PRODUCTION_RESOURCE_CONTINUATION_INGRESS, PRODUCTION_SEMANTIC_HASH,
+    ProductionArchiveIngressReceiptV1, ProductionPlugin, enqueue_production_archive,
+    enqueue_production_completion_operation, enqueue_production_completion_operation_in_scope,
+    enqueue_production_resource_continuation, enqueue_production_resource_continuation_in_scope,
+    finalize_production_archive_retention, production_batch_command_descriptor,
     production_command_descriptor, production_incident_random_stream,
     production_output_ack_ingress_descriptor, production_report_knowledge_schema_id,
+    production_root_state,
 };
 pub use query::{
-    degraded_facility_decision_ticket, from_production_checkpoint_journal,
-    from_production_checkpoint_journal_with_archives, from_production_snapshot_json,
-    from_production_snapshot_json_with_archives, production_observation_witness, production_report,
-    production_report_from_state, replay_production_from_journal,
+    degraded_facility_decision_ticket, degraded_facility_decision_ticket_in_root,
+    from_production_checkpoint_journal, from_production_checkpoint_journal_with_archives,
+    from_production_snapshot_json, from_production_snapshot_json_with_archives,
+    production_observation_witness, production_observation_witness_in_root, production_report,
+    production_report_from_state, production_report_in_root, replay_production_from_journal,
     replay_production_from_journal_with_archives, validate_production_observation_witness,
     validate_production_resource_continuation, validate_production_runtime,
     validate_production_runtime_with_archives,
+};
+pub use root::{
+    PRODUCTION_BOUNDARY_ACTIVITY_ID, ProductionBoundaryActivityRecord,
+    ProductionBoundaryActivityV1, ProductionRootActivityV1, production_boundary_activity_reference,
 };
 
 pub const PLUGIN_NAME: &str = "canwu-production";

@@ -1,3 +1,4 @@
+use crate::residue::{ArchiveClaims, outcome_matches_lease, validate_residue_archive_record};
 use crate::{
     MAX_ARCHIVE_BYTES_PER_BATCH, MAX_ARCHIVE_COMMIT_PAGES, MAX_ARCHIVE_OBJECTS_PER_BATCH,
     MAX_ARCHIVE_PAGE_ENTRIES, MAX_ARCHIVE_PREPARE_CANDIDATES, PreparedProductionArchiveBatchV1,
@@ -6,9 +7,9 @@ use crate::{
     ProductionArchiveMembershipV1, ProductionArchiveReceiptId, ProductionArchiveRetentionHandleV1,
     ProductionArchiveRetentionPhaseV1, ProductionArchiveTemporalEntryV1,
     ProductionArchiveTemporalPageV1, ProductionExecutionId,
-    ProductionFacilityProjectArchiveRecordV1, ProductionState, ProductionTerminalArchiveKeyV1,
-    ProductionTerminalArchiveRecordV1, VerifiedProductionArchiveCommitV1, WorkInProgressId,
-    WorkOrderLifecycle, invalid,
+    ProductionFacilityProjectArchiveRecordV1, ProductionResidueArchiveRecordV1, ProductionState,
+    ProductionTerminalArchiveKeyV1, ProductionTerminalArchiveRecordV1,
+    VerifiedProductionArchiveCommitV1, WorkInProgressId, WorkOrderLifecycle, invalid,
 };
 use canwu_api::{CanwuError, ErrorCode, SimTime, canonical_hash};
 use canwu_resource::{ResourceArchiveLookupEntryV1, ResourceError};
@@ -31,9 +32,10 @@ pub const PRODUCTION_ARCHIVE_LOOKUP_PAGE_NAMESPACE: &str = "canwu.production.arc
 
 const PRODUCTION_ARCHIVE_LOOKUP_KEY_DOMAIN: &str = "canwu.production.archive-lookup-key.v1";
 
-/// Format of [`ProductionArchiveBlobV1`]. Version 2 adds the archived
-/// maintenance receipts; a blob of any other version is refused.
-pub const PRODUCTION_ARCHIVE_BLOB_FORMAT_VERSION: u32 = 2;
+/// Format of [`ProductionArchiveBlobV1`]. Version 3 adds residue records and
+/// the decision receipts and lease outcomes an execution archives; a blob of
+/// any other version is refused.
+pub const PRODUCTION_ARCHIVE_BLOB_FORMAT_VERSION: u32 = 3;
 
 /// The host application's store of production archive objects and retention
 /// handles.
@@ -119,6 +121,9 @@ pub enum ProductionArchivedRecordV1 {
     FacilityProject(ProductionFacilityProjectArchiveRecordV1),
     /// The maintenance receipt of an applied archive commit.
     ArchiveMaintenanceReceipt(ProductionArchiveMaintenanceReceiptV1),
+    /// A residue: a work order, completion lease, or outcome no execution or
+    /// facility project archived.
+    Residue(ProductionResidueArchiveRecordV1),
 }
 
 /// The production store seen as a store of lookup-index pages, so that the
@@ -196,6 +201,7 @@ enum ArchiveCandidate<'a> {
     Receipt(&'a ProductionArchiveReceiptId),
     Execution(&'a ProductionExecutionId),
     FacilityProject(&'a crate::FacilityProjectId),
+    Residue(ProductionTerminalArchiveKeyV1),
 }
 
 impl PreparedProductionArchiveBatchV1 {
@@ -220,7 +226,10 @@ impl PreparedProductionArchiveBatchV1 {
     /// Terminal records the batch archives.
     #[must_use]
     pub fn selected_count(&self) -> usize {
-        self.selected_receipts.len() + self.selected.len() + self.selected_projects.len()
+        self.selected_receipts.len()
+            + self.selected.len()
+            + self.selected_projects.len()
+            + self.selected_residues.len()
     }
 
     /// Checks that the batch is self-consistent before anything is stored:
@@ -232,12 +241,14 @@ impl PreparedProductionArchiveBatchV1 {
         let mut selected_receipts = Vec::new();
         let mut selected = Vec::new();
         let mut selected_projects = Vec::new();
+        let mut selected_residues = Vec::new();
         let mut blob_ids = Vec::new();
         let mut membership_page_ids = Vec::new();
         let mut temporal_page_ids = Vec::new();
         let mut pages_bind_their_blobs = true;
         for (blob, membership_page, temporal_page) in self.pages() {
-            let records = blob.records.len() + blob.project_records.len() + blob.receipts.len();
+            let records = blob_record_count(blob);
+            selected_residues.extend(blob.residue_records.iter().map(|record| record.key.clone()));
             selected.extend(blob.records.iter().map(|record| match &record.key {
                 ProductionTerminalArchiveKeyV1::Execution(id) => Some(id.clone()),
                 _ => None,
@@ -271,6 +282,7 @@ impl PreparedProductionArchiveBatchV1 {
             || selected.as_ref() != Some(&self.selected)
             || selected_projects.as_ref() != Some(&self.selected_projects)
             || selected_receipts != self.selected_receipts
+            || selected_residues != self.selected_residues
             || !pages_bind_their_blobs
             || self.expected_source_root.len() != 64
             || self.directory.previous_root.as_ref() == Some(&self.directory.id)
@@ -418,10 +430,12 @@ impl PreparedProductionArchiveBatchV1 {
             canonical_hash("canwu.production.archive-retention.v1", &retention)?;
         store.persist_production_archive_retention(&retention)?;
         Ok(VerifiedProductionArchiveCommitV1 {
+            scope: self.scope.clone(),
             expected_source_root: self.expected_source_root.clone(),
             selected_receipts: self.selected_receipts.clone(),
             selected: self.selected.clone(),
             selected_projects: self.selected_projects.clone(),
+            selected_residues: self.selected_residues.clone(),
             directory_root: self.directory.id.clone(),
             lookup_root: self.directory.lookup_root.clone(),
             retention,
@@ -433,7 +447,10 @@ impl VerifiedProductionArchiveCommitV1 {
     /// Terminal records the commit archives when it applies.
     #[must_use]
     pub fn selected_count(&self) -> usize {
-        self.selected_receipts.len() + self.selected.len() + self.selected_projects.len()
+        self.selected_receipts.len()
+            + self.selected.len()
+            + self.selected_projects.len()
+            + self.selected_residues.len()
     }
 
     /// Checks that the commit is self-consistent: between one and
@@ -455,6 +472,18 @@ impl VerifiedProductionArchiveCommitV1 {
                 self.selected_projects.len(),
                 self.selected_projects.iter().collect::<BTreeSet<_>>().len(),
             )
+            || !unique(
+                self.selected_residues.len(),
+                self.selected_residues.iter().collect::<BTreeSet<_>>().len(),
+            )
+            || self.selected_residues.iter().any(|key| {
+                !matches!(
+                    key,
+                    ProductionTerminalArchiveKeyV1::WorkOrder(_)
+                        | ProductionTerminalArchiveKeyV1::CompletionLease(_)
+                        | ProductionTerminalArchiveKeyV1::OperationOutcome(_)
+                )
+            })
             || self.expected_source_root.len() != 64
             || self.directory_root.len() != 64
             || !is_digest(&self.lookup_root)
@@ -518,8 +547,9 @@ impl ProductionState {
     /// not the root's current one settles as stale.
     pub fn archive_source_root(&self) -> Result<String, CanwuError> {
         canonical_hash(
-            "canwu.production.archive-source-root.v1",
+            "canwu.production.archive-source-root.v2",
             &(
+                &self.scope,
                 self.revision,
                 &self.archive_due_index,
                 &self.archive.directory_root,
@@ -574,9 +604,7 @@ impl ProductionState {
         if candidate_limit == 0 || candidate_limit > MAX_ARCHIVE_PREPARE_CANDIDATES {
             return Err(invalid("production archive candidate budget is invalid"));
         }
-        if self.archive.pending_handles.len()
-            >= crate::ProductionLimitsV1::canonical().max_pending_retention_handles
-        {
+        if self.archive.pending_handles.len() >= self.limits.max_pending_retention_handles {
             return Err(CanwuError::new(
                 ErrorCode::ValueOutOfRange,
                 "archive_backpressure: production archive retention capacity is exhausted",
@@ -595,6 +623,7 @@ impl ProductionState {
                     .iter()
                     .map(ArchiveCandidate::FacilityProject),
             )
+            .chain(self.residue_candidates().map(ArchiveCandidate::Residue))
             .take(candidate_limit)
             .collect::<Vec<_>>();
         if candidates.is_empty() {
@@ -607,11 +636,13 @@ impl ProductionState {
         let mut selected_receipts = Vec::new();
         let mut selected = Vec::new();
         let mut selected_projects = Vec::new();
+        let mut selected_residues = Vec::new();
         for candidate in &candidates {
             match candidate {
                 ArchiveCandidate::Receipt(id) => selected_receipts.push((*id).clone()),
                 ArchiveCandidate::Execution(id) => selected.push((*id).clone()),
                 ArchiveCandidate::FacilityProject(id) => selected_projects.push((*id).clone()),
+                ArchiveCandidate::Residue(key) => selected_residues.push(key.clone()),
             }
         }
         let pages = self.archive_pages(&expected_source_root, &candidates)?;
@@ -672,10 +703,12 @@ impl ProductionState {
             .next()
             .ok_or_else(|| invalid("production archive batch has no page"))?;
         Ok(PreparedProductionArchiveBatchV1 {
+            scope: self.scope.clone(),
             expected_source_root,
             selected_receipts,
             selected,
             selected_projects,
+            selected_residues,
             blob: first.blob,
             membership_page: first.membership_page,
             temporal_page: first.temporal_page,
@@ -696,6 +729,9 @@ impl ProductionState {
         candidates: &[ArchiveCandidate<'_>],
     ) -> Result<Vec<PreparedProductionArchivePageV1>, CanwuError> {
         let mut pages = Vec::with_capacity(candidates.len().div_ceil(MAX_ARCHIVE_PAGE_ENTRIES));
+        // The root's outcomes and lease receipts are grouped by the records
+        // that claim them once for the whole commit.
+        let claims = ArchiveClaims::of(self);
         for chunk in candidates.chunks(MAX_ARCHIVE_PAGE_ENTRIES) {
             let mut blob = ProductionArchiveBlobV1 {
                 format_version: PRODUCTION_ARCHIVE_BLOB_FORMAT_VERSION,
@@ -703,6 +739,7 @@ impl ProductionState {
                 records: Vec::new(),
                 project_records: Vec::new(),
                 receipts: Vec::new(),
+                residue_records: Vec::new(),
                 content_id: String::new(),
             };
             for candidate in chunk {
@@ -719,11 +756,16 @@ impl ProductionState {
                         );
                     }
                     ArchiveCandidate::Execution(id) => {
-                        blob.records.push(self.terminal_archive_record(id)?);
+                        blob.records
+                            .push(self.terminal_archive_record(id, &claims)?);
                     }
                     ArchiveCandidate::FacilityProject(id) => {
                         blob.project_records
-                            .push(self.facility_project_archive_record(id)?);
+                            .push(self.facility_project_archive_record(id, &claims)?);
+                    }
+                    ArchiveCandidate::Residue(key) => {
+                        blob.residue_records
+                            .push(self.residue_archive_record(key, &claims)?);
                     }
                 }
             }
@@ -746,14 +788,15 @@ impl ProductionState {
                 .and_then(|value| total.checked_add(value))
                 .ok_or_else(|| invalid("production archive count overflowed"))
         };
-        let (executions, projects, receipts) =
+        let (executions, projects, receipts, residues) =
             pages
                 .iter()
-                .fold((0_usize, 0_usize, 0_usize), |totals, page| {
+                .fold((0_usize, 0_usize, 0_usize, 0_usize), |totals, page| {
                     (
                         totals.0 + page.blob.records.len(),
                         totals.1 + page.blob.project_records.len(),
                         totals.2 + page.blob.receipts.len(),
+                        totals.3 + page.blob.residue_records.len(),
                     )
                 });
         let mut directory = ProductionArchiveIndexDirectoryV1 {
@@ -774,6 +817,7 @@ impl ProductionState {
             archived_execution_count: add(self.archive.archived_execution_count, executions)?,
             archived_project_count: add(self.archive.archived_project_count, projects)?,
             archived_receipt_count: add(self.archive.archived_receipt_count, receipts)?,
+            archived_residue_count: add(self.archive.archived_residue_count, residues)?,
             lookup_root,
             semantic_digest: String::new(),
         };
@@ -801,6 +845,11 @@ impl ProductionState {
         at: SimTime,
     ) -> Result<ProductionArchiveMaintenanceReceiptV1, CanwuError> {
         commit.validate()?;
+        if commit.scope != self.scope {
+            return Err(invalid(
+                "production archive commit names another production root",
+            ));
+        }
         let applied = self.archive_source_root()? == commit.expected_source_root;
         if applied {
             let head_receipts = self.applied_archive_receipts().cloned().collect::<Vec<_>>();
@@ -823,6 +872,13 @@ impl ProductionState {
                         .iter()
                         .map(ArchiveCandidate::FacilityProject),
                 )
+                .chain(
+                    commit
+                        .selected_residues
+                        .iter()
+                        .cloned()
+                        .map(ArchiveCandidate::Residue),
+                )
                 .collect::<Vec<_>>();
             let pages = self.archive_pages(&commit.expected_source_root, &candidates)?;
             let directory = self.archive_directory(&pages, commit.lookup_root.clone())?;
@@ -842,12 +898,37 @@ impl ProductionState {
             for receipt in &commit.selected_receipts {
                 self.archive.maintenance_receipts.remove(receipt);
             }
-            for execution_id in &commit.selected {
-                self.remove_hot_terminal_execution(execution_id)?;
+            // Each record leaves the root with exactly what its archived
+            // record holds.
+            for page in &pages {
+                for record in &page.blob.records {
+                    self.remove_hot_terminal_execution(record)?;
+                }
+                for record in &page.blob.project_records {
+                    self.remove_hot_terminal_project(record)?;
+                }
+                for record in &page.blob.residue_records {
+                    self.remove_residue(record)?;
+                }
             }
-            for project_id in &commit.selected_projects {
-                self.remove_hot_terminal_project(project_id)?;
-            }
+            self.release_unbound_completion_leases(
+                &pages
+                    .iter()
+                    .flat_map(|page| {
+                        page.blob
+                            .records
+                            .iter()
+                            .map(|record| &record.completion_acquisition.id)
+                            .chain(
+                                page.blob
+                                    .project_records
+                                    .iter()
+                                    .map(|record| &record.completion_acquisition.id),
+                            )
+                    })
+                    .cloned()
+                    .collect(),
+            );
             let add = |total: u64, value: usize| {
                 u64::try_from(value)
                     .ok()
@@ -865,6 +946,10 @@ impl ProductionState {
                 self.archive.archived_receipt_count,
                 commit.selected_receipts.len(),
             )?;
+            self.archive.archived_residue_count = add(
+                self.archive.archived_residue_count,
+                commit.selected_residues.len(),
+            )?;
             self.archive.committed_batch_count = self
                 .archive
                 .committed_batch_count
@@ -876,6 +961,36 @@ impl ProductionState {
         } else {
             ProductionArchiveRetentionPhaseV1::RejectedStale
         };
+        // A stale commit under a handle that already has a stale receipt
+        // counts on that receipt: queuing one batch again and again leaves
+        // one receipt per handle.
+        if !applied
+            && let Some(existing) = self
+                .archive
+                .maintenance_receipts
+                .values_mut()
+                .find(|receipt| {
+                    receipt.disposition == ProductionArchiveRetentionPhaseV1::RejectedStale
+                        && receipt.retention_handle_id == commit.retention.handle_id
+                })
+        {
+            existing.duplicate_settlements = existing
+                .duplicate_settlements
+                .checked_add(1)
+                .ok_or_else(|| invalid("production archive duplicate count overflowed"))?;
+            existing.canonical_digest.clear();
+            existing.canonical_digest = canonical_hash(
+                "canwu.production.archive-maintenance-receipt.v1",
+                &*existing,
+            )?;
+            let receipt = existing.clone();
+            self.revision = self
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| invalid("production runtime revision overflowed"))?;
+            self.validate()?;
+            return Ok(receipt);
+        }
         self.archive.receipt_sequence = self
             .archive
             .receipt_sequence
@@ -901,8 +1016,14 @@ impl ProductionState {
             } else {
                 0
             },
+            archived_residues: if applied {
+                commit.selected_residues.len()
+            } else {
+                0
+            },
             disposition,
             settled_at: at,
+            duplicate_settlements: 0,
             canonical_digest: String::new(),
         };
         receipt.canonical_digest =
@@ -935,13 +1056,16 @@ impl ProductionState {
     ///
     /// The same batch queued twice settles once as applied and once as stale
     /// under one handle id, so stale receipts are retired by handle. A handle
-    /// that is already gone, because the acknowledgement arrived twice, makes
-    /// this a no-op that still advances the runtime revision. The receipt of
-    /// an applied commit is not retired here: the next commit archives it.
+    /// the root does not hold, because the acknowledgement arrived twice or
+    /// names nothing, changes nothing and returns `false`. The receipt of an
+    /// applied commit is not retired here: the next commit archives it.
     pub fn acknowledge_production_archive_retention(
         &mut self,
         handle_id: &str,
-    ) -> Result<(), CanwuError> {
+    ) -> Result<bool, CanwuError> {
+        if !self.archive.pending_handles.contains_key(handle_id) {
+            return Ok(false);
+        }
         if self
             .archive
             .pending_handles
@@ -967,12 +1091,14 @@ impl ProductionState {
             .revision
             .checked_add(1)
             .ok_or_else(|| invalid("production runtime revision overflowed"))?;
-        self.validate()
+        self.validate()?;
+        Ok(true)
     }
 
     fn terminal_archive_record(
         &self,
         execution_id: &ProductionExecutionId,
+        claims: &ArchiveClaims<'_>,
     ) -> Result<ProductionTerminalArchiveRecordV1, CanwuError> {
         let execution = self
             .executions
@@ -1005,16 +1131,11 @@ impl ProductionState {
             .production_completion_grants
             .get(&execution.production_completion_grant)
             .ok_or_else(|| invalid("terminal production execution lost its production grant"))?;
-        let mut operation_outcomes = self
-            .operation_outcomes
-            .values()
-            .filter(|outcome| {
-                outcome.execution.as_ref() == Some(execution_id)
-                    || outcome.work_order.as_ref() == Some(&execution.work_order)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        operation_outcomes.sort_by(|left, right| left.id.cmp(&right.id));
+        let operation_outcomes = claims.execution_outcomes(work_order, execution);
+        let decision_receipts = crate::residue::decision_receipts_of(
+            self,
+            &crate::residue::resolved_tickets(&operation_outcomes),
+        );
         let mut participant_grants = self
             .completion_participant_grants
             .get(&acquisition.id)
@@ -1023,12 +1144,7 @@ impl ProductionState {
             .cloned()
             .collect::<Vec<_>>();
         participant_grants.sort_by(|left, right| left.participant.cmp(&right.participant));
-        let completion_receipts = self
-            .completion_receipts
-            .values()
-            .filter(|receipt| receipt.acquisition == acquisition.id)
-            .cloned()
-            .collect::<Vec<_>>();
+        let completion_receipts = claims.lease_receipts(&acquisition.id);
         let mut record = ProductionTerminalArchiveRecordV1 {
             key: ProductionTerminalArchiveKeyV1::Execution(execution_id.clone()),
             work_order: execution.work_order.clone(),
@@ -1060,6 +1176,7 @@ impl ProductionState {
             production_completion_grant: production_grant.clone(),
             participant_grants,
             completion_receipts,
+            decision_receipts,
             terminal_at: execution.completed_at.unwrap_or(wip.updated_at),
             canonical_digest: String::new(),
         };
@@ -1071,6 +1188,7 @@ impl ProductionState {
     fn facility_project_archive_record(
         &self,
         project_id: &crate::FacilityProjectId,
+        claims: &ArchiveClaims<'_>,
     ) -> Result<ProductionFacilityProjectArchiveRecordV1, CanwuError> {
         let project = self
             .facility_projects
@@ -1095,13 +1213,7 @@ impl ProductionState {
             .production_completion_grants
             .get(&project.production_completion_grant)
             .ok_or_else(|| invalid("terminal facility project lost its completion grant"))?;
-        let mut operation_outcomes = self
-            .operation_outcomes
-            .values()
-            .filter(|outcome| outcome.project.as_ref() == Some(project_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        operation_outcomes.sort_by(|left, right| left.id.cmp(&right.id));
+        let operation_outcomes = claims.project_outcomes(project);
         let mut participant_grants = self
             .completion_participant_grants
             .get(&acquisition.id)
@@ -1120,12 +1232,7 @@ impl ProductionState {
                 "terminal facility project has not closed both completion grants",
             ));
         }
-        let completion_receipts = self
-            .completion_receipts
-            .values()
-            .filter(|receipt| receipt.acquisition == acquisition.id)
-            .cloned()
-            .collect::<Vec<_>>();
+        let completion_receipts = claims.lease_receipts(&acquisition.id);
         let mut record = ProductionFacilityProjectArchiveRecordV1 {
             key: ProductionTerminalArchiveKeyV1::FacilityProject(project_id.clone()),
             project: project.clone(),
@@ -1147,67 +1254,53 @@ impl ProductionState {
         Ok(record)
     }
 
+    /// Removes the execution `record` archives, with its work order, work in
+    /// progress, allocations, local grant, outcomes, and decision receipts.
+    /// Its completion lease leaves with it unless another hot record binds
+    /// it; see [`Self::release_unbound_completion_leases`].
     fn remove_hot_terminal_execution(
         &mut self,
-        execution_id: &ProductionExecutionId,
+        record: &ProductionTerminalArchiveRecordV1,
     ) -> Result<(), CanwuError> {
+        let execution_id = &record.execution_record.id;
         let execution = self
             .executions
-            .get(execution_id)
-            .ok_or_else(|| invalid("production archive commit lost its execution"))?
-            .clone();
-        if !self.archive_due_index.contains(execution_id) {
+            .remove(execution_id)
+            .ok_or_else(|| invalid("production archive commit lost its execution"))?;
+        if !self.archive_due_index.remove(execution_id) {
             return Err(invalid(
                 "production archive commit names an execution outside the due index",
             ));
         }
         let wip_id = WorkInProgressId::new(format!("canwu.production:wip:{execution_id}"))?;
-        self.executions.remove(execution_id);
         self.work_in_progress.remove(&wip_id);
         for allocation in &execution.allocations {
             self.capacity_allocations.remove(allocation);
         }
         self.work_orders.remove(&execution.work_order);
-        self.operation_outcomes.retain(|_, outcome| {
-            outcome.execution.as_ref() != Some(execution_id)
-                && outcome.work_order.as_ref() != Some(&execution.work_order)
-        });
+        for outcome in &record.operation_outcomes {
+            self.operation_outcomes.remove(&outcome.id);
+        }
+        for receipt in &record.decision_receipts {
+            self.decision_receipts.remove(&receipt.ticket_id);
+        }
         self.production_completion_grants
             .remove(&execution.production_completion_grant);
-        let acquisition = execution.completion_certificate.acquisition;
-        if !self
-            .executions
-            .values()
-            .any(|other| other.completion_certificate.acquisition == acquisition)
-        {
-            self.production_completion_certificates.remove(&acquisition);
-            self.completion_participant_grants.remove(&acquisition);
-            self.completion_acquisitions.remove(&acquisition);
-            self.completion_receipts
-                .retain(|_, receipt| receipt.acquisition != acquisition);
-            for acquisitions in self.completion_expiry_due.values_mut() {
-                acquisitions.remove(&acquisition);
-            }
-            self.completion_expiry_due
-                .retain(|_, acquisitions| !acquisitions.is_empty());
-            self.completion_target_locks
-                .retain(|_, (_, grant)| self.production_completion_grants.contains_key(grant));
-        }
-        self.archive_due_index.remove(execution_id);
         Ok(())
     }
 
     fn remove_hot_terminal_project(
         &mut self,
-        project_id: &crate::FacilityProjectId,
+        record: &ProductionFacilityProjectArchiveRecordV1,
     ) -> Result<(), CanwuError> {
+        let project_id = &record.project.id;
         let project = self
             .facility_projects
             .get(project_id)
             .ok_or_else(|| invalid("production archive commit lost its facility project"))?
             .clone();
         if project.lifecycle != crate::FacilityProjectLifecycle::Completed
-            || !self.project_archive_due_index.contains(project_id)
+            || !self.project_archive_due_index.remove(project_id)
         {
             return Err(invalid(
                 "production archive commit names a non-terminal facility project",
@@ -1215,40 +1308,70 @@ impl ProductionState {
         }
         self.facility_projects.remove(project_id);
         self.resource_continuation_witnesses.remove(project_id);
-        self.operation_outcomes
-            .retain(|_, outcome| outcome.project.as_ref() != Some(project_id));
+        for outcome in &record.operation_outcomes {
+            self.operation_outcomes.remove(&outcome.id);
+        }
         self.production_completion_grants
             .remove(&project.production_completion_grant);
-        let acquisition = project.completion_certificate.acquisition;
-        if !self
+        Ok(())
+    }
+
+    /// Removes each completion lease of `acquisitions` that no hot execution
+    /// or facility project binds any longer, with its certificate,
+    /// participant grants, receipts, expiry entries, and target locks: the
+    /// archived execution or project records them.
+    fn release_unbound_completion_leases(
+        &mut self,
+        acquisitions: &BTreeSet<canwu_resource::CompletionLeaseAcquisitionId>,
+    ) {
+        if acquisitions.is_empty() {
+            return;
+        }
+        let bound = self
             .executions
             .values()
-            .any(|execution| execution.completion_certificate.acquisition == acquisition)
-            && !self
-                .facility_projects
-                .values()
-                .any(|other| other.completion_certificate.acquisition == acquisition)
-        {
-            self.production_completion_certificates.remove(&acquisition);
-            self.completion_participant_grants.remove(&acquisition);
-            self.completion_acquisitions.remove(&acquisition);
-            self.completion_receipts
-                .retain(|_, receipt| receipt.acquisition != acquisition);
-            for acquisitions in self.completion_expiry_due.values_mut() {
-                acquisitions.remove(&acquisition);
-            }
-            self.completion_expiry_due
-                .retain(|_, acquisitions| !acquisitions.is_empty());
-            self.completion_target_locks
-                .retain(|_, (_, grant)| self.production_completion_grants.contains_key(grant));
+            .map(|execution| &execution.completion_certificate.acquisition)
+            .chain(
+                self.facility_projects
+                    .values()
+                    .map(|project| &project.completion_certificate.acquisition),
+            )
+            .filter(|acquisition| acquisitions.contains(*acquisition))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let released = acquisitions
+            .difference(&bound)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if released.is_empty() {
+            return;
         }
-        self.project_archive_due_index.remove(project_id);
-        Ok(())
+        for acquisition in &released {
+            self.production_completion_certificates.remove(acquisition);
+            self.completion_participant_grants.remove(acquisition);
+            self.completion_acquisitions.remove(acquisition);
+        }
+        self.completion_receipts
+            .retain(|_, receipt| !released.contains(&receipt.acquisition));
+        for due in self.completion_expiry_due.values_mut() {
+            due.retain(|acquisition| !released.contains(acquisition));
+        }
+        self.completion_expiry_due
+            .retain(|_, acquisitions| !acquisitions.is_empty());
+        self.completion_target_locks
+            .retain(|_, (_, grant)| self.production_completion_grants.contains_key(grant));
     }
 }
 
-/// Every record of a blob as (key, canonical digest, terminal time), in
-/// ordinal order: executions, facility projects, receipts.
+/// Records one blob holds: executions, facility projects, receipts, and
+/// residues.
+fn blob_record_count(blob: &ProductionArchiveBlobV1) -> usize {
+    blob.records.len()
+        + blob.project_records.len()
+        + blob.receipts.len()
+        + blob.residue_records.len()
+}
+
 fn blob_entries(
     blob: &ProductionArchiveBlobV1,
 ) -> impl Iterator<Item = (ProductionTerminalArchiveKeyV1, &str, SimTime)> {
@@ -1273,6 +1396,13 @@ fn blob_entries(
                 ProductionTerminalArchiveKeyV1::ArchiveMaintenanceReceipt(receipt.id.clone()),
                 receipt.canonical_digest.as_str(),
                 receipt.settled_at,
+            )
+        }))
+        .chain(blob.residue_records.iter().map(|record| {
+            (
+                record.key.clone(),
+                record.canonical_digest.as_str(),
+                record.terminal_at,
             )
         }))
 }
@@ -1329,6 +1459,7 @@ struct ProductionArchiveCommitClosure {
     executions: u64,
     projects: u64,
     receipts: u64,
+    residues: u64,
 }
 
 /// Authenticates one archive commit: the directory's own identity, every
@@ -1407,7 +1538,7 @@ fn authenticate_production_archive_directory_closure(
     }
     let mut archived_records = BTreeMap::new();
     let mut source_root: Option<String> = None;
-    let (mut executions, mut projects, mut receipts) = (0_u64, 0_u64, 0_u64);
+    let (mut executions, mut projects, mut receipts, mut residues) = (0_u64, 0_u64, 0_u64, 0_u64);
     for blob_id in &directory.blob_ids {
         let blob: ProductionArchiveBlobV1 =
             load_encoded(store, PRODUCTION_ARCHIVE_BLOB_NAMESPACE, blob_id)?.ok_or_else(|| {
@@ -1431,6 +1562,8 @@ fn authenticate_production_archive_directory_closure(
         projects += u64::try_from(blob.project_records.len())
             .map_err(|_| invalid("production archive count overflowed"))?;
         receipts += u64::try_from(blob.receipts.len())
+            .map_err(|_| invalid("production archive count overflowed"))?;
+        residues += u64::try_from(blob.residue_records.len())
             .map_err(|_| invalid("production archive count overflowed"))?;
         for (ordinal, (key, digest, terminal_at)) in blob_entries(&blob).enumerate() {
             let ordinal = u16::try_from(ordinal)
@@ -1540,6 +1673,7 @@ fn authenticate_production_archive_directory_closure(
         executions,
         projects,
         receipts,
+        residues,
     })
 }
 
@@ -1551,7 +1685,7 @@ fn authenticate_production_archive_blob(
 ) -> Result<(), CanwuError> {
     let mut detached = blob.clone();
     detached.content_id.clear();
-    let records = blob.records.len() + blob.project_records.len() + blob.receipts.len();
+    let records = blob_record_count(blob);
     if blob.content_id != blob_id
         || blob.content_id != canonical_hash("canwu.production.archive-blob.v1", &detached)?
         || blob.format_version != PRODUCTION_ARCHIVE_BLOB_FORMAT_VERSION
@@ -1591,6 +1725,14 @@ fn authenticate_production_archive_blob(
             return Err(invalid("production archive maintenance receipt is forged"));
         }
     }
+    for record in &blob.residue_records {
+        let mut detached = record.clone();
+        let digest = std::mem::take(&mut detached.canonical_digest);
+        if digest != canonical_hash("canwu.production.residue-archive-record.v1", &detached)? {
+            return Err(invalid("production residue archive record is forged"));
+        }
+        validate_residue_archive_record(record)?;
+    }
     Ok(())
 }
 
@@ -1608,6 +1750,7 @@ fn validate_archived_maintenance_receipt(
             .archived_executions
             .saturating_add(receipt.archived_projects)
             .saturating_add(receipt.archived_receipts)
+            .saturating_add(receipt.archived_residues)
             == 0
     {
         return Err(invalid(
@@ -1798,7 +1941,8 @@ fn validate_terminal_execution_archive_record(
         .any(|pair| pair[0].id >= pair[1].id)
         || record.operation_outcomes.iter().any(|outcome| {
             validate_archived_operation_outcome(outcome).is_err()
-                || !outcome_matches_execution(outcome, order, execution)
+                || !(outcome_matches_execution(outcome, order, execution)
+                    || outcome_matches_lease(outcome, &acquisition.id, &order.holder))
                 || outcome.settled_at > record.terminal_at
                 || match outcome.disposition {
                     crate::ProductionOperationDisposition::Applied
@@ -1813,6 +1957,23 @@ fn validate_terminal_execution_archive_record(
     {
         return Err(invalid(
             "production execution archive operation outcomes are not canonical",
+        ));
+    }
+    let tickets = crate::residue::resolved_tickets(&record.operation_outcomes);
+    if record
+        .decision_receipts
+        .windows(2)
+        .any(|pair| pair[0].ticket_id >= pair[1].ticket_id)
+        || record.decision_receipts.iter().any(|receipt| {
+            let mut detached = receipt.clone();
+            let recorded = std::mem::take(&mut detached.canonical_digest);
+            !tickets.contains(&receipt.ticket_id)
+                || canonical_hash("canwu.production.decision-receipt.v1", &detached)
+                    .is_ok_and(|digest| digest != recorded)
+        })
+    {
+        return Err(invalid(
+            "production execution archive decision receipts are not canonical",
         ));
     }
     let known_grants = BTreeSet::from([
@@ -2164,7 +2325,12 @@ fn validate_facility_project_archive_record(
         .any(|pair| pair[0].id >= pair[1].id)
         || record.operation_outcomes.iter().any(|outcome| {
             validate_archived_operation_outcome(outcome).is_err()
-                || !outcome_matches_project(outcome, project)
+                || !(outcome_matches_project(outcome, project)
+                    || outcome_matches_lease(
+                        outcome,
+                        &project.completion_certificate.acquisition,
+                        &project.holder,
+                    ))
                 || outcome.settled_at > record.terminal_at
                 || match outcome.disposition {
                     crate::ProductionOperationDisposition::Applied
@@ -2239,7 +2405,7 @@ fn validate_facility_project_archive_record(
     Ok(())
 }
 
-fn validate_archived_operation_outcome(
+pub(crate) fn validate_archived_operation_outcome(
     outcome: &crate::ProductionOperationOutcome,
 ) -> Result<(), CanwuError> {
     if outcome.command.operation_id != outcome.id
@@ -2253,7 +2419,7 @@ fn validate_archived_operation_outcome(
     Ok(())
 }
 
-fn outcome_matches_execution(
+pub(crate) fn outcome_matches_execution(
     outcome: &crate::ProductionOperationOutcome,
     order: &crate::WorkOrder,
     execution: &crate::ProductionExecution,
@@ -2306,7 +2472,7 @@ fn outcome_matches_execution(
     }
 }
 
-fn outcome_matches_project(
+pub(crate) fn outcome_matches_project(
     outcome: &crate::ProductionOperationOutcome,
     project: &crate::FacilityProject,
 ) -> bool {
@@ -2361,6 +2527,7 @@ pub fn validate_production_archive(
         state.archive.archived_execution_count,
         state.archive.archived_project_count,
         state.archive.archived_receipt_count,
+        state.archive.archived_residue_count,
     );
     let mut visited = BTreeSet::new();
     let mut directories = 0_u64;
@@ -2388,6 +2555,7 @@ pub fn validate_production_archive(
                 directory.archived_execution_count,
                 directory.archived_project_count,
                 directory.archived_receipt_count,
+                directory.archived_residue_count,
             ) != expected
         {
             return Err(invalid(
@@ -2436,10 +2604,14 @@ pub fn validate_production_archive(
                 .2
                 .checked_sub(closure.receipts)
                 .ok_or_else(|| invalid("production archive receipt count underflowed"))?,
+            expected
+                .3
+                .checked_sub(closure.residues)
+                .ok_or_else(|| invalid("production archive residue count underflowed"))?,
         );
         next = directory.previous_root;
     }
-    if expected != (0, 0, 0) || directories != state.archive.committed_batch_count {
+    if expected != (0, 0, 0, 0) || directories != state.archive.committed_batch_count {
         return Err(invalid(
             "production archive directory chain does not close its authoritative counts",
         ));
@@ -2534,7 +2706,11 @@ pub fn archived_production_terminal_record(
             .ok_or_else(|| invalid("production archive lookup blob is missing"))?;
     authenticate_production_archive_blob(&blob, &entry.blob_id)?;
     let ordinal = usize::from(entry.ordinal);
-    let (executions, projects) = (blob.records.len(), blob.project_records.len());
+    let (executions, projects, receipts) = (
+        blob.records.len(),
+        blob.project_records.len(),
+        blob.receipts.len(),
+    );
     let record = if ordinal < executions {
         blob.records
             .into_iter()
@@ -2545,11 +2721,16 @@ pub fn archived_production_terminal_record(
             .into_iter()
             .nth(ordinal - executions)
             .map(ProductionArchivedRecordV1::FacilityProject)
-    } else {
+    } else if ordinal - executions - projects < receipts {
         blob.receipts
             .into_iter()
             .nth(ordinal - executions - projects)
             .map(ProductionArchivedRecordV1::ArchiveMaintenanceReceipt)
+    } else {
+        blob.residue_records
+            .into_iter()
+            .nth(ordinal - executions - projects - receipts)
+            .map(ProductionArchivedRecordV1::Residue)
     }
     .ok_or_else(|| invalid("production archive lookup ordinal is outside its blob"))?;
     let found = match &record {
@@ -2558,6 +2739,7 @@ pub fn archived_production_terminal_record(
         ProductionArchivedRecordV1::ArchiveMaintenanceReceipt(receipt) => {
             ProductionTerminalArchiveKeyV1::ArchiveMaintenanceReceipt(receipt.id.clone())
         }
+        ProductionArchivedRecordV1::Residue(record) => record.key.clone(),
     };
     if &found != key {
         return Err(invalid(

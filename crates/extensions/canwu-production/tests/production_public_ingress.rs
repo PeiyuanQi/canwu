@@ -101,6 +101,7 @@ fn an_operation_packet_no_tracked_command_admitted_is_refused() {
         operation: ProductionOperation::CancelWorkOrder {
             work_order: order.clone(),
         },
+        scope: None,
     };
     let forged = serde_json::json!({
         "envelope": envelope,

@@ -293,6 +293,7 @@ pub fn command(
         holder: holder(),
         expected_runtime_revision: state.revision,
         operation,
+        scope: None,
     }
 }
 
@@ -1014,6 +1015,7 @@ pub fn enqueue_operation(
                             holder: holder(),
                             expected_runtime_revision,
                             operation,
+                            scope: None,
                         })
                         .expect("production command payload"),
                     },

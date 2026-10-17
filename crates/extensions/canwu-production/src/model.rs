@@ -28,7 +28,6 @@ pub const MAX_REQUIREMENT_ALTERNATIVES: usize = 16;
 pub const MAX_EVIDENCE_BINDINGS: usize = 128;
 pub const MAX_REPORT_FACTS: usize = 256;
 pub const MAX_OBSERVATION_HEADS_PER_SCOPE: usize = 16;
-pub const MAX_HOT_RECEIPTS: usize = 8_192;
 /// Terminal records one archive blob, membership page, or temporal page may
 /// hold. A settled execution's record encodes to about 13 KB, so a full blob
 /// is about 0.8 MB: the most a lookup hit reads besides the index path.
@@ -69,6 +68,16 @@ const fn is_nominal_realized_output_per_mille(value: &u16) -> bool {
     *value == NOMINAL_REALIZED_OUTPUT_PER_MILLE
 }
 
+/// The bounds one production root enforces. Each root carries its own
+/// limits ([`ProductionState::limits`]), fixed by the scenario that installs
+/// it; [`Self::canonical`] is the default and [`Self::maximum`] the largest
+/// value each field may take.
+///
+/// Every bound is enforced as a recorded refusal, never as a failed
+/// boundary: an operation that would exceed a count or the byte cap is
+/// rejected with its outcome, a report that would exceed a report bound
+/// waits as dirty or due work, and an incident candidate past the
+/// per-boundary bound waits for a later round.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProductionLimitsV1 {
     pub max_process_revisions: usize,
@@ -79,45 +88,151 @@ pub struct ProductionLimitsV1 {
     pub max_capacity_allocations: usize,
     pub max_projects: usize,
     pub max_operation_outcomes: usize,
+    /// Production reports in the knowledge ledger, across every holder and
+    /// every production root (a namespace-wide count).
     pub max_observation_records: usize,
+    /// Production reports one holder keeps, across every production root.
     pub max_observation_records_per_holder: usize,
     pub max_holders: usize,
     pub max_reports_per_boundary: usize,
-    pub max_mutations_per_boundary: usize,
+    /// Items one production batch command may carry.
+    pub max_batch_items: usize,
+    /// Operations and batch items the root records outcomes for in one
+    /// boundary; an operation or a whole batch past it is refused with a
+    /// trace and can be sent again.
+    pub max_operations_per_boundary: usize,
     pub max_incidents_per_boundary: usize,
-    pub max_incident_receipts: usize,
     pub max_observation_heads: usize,
+    /// Rolled-out observation heads the root keeps for delayed holders: the
+    /// heads of each holder and site within the holder's delay that rolled
+    /// out of the pair's window of [`MAX_OBSERVATION_HEADS_PER_SCOPE`].
+    pub max_observation_rollover: usize,
     pub max_observation_dirty: usize,
     pub max_archive_due: usize,
     pub max_pending_retention_handles: usize,
     pub max_serialized_bytes: usize,
 }
 
+impl Default for ProductionLimitsV1 {
+    fn default() -> Self {
+        Self::canonical()
+    }
+}
+
 impl ProductionLimitsV1 {
+    /// The default bounds of a production root.
     #[must_use]
     pub const fn canonical() -> Self {
         Self {
             max_process_revisions: 2_048,
-            max_sites: 2_048,
-            max_facilities: 4_096,
-            max_work_orders: 4_096,
-            max_executions: 4_096,
-            max_capacity_allocations: 4_096,
+            max_sites: 16_384,
+            max_facilities: 16_384,
+            max_work_orders: 16_384,
+            max_executions: 16_384,
+            max_capacity_allocations: 16_384,
             max_projects: 4_096,
-            max_operation_outcomes: 8_192,
+            max_operation_outcomes: 32_768,
             max_observation_records: 8_192,
             max_observation_records_per_holder: 1_024,
             max_holders: 1_024,
             max_reports_per_boundary: 64,
-            max_mutations_per_boundary: 4_096,
+            max_batch_items: 1_024,
+            max_operations_per_boundary: 4_096,
             max_incidents_per_boundary: 512,
-            max_incident_receipts: MAX_HOT_RECEIPTS,
-            max_observation_heads: 8_192,
-            max_observation_dirty: 4_096,
-            max_archive_due: 4_096,
+            max_observation_heads: 16_384,
+            max_observation_rollover: 8_192,
+            max_observation_dirty: 16_384,
+            max_archive_due: 16_384,
             max_pending_retention_handles: MAX_PENDING_RETENTION_HANDLES,
             max_serialized_bytes: 256 * 1024 * 1024,
         }
+    }
+
+    /// The largest value each bound may be configured to.
+    #[must_use]
+    pub const fn maximum() -> Self {
+        Self {
+            max_process_revisions: 8_192,
+            max_sites: 65_536,
+            max_facilities: 65_536,
+            max_work_orders: 65_536,
+            max_executions: 65_536,
+            max_capacity_allocations: 65_536,
+            max_projects: 16_384,
+            max_operation_outcomes: 131_072,
+            max_observation_records: 1_048_576,
+            max_observation_records_per_holder: 65_536,
+            max_holders: 16_384,
+            max_reports_per_boundary: 1_024,
+            max_batch_items: 4_096,
+            max_operations_per_boundary: 65_536,
+            max_incidents_per_boundary: 4_096,
+            max_observation_heads: 262_144,
+            max_observation_rollover: 65_536,
+            max_observation_dirty: 65_536,
+            max_archive_due: 65_536,
+            max_pending_retention_handles: MAX_PENDING_RETENTION_HANDLES,
+            max_serialized_bytes: 256 * 1024 * 1024,
+        }
+    }
+
+    fn fields(&self) -> [(usize, &'static str); 21] {
+        [
+            (self.max_process_revisions, "max_process_revisions"),
+            (self.max_sites, "max_sites"),
+            (self.max_facilities, "max_facilities"),
+            (self.max_work_orders, "max_work_orders"),
+            (self.max_executions, "max_executions"),
+            (self.max_capacity_allocations, "max_capacity_allocations"),
+            (self.max_projects, "max_projects"),
+            (self.max_operation_outcomes, "max_operation_outcomes"),
+            (self.max_observation_records, "max_observation_records"),
+            (
+                self.max_observation_records_per_holder,
+                "max_observation_records_per_holder",
+            ),
+            (self.max_holders, "max_holders"),
+            (self.max_reports_per_boundary, "max_reports_per_boundary"),
+            (self.max_batch_items, "max_batch_items"),
+            (
+                self.max_operations_per_boundary,
+                "max_operations_per_boundary",
+            ),
+            (
+                self.max_incidents_per_boundary,
+                "max_incidents_per_boundary",
+            ),
+            (self.max_observation_heads, "max_observation_heads"),
+            (self.max_observation_rollover, "max_observation_rollover"),
+            (self.max_observation_dirty, "max_observation_dirty"),
+            (self.max_archive_due, "max_archive_due"),
+            (
+                self.max_pending_retention_handles,
+                "max_pending_retention_handles",
+            ),
+            (self.max_serialized_bytes, "max_serialized_bytes"),
+        ]
+    }
+
+    /// Refuses a bound of zero or above [`Self::maximum`], and a batch item
+    /// bound above the operations a root settles in one boundary, which
+    /// would admit a batch that can never settle.
+    pub fn validate(&self) -> Result<(), CanwuError> {
+        for ((value, label), (maximum, _)) in
+            self.fields().into_iter().zip(Self::maximum().fields())
+        {
+            if value == 0 || value > maximum {
+                return Err(invalid(format!(
+                    "production limit {label} must lie between 1 and {maximum}"
+                )));
+            }
+        }
+        if self.max_batch_items > self.max_operations_per_boundary {
+            return Err(invalid(
+                "production limit max_batch_items must not exceed max_operations_per_boundary",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -179,6 +294,7 @@ production_id!(ProductionObservationId);
 production_id!(ProductionObserverGrantId);
 production_id!(ProductionIncidentId);
 production_id!(ProductionArchiveReceiptId);
+production_id!(ProductionScopeId);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -772,10 +888,29 @@ pub struct ProductionArchiveMaintenanceReceiptV1 {
     pub archived_projects: usize,
     /// Maintenance receipts of earlier commits that this commit archived.
     pub archived_receipts: usize,
+    /// Residues this commit archived.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub archived_residues: usize,
     pub disposition: ProductionArchiveRetentionPhaseV1,
     /// Time of the boundary that settled the commit.
     pub settled_at: SimTime,
+    /// For the receipt of a stale commit: how many more times a commit under
+    /// the same retention handle settled as stale after this receipt was
+    /// recorded. A handle keeps one stale receipt however often its batch is
+    /// queued again, so duplicates cannot grow the root.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub duplicate_settlements: u64,
     pub canonical_digest: String,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -785,6 +920,55 @@ pub enum ProductionTerminalArchiveKeyV1 {
     FacilityProject(FacilityProjectId),
     /// The maintenance receipt of an applied archive commit.
     ArchiveMaintenanceReceipt(ProductionArchiveReceiptId),
+    /// A work order that ended without an execution, with its outcomes.
+    WorkOrder(WorkOrderId),
+    /// A completion lease that was released or expired without binding a
+    /// hot execution or facility project, with its grants, receipts, and
+    /// outcomes.
+    CompletionLease(CompletionLeaseAcquisitionId),
+    /// An operation outcome that no hot record claims: a lease or facility
+    /// operation's outcome, or a rejection naming nothing hot.
+    OperationOutcome(ProductionOperationOutcomeId),
+}
+
+/// The closure of one completion lease as a lease residue archives it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProductionCompletionLeaseArchiveV1 {
+    pub acquisition: canwu_resource::CompletionLeaseAcquisitionV1,
+    pub production_grants: Vec<CompletionCapacityGrantV1>,
+    pub certificate: Option<CompletionLeaseActivationCertificateV1>,
+    pub participant_grants: Vec<crate::ProductionCompletionParticipantGrantV1>,
+    pub completion_receipts: Vec<canwu_resource::CompletionLeaseReceiptV1>,
+}
+
+/// What a residue record archives besides its outcomes.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
+pub enum ProductionResidueBodyV1 {
+    WorkOrder {
+        work_order: WorkOrder,
+    },
+    CompletionLease {
+        lease: ProductionCompletionLeaseArchiveV1,
+    },
+    OperationOutcome,
+}
+
+/// One residue: a terminal record that no execution or facility project
+/// archives with it, so that nothing a run settles stays in its root for
+/// life. `operation_outcomes` are the outcomes the residue claims, in
+/// identity order; an outcome residue holds exactly its own outcome.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProductionResidueArchiveRecordV1 {
+    pub key: ProductionTerminalArchiveKeyV1,
+    pub body: ProductionResidueBodyV1,
+    pub operation_outcomes: Vec<ProductionOperationOutcome>,
+    /// Degraded-facility decision receipts the residue's outcomes cite.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_receipts: Vec<ProductionDecisionReceiptV1>,
+    pub terminal_at: SimTime,
+    pub canonical_digest: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -811,6 +995,9 @@ pub struct ProductionTerminalArchiveRecordV1 {
     pub production_completion_grant: CompletionCapacityGrantV1,
     pub participant_grants: Vec<crate::ProductionCompletionParticipantGrantV1>,
     pub completion_receipts: Vec<canwu_resource::CompletionLeaseReceiptV1>,
+    /// Degraded-facility decision receipts the execution's outcomes cite.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_receipts: Vec<ProductionDecisionReceiptV1>,
     pub terminal_at: SimTime,
     pub canonical_digest: String,
 }
@@ -842,6 +1029,9 @@ pub struct ProductionArchiveBlobV1 {
     pub project_records: Vec<ProductionFacilityProjectArchiveRecordV1>,
     /// Maintenance receipts of applied commits archived by this commit.
     pub receipts: Vec<ProductionArchiveMaintenanceReceiptV1>,
+    /// Residues archived by this commit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub residue_records: Vec<ProductionResidueArchiveRecordV1>,
     pub content_id: String,
 }
 
@@ -892,6 +1082,9 @@ pub struct ProductionArchiveIndexDirectoryV1 {
     pub archived_project_count: u64,
     /// Maintenance receipts archived up to and including this commit.
     pub archived_receipt_count: u64,
+    /// Residues archived up to and including this commit.
+    #[serde(default)]
+    pub archived_residue_count: u64,
     /// Root lookup page of the index over every terminal record archived up
     /// to and including this commit, in the format of
     /// [`canwu_resource::ResourceArchiveLookupPageV1`] and stored under
@@ -916,6 +1109,9 @@ pub struct PreparedProductionArchivePageV1 {
 /// root, ready for [`Self::store_and_verify`].
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PreparedProductionArchiveBatchV1 {
+    /// The production root the batch was prepared from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ProductionScopeId>,
     pub expected_source_root: String,
     /// Selected maintenance receipts: at most one, the receipt of the commit
     /// at the archive head, always selected first.
@@ -923,6 +1119,9 @@ pub struct PreparedProductionArchiveBatchV1 {
     pub selected: Vec<ProductionExecutionId>,
     #[serde(default)]
     pub selected_projects: Vec<FacilityProjectId>,
+    /// Residues archived, in key order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_residues: Vec<ProductionTerminalArchiveKeyV1>,
     /// First blob of the batch.
     pub blob: ProductionArchiveBlobV1,
     pub membership_page: ProductionArchiveMembershipPageV1,
@@ -948,6 +1147,9 @@ pub struct PreparedProductionArchiveBatchV1 {
 /// carries it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct VerifiedProductionArchiveCommitV1 {
+    /// The production root the commit applies to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ProductionScopeId>,
     /// Source root the batch was prepared from; the commit applies only
     /// against a root that still has it.
     pub expected_source_root: String,
@@ -958,6 +1160,9 @@ pub struct VerifiedProductionArchiveCommitV1 {
     /// Completed facility projects archived, in identity order.
     #[serde(default)]
     pub selected_projects: Vec<FacilityProjectId>,
+    /// Residues archived, in key order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_residues: Vec<ProductionTerminalArchiveKeyV1>,
     /// Directory of the commit, which becomes the archive head.
     pub directory_root: String,
     /// Root of the lookup index the directory names. The boundary rebuilds
@@ -975,6 +1180,9 @@ pub struct ProductionArchiveHeadStateV1 {
     pub archived_project_count: u64,
     /// Maintenance receipts archived up to and including the head commit.
     pub archived_receipt_count: u64,
+    /// Residues archived up to and including the head commit.
+    #[serde(default)]
+    pub archived_residue_count: u64,
     pub committed_batch_count: u64,
     /// Number of maintenance receipts this root has ever recorded. The next
     /// receipt is `canwu.production:archive-receipt:{receipt_sequence + 1}`,
@@ -1060,10 +1268,68 @@ pub struct ProductionCommandEnvelope {
     pub holder: KnowledgeHolderRef,
     pub expected_runtime_revision: u64,
     pub operation: ProductionOperation,
+    /// The production root the operation applies to: `None` for the primary
+    /// root ([`production_runtime_reference`]), otherwise the scope root
+    /// ([`production_scope_runtime_reference`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ProductionScopeId>,
+}
+
+/// One item of a [`ProductionBatchEnvelopeV1`]: an operation with its own
+/// operation ID, under which its outcome is recorded.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProductionBatchItemV1 {
+    pub operation_id: ProductionOperationOutcomeId,
+    pub operation: ProductionOperation,
+}
+
+/// Many production operations of one holder against one production root,
+/// admitted as one tracked command (`apply_production_batch_v1`) and settled
+/// in one boundary, item by item in order, each with its own recorded
+/// outcome.
+///
+/// Admission checks the issuer's authority over `holder` once, the outcome
+/// capacity for every item, and that no item resolves a degraded facility
+/// (that operation needs its own decision). When `expected_runtime_revision`
+/// is set, settlement compares it once with the root's revision and rejects
+/// every item if it differs; when it is `None`, each item is checked only by
+/// its own rules, against the root as the items before it left it. An item
+/// whose operation ID already has an outcome with the same operation and
+/// holder is skipped as already settled.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProductionBatchEnvelopeV1 {
+    pub holder: KnowledgeHolderRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ProductionScopeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_runtime_revision: Option<u64>,
+    pub items: Vec<ProductionBatchItemV1>,
+}
+
+/// What a production root keeps of the incident receipts it folded: every
+/// receipt of an earlier incident boundary leaves the root, chained into
+/// `digest` in the order the root recorded them.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProductionIncidentHistoryV1 {
+    /// Receipts folded so far.
+    pub folded_receipts: u64,
+    /// `canonical_hash("canwu.production.incident-history.v1", (previous
+    /// digest, receipt digest))` over the folded receipts; empty while none
+    /// was folded.
+    pub digest: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProductionState {
+    /// The scope this root holds: `None` for the primary root, otherwise the
+    /// scope whose sites, facilities, work, and completion leases it holds.
+    /// A scope root is an independent production root under its own record
+    /// ([`production_scope_runtime_reference`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ProductionScopeId>,
+    /// The bounds this root enforces, fixed by the scenario that installs it.
+    #[serde(default)]
+    pub limits: ProductionLimitsV1,
     pub revision: u64,
     pub processes: BTreeMap<ProcessRevisionId, ProcessRevision>,
     pub sites: BTreeMap<ProductionSiteId, ProductionSite>,
@@ -1118,7 +1384,11 @@ pub struct ProductionState {
     pub incident_cursor: Option<FacilityAssetId>,
     #[serde(default)]
     pub incident_round: u64,
+    /// The receipts of the root's latest incident boundary; earlier ones are
+    /// folded into `incident_history`.
     pub incident_receipts: BTreeMap<String, ProductionIncidentTransitionV1>,
+    #[serde(default)]
+    pub incident_history: ProductionIncidentHistoryV1,
     pub observation_heads: BTreeMap<String, Vec<ProductionObservationHeadV1>>,
     #[serde(default)]
     pub observation_rollover: BTreeMap<String, ProductionObservationHeadV1>,
@@ -1140,12 +1410,78 @@ impl DomainRecordType for ProductionRuntimeRecord {
     const NAME: &'static str = "runtime";
 }
 
+/// The record of the primary production root, `canwu.production:runtime`.
 #[must_use]
 pub fn production_runtime_reference() -> TypedDomainRecordRef<ProductionRuntimeRecord> {
     TypedDomainRecordRef::new(PRODUCTION_RUNTIME_ID)
 }
 
+/// The record of the production root of `scope`:
+/// `canwu.production:runtime:scope:{scope}`. It has the kind of the primary
+/// root, so a reader that declares the production runtime kind reads every
+/// root.
+#[must_use]
+pub fn production_scope_runtime_reference(
+    scope: &ProductionScopeId,
+) -> TypedDomainRecordRef<ProductionRuntimeRecord> {
+    TypedDomainRecordRef::new(format!("{PRODUCTION_RUNTIME_ID}:scope:{scope}"))
+}
+
+/// The record of the production root `scope` names: the primary root for
+/// `None`.
+#[must_use]
+pub fn production_root_reference(
+    scope: Option<&ProductionScopeId>,
+) -> TypedDomainRecordRef<ProductionRuntimeRecord> {
+    scope.map_or_else(
+        production_runtime_reference,
+        production_scope_runtime_reference,
+    )
+}
+
+/// Whether `value`, a completion acquisition id or a lease or output
+/// operation key, belongs to the production root `scope` names. A scope
+/// root's begin with `{scope}/` and the primary root's hold no `/`. A scope
+/// id holds no `/`, so no two roots can name the same resource-side key, and
+/// an output key of one root can never strand an execution of another.
+#[must_use]
+pub fn production_root_names_key(scope: Option<&ProductionScopeId>, value: &str) -> bool {
+    match scope {
+        None => !value.contains('/'),
+        Some(scope) => value
+            .split_once('/')
+            .is_some_and(|(prefix, rest)| prefix == scope.as_str() && !rest.is_empty()),
+    }
+}
+
+/// The scope of the production root `reference` names: `Some(None)` for the
+/// primary root, `Some(Some(scope))` for a scope root, and `None` for any
+/// other record.
+#[must_use]
+pub fn production_root_scope(
+    reference: &canwu_api::DomainRecordRef,
+) -> Option<Option<ProductionScopeId>> {
+    if !reference.kind.matches_type::<ProductionRuntimeRecord>() {
+        return None;
+    }
+    if reference.id == PRODUCTION_RUNTIME_ID {
+        return Some(None);
+    }
+    let scope = reference
+        .id
+        .strip_prefix(PRODUCTION_RUNTIME_ID)?
+        .strip_prefix(":scope:")?;
+    let scope = ProductionScopeId::new(scope).ok()?;
+    (production_scope_runtime_reference(&scope).into_untyped() == *reference).then_some(Some(scope))
+}
+
 impl ProductionState {
+    /// The record this root persists as: the primary root, or its scope root.
+    #[must_use]
+    pub fn runtime_reference(&self) -> TypedDomainRecordRef<ProductionRuntimeRecord> {
+        production_root_reference(self.scope.as_ref())
+    }
+
     pub fn into_initial_record(mut self) -> Result<DomainRecord, CanwuError> {
         self.rebuild_runtime_indexes()?;
         self.validate()?;
@@ -1163,7 +1499,7 @@ impl ProductionState {
 
     pub(crate) fn draft(&self) -> Result<DomainRecordDraft, CanwuError> {
         self.validate()?;
-        let mut draft = DomainRecordDraft::from_typed(production_runtime_reference(), self)?;
+        let mut draft = DomainRecordDraft::from_typed(self.runtime_reference(), self)?;
         // Every hot execution and facility project, terminal ones included,
         // declares the record versions that restore validation reads for it,
         // so a seal keeps them until the archive removes the work. Restore
@@ -1292,7 +1628,14 @@ impl ProductionState {
     }
 
     pub fn validate(&self) -> Result<(), CanwuError> {
-        let limits = ProductionLimitsV1::canonical();
+        self.limits.validate()?;
+        let limits = self.limits;
+        if (self.incident_history.folded_receipts == 0) != self.incident_history.digest.is_empty()
+            || (!self.incident_history.digest.is_empty()
+                && self.incident_history.digest.len() != 64)
+        {
+            return Err(invalid("production incident history is malformed"));
+        }
         for (actual, maximum, label) in [
             (
                 self.processes.len(),
@@ -1325,7 +1668,7 @@ impl ProductionState {
         ] {
             if actual > maximum {
                 return Err(invalid(format!(
-                    "production {label} exceed their canonical cap"
+                    "production {label} exceed their configured bound"
                 )));
             }
         }
@@ -1342,7 +1685,7 @@ impl ProductionState {
         for (actual, maximum, label) in [
             (
                 self.incident_receipts.len(),
-                limits.max_incident_receipts,
+                limits.max_incidents_per_boundary,
                 "incident receipts",
             ),
             (
@@ -1352,7 +1695,7 @@ impl ProductionState {
             ),
             (
                 self.observation_rollover.len(),
-                MAX_HOT_RECEIPTS,
+                limits.max_observation_rollover,
                 "observation rollover receipts",
             ),
             (
@@ -1395,7 +1738,7 @@ impl ProductionState {
         ] {
             if actual > maximum {
                 return Err(invalid(format!(
-                    "production {label} exceed their canonical cap"
+                    "production {label} exceed their configured bound"
                 )));
             }
         }
@@ -1488,6 +1831,20 @@ impl ProductionState {
                     "production resource continuation witness is forged or stale",
                 ));
             }
+        }
+        let scope = self.scope.as_ref();
+        if self.completion_acquisitions.values().any(|acquisition| {
+            !production_root_names_key(scope, acquisition.id.as_str())
+                || !production_root_names_key(scope, acquisition.operation_key.as_str())
+        }) || self.executions.values().any(|execution| {
+            execution
+                .output_requests
+                .iter()
+                .any(|request| !production_root_names_key(scope, request.operation_key.as_str()))
+        }) {
+            return Err(invalid(
+                "production root names a completion lease or output key outside its scope",
+            ));
         }
         self.validate_completion_capacity()?;
         self.validate_completion_coordinator()?;
@@ -1822,9 +2179,10 @@ impl ProductionState {
                     .iter()
                     .any(|key| names_reserved_resource_operation_key(key))
                 || output_accounts.len() != execution.output_requests.len()
-                || execution.output_source.as_ref().is_some_and(|source| {
-                    source.record != production_runtime_reference().into_untyped()
-                })
+                || execution
+                    .output_source
+                    .as_ref()
+                    .is_some_and(|source| source.record != self.runtime_reference().into_untyped())
                 || !realized_output_record_is_valid(process, execution)
                 || execution.output_requests.iter().zip(&process.outputs).any(
                     |(request, output)| {
@@ -2214,6 +2572,7 @@ impl ProductionState {
             ));
         }
         let mut applied_receipts = 0_usize;
+        let mut stale_handles = BTreeSet::new();
         for (id, receipt) in &self.archive.maintenance_receipts {
             let mut detached = receipt.clone();
             let recorded = std::mem::take(&mut detached.canonical_digest);
@@ -2229,12 +2588,15 @@ impl ProductionState {
                 // The receipt of an applied commit names the archive head:
                 // the next applied commit archives it first.
                 || (applied && self.archive.directory_root.as_ref() != Some(&receipt.directory_root))
-                // A stale receipt is retired with the handle it names.
+                // A stale receipt is retired with the handle it names, and a
+                // handle keeps one, which counts the later duplicates.
                 || (!applied
-                    && !self
+                    && (!self
                         .archive
                         .pending_handles
-                        .contains_key(&receipt.retention_handle_id))
+                        .contains_key(&receipt.retention_handle_id)
+                        || !stale_handles.insert(&receipt.retention_handle_id)))
+                || (applied && receipt.duplicate_settlements != 0)
             {
                 return Err(invalid("production archive maintenance receipt is invalid"));
             }
@@ -2352,6 +2714,7 @@ impl ProductionState {
             .collect()
     }
 
+    /// Applies one operation, or changes nothing and returns the rejection.
     pub fn apply_operation(
         &mut self,
         envelope: &ProductionCommandEnvelope,
@@ -2363,12 +2726,29 @@ impl ProductionState {
         Ok(())
     }
 
+    /// Applies one operation to this state in place. On an error the state
+    /// may be partly changed, so a caller applies it to a copy it can drop,
+    /// as the production plugin does.
+    pub(crate) fn apply_operation_in_place(
+        &mut self,
+        envelope: &ProductionCommandEnvelope,
+        now: SimTime,
+    ) -> Result<(), CanwuError> {
+        self.apply_operation_mut(envelope, now)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn apply_operation_mut(
         &mut self,
         envelope: &ProductionCommandEnvelope,
         now: SimTime,
     ) -> Result<(), CanwuError> {
+        if envelope.scope != self.scope {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPayload,
+                "production operation names another production root",
+            ));
+        }
         if envelope.expected_runtime_revision != self.revision {
             return Err(CanwuError::new(
                 ErrorCode::DomainRecordVersionConflict,
@@ -2380,6 +2760,17 @@ impl ProductionState {
         match &envelope.operation {
             ProductionOperation::RequestCompletionLease { request } => {
                 self.ensure_new_lifecycle_capacity()?;
+                if !production_root_names_key(self.scope.as_ref(), request.id.as_str())
+                    || !production_root_names_key(
+                        self.scope.as_ref(),
+                        request.operation_key.as_str(),
+                    )
+                {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidPayload,
+                        "a completion lease's acquisition and operation key must carry its root's scope prefix",
+                    ));
+                }
                 if request.holder != envelope.holder {
                     return Err(CanwuError::new(
                         ErrorCode::InvalidAuthority,
@@ -2826,8 +3217,7 @@ impl ProductionState {
                             | FacilityLifecycle::Damaged
                     )
             })
-            && (self.incident_due_index.len()
-                < ProductionLimitsV1::canonical().max_incidents_per_boundary
+            && (self.incident_due_index.len() < self.limits.max_incidents_per_boundary
                 || self.incident_due_index.contains(&facility))
         {
             self.incident_due_index.insert(facility);
@@ -2871,6 +3261,14 @@ impl ProductionState {
             ));
         }
         refuse_reserved_output_keys(execution)?;
+        if execution.output_requests.iter().any(|request| {
+            !production_root_names_key(self.scope.as_ref(), request.operation_key.as_str())
+        }) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPayload,
+                "an execution's output keys must carry its root's scope prefix",
+            ));
+        }
         self.refuse_output_keys_held_by_unsettled_executions(execution)?;
         let process = self
             .processes
@@ -3163,7 +3561,16 @@ impl ProductionState {
         &self,
         operation: &ProductionOperation,
     ) -> Result<(), CanwuError> {
-        let limits = ProductionLimitsV1::canonical();
+        self.ensure_operations_outcome_admission_capacity(&[operation])
+    }
+
+    /// Whether the root has room for the outcomes of `operations` together,
+    /// besides the outcomes accepted facility projects reserve.
+    pub(crate) fn ensure_operations_outcome_admission_capacity(
+        &self,
+        operations: &[&ProductionOperation],
+    ) -> Result<(), CanwuError> {
+        let limits = self.limits;
         let reserved = self
             .project_operation_outcome_reservations
             .values()
@@ -3173,25 +3580,33 @@ impl ProductionState {
                     .and_then(|reserved| total.checked_add(reserved))
             })
             .ok_or_else(|| invalid("production project outcome reservation overflowed"))?;
-        let additional = match operation {
-            ProductionOperation::CreateFacilityProject { project } => {
-                usize::try_from(required_project_operation_outcome_reservation(project)?)
-                    .ok()
-                    .and_then(|reserved| reserved.checked_add(1))
-                    .ok_or_else(|| invalid("production project outcome reservation overflowed"))?
-            }
-            ProductionOperation::AuthorizeFacilityProject { project }
-            | ProductionOperation::AdvanceFacilityProject { project, .. }
-            | ProductionOperation::AcceptFacilityCommissioning { project }
-                if self
-                    .project_operation_outcome_reservations
-                    .get(project)
-                    .is_some_and(|reserved| *reserved > 0) =>
-            {
-                0
-            }
-            _ => 1,
-        };
+        let mut additional = 0_usize;
+        for operation in operations {
+            let needed = match operation {
+                ProductionOperation::CreateFacilityProject { project } => {
+                    usize::try_from(required_project_operation_outcome_reservation(project)?)
+                        .ok()
+                        .and_then(|reserved| reserved.checked_add(1))
+                        .ok_or_else(|| {
+                            invalid("production project outcome reservation overflowed")
+                        })?
+                }
+                ProductionOperation::AuthorizeFacilityProject { project }
+                | ProductionOperation::AdvanceFacilityProject { project, .. }
+                | ProductionOperation::AcceptFacilityCommissioning { project }
+                    if self
+                        .project_operation_outcome_reservations
+                        .get(project)
+                        .is_some_and(|reserved| *reserved > 0) =>
+                {
+                    0
+                }
+                _ => 1,
+            };
+            additional = additional
+                .checked_add(needed)
+                .ok_or_else(|| invalid("production outcome capacity accounting overflowed"))?;
+        }
         if self
             .operation_outcomes
             .len()
@@ -3239,7 +3654,7 @@ impl ProductionState {
             .operation_outcomes
             .len()
             .checked_add(reserved)
-            .is_some_and(|used| used >= ProductionLimitsV1::canonical().max_operation_outcomes))
+            .is_some_and(|used| used >= self.limits.max_operation_outcomes))
     }
 
     fn ensure_new_project_lifecycle_capacity(
@@ -3263,7 +3678,7 @@ impl ProductionState {
         &self,
         additional_outcomes: usize,
     ) -> Result<(), CanwuError> {
-        let limits = ProductionLimitsV1::canonical();
+        let limits = self.limits;
         let active_completion = self
             .completion_acquisitions
             .values()
@@ -3677,9 +4092,42 @@ impl ProductionState {
     }
 
     #[allow(clippy::needless_pass_by_value)]
+    /// Folds every incident receipt of a boundary other than `boundary` into
+    /// the root's incident history, in receipt-key order, so the root keeps
+    /// only the receipts of its latest incident boundary: at most
+    /// [`ProductionLimitsV1::max_incidents_per_boundary`], whatever the age of
+    /// the run. Returns whether anything was folded.
+    pub(crate) fn fold_incident_receipts(
+        &mut self,
+        boundary: BoundaryId,
+    ) -> Result<bool, CanwuError> {
+        let folded = self
+            .incident_receipts
+            .iter()
+            .filter(|(_, receipt)| receipt.evaluation_boundary != boundary)
+            .map(|(key, receipt)| (key.clone(), receipt.canonical_digest.clone()))
+            .collect::<Vec<_>>();
+        if folded.is_empty() {
+            return Ok(false);
+        }
+        for (key, digest) in folded {
+            self.incident_receipts.remove(&key);
+            self.incident_history.digest = canonical_hash(
+                "canwu.production.incident-history.v1",
+                &(&self.incident_history.digest, &digest),
+            )?;
+            self.incident_history.folded_receipts = self
+                .incident_history
+                .folded_receipts
+                .checked_add(1)
+                .ok_or_else(|| invalid("production incident history count overflowed"))?;
+        }
+        Ok(true)
+    }
+
     pub(crate) fn apply_incident_transition(
         &mut self,
-        transition: ProductionIncidentTransitionV1,
+        transition: &ProductionIncidentTransitionV1,
     ) -> Result<(), CanwuError> {
         let mut detached = transition.clone();
         let recorded = std::mem::take(&mut detached.canonical_digest);
@@ -3842,7 +4290,7 @@ impl ProductionState {
             })
             .map(|facility| facility.id.clone())
             .collect::<Vec<_>>();
-        let maximum = ProductionLimitsV1::canonical().max_incidents_per_boundary;
+        let maximum = self.limits.max_incidents_per_boundary;
         let mut selected = eligible
             .iter()
             .filter(|id| {
@@ -3874,11 +4322,9 @@ impl ProductionState {
                     scope: site.clone(),
                 });
         }
-        if self.observation_dirty_index.len()
-            > ProductionLimitsV1::canonical().max_observation_dirty
-        {
+        if self.observation_dirty_index.len() > self.limits.max_observation_dirty {
             return Err(invalid(
-                "production observation dirty index exceeds its canonical cap",
+                "production observation dirty index exceeds its configured bound",
             ));
         }
         Ok(())
@@ -3922,16 +4368,11 @@ impl ProductionState {
         }
         heads.push(head.clone());
         if heads.len() > MAX_OBSERVATION_HEADS_PER_SCOPE {
-            if self.observation_rollover.len() >= MAX_HOT_RECEIPTS {
-                return Err(CanwuError::new(
-                    ErrorCode::ValueOutOfRange,
-                    "archive_backpressure: production observation rollover is full",
-                ));
-            }
             let rolled = heads.remove(0);
             self.observation_rollover
                 .insert(rolled.canonical_digest.clone(), rolled);
         }
+        self.prune_observation_rollover(key, now, grant.delay_minutes)?;
         self.observation_dirty_index.remove(key);
         for keys in self.observation_due_index.values_mut() {
             keys.remove(key);
@@ -3948,6 +4389,84 @@ impl ProductionState {
             .or_default()
             .insert(key.clone());
         Ok(head)
+    }
+
+    /// Whether the root can materialize one more head for `key` now: false
+    /// only while the rollover of rolled-out heads is full and a new head
+    /// would roll one more out. The report system then keeps the key dirty
+    /// and tries again in a later boundary.
+    pub(crate) fn observation_head_fits(
+        &self,
+        key: &ProductionObservationHeadKeyV1,
+    ) -> Result<bool, CanwuError> {
+        let storage_key = production_observation_head_storage_key(key)?;
+        let rolls = self
+            .observation_heads
+            .get(&storage_key)
+            .is_some_and(|heads| heads.len() >= MAX_OBSERVATION_HEADS_PER_SCOPE);
+        Ok(!rolls || self.observation_rollover.len() < self.limits.max_observation_rollover)
+    }
+
+    /// Removes the rolled-out heads of `key` that can never again be the
+    /// head a holder's report reads. The report of a holder with delay `d`
+    /// reads the newest head observed at or before `now - d`; that cut only
+    /// moves forward, so once a head of the key is eligible every older head
+    /// of the key is dominated for good. The rollover therefore holds, per
+    /// key, only heads newer than the newest eligible one: the heads one
+    /// delay window rolled out, not every head of the run.
+    fn prune_observation_rollover(
+        &mut self,
+        key: &ProductionObservationHeadKeyV1,
+        now: SimTime,
+        delay_minutes: u64,
+    ) -> Result<bool, CanwuError> {
+        let delay = i64::try_from(delay_minutes)
+            .map_err(|_| invalid("production observation delay exceeds simulation time"))?;
+        let Some(cut) = now.checked_add(canwu_api::SimDuration::minutes(-delay)) else {
+            return Ok(false);
+        };
+        let storage_key = production_observation_head_storage_key(key)?;
+        let dominator = self
+            .observation_heads
+            .get(&storage_key)
+            .into_iter()
+            .flatten()
+            .chain(
+                self.observation_rollover
+                    .values()
+                    .filter(|head| head.key == *key),
+            )
+            .filter(|head| head.observed_at <= cut)
+            .map(|head| (head.observed_at, head.provider_state_revision))
+            .max();
+        let before = self.observation_rollover.len();
+        if let Some(dominator) = dominator {
+            self.observation_rollover.retain(|_, head| {
+                head.key != *key || (head.observed_at, head.provider_state_revision) >= dominator
+            });
+        }
+        Ok(self.observation_rollover.len() != before)
+    }
+
+    /// Prunes the rolled-out heads of `key` that its holder can never read
+    /// again at `now` ([`Self::prune_observation_rollover`]); the report
+    /// system calls it for every pair it visits, so a pair whose newest head
+    /// came due drains whether or not it gets another head. Returns whether
+    /// anything was removed.
+    pub(crate) fn prune_observation_key(
+        &mut self,
+        key: &ProductionObservationHeadKeyV1,
+        now: SimTime,
+    ) -> Result<bool, CanwuError> {
+        let Some(delay) = self
+            .observer_grants
+            .values()
+            .find(|grant| grant.holder == key.holder && grant.sites.contains(&key.scope))
+            .map(|grant| grant.delay_minutes)
+        else {
+            return Ok(false);
+        };
+        self.prune_observation_rollover(key, now, delay)
     }
 
     fn observation_facts(

@@ -695,6 +695,7 @@ fn canonical_cross_plugin_completion_coordinator_uses_real_ingress_and_exact_gra
                             holder: holder.clone(),
                             expected_runtime_revision,
                             operation: ProductionOperation::RequestCompletionLease { request },
+                            scope: None,
                         })
                         .expect("production command payload"),
                     },
@@ -723,6 +724,38 @@ fn canonical_cross_plugin_completion_coordinator_uses_real_ingress_and_exact_gra
     let production_grant =
         CompletionCapacityGrantId::new("production:completion-grant:canonical-ingress")
             .expect("production grant");
+    // A root's local grant may lock only that root's own record: one locking
+    // another production record, here the boundary activity record, is
+    // refused with a trace and leaves the acquisition requested.
+    let foreign = current_record_version(&canwu, production_boundary_activity_reference());
+    let boundary = next_boundary(&canwu);
+    let events = canwu.events().len();
+    enqueue_production_completion_operation(
+        &mut canwu,
+        SimTime::EPOCH,
+        &ProductionCompletionIngressV1::GrantLocal(GrantCompletionCapacityV1 {
+            grant_id: production_grant.clone(),
+            acquisition: acquisition.clone(),
+            expected_acquisition_revision: ResourceRevision::INITIAL,
+            owner_plugin: canwu_production::PLUGIN_NAME.to_owned(),
+            target_versions: vec![CompletionLockedTargetV1::ExternalRecord { version: foreign }],
+            current_boundary: boundary,
+        }),
+    )
+    .expect("foreign lock grant ingress");
+    settle_at_epoch(&mut canwu, "foreign lock grant boundary");
+    assert_eq!(production_state(&canwu), requested_state);
+    assert!(
+        canwu.events()[events..].iter().any(|event| {
+            event.kind.plugin_identity()
+                == Some((
+                    canwu_production::PLUGIN_NAME,
+                    "canwu.production.ingress_refused.v1",
+                ))
+                && event.summary.contains("may lock only its own root")
+        }),
+        "a foreign lock is refused with a trace"
+    );
     let production_source = current_record_version(&canwu, production_runtime_reference());
     let boundary = next_boundary(&canwu);
     enqueue_production_completion_operation(
@@ -932,6 +965,7 @@ fn command(
         holder: holder.clone(),
         expected_runtime_revision: state.revision,
         operation,
+        scope: None,
     }
 }
 
@@ -948,6 +982,7 @@ fn unrelated_outcome(
                 .expect("filler facility ID"),
             expected_generation: 1,
         },
+        scope: None,
     };
     ProductionOperationOutcome {
         id,
@@ -1906,6 +1941,7 @@ fn enqueue_tracked_production_operation(
                             holder: holder.clone(),
                             expected_runtime_revision,
                             operation,
+                            scope: None,
                         })
                         .expect("production command payload"),
                     },
@@ -3317,6 +3353,22 @@ fn canonical_commissioning_closes_resource_and_local_grants_before_project_archi
         canwu_resource::CompletionLeaseAcquisitionStateV1::Released
     );
     assert!(completed.project_archive_due_index.contains(&project_id));
+    // A released lease that binds no hot work leaves as a residue only once
+    // every participant grant the root recorded for it ended: with the
+    // project gone, the lease is a candidate while the resource grant is
+    // completed, and not while that grant is still held.
+    let lease_key = ProductionTerminalArchiveKeyV1::CompletionLease(acquisition.clone());
+    let mut unbound = completed.clone();
+    unbound.facility_projects.remove(&project_id);
+    assert!(unbound.residue_archive_candidates().contains(&lease_key));
+    unbound
+        .completion_participant_grants
+        .get_mut(&acquisition)
+        .and_then(|participants| participants.get_mut(canwu_resource::PLUGIN_NAME))
+        .expect("resource participant grant")
+        .grant
+        .state = CompletionGrantStateV1::Held;
+    assert!(!unbound.residue_archive_candidates().contains(&lease_key));
     let (_, authoritative_resource) = canwu_resource::resource_state(&canwu)
         .expect("resource query")
         .expect("resource state");
@@ -3972,7 +4024,7 @@ fn snapshot_restore_and_exact_replay_reproduce_reports_and_reject_a_forged_root(
 
 #[test]
 fn phase_ten_only_stages_and_phase_eleven_atomically_commits_incidents() {
-    let (mut state, _, _, facility_id) = base_state();
+    let (mut state, holder, site_id, facility_id) = base_state();
     let facility = state.facilities.get_mut(&facility_id).expect("facility");
     facility.incident_risk_per_mille = 1_000;
     facility.incident_max_severity_per_mille = 200;
@@ -4008,18 +4060,25 @@ fn phase_ten_only_stages_and_phase_eleven_atomically_commits_incidents() {
         "the kernel, not an ordinary package writer, owns the Phase 11 atomic commit"
     );
 
-    canwu
-        .enqueue_plugin_ingress(PluginIngressRequest::new(
-            PLUGIN_NAME,
-            PRODUCTION_OBSERVATION_WAKE_INGRESS,
-            canwu.time(),
-            serde_json::json!({}),
-        ))
-        .expect("incident-driving ingress");
-    canwu
-        .step_canonical()
-        .expect("incident boundary")
-        .expect("incident work");
+    // Only a packet that changes the root drives incident evaluation: an
+    // applied operation. The command's admission boundary queues its packet,
+    // and the next boundary settles it and evaluates the incident.
+    enqueue_tracked_production_operation(
+        &mut canwu,
+        &holder,
+        9_001,
+        "production:incident-driver:create",
+        ProductionOperation::CreateWorkOrder {
+            work_order: work_order(
+                "production:order:incident-driver",
+                &holder,
+                &ProcessRevisionId::new("production:household-process:v1").expect("process ID"),
+                &site_id,
+            ),
+        },
+    );
+    settle_at_epoch(&mut canwu, "incident command admission");
+    settle_at_epoch(&mut canwu, "incident boundary");
     let changed = production_state(&canwu);
     let receipt = changed
         .incident_receipts
@@ -4746,6 +4805,7 @@ fn reserved_project_capacity_rejects_repeated_invalid_commands_without_using_out
                             operation: ProductionOperation::AuthorizeFacilityProject {
                                 project: project_id.clone(),
                             },
+                            scope: None,
                         })
                         .expect("command payload"),
                     },
@@ -4784,6 +4844,7 @@ fn archive_commit_survives_restart_and_authenticates_damage_waste_and_output_evi
             realized_output_per_mille: None,
             realization_evidence: None,
         },
+        scope: None,
     };
     let command_hash = canwu_api::canonical_hash("canwu.production.operation-input.v1", &command)
         .expect("archive command input hash");
@@ -5002,19 +5063,25 @@ fn holder_knowledge_cap_rejects_one_more_report_with_bounded_work() {
     let plugin = ProductionPlugin;
     let mut canwu = Canwu::new_with_plugins(151, scenario_with_production(state), &[&plugin])
         .expect("knowledge cap runtime");
-    for round in 0..17 {
-        canwu
-            .enqueue_plugin_ingress(PluginIngressRequest::new(
-                PLUGIN_NAME,
-                PRODUCTION_OBSERVATION_WAKE_INGRESS,
-                canwu.time(),
-                serde_json::json!({ "round": round }),
-            ))
-            .expect("knowledge cap wake");
-        canwu
-            .step_canonical()
-            .expect("knowledge cap boundary")
-            .expect("knowledge cap work");
+    // Each round applies one operation, which evaluates every facility's
+    // certain incident, which marks every site's report dirty.
+    for round in 0..17_u64 {
+        enqueue_tracked_production_operation(
+            &mut canwu,
+            &holder,
+            9_100 + round,
+            &format!("production:cap-driver:create:{round}"),
+            ProductionOperation::CreateWorkOrder {
+                work_order: work_order(
+                    &format!("production:order:cap-driver:{round}"),
+                    &holder,
+                    &ProcessRevisionId::new("production:household-process:v1").expect("process ID"),
+                    &first_site,
+                ),
+            },
+        );
+        settle_at_epoch(&mut canwu, "knowledge cap command admission");
+        settle_at_epoch(&mut canwu, "knowledge cap boundary");
     }
     assert_eq!(
         canwu
@@ -6279,6 +6346,7 @@ fn apply_compact_operation(
                             holder: holder.clone(),
                             expected_runtime_revision,
                             operation,
+                            scope: None,
                         })
                         .expect("production command payload"),
                     },

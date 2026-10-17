@@ -13,10 +13,10 @@
 //! archive API.
 
 use canwu_api::{
-    BoundaryRequest, Canwu, CanwuError, DomainRecordType, DomainRecordVersionRef,
-    DomainRecordVersionSource, EntityRef, Government, GovernmentId, KnowledgeHolderRef,
-    KnowledgeSnapshot, MapPoint, Person, PersonId, Scenario, SimTime, Territory, TerritoryId,
-    TypedDomainRecordRef, WorldSnapshot,
+    BoundaryRequest, Canwu, CanwuError, Command, CommandEnvelope, CommandRequest, CommandRequestId,
+    DomainRecordType, DomainRecordVersionRef, DomainRecordVersionSource, EntityRef, Government,
+    GovernmentId, Issuer, KnowledgeHolderRef, KnowledgeSnapshot, MapPoint, Person, PersonId,
+    Scenario, SimTime, Territory, TerritoryId, TypedDomainRecordRef, WorldSnapshot,
 };
 use canwu_production::*;
 use canwu_resource::{
@@ -42,7 +42,7 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::Command as Process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -314,6 +314,7 @@ fn command(
         holder: holder(),
         expected_runtime_revision: state.revision,
         operation,
+        scope: None,
     }
 }
 
@@ -450,6 +451,19 @@ fn resource_input(process: &ProcessRevision, suffix: &str) -> ResourceInputBindi
 
 /// Adds one settled execution named by `suffix` to `state`.
 fn settle_execution(state: &mut ProductionState, suffix: &str) -> ProductionExecutionId {
+    run_execution(state, suffix, &site_id(), &facility_id(), true)
+}
+
+/// Adds one execution named by `suffix` at `site` and `facility` to `state`:
+/// settled when `settle`, otherwise left running with its completion lease
+/// active.
+fn run_execution(
+    state: &mut ProductionState,
+    suffix: &str,
+    site: &ProductionSiteId,
+    facility: &FacilityAssetId,
+    settle: bool,
+) -> ProductionExecutionId {
     let process = process();
     let order_id = WorkOrderId::new(format!("production:order:{suffix}")).expect("order");
     state
@@ -462,7 +476,7 @@ fn settle_execution(state: &mut ProductionState, suffix: &str) -> ProductionExec
                         id: order_id.clone(),
                         holder: holder(),
                         process: process.id.clone(),
-                        site: site_id(),
+                        site: site.clone(),
                         quantity: 1,
                         lifecycle: WorkOrderLifecycle::Proposed,
                         execution: None,
@@ -532,15 +546,16 @@ fn settle_execution(state: &mut ProductionState, suffix: &str) -> ProductionExec
         Vec::new(),
     )
     .expect("eligibility");
+    // Room for every lease a scale fixture leaves running.
     state.production_run_budget = Some(
         RunBudgetRevisionV1 {
             revision: revision(1),
-            total_completion_units: units.saturating_mul(4),
+            total_completion_units: units.saturating_mul(1 << 20),
             shared_pending_slots: 0,
             partitions: vec![CompletionCapacityPartitionV1 {
                 authority: holder(),
                 operation_namespace: PRODUCTION_COMPLETION_OPERATION_NAMESPACE.to_owned(),
-                guaranteed_units: units.saturating_mul(2),
+                guaranteed_units: units.saturating_mul(1 << 19),
                 reserved_pending_slots: 2,
                 maximum_burst_units: units,
                 request_token_capacity: 2,
@@ -577,8 +592,14 @@ fn settle_execution(state: &mut ProductionState, suffix: &str) -> ProductionExec
                 acquisition: acquisition.clone(),
                 expected_acquisition_revision: revision(1),
                 owner_plugin: canwu_production::PLUGIN_NAME.to_owned(),
+                // A live lease locks the runtime version current when it is
+                // granted, so concurrent leases lock distinct versions.
                 target_versions: vec![CompletionLockedTargetV1::ExternalRecord {
-                    version: version::<ProductionRuntimeRecord>(PRODUCTION_RUNTIME_ID),
+                    version: DomainRecordVersionRef {
+                        version: u64::try_from(state.completion_acquisitions.len())
+                            .expect("lease count"),
+                        ..version::<ProductionRuntimeRecord>(PRODUCTION_RUNTIME_ID)
+                    },
                 }],
                 current_boundary: 1,
             },
@@ -657,8 +678,8 @@ fn settle_execution(state: &mut ProductionState, suffix: &str) -> ProductionExec
         id: execution_id.clone(),
         work_order: order_id.clone(),
         process: process.id.clone(),
-        site: site_id(),
-        facility: facility_id(),
+        site: site.clone(),
+        facility: facility.clone(),
         allocations: vec![allocation_id.clone()],
         lifecycle: WorkOrderLifecycle::Running,
         started_at: at,
@@ -700,7 +721,7 @@ fn settle_execution(state: &mut ProductionState, suffix: &str) -> ProductionExec
     };
     let allocation = ProductionCapacityAllocation {
         id: allocation_id,
-        facility: facility_id(),
+        facility: facility.clone(),
         facility_generation: 1,
         capability: "bench".to_owned(),
         start: at,
@@ -726,6 +747,9 @@ fn settle_execution(state: &mut ProductionState, suffix: &str) -> ProductionExec
             at,
         )
         .expect("start execution");
+    if !settle {
+        return execution_id;
+    }
     let advance_at = at
         .checked_add(canwu_api::SimDuration::minutes(10))
         .expect("advance time");
@@ -840,6 +864,11 @@ fn settle_execution(state: &mut ProductionState, suffix: &str) -> ProductionExec
 }
 
 fn scenario(state: ProductionState) -> Scenario {
+    scenario_of(vec![state])
+}
+
+/// A scenario holding every production root of `states`.
+fn scenario_of(states: Vec<ProductionState>) -> Scenario {
     let actor = PersonId::new(1);
     let government = GovernmentId::new(1);
     let territory = TerritoryId::new(1);
@@ -872,7 +901,10 @@ fn scenario(state: ProductionState) -> Scenario {
         entities: world.entities(),
         world,
         knowledge: KnowledgeSnapshot::default(),
-        domain_records: vec![state.into_initial_record().expect("production root")],
+        domain_records: states
+            .into_iter()
+            .map(|state| state.into_initial_record().expect("production root"))
+            .collect(),
     }
 }
 
@@ -1293,6 +1325,448 @@ fn multi_page_case(executions: usize, prior_commits: usize) -> Result<Value, Box
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Scale: what each production record adds to the root, what the root's
+// whole-state steps cost as it grows, and what a boundary of tracked
+// production commands costs.
+
+fn scale_site_id(index: usize) -> ProductionSiteId {
+    ProductionSiteId::new(format!("production:site:{index:06}")).expect("site")
+}
+
+fn scale_facility_id(index: usize) -> FacilityAssetId {
+    FacilityAssetId::new(format!("production:facility:{index:06}")).expect("facility")
+}
+
+/// One process and `sites` household sites of one facility each, all held by
+/// the one operator.
+fn scale_world(sites: usize) -> ProductionState {
+    let mut state = ProductionState {
+        revision: 1,
+        ..ProductionState::default()
+    };
+    let process = process();
+    state.processes.insert(process.id.clone(), process);
+    for index in 0..sites {
+        state.sites.insert(
+            scale_site_id(index),
+            ProductionSite {
+                id: scale_site_id(index),
+                holder: holder(),
+                place: EntityRef::Territory(TerritoryId::new(1)),
+                form: ProductionSiteForm::Household,
+                active: true,
+            },
+        );
+        state.facilities.insert(
+            scale_facility_id(index),
+            FacilityAsset {
+                id: scale_facility_id(index),
+                site: scale_site_id(index),
+                generation: 1,
+                lifecycle: FacilityLifecycle::Operational,
+                condition_per_mille: 1_000,
+                capacity: BTreeMap::from([("bench".to_owned(), 1)]),
+                maintenance_evidence: Vec::new(),
+                operational_stage_capacity_per_mille: 0,
+                incident_risk_per_mille: 0,
+                incident_max_severity_per_mille: 0,
+            },
+        );
+    }
+    state
+}
+
+/// `scale_world(sites)` with `running` running executions and `settled`
+/// settled ones, one per site from the first.
+fn scale_state(sites: usize, running: usize, settled: usize) -> ProductionState {
+    let mut state = scale_world(sites);
+    for index in 0..running.saturating_add(settled) {
+        run_execution(
+            &mut state,
+            &format!("scale-{index:06}"),
+            &scale_site_id(index % sites.max(1)),
+            &scale_facility_id(index % sites.max(1)),
+            index >= running,
+        );
+    }
+    state.observation_dirty_index.clear();
+    state.observation_due_index.clear();
+    state.rebuild_runtime_indexes().expect("scale indexes");
+    state.validate().expect("scale state");
+    state
+}
+
+fn encoded_len(state: &ProductionState) -> usize {
+    serde_json::to_vec(state).expect("encode").len()
+}
+
+/// Median of `samples` timed runs of `step`, in milliseconds.
+fn median_ms(samples: usize, mut step: impl FnMut()) -> f64 {
+    let mut times = (0..samples.max(1))
+        .map(|_| {
+            let started = Instant::now();
+            step();
+            milliseconds(started)
+        })
+        .collect::<Vec<_>>();
+    times.sort_by(f64::total_cmp);
+    times[times.len() / 2]
+}
+
+/// Encoded bytes each kind of record adds to the root.
+fn scale_record_bytes() -> Value {
+    let count = 256;
+    let empty = encoded_len(&scale_world(0));
+    let sites = scale_world(count);
+    let per_site = (encoded_len(&sites) - empty) as f64 / count as f64;
+    let running = scale_state(count, count, 0);
+    let per_running = (encoded_len(&running) - encoded_len(&sites)) as f64 / count as f64;
+    let settled = scale_state(count, 0, count);
+    let per_settled = (encoded_len(&settled) - encoded_len(&sites)) as f64 / count as f64;
+    // The outcome of a start: the plugin records every operation's outcome
+    // with its whole command envelope.
+    let mut probe = scale_world(1);
+    run_execution(
+        &mut probe,
+        "outcome",
+        &scale_site_id(0),
+        &scale_facility_id(0),
+        false,
+    );
+    let execution = probe.executions.values().next().expect("execution").clone();
+    let allocations = probe
+        .capacity_allocations
+        .values()
+        .cloned()
+        .map(|mut allocation| {
+            allocation.state = CapacityAllocationState::Reserved;
+            allocation
+        })
+        .collect::<Vec<_>>();
+    let start = command(
+        &probe,
+        "production:start:outcome",
+        ProductionOperation::StartExecution {
+            execution,
+            allocations,
+        },
+    );
+    let outcome = ProductionOperationOutcome {
+        id: start.operation_id.clone(),
+        canonical_input_hash: "0".repeat(64),
+        command: start,
+        disposition: ProductionOperationDisposition::Applied,
+        work_order: None,
+        execution: None,
+        project: None,
+        rejection_code: None,
+        rejection_message: None,
+        settled_at: SimTime::EPOCH,
+    };
+    json!({
+        "site_with_facility_bytes": per_site,
+        "running_execution_bytes": per_running,
+        "settled_execution_bytes": per_settled,
+        "start_outcome_bytes": serde_json::to_vec(&outcome).expect("outcome").len(),
+    })
+}
+
+/// The whole-state steps every production boundary system and every
+/// command admission repeats: decode, validate, encode, and clone.
+fn scale_root_case(sites: usize, running: usize, settled: usize) -> Value {
+    let state = scale_state(sites, running, settled);
+    let value = serde_json::to_value(&state).expect("encode");
+    let samples = 5;
+    let decode_ms = median_ms(samples, || {
+        let _: ProductionState = serde_json::from_value(value.clone()).expect("decode");
+    });
+    let clone_value_ms = median_ms(samples, || {
+        let _ = value.clone();
+    });
+    let validate_ms = median_ms(samples, || state.validate().expect("validate"));
+    let encode_ms = median_ms(samples, || {
+        let _ = serde_json::to_value(&state).expect("encode");
+    });
+    let clone_ms = median_ms(samples, || {
+        let _ = state.clone();
+    });
+    json!({
+        "sites": sites,
+        "facilities": state.facilities.len(),
+        "running_executions": running,
+        "settled_executions": settled,
+        "root_bytes": encoded_len(&state),
+        "decode_ms": decode_ms - clone_value_ms,
+        "validate_ms": validate_ms,
+        "encode_ms": encode_ms,
+        "clone_ms": clone_ms,
+    })
+}
+
+/// Queues one tracked production command that expects the simulation
+/// revision `expected`: each command admitted before it in the boundary
+/// advances the revision by one.
+fn enqueue_production_command(
+    canwu: &mut Canwu,
+    request: u64,
+    expected: u64,
+    envelope: &ProductionCommandEnvelope,
+) -> Result<(), Box<dyn Error>> {
+    canwu.enqueue_command(
+        canwu.time(),
+        0,
+        CommandRequest::new(
+            CommandRequestId::new(request),
+            expected,
+            CommandEnvelope::new(
+                Issuer::Actor(PersonId::new(1)),
+                Command::Plugin {
+                    plugin: canwu_production::PLUGIN_NAME.to_owned(),
+                    command: PRODUCTION_COMMAND.to_owned(),
+                    payload: serde_json::to_value(envelope)?,
+                },
+            )
+            .at_time(canwu.time()),
+        ),
+    )?;
+    Ok(())
+}
+
+/// One boundary admitting `commands` tracked `CreateWorkOrder` commands, on
+/// distinct sites, against a root of `sites` sites and `running` running
+/// executions. Each command expects the revision its predecessors leave, so
+/// every one applies.
+fn scale_boundary_case(
+    sites: usize,
+    running: usize,
+    commands: usize,
+) -> Result<Value, Box<dyn Error>> {
+    let state = scale_state(sites, running, 0);
+    let root_bytes = encoded_len(&state);
+    let plugin = ProductionPlugin;
+    let mut canwu = Canwu::new_with_plugins(0x00CA_4E55, scenario(state), &[&plugin])?;
+    // An idle boundary first: nothing for production.
+    let started = Instant::now();
+    canwu.settle_boundary(BoundaryRequest::at(canwu.time()))?;
+    let idle_ms = milliseconds(started);
+    let revision = production_state(&canwu).revision;
+    let simulation_revision = canwu.revision();
+    let at = canwu.time();
+    for index in 0..commands {
+        let envelope = ProductionCommandEnvelope {
+            operation_id: ProductionOperationOutcomeId::new(format!(
+                "production:scale-create:{index:06}"
+            ))?,
+            holder: holder(),
+            expected_runtime_revision: revision + index as u64,
+            operation: ProductionOperation::CreateWorkOrder {
+                work_order: WorkOrder {
+                    id: WorkOrderId::new(format!("production:scale-order:{index:06}"))?,
+                    holder: holder(),
+                    process: process().id,
+                    site: scale_site_id(running.saturating_add(index) % sites.max(1)),
+                    quantity: 1,
+                    lifecycle: WorkOrderLifecycle::Proposed,
+                    execution: None,
+                    expected_revision: 1,
+                    created_at: at,
+                },
+            },
+            scope: None,
+        };
+        enqueue_production_command(
+            &mut canwu,
+            1_000 + index as u64,
+            simulation_revision + index as u64,
+            &envelope,
+        )?;
+    }
+    // The boundary that admits the commands queues one operation packet
+    // each, which the next boundary settles.
+    let cursor = canwu.evidence_cursor()?;
+    let started = Instant::now();
+    canwu.settle_boundary(BoundaryRequest::at(canwu.time()))?;
+    let admission_ms = milliseconds(started);
+    let admission_journal = serde_json::to_vec(&canwu.journal_segment_since(cursor)?)?.len();
+    let cursor = canwu.evidence_cursor()?;
+    let started = Instant::now();
+    canwu.settle_boundary(BoundaryRequest::at(canwu.time()))?;
+    let boundary_ms = milliseconds(started);
+    let journal = serde_json::to_vec(&canwu.journal_segment_since(cursor)?)?.len();
+    if std::env::var_os("PROFILE_DEBUG").is_some() {
+        for record in canwu.command_attempts().iter().rev().take(3) {
+            eprintln!("command {:?}", record.outcome);
+        }
+        for event in canwu.events().iter().rev().take(6) {
+            eprintln!("event {:?} {}", event.kind, event.summary);
+        }
+    }
+    let after = production_state(&canwu);
+    if std::env::var_os("PROFILE_DEBUG").is_some() {
+        for outcome in after.operation_outcomes.values().take(3) {
+            eprintln!(
+                "outcome {:?} {:?}",
+                outcome.disposition, outcome.rejection_message
+            );
+        }
+    }
+    let applied = after
+        .operation_outcomes
+        .values()
+        .filter(|outcome| outcome.disposition == ProductionOperationDisposition::Applied)
+        .count();
+    Ok(json!({
+        "sites": sites,
+        "running_executions": running,
+        "root_bytes": root_bytes,
+        "commands": commands,
+        "applied": applied,
+        "idle_boundary_ms": idle_ms,
+        "admission_boundary_ms": admission_ms,
+        "admission_journal_bytes": admission_journal,
+        "boundary_ms": boundary_ms,
+        "boundary_ms_per_command": boundary_ms / commands.max(1) as f64,
+        "journal_bytes": journal,
+    }))
+}
+
+/// A `CreateWorkOrder` of the scale world, on the site `index`.
+fn scale_create(
+    index: usize,
+    sites: usize,
+    at: SimTime,
+) -> Result<ProductionBatchItemV1, Box<dyn Error>> {
+    Ok(ProductionBatchItemV1 {
+        operation_id: ProductionOperationOutcomeId::new(format!(
+            "production:scale-batch-create:{index:06}"
+        ))?,
+        operation: ProductionOperation::CreateWorkOrder {
+            work_order: WorkOrder {
+                id: WorkOrderId::new(format!("production:scale-batch-order:{index:06}"))?,
+                holder: holder(),
+                process: process().id,
+                site: scale_site_id(index % sites.max(1)),
+                quantity: 1,
+                lifecycle: WorkOrderLifecycle::Proposed,
+                execution: None,
+                expected_revision: 1,
+                created_at: at,
+            },
+        },
+    })
+}
+
+/// Settles one tracked production batch of `items` `CreateWorkOrder` items
+/// against the root `scope` of a run: the boundary that admits the command,
+/// then the boundary that settles its packet.
+fn settle_batch(
+    canwu: &mut Canwu,
+    scope: Option<&ProductionScopeId>,
+    sites: usize,
+    items: usize,
+) -> Result<Value, Box<dyn Error>> {
+    let at = canwu.time();
+    let batch = ProductionBatchEnvelopeV1 {
+        holder: holder(),
+        scope: scope.cloned(),
+        expected_runtime_revision: None,
+        items: (0..items)
+            .map(|index| scale_create(index, sites, at))
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+    canwu.enqueue_command(
+        at,
+        0,
+        CommandRequest::new(
+            CommandRequestId::new(5_000),
+            canwu.revision(),
+            CommandEnvelope::new(
+                Issuer::Actor(PersonId::new(1)),
+                Command::Plugin {
+                    plugin: canwu_production::PLUGIN_NAME.to_owned(),
+                    command: PRODUCTION_BATCH_COMMAND.to_owned(),
+                    payload: serde_json::to_value(&batch)?,
+                },
+            )
+            .at_time(at),
+        ),
+    )?;
+    let cursor = canwu.evidence_cursor()?;
+    let started = Instant::now();
+    canwu.settle_boundary(BoundaryRequest::at(at))?;
+    let admission_ms = milliseconds(started);
+    let admission_journal = serde_json::to_vec(&canwu.journal_segment_since(cursor)?)?.len();
+    let cursor = canwu.evidence_cursor()?;
+    let started = Instant::now();
+    canwu.settle_boundary(BoundaryRequest::at(at))?;
+    let boundary_ms = milliseconds(started);
+    let journal = serde_json::to_vec(&canwu.journal_segment_since(cursor)?)?.len();
+    let after = production_root_state(canwu, scope)?.ok_or("the batch root is absent")?;
+    let applied = after
+        .operation_outcomes
+        .values()
+        .filter(|outcome| outcome.disposition == ProductionOperationDisposition::Applied)
+        .count();
+    Ok(json!({
+        "items": items,
+        "applied": applied,
+        "admission_boundary_ms": admission_ms,
+        "admission_journal_bytes": admission_journal,
+        "boundary_ms": boundary_ms,
+        "boundary_ms_per_item": boundary_ms / items.max(1) as f64,
+        "journal_bytes": journal,
+    }))
+}
+
+/// One batch of `items` items against one root of `sites` sites and
+/// `running` running executions: the batching contract's cost on the same
+/// roots as the boundary cases.
+fn scale_batch_case(sites: usize, running: usize, items: usize) -> Result<Value, Box<dyn Error>> {
+    let state = scale_state(sites, running, 0);
+    let root_bytes = encoded_len(&state);
+    let plugin = ProductionPlugin;
+    let mut canwu = Canwu::new_with_plugins(0x00CA_4E55, scenario(state), &[&plugin])?;
+    let mut result = settle_batch(&mut canwu, None, sites, items)?;
+    result["sites"] = json!(sites);
+    result["running_executions"] = json!(running);
+    result["root_bytes"] = json!(root_bytes);
+    Ok(result)
+}
+
+/// A world of `scopes` scope roots of `sites_per_scope` sites each, the
+/// primary root empty: one batch of `items` items into the first scope.
+fn scale_scopes_case(
+    scopes: usize,
+    sites_per_scope: usize,
+    items: usize,
+) -> Result<Value, Box<dyn Error>> {
+    let mut states = vec![scale_world(0)];
+    for index in 0..scopes {
+        let mut state = scale_world(sites_per_scope);
+        state.scope = Some(ProductionScopeId::new(format!("profile:scope-{index:04}"))?);
+        states.push(state);
+    }
+    let world_bytes = states.iter().map(encoded_len).sum::<usize>();
+    let scope_bytes = encoded_len(&states[1]);
+    let plugin = ProductionPlugin;
+    let started = Instant::now();
+    let mut canwu = Canwu::new_with_plugins(0x00CA_4E55, scenario_of(states), &[&plugin])?;
+    let install_ms = milliseconds(started);
+    let started = Instant::now();
+    canwu.settle_boundary(BoundaryRequest::at(canwu.time()))?;
+    let idle_ms = milliseconds(started);
+    let first = ProductionScopeId::new("profile:scope-0000")?;
+    let mut result = settle_batch(&mut canwu, Some(&first), sites_per_scope, items)?;
+    result["scopes"] = json!(scopes);
+    result["sites"] = json!(scopes * sites_per_scope);
+    result["world_root_bytes"] = json!(world_bytes);
+    result["scope_root_bytes"] = json!(scope_bytes);
+    result["install_ms"] = json!(install_ms);
+    result["idle_boundary_ms"] = json!(idle_ms);
+    Ok(result)
+}
+
 struct Options {
     preset: String,
     machine: String,
@@ -1318,7 +1792,7 @@ fn options() -> Result<Options, Box<dyn Error>> {
             "--help" | "-h" => {
                 println!(
                     "Canwu production archive profile\n\n\
-                     --preset smoke|full\n\
+                     --preset smoke|full|scale\n\
                      --machine LABEL --recorded-on DATE --output PATH"
                 );
                 std::process::exit(0);
@@ -1330,7 +1804,7 @@ fn options() -> Result<Options, Box<dyn Error>> {
 }
 
 fn command_output(program: &str, arguments: &[&str]) -> String {
-    Command::new(program)
+    Process::new(program)
         .args(arguments)
         .output()
         .ok()
@@ -1369,13 +1843,50 @@ fn source_content_hash() -> String {
 
 /// Pairs of case sizes; see `main`.
 type Cases = &'static [(usize, usize)];
+/// Triples of case sizes; see `main`.
+type ScaleCases = &'static [(usize, usize, usize)];
 
 fn main() -> Result<(), Box<dyn Error>> {
     let options = options()?;
+    // (sites, running executions, settled executions), (sites, running
+    // executions, commands in the boundary)
+    // (sites, running executions, batch items), (scopes, sites per scope,
+    // batch items)
+    let (batches, scope_worlds): (ScaleCases, ScaleCases) = match options.preset.as_str() {
+        "smoke" => (&[(256, 64, 16)], &[(8, 64, 16)]),
+        _ => (
+            &[(2_048, 0, 64), (2_048, 0, 1_024), (2_048, 1_024, 64)],
+            &[
+                (64, 64, 64),
+                (400, 64, 64),
+                (400, 64, 1_024),
+                (400, 160, 64),
+            ],
+        ),
+    };
+    let (roots, boundaries): (ScaleCases, ScaleCases) = match options.preset.as_str() {
+        "smoke" => (&[(256, 64, 64)], &[(256, 64, 4)]),
+        _ => (
+            &[
+                (2_048, 0, 0),
+                (2_048, 1_024, 0),
+                (2_048, 0, 1_024),
+                (2_048, 2_048, 0),
+            ],
+            &[
+                (2_048, 0, 1),
+                (2_048, 0, 16),
+                (2_048, 0, 64),
+                (2_048, 1_024, 1),
+                (2_048, 1_024, 16),
+            ],
+        ),
+    };
     // (resource commits, records per commit), (commits, first-commit
     // executions), (executions, prior commits)
     let (restores, lifetimes, pages): (Cases, Cases, Cases) = match options.preset.as_str() {
         "smoke" => (&[(37, 27), (100, 1)], &[(100, 1)], &[(70, 10)]),
+        "scale" => (&[], &[], &[]),
         "full" => (
             &[
                 (37, 27),
@@ -1408,6 +1919,28 @@ fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("multi-page case: {executions} executions after {prior} commits");
         multi_page_cases.push(multi_page_case(*executions, *prior)?);
     }
+    eprintln!("scale: record bytes");
+    let record_bytes = scale_record_bytes();
+    let mut root_cases = Vec::new();
+    for (sites, running, settled) in roots {
+        eprintln!("scale root: {sites} sites, {running} running, {settled} settled");
+        root_cases.push(scale_root_case(*sites, *running, *settled));
+    }
+    let mut boundary_cases = Vec::new();
+    for (sites, running, commands) in boundaries {
+        eprintln!("scale boundary: {sites} sites, {running} running, {commands} commands");
+        boundary_cases.push(scale_boundary_case(*sites, *running, *commands)?);
+    }
+    let mut batch_cases = Vec::new();
+    for (sites, running, items) in batches {
+        eprintln!("scale batch: {sites} sites, {running} running, {items} items");
+        batch_cases.push(scale_batch_case(*sites, *running, *items)?);
+    }
+    let mut scope_cases = Vec::new();
+    for (scopes, sites_per_scope, items) in scope_worlds {
+        eprintln!("scale scopes: {scopes} scopes of {sites_per_scope} sites, {items} items");
+        scope_cases.push(scale_scopes_case(*scopes, *sites_per_scope, *items)?);
+    }
     let report = json!({
         "benchmark": "production-archive-profile",
         "preset": options.preset,
@@ -1422,6 +1955,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         "restore_cases": restore_cases,
         "lifetime_cases": lifetime_cases,
         "multi_page_cases": multi_page_cases,
+        "scale": {
+            "record_bytes": record_bytes,
+            "root_cases": root_cases,
+            "boundary_cases": boundary_cases,
+            "batch_cases": batch_cases,
+            "scope_cases": scope_cases,
+        },
     });
     let text = serde_json::to_string_pretty(&report)?;
     match options.output {

@@ -2,7 +2,7 @@ use crate::model::{
     MAX_REPORT_FACTS, ProductionExecution, ProductionObservationHeadKeyV1,
     ProductionObservationHeadV1, ProductionObservationId, ProductionObservationReport,
     ProductionObservationWitnessV1, ProductionRuntimeRecord, ProductionState, WorkOrderLifecycle,
-    invalid, production_runtime_reference,
+    invalid,
 };
 use canwu_api::{
     Canwu, CanwuError, Command, DecisionAction, DecisionContext, DecisionOption,
@@ -66,24 +66,29 @@ fn validate_production_runtime_with_archive_providers(
     production_archive: Option<&dyn crate::ProductionArchiveStore>,
     resource_archive: Option<&dyn canwu_resource::ResourceArchiveStore>,
 ) -> Result<(), CanwuError> {
-    let Some(record) = canwu_api::typed_domain_record(canwu, &production_runtime_reference())
-    else {
-        return Ok(());
-    };
-    let state = record.decode_payload::<ProductionRuntimeRecord>()?;
-    state.validate()?;
-    if state.draft()?.payload != record.payload {
-        return Err(invalid(
-            "production runtime root is not canonically encoded",
-        ));
+    let mut roots = Vec::new();
+    for record in canwu.domain_records().filter(|record| {
+        record
+            .reference
+            .kind
+            .matches_type::<ProductionRuntimeRecord>()
+    }) {
+        let state = record.decode_payload::<ProductionRuntimeRecord>()?;
+        if record.reference != state.runtime_reference().into_untyped() {
+            return Err(invalid(
+                "production runtime root names another scope than its record",
+            ));
+        }
+        state.validate()?;
+        if state.draft()?.payload != record.payload {
+            return Err(invalid(
+                "production runtime root is not canonically encoded",
+            ));
+        }
+        roots.push((record.reference.clone(), state));
     }
-    if state.archive.directory_root.is_some() || !state.archive.pending_handles.is_empty() {
-        let store = production_archive.ok_or_else(|| {
-            invalid(
-                "production restore requires its archive provider to authenticate the complete directory and pending-retention closure",
-            )
-        })?;
-        crate::validate_production_archive(store, &state)?;
+    if roots.is_empty() {
+        return Ok(());
     }
     // With an archive provider, the resource archive this production root reads
     // through is audited as the resource restore wrappers audit it, so a lookup
@@ -95,7 +100,10 @@ fn validate_production_runtime_with_archive_providers(
         canwu_resource::validate_resource_archive_store(&resource, store)
             .map_err(|error| resource_archive_error(&error))?;
     }
-    let resource_state = if state.executions.is_empty() && state.facility_projects.is_empty() {
+    let resource_state = if roots
+        .iter()
+        .all(|(_, state)| state.executions.is_empty() && state.facility_projects.is_empty())
+    {
         None
     } else {
         Some(
@@ -106,42 +114,63 @@ fn validate_production_runtime_with_archive_providers(
                 })?,
         )
     };
-    for execution in state.executions.values() {
-        validate_execution_restore(canwu, resource_state.as_ref(), resource_archive, execution)?;
-    }
-    for project in state.facility_projects.values() {
-        validate_project_restore(canwu, resource_state.as_ref(), resource_archive, project)?;
-    }
-    if !state.resource_continuation_witnesses.is_empty() {
-        let resource = resource_state.as_ref().ok_or_else(|| {
-            invalid("production continuation witness requires the resource runtime")
-        })?;
-        let store = resource_archive.ok_or_else(|| {
-            invalid("production continuation witness requires its resource archive provider")
-        })?;
-        // Each witness names a commit of the resource archive chain, which was
-        // audited above; it is walked once for every witness together.
-        let chain = resource_archive_chain_counts(resource, store)?;
-        for (project_id, witness) in &state.resource_continuation_witnesses {
-            let project = state
-                .facility_projects
-                .get(project_id)
-                .ok_or_else(|| invalid("production continuation witness lost its project"))?;
-            if chain.get(&witness.resource_archive_directory_root)
-                != Some(&witness.resource_archive_record_count)
-            {
-                return Err(invalid(
-                    "production continuation witness names no commit of the resource archive chain",
-                ));
+    let mut chain = None;
+    for (reference, state) in &roots {
+        if state.archive.directory_root.is_some() || !state.archive.pending_handles.is_empty() {
+            let store = production_archive.ok_or_else(|| {
+                invalid(
+                    "production restore requires its archive provider to authenticate the complete directory and pending-retention closure",
+                )
+            })?;
+            crate::validate_production_archive(store, state)?;
+        }
+        for execution in state.executions.values() {
+            validate_execution_restore(
+                canwu,
+                reference,
+                resource_state.as_ref(),
+                resource_archive,
+                execution,
+            )?;
+        }
+        for project in state.facility_projects.values() {
+            validate_project_restore(canwu, resource_state.as_ref(), resource_archive, project)?;
+        }
+        if !state.resource_continuation_witnesses.is_empty() {
+            let resource = resource_state.as_ref().ok_or_else(|| {
+                invalid("production continuation witness requires the resource runtime")
+            })?;
+            let store = resource_archive.ok_or_else(|| {
+                invalid("production continuation witness requires its resource archive provider")
+            })?;
+            // Each witness names a commit of the resource archive chain, which
+            // was audited above; it is walked once for every witness of every
+            // root together.
+            if chain.is_none() {
+                chain = Some(resource_archive_chain_counts(resource, store)?);
             }
-            for input in &project.inputs {
-                validate_resource_input_restore(resource, Some(store), input)?;
+            let chain = chain.as_ref().expect("the chain was walked");
+            for (project_id, witness) in &state.resource_continuation_witnesses {
+                let project = state
+                    .facility_projects
+                    .get(project_id)
+                    .ok_or_else(|| invalid("production continuation witness lost its project"))?;
+                if chain.get(&witness.resource_archive_directory_root)
+                    != Some(&witness.resource_archive_record_count)
+                {
+                    return Err(invalid(
+                        "production continuation witness names no commit of the resource archive chain",
+                    ));
+                }
+                for input in &project.inputs {
+                    validate_resource_input_restore(resource, Some(store), input)?;
+                }
             }
         }
+        validate_production_decisions(canwu, state)?;
+        validate_production_incident_draws(canwu, reference, state)?;
     }
-    validate_production_decisions(canwu, &state)?;
-    validate_production_incident_draws(canwu, &state)?;
-    validate_production_knowledge(canwu, &state)?;
+    validate_production_knowledge(canwu, &roots)?;
     Ok(())
 }
 
@@ -185,16 +214,25 @@ fn validate_production_decisions(canwu: &Canwu, state: &ProductionState) -> Resu
 
 fn validate_production_incident_draws(
     canwu: &Canwu,
+    root: &canwu_api::DomainRecordRef,
     state: &ProductionState,
 ) -> Result<(), CanwuError> {
+    // The receipts of one incident boundary cite one source version: each
+    // version is found and hashed once.
+    let mut source_digests = std::collections::BTreeMap::<u64, String>::new();
     for receipt in state.incident_receipts.values() {
-        let source = production_record_at_revision(canwu, receipt.source_record_revision)
-            .ok_or_else(|| {
-                invalid("production incident source runtime version is unavailable at restore")
-            })?;
-        if receipt.source_record_digest
-            != canonical_hash("canwu.production.runtime-cut.v1", &source)?
-        {
+        let digest = if let Some(digest) = source_digests.get(&receipt.source_record_revision) {
+            digest.clone()
+        } else {
+            let source = production_record_at_revision(canwu, root, receipt.source_record_revision)
+                .ok_or_else(|| {
+                    invalid("production incident source runtime version is unavailable at restore")
+                })?;
+            let digest = canonical_hash("canwu.production.runtime-cut.v1", &source)?;
+            source_digests.insert(receipt.source_record_revision, digest.clone());
+            digest
+        };
+        if receipt.source_record_digest != digest {
             return Err(invalid(
                 "production incident source-runtime digest differs from its exact restored body",
             ));
@@ -219,8 +257,12 @@ fn validate_production_incident_draws(
     Ok(())
 }
 
-fn production_record_at_revision(canwu: &Canwu, revision: u64) -> Option<canwu_api::DomainRecord> {
-    let reference = production_runtime_reference().into_untyped();
+fn production_record_at_revision(
+    canwu: &Canwu,
+    root: &canwu_api::DomainRecordRef,
+    revision: u64,
+) -> Option<canwu_api::DomainRecord> {
+    let reference = root.clone();
     if revision == 1 {
         let version = canwu_api::DomainRecordVersionRef {
             record: reference.clone(),
@@ -251,6 +293,7 @@ fn production_record_at_revision(canwu: &Canwu, revision: u64) -> Option<canwu_a
 
 fn validate_execution_restore(
     canwu: &Canwu,
+    root: &canwu_api::DomainRecordRef,
     resource_state: Option<&canwu_resource::ResourceState>,
     resource_archive: Option<&dyn canwu_resource::ResourceArchiveStore>,
     execution: &ProductionExecution,
@@ -382,6 +425,7 @@ fn validate_execution_restore(
         .zip(&execution.output_outcomes)
     {
         validate_settled_output_restore(
+            root,
             resource_state,
             resource_archive,
             execution,
@@ -687,6 +731,7 @@ fn resource_archive_error(error: &canwu_resource::ResourceError) -> CanwuError {
 /// read: the production root no longer declares it once the output settled,
 /// so a seal may drop it, and the exact outcome already binds it.
 fn validate_settled_output_restore(
+    root: &canwu_api::DomainRecordRef,
     resource_state: &canwu_resource::ResourceState,
     resource_archive: Option<&dyn canwu_resource::ResourceArchiveStore>,
     execution: &ProductionExecution,
@@ -697,9 +742,7 @@ fn validate_settled_output_restore(
         .output_source
         .as_ref()
         .ok_or_else(|| invalid("settled production output lost its exact production source"))?;
-    if request.operation_key != expected.operation_key
-        || source.record != production_runtime_reference().into_untyped()
-    {
+    if request.operation_key != expected.operation_key || source.record != *root {
         return Err(invalid(
             "settled production output does not bind its request and production source",
         ));
@@ -713,10 +756,29 @@ fn validate_settled_output_restore(
     )
 }
 
-fn validate_production_knowledge(canwu: &Canwu, state: &ProductionState) -> Result<(), CanwuError> {
-    let limits = crate::ProductionLimitsV1::canonical();
+/// Checks every production report in the knowledge ledger against the root
+/// whose observation head it was published from: the root its origin
+/// evidence names. The report bounds count across every root, so the totals
+/// are checked against the largest bound any root configures.
+fn validate_production_knowledge(
+    canwu: &Canwu,
+    roots: &[(canwu_api::DomainRecordRef, ProductionState)],
+) -> Result<(), CanwuError> {
+    let max_total = roots
+        .iter()
+        .map(|(_, state)| state.limits.max_observation_records)
+        .max()
+        .unwrap_or_default();
+    let max_per_holder = roots
+        .iter()
+        .map(|(_, state)| state.limits.max_observation_records_per_holder)
+        .max()
+        .unwrap_or_default();
     let mut total = 0_usize;
     let mut per_holder = std::collections::BTreeMap::<KnowledgeHolderRef, usize>::new();
+    // Each provider source version is decoded once for all the reports that
+    // cite it.
+    let mut source_revisions = std::collections::BTreeMap::<DomainRecordVersionRef, u64>::new();
     for (holder, records) in &canwu.knowledge().records {
         for record in records
             .values()
@@ -729,10 +791,8 @@ fn validate_production_knowledge(canwu: &Canwu, state: &ProductionState) -> Resu
             *holder_count = holder_count
                 .checked_add(1)
                 .ok_or_else(|| invalid("production holder knowledge count overflowed"))?;
-            if total > limits.max_observation_records
-                || *holder_count > limits.max_observation_records_per_holder
-            {
-                return Err(invalid("production knowledge exceeds its canonical cap"));
+            if total > max_total || *holder_count > max_per_holder {
+                return Err(invalid("production knowledge exceeds its configured bound"));
             }
             if record.schema != crate::production_report_knowledge_schema_id()
                 || record.holder != *holder
@@ -746,6 +806,20 @@ fn validate_production_knowledge(canwu: &Canwu, state: &ProductionState) -> Resu
             let report: ProductionObservationReport =
                 serde_json::from_value(record.payload.clone()).map_err(|error| {
                     invalid(format!("production report could not be decoded: {error}"))
+                })?;
+            let state = record
+                .origin
+                .evidence
+                .iter()
+                .find_map(|evidence| match evidence {
+                    EvidenceRef::DomainRecordVersion(version) => roots
+                        .iter()
+                        .find(|(reference, _)| *reference == version.record)
+                        .map(|(_, state)| state),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    invalid("production report names no installed production root as its source")
                 })?;
             let grant = state
                 .observer_grants
@@ -778,58 +852,79 @@ fn validate_production_knowledge(canwu: &Canwu, state: &ProductionState) -> Resu
                 scope: report.scope.clone(),
             };
             let storage_key = crate::model::production_observation_head_storage_key(&key)?;
+            let matches_report = |head: &&crate::ProductionObservationHeadV1| {
+                head.observed_at == report.observed_at
+                    && head.role == report.role
+                    && head.facts == report.facts
+                    && head.blockers == report.blockers
+            };
+            // A report is checked against its observation head while the root
+            // keeps it. Reports are kept for life, but a head leaves the root
+            // once it rolls out of its pair's window and a newer head is
+            // eligible; such a report is checked by its own content, grant,
+            // and subject, and its origin names an installed root, which its
+            // publication checked against the head (exact replay rechecks
+            // that).
             let observed_head = state
                 .observation_heads
                 .get(&storage_key)
-                .and_then(|heads| {
-                    heads.iter().find(|head| {
-                        head.observed_at == report.observed_at
-                            && head.role == report.role
-                            && head.facts == report.facts
-                            && head.blockers == report.blockers
+                .and_then(|heads| heads.iter().find(matches_report))
+                .or_else(|| {
+                    state
+                        .observation_rollover
+                        .values()
+                        .filter(|head| head.key == key)
+                        .find(matches_report)
+                });
+            if let Some(observed_head) = observed_head {
+                let source_versions = observed_head
+                    .source_evidence
+                    .iter()
+                    .filter_map(|evidence| match evidence {
+                        EvidenceRef::DomainRecordVersion(version) => Some(version),
+                        _ => None,
                     })
-                })
-                .ok_or_else(|| {
-                    invalid(
-                        "production report is not derived from a retained persisted observation cut",
-                    )
-                })?;
-            let source_versions = observed_head
-                .source_evidence
-                .iter()
-                .filter_map(|evidence| match evidence {
-                    EvidenceRef::DomainRecordVersion(version) => Some(version),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            if source_versions.is_empty() {
-                return Err(invalid(
-                    "production observation head has no exact provider source version",
-                ));
-            }
-            for version in source_versions {
-                let source = canwu.domain_record_version(version).ok_or_else(|| {
-                    invalid("production observation provider source is unavailable at restore")
-                })?;
-                if !source
-                    .reference
-                    .kind
-                    .matches_type::<ProductionRuntimeRecord>()
-                {
+                    .collect::<Vec<_>>();
+                if source_versions.is_empty() {
                     return Err(invalid(
-                        "production observation provider source has another record kind",
+                        "production observation head has no exact provider source version",
                     ));
                 }
-                let source_state = source.decode_payload::<ProductionRuntimeRecord>()?;
-                if source_state.revision != observed_head.provider_state_revision {
+                for version in source_versions {
+                    let revision = if let Some(revision) = source_revisions.get(version) {
+                        *revision
+                    } else {
+                        let source = canwu.domain_record_version(version).ok_or_else(|| {
+                            invalid(
+                                "production observation provider source is unavailable at restore",
+                            )
+                        })?;
+                        if !source
+                            .reference
+                            .kind
+                            .matches_type::<ProductionRuntimeRecord>()
+                        {
+                            return Err(invalid(
+                                "production observation provider source has another record kind",
+                            ));
+                        }
+                        let revision = source.decode_payload::<ProductionRuntimeRecord>()?.revision;
+                        source_revisions.insert(version.clone(), revision);
+                        revision
+                    };
+                    if revision != observed_head.provider_state_revision {
+                        return Err(invalid(
+                            "production observation provider source revision differs from its head",
+                        ));
+                    }
+                }
+                if observed_head.materialized_at > report.materialized_at {
                     return Err(invalid(
-                        "production observation provider source revision differs from its head",
+                        "production report predates its persisted observation materialization",
                     ));
                 }
             }
-            if report.observed_at > report.materialized_at
-                || observed_head.materialized_at > report.materialized_at
-            {
+            if report.observed_at > report.materialized_at {
                 return Err(invalid(
                     "production report predates its persisted observation materialization",
                 ));
@@ -850,10 +945,27 @@ pub fn production_report<H: canwu_api::CanwuRun + ?Sized>(
     holder: &KnowledgeHolderRef,
     scope: &crate::ProductionSiteId,
 ) -> Result<ProductionObservationReport, CanwuError> {
-    let record = canwu_api::typed_domain_record(canwu, &production_runtime_reference())
-        .ok_or_else(|| invalid("production runtime is not configured"))?;
-    let state = record.decode_payload::<ProductionRuntimeRecord>()?;
-    production_report_from_state(&state, holder, scope, canwu.time())
+    production_report_in_root(canwu, None, holder, scope)
+}
+
+/// [`production_report`] for a site of the production root `root` names
+/// (`None` for the primary root).
+pub fn production_report_in_root<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
+    root: Option<&crate::ProductionScopeId>,
+    holder: &KnowledgeHolderRef,
+    site: &crate::ProductionSiteId,
+) -> Result<ProductionObservationReport, CanwuError> {
+    let state = root_state(canwu, root)?;
+    production_report_from_state(&state, holder, site, canwu.time())
+}
+
+fn root_state<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
+    root: Option<&crate::ProductionScopeId>,
+) -> Result<ProductionState, CanwuError> {
+    crate::production_root_state(canwu, root)?
+        .ok_or_else(|| invalid("production runtime is not configured"))
 }
 
 /// The observation witness a holder may cite for production state.
@@ -863,9 +975,18 @@ pub fn production_observation_witness<H: canwu_api::CanwuRun + ?Sized>(
     holder: &KnowledgeHolderRef,
     scope: &crate::ProductionSiteId,
 ) -> Result<ProductionObservationWitnessV1, CanwuError> {
-    let record = canwu_api::typed_domain_record(canwu, &production_runtime_reference())
-        .ok_or_else(|| invalid("production runtime is not configured"))?;
-    let state = record.decode_payload::<ProductionRuntimeRecord>()?;
+    production_observation_witness_in_root(canwu, None, holder, scope)
+}
+
+/// [`production_observation_witness`] for a site of the production root
+/// `root` names (`None` for the primary root).
+pub fn production_observation_witness_in_root<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
+    root: Option<&crate::ProductionScopeId>,
+    holder: &KnowledgeHolderRef,
+    scope: &crate::ProductionSiteId,
+) -> Result<ProductionObservationWitnessV1, CanwuError> {
+    let state = root_state(canwu, root)?;
     let head = eligible_observation_head(&state, holder, scope, canwu.time())?;
     let report = production_report_from_head(head, canwu.time())?;
     let mut source_versions = head
@@ -951,9 +1072,32 @@ pub fn degraded_facility_decision_ticket<H: canwu_api::CanwuRun + ?Sized>(
     facility: &crate::FacilityAssetId,
     deadline: Option<SimTime>,
 ) -> Result<DecisionTicketDraft, CanwuError> {
-    let record = canwu_api::typed_domain_record(canwu, &production_runtime_reference())
-        .ok_or_else(|| invalid("production runtime is not configured"))?;
-    let state = record.decode_payload::<ProductionRuntimeRecord>()?;
+    degraded_facility_decision_ticket_in_root(
+        canwu,
+        None,
+        ticket_id,
+        assigned_controller,
+        holder,
+        work_order,
+        facility,
+        deadline,
+    )
+}
+
+/// [`degraded_facility_decision_ticket`] for a work order of the production
+/// root `root` names (`None` for the primary root).
+#[allow(clippy::too_many_arguments)]
+pub fn degraded_facility_decision_ticket_in_root<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
+    root: Option<&crate::ProductionScopeId>,
+    ticket_id: DecisionTicketId,
+    assigned_controller: impl Into<String>,
+    holder: &KnowledgeHolderRef,
+    work_order: &crate::WorkOrderId,
+    facility: &crate::FacilityAssetId,
+    deadline: Option<SimTime>,
+) -> Result<DecisionTicketDraft, CanwuError> {
+    let state = root_state(canwu, root)?;
     let order = state
         .work_orders
         .get(work_order)
@@ -1015,6 +1159,7 @@ pub fn degraded_facility_decision_ticket<H: canwu_api::CanwuRun + ?Sized>(
                 choice,
                 decision_ticket: ticket_id,
             },
+            scope: state.scope.clone(),
         };
         let command = Command::Plugin {
             plugin: crate::PLUGIN_NAME.to_owned(),

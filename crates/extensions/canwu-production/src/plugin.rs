@@ -1,14 +1,19 @@
 use crate::model::{
-    ProductionCommandEnvelope, ProductionOperationDisposition, ProductionOperationOutcome,
-    ProductionOutputAcknowledgement, ProductionRuntimeRecord, ProductionState, invalid,
-    production_runtime_reference,
+    ProductionBatchEnvelopeV1, ProductionCommandEnvelope, ProductionOperationDisposition,
+    ProductionOperationOutcome, ProductionOutputAcknowledgement, ProductionRuntimeRecord,
+    ProductionScopeId, ProductionState, invalid, production_root_reference,
+};
+use crate::root::{
+    ProductionBoundaryActivityRecord, ProductionBoundaryActivityV1, ProductionRootActivityV1,
+    RootKey, active_roots, load_root, payload_scope, production_boundary_activity_reference,
+    production_root_kind, root_of_record, with_scope, without_scope,
 };
 use crate::{PLUGIN_NAME, PLUGIN_NAMESPACE};
 use canwu_api::{
     ArchiveReachabilityManifest, BoundaryContext, BoundaryDirective, BoundaryPhase,
     BoundaryProposal, BoundarySystemContract, CanwuError, CauseRef, Command, CommandContext,
     CommandIngress, DecisionAction, DecisionTicketState, DomainRecord, DomainRecordMutation,
-    DomainRecordSchema, ErrorCode, EvidenceRef, IngressClass, IngressPayload, Issuer,
+    DomainRecordSchema, ErrorCode, EvidenceRef, IngressClass, IngressId, IngressPayload, Issuer,
     KnowledgeHistoryView, KnowledgeHolderRef, KnowledgeOrigin, KnowledgeQuery,
     KnowledgeRecordDraft, KnowledgeRecordKind, KnowledgeSchemaId, KnowledgeSubject,
     KnowledgeSubjectSchema, KnowledgeSubjectTarget, KnowledgeSubjectTargetKind,
@@ -21,16 +26,26 @@ use canwu_api::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeSet, sync::OnceLock};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::OnceLock,
+};
 
 pub const PRODUCTION_COMMAND: &str = "apply_production_operation_v1";
+/// The tracked command that carries a [`ProductionBatchEnvelopeV1`]: many
+/// operations of one holder against one production root, settled in one
+/// boundary with one outcome per item.
+pub const PRODUCTION_BATCH_COMMAND: &str = "apply_production_batch_v1";
 /// Event of a production packet that settles nothing because it does not
-/// decode, or because an operation packet does not match an admitted tracked
-/// production command.
+/// decode, does not name an existing production root, does not match an
+/// admitted tracked production command, or fails production's checks.
 const INGRESS_REFUSED_EVENT: &str = "canwu.production.ingress_refused.v1";
 /// Event of an output acknowledgement that settles nothing.
 const OUTPUT_ACK_REFUSED_EVENT: &str = "canwu.production.output_ack_refused.v1";
+/// Event of a settled production batch, with its item counts.
+const BATCH_SETTLED_EVENT: &str = "canwu.production.batch_settled.v1";
 const PRODUCTION_COMMAND_INGRESS: &str = "production_operation_v1";
+const PRODUCTION_BATCH_INGRESS: &str = "production_batch_v1";
 pub const PRODUCTION_OUTPUT_ACK_INGRESS: &str = "production_output_ack_v1";
 pub const PRODUCTION_COMPLETION_INGRESS: &str = "production_completion_operation_v1";
 pub const PRODUCTION_OBSERVATION_WAKE_INGRESS: &str = "production_observation_wake_v1";
@@ -44,8 +59,11 @@ const INCIDENT_COMMIT_AUDIT_SYSTEM: &str = "production_incident_commit_audit_v1"
 const OUTPUT_DISPATCH_SYSTEM: &str = "production_output_dispatch_v1";
 const REPORT_SYSTEM: &str = "production_holder_report_publish_v1";
 const PRODUCTION_REPORT_KNOWLEDGE: &str = "holder_report";
+/// BLAKE3, lowercase hex, of `canwu-production 0.18.0 semantics: scope roots,
+/// batch command, residue archive, boundary activity triggers, folded incident
+/// receipts` (one line, one space after each comma and colon).
 pub const PRODUCTION_SEMANTIC_HASH: &str =
-    "197b4a0e784ffdf94e0e87e021f9420d121171d76c840951572685802d6c85a4";
+    "7b39f2f5d5dab13ab1ee6e7c9b051c34eb05870249cdce287d89c879e2248ed0";
 const REPORT_SCHEMA_HASH: &str = "2e84d66c85841a251a94aa15fa4fd477d29136ed31c8434c5dd61dc92156fdf8";
 static PRODUCTION_ARCHIVE_COMMIT_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static PRODUCTION_ARCHIVE_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
@@ -55,6 +73,8 @@ static PRODUCTION_RESOURCE_CONTINUATION_PERMIT: OnceLock<PluginIngressPermit> = 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProductionArchiveIngressReceiptV1 {
     pub ingress: canwu_api::IngressReceipt,
+    /// The production root the commit applies to.
+    pub scope: Option<ProductionScopeId>,
     pub retention_handle_id: String,
     pub directory_root: String,
 }
@@ -62,6 +82,8 @@ pub struct ProductionArchiveIngressReceiptV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ProductionArchiveRetentionAcknowledgementV1 {
     handle_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scope: Option<ProductionScopeId>,
 }
 
 #[must_use]
@@ -77,23 +99,52 @@ struct AdmittedProductionOperation {
     decision_receipt: Option<crate::ProductionDecisionReceiptV1>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct AdmittedProductionBatch {
+    batch: ProductionBatchEnvelopeV1,
+    command: canwu_api::CommandId,
+    input_hash: String,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ProductionPlugin;
 
-#[must_use]
-pub fn production_command_descriptor() -> PluginActionDescriptor {
-    let mut reads = vec![
-        StateKey::core_decisions(),
-        StateKey::new(PLUGIN_NAMESPACE, "runtime"),
-    ];
+fn production_runtime_state_key() -> StateKey {
+    DomainRecordSchema::for_record::<ProductionRuntimeRecord>().state_key()
+}
+
+fn production_activity_state_key() -> StateKey {
+    DomainRecordSchema::for_record::<ProductionBoundaryActivityRecord>().state_key()
+}
+
+fn command_reads() -> Vec<StateKey> {
+    let mut reads = vec![StateKey::core_decisions(), production_runtime_state_key()];
     reads.extend(production_external_state_keys());
     reads.sort();
     reads.dedup();
+    reads
+}
+
+#[must_use]
+pub fn production_command_descriptor() -> PluginActionDescriptor {
     PluginActionDescriptor {
         name: PRODUCTION_COMMAND.to_owned(),
         description: "Submit one authority-checked production lifecycle operation".to_owned(),
         payload_schema: PayloadSchema::Any,
-        reads,
+        reads: command_reads(),
+        writes: Vec::new(),
+    }
+}
+
+/// The descriptor of [`PRODUCTION_BATCH_COMMAND`].
+#[must_use]
+pub fn production_batch_command_descriptor() -> PluginActionDescriptor {
+    PluginActionDescriptor {
+        name: PRODUCTION_BATCH_COMMAND.to_owned(),
+        description: "Submit many authority-checked production operations of one holder against one production root"
+            .to_owned(),
+        payload_schema: PayloadSchema::Any,
+        reads: command_reads(),
         writes: Vec::new(),
     }
 }
@@ -133,6 +184,20 @@ pub fn production_report_knowledge_schema_id() -> KnowledgeSchemaId {
     )
 }
 
+fn register_permit(
+    cell: &OnceLock<PluginIngressPermit>,
+    permit: &PluginIngressPermit,
+    label: &str,
+) -> Result<(), CanwuError> {
+    if cell.set(permit.clone()).is_err() && cell.get() != Some(permit) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            format!("production {label} permit changed across registrations"),
+        ));
+    }
+    Ok(())
+}
+
 impl SimulationPlugin for ProductionPlugin {
     fn name(&self) -> &'static str {
         PLUGIN_NAME
@@ -147,30 +212,48 @@ impl SimulationPlugin for ProductionPlugin {
     }
 
     fn validate_activation(&self, records: &[DomainRecord]) -> Result<(), CanwuError> {
-        let mut found = false;
-        for record in records.iter().filter(|record| {
-            record
+        let mut roots = BTreeSet::new();
+        for record in records {
+            if record
+                .reference
+                .kind
+                .matches_type::<ProductionBoundaryActivityRecord>()
+            {
+                if record.reference != production_boundary_activity_reference().into_untyped() {
+                    return Err(invalid(
+                        "production activation contains a misidentified boundary activity record",
+                    ));
+                }
+                record.decode_payload::<ProductionBoundaryActivityRecord>()?;
+                continue;
+            }
+            if !record
                 .reference
                 .kind
                 .matches_type::<ProductionRuntimeRecord>()
-        }) {
-            if found || record.reference != production_runtime_reference().into_untyped() {
-                return Err(invalid(
-                    "production activation contains multiple or misidentified runtime roots",
-                ));
+            {
+                continue;
             }
             let state = record.decode_payload::<ProductionRuntimeRecord>()?;
+            if record.reference != state.runtime_reference().into_untyped()
+                || root_of_record(&record.reference).as_ref() != Some(&state.scope)
+                || !roots.insert(state.scope.clone())
+            {
+                return Err(invalid(
+                    "production activation contains a duplicated or misidentified runtime root",
+                ));
+            }
             state.validate()?;
             if state.draft()?.payload != record.payload {
                 return Err(invalid(
                     "production activation root is not canonically encoded",
                 ));
             }
-            found = true;
         }
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
         let mut runtime_schema = DomainRecordSchema::for_record::<ProductionRuntimeRecord>();
         runtime_schema.payload_schema = PayloadSchema::Object {
@@ -181,6 +264,9 @@ impl SimulationPlugin for ProductionPlugin {
             allow_additional: true,
         };
         registrar.register_record_schema(runtime_schema)?;
+        registrar.register_record_schema(DomainRecordSchema::for_record::<
+            ProductionBoundaryActivityRecord,
+        >())?;
         let report_schema = PluginKnowledgeSchema {
             id: production_report_knowledge_schema_id(),
             schema_hash: REPORT_SCHEMA_HASH.to_owned(),
@@ -197,9 +283,19 @@ impl SimulationPlugin for ProductionPlugin {
         registrar.register_knowledge_schema(report_schema.clone())?;
         registrar.register_archive_reachability_participant(production_archive_reachability)?;
         registrar.register_command(production_command_descriptor(), admit_production_operation)?;
+        registrar.register_command(
+            production_batch_command_descriptor(),
+            admit_production_batch,
+        )?;
         registrar.register_ingress(PluginIngressDescriptor {
             name: PRODUCTION_COMMAND_INGRESS.to_owned(),
             description: "Apply one admitted production lifecycle operation".to_owned(),
+            class: IngressClass::Decision,
+            payload_schema: PayloadSchema::Any,
+        })?;
+        registrar.register_ingress(PluginIngressDescriptor {
+            name: PRODUCTION_BATCH_INGRESS.to_owned(),
+            description: "Apply one admitted production batch, item by item".to_owned(),
             class: IngressClass::Decision,
             payload_schema: PayloadSchema::Any,
         })?;
@@ -211,16 +307,11 @@ impl SimulationPlugin for ProductionPlugin {
             class: IngressClass::ScheduledSystem,
             payload_schema: PayloadSchema::Any,
         })?;
-        if PRODUCTION_COMPLETION_INGRESS_PERMIT
-            .set(completion_permit.clone())
-            .is_err()
-            && PRODUCTION_COMPLETION_INGRESS_PERMIT.get() != Some(&completion_permit)
-        {
-            return Err(CanwuError::new(
-                ErrorCode::InvalidPluginRegistration,
-                "production completion ingress permit changed across registrations",
-            ));
-        }
+        register_permit(
+            &PRODUCTION_COMPLETION_INGRESS_PERMIT,
+            &completion_permit,
+            "completion ingress",
+        )?;
         let continuation_permit = registrar.register_internal_ingress(PluginIngressDescriptor {
             name: PRODUCTION_RESOURCE_CONTINUATION_INGRESS.to_owned(),
             description: "Persist one provider-authenticated resource archive continuation witness"
@@ -228,16 +319,11 @@ impl SimulationPlugin for ProductionPlugin {
             class: IngressClass::Acknowledgement,
             payload_schema: PayloadSchema::Any,
         })?;
-        if PRODUCTION_RESOURCE_CONTINUATION_PERMIT
-            .set(continuation_permit.clone())
-            .is_err()
-            && PRODUCTION_RESOURCE_CONTINUATION_PERMIT.get() != Some(&continuation_permit)
-        {
-            return Err(CanwuError::new(
-                ErrorCode::InvalidPluginRegistration,
-                "production resource continuation ingress permit changed across registrations",
-            ));
-        }
+        register_permit(
+            &PRODUCTION_RESOURCE_CONTINUATION_PERMIT,
+            &continuation_permit,
+            "resource continuation ingress",
+        )?;
         let archive_commit_permit = registrar.register_internal_ingress_with_archive_retention(
             PluginIngressDescriptor {
                 name: PRODUCTION_ARCHIVE_COMMIT_INGRESS.to_owned(),
@@ -249,16 +335,11 @@ impl SimulationPlugin for ProductionPlugin {
             crate::PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE,
             vec!["/commit/directory_root".to_owned()],
         )?;
-        if PRODUCTION_ARCHIVE_COMMIT_PERMIT
-            .set(archive_commit_permit.clone())
-            .is_err()
-            && PRODUCTION_ARCHIVE_COMMIT_PERMIT.get() != Some(&archive_commit_permit)
-        {
-            return Err(CanwuError::new(
-                ErrorCode::InvalidPluginRegistration,
-                "production archive commit permit changed across registrations",
-            ));
-        }
+        register_permit(
+            &PRODUCTION_ARCHIVE_COMMIT_PERMIT,
+            &archive_commit_permit,
+            "archive commit",
+        )?;
         let archive_ack_permit = registrar.register_internal_ingress(PluginIngressDescriptor {
             name: PRODUCTION_ARCHIVE_RETENTION_ACK_INGRESS.to_owned(),
             description: "Acknowledge terminal provider-side production archive retention"
@@ -266,16 +347,11 @@ impl SimulationPlugin for ProductionPlugin {
             class: IngressClass::Acknowledgement,
             payload_schema: PayloadSchema::Any,
         })?;
-        if PRODUCTION_ARCHIVE_ACK_PERMIT
-            .set(archive_ack_permit.clone())
-            .is_err()
-            && PRODUCTION_ARCHIVE_ACK_PERMIT.get() != Some(&archive_ack_permit)
-        {
-            return Err(CanwuError::new(
-                ErrorCode::InvalidPluginRegistration,
-                "production archive retention acknowledgement permit changed across registrations",
-            ));
-        }
+        register_permit(
+            &PRODUCTION_ARCHIVE_ACK_PERMIT,
+            &archive_ack_permit,
+            "archive retention acknowledgement",
+        )?;
         registrar.register_ingress(PluginIngressDescriptor {
             name: PRODUCTION_OBSERVATION_WAKE_INGRESS.to_owned(),
             description:
@@ -285,6 +361,8 @@ impl SimulationPlugin for ProductionPlugin {
             payload_schema: PayloadSchema::Any,
         })?;
 
+        let runtime = production_runtime_state_key();
+        let activity = production_activity_state_key();
         let mut apply = BoundarySystemContract::new(
             APPLY_SYSTEM,
             BoundaryPhase::DomainDeltaProposal,
@@ -293,12 +371,13 @@ impl SimulationPlugin for ProductionPlugin {
         apply.reads = vec![
             StateKey::core_commands(),
             StateKey::core_ingress(),
-            StateKey::new(PLUGIN_NAMESPACE, "runtime"),
+            runtime.clone(),
+            activity.clone(),
         ];
         apply.reads.extend(production_external_state_keys());
         apply.reads.sort();
         apply.reads.dedup();
-        apply.writes = vec![StateKey::new(PLUGIN_NAMESPACE, "runtime")];
+        apply.writes = vec![runtime.clone(), activity.clone()];
         apply.plugin_ingress_targets = vec![PluginIngressTarget {
             target_plugin: canwu_resource::PLUGIN_NAME.to_owned(),
             packet_type: canwu_resource::RESOURCE_COMPLETION_INGRESS.to_owned(),
@@ -309,6 +388,7 @@ impl SimulationPlugin for ProductionPlugin {
             "canwu.production.output_settled.v1".to_owned(),
             OUTPUT_ACK_REFUSED_EVENT.to_owned(),
             INGRESS_REFUSED_EVENT.to_owned(),
+            BATCH_SETTLED_EVENT.to_owned(),
             "canwu.production.archive_maintenance.v1".to_owned(),
         ];
         apply.visibility = StateVisibility::SameBoundary;
@@ -319,7 +399,7 @@ impl SimulationPlugin for ProductionPlugin {
             BoundaryPhase::InvariantValidation,
             SystemCadence::EventDriven,
         );
-        validate.reads = vec![StateKey::new(PLUGIN_NAMESPACE, "runtime")];
+        validate.reads = vec![runtime.clone(), activity.clone()];
         validate.visibility = StateVisibility::SameBoundary;
         registrar.register_boundary_system(validate, validate_production_candidate)?;
 
@@ -331,9 +411,10 @@ impl SimulationPlugin for ProductionPlugin {
         incidents.reads = vec![
             StateKey::core_evidence(),
             StateKey::core_ingress(),
-            StateKey::new(PLUGIN_NAMESPACE, "runtime"),
+            runtime.clone(),
+            activity.clone(),
         ];
-        incidents.writes = vec![StateKey::new(PLUGIN_NAMESPACE, "runtime")];
+        incidents.writes = vec![runtime.clone()];
         incidents.emits = vec!["canwu.production.incident_committed.v1".to_owned()];
         incidents.random_streams = vec![production_incident_random_stream()];
         incidents.visibility = StateVisibility::SameBoundary;
@@ -344,7 +425,7 @@ impl SimulationPlugin for ProductionPlugin {
             BoundaryPhase::ConditionalTransitionCommit,
             SystemCadence::EventDriven,
         );
-        incident_commit_audit.reads = vec![StateKey::new(PLUGIN_NAMESPACE, "runtime")];
+        incident_commit_audit.reads = vec![runtime.clone(), activity.clone()];
         incident_commit_audit.visibility = StateVisibility::SameBoundary;
         registrar
             .register_boundary_system(incident_commit_audit, audit_incident_transition_commit)?;
@@ -354,8 +435,8 @@ impl SimulationPlugin for ProductionPlugin {
             BoundaryPhase::StrategicAggregation,
             SystemCadence::EventDriven,
         );
-        output_dispatch.reads = vec![StateKey::new(PLUGIN_NAMESPACE, "runtime")];
-        output_dispatch.writes = vec![StateKey::new(PLUGIN_NAMESPACE, "runtime")];
+        output_dispatch.reads = vec![StateKey::core_ingress(), runtime.clone(), activity.clone()];
+        output_dispatch.writes = vec![runtime.clone()];
         output_dispatch.plugin_ingress_targets = vec![PluginIngressTarget {
             target_plugin: canwu_resource::PLUGIN_NAME.to_owned(),
             packet_type: canwu_resource::RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS.to_owned(),
@@ -371,9 +452,10 @@ impl SimulationPlugin for ProductionPlugin {
         reports.reads = vec![
             StateKey::core_ingress(),
             StateKey::core_knowledge(),
-            StateKey::new(PLUGIN_NAMESPACE, "runtime"),
+            runtime.clone(),
+            activity,
         ];
-        reports.writes = vec![StateKey::new(PLUGIN_NAMESPACE, "runtime")];
+        reports.writes = vec![runtime];
         reports.plugin_ingress_targets = vec![PluginIngressTarget {
             target_plugin: PLUGIN_NAME.to_owned(),
             packet_type: PRODUCTION_OBSERVATION_WAKE_INGRESS.to_owned(),
@@ -382,10 +464,30 @@ impl SimulationPlugin for ProductionPlugin {
             schema: report_schema.id,
             visibilities: vec![StateVisibility::SameBoundary],
         }];
-        reports.emits = vec!["canwu.production.report_capacity_rejected.v1".to_owned()];
+        reports.emits = vec![
+            "canwu.production.report_capacity_rejected.v1".to_owned(),
+            INGRESS_REFUSED_EVENT.to_owned(),
+        ];
         reports.visibility = StateVisibility::SameBoundary;
         registrar.register_boundary_system(reports, publish_holder_reports)
     }
+}
+
+/// The root a command names, decoded and validated. A command that names no
+/// installed root is a recorded command rejection (`InvalidPayload`), never
+/// a failed boundary.
+fn admission_root(
+    view: &SimulationView<'_>,
+    scope: Option<&ProductionScopeId>,
+) -> Result<ProductionState, CanwuError> {
+    load_root(view, scope)?
+        .map(|(_, state)| state)
+        .ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::InvalidPayload,
+                "production runtime is not configured for the named root",
+            )
+        })
 }
 
 fn admit_production_operation(
@@ -400,13 +502,9 @@ fn admit_production_operation(
         ));
     }
     let envelope: ProductionCommandEnvelope = decode(payload, "production operation")?;
+    require_canonical_payload(&envelope, payload, "production operation")?;
     require_holder_authority(context, &envelope.holder)?;
-    let (_, state) = load_state(view)?.ok_or_else(|| {
-        CanwuError::new(
-            ErrorCode::DomainRecordNotFound,
-            "production runtime is not configured",
-        )
-    })?;
+    let state = admission_root(view, envelope.scope.as_ref())?;
     let input_hash = canonical_hash("canwu.production.operation-input.v1", &envelope)?;
     if let Some(existing) = state.operation_outcomes.get(&envelope.operation_id) {
         if existing.canonical_input_hash == input_hash {
@@ -417,19 +515,23 @@ fn admit_production_operation(
             "production operation ID was reused with different input",
         ));
     }
-    state.ensure_operation_outcome_admission_capacity(&envelope.operation)?;
-    if state.project_operation_uses_reserved_outcome_at_capacity(&envelope.operation)? {
-        validate_external_operation_evidence(view, &envelope.holder, &envelope.operation)
-            .map_err(structured_reserved_project_rejection)?;
+    state
+        .ensure_operation_outcome_admission_capacity(&envelope.operation)
+        .map_err(admission_rejection)?;
+    if state
+        .project_operation_uses_reserved_outcome_at_capacity(&envelope.operation)
+        .map_err(admission_rejection)?
+    {
+        validate_external_operation_evidence(view, &state, &envelope.holder, &envelope.operation)
+            .map_err(admission_rejection)?;
         let mut candidate = state.clone();
         candidate
             .apply_operation(&envelope, context.simulation_time)
-            .map_err(structured_reserved_project_rejection)?;
-        candidate
-            .validate()
-            .map_err(structured_reserved_project_rejection)?;
+            .map_err(admission_rejection)?;
+        candidate.validate().map_err(admission_rejection)?;
     }
-    let decision_receipt = validate_degraded_decision(view, context, &state, &envelope)?;
+    let decision_receipt = validate_degraded_decision(view, context, &state, &envelope)
+        .map_err(admission_rejection)?;
     Ok(vec![SystemDirective::EnqueuePluginIngress {
         after: SimDuration::ZERO,
         packet_type: PRODUCTION_COMMAND_INGRESS.to_owned(),
@@ -445,17 +547,274 @@ fn admit_production_operation(
     }])
 }
 
+/// Refuses a command payload that is not the canonical encoding of what it
+/// decodes to: an explicit `null` or unknown member would be admitted but
+/// would not match its packet at settlement.
+fn require_canonical_payload<T: Serialize>(
+    decoded: &T,
+    payload: &Value,
+    label: &str,
+) -> Result<(), CanwuError> {
+    if serde_json::to_value(decoded).map_err(|error| encode_error(&error))? != *payload {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPayload,
+            format!("{label} payload is not its canonical encoding"),
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `existing` is the outcome of `item` of `batch`: the same operation
+/// of the same holder against the same root.
+fn batch_item_settled(
+    existing: &ProductionOperationOutcome,
+    batch: &ProductionBatchEnvelopeV1,
+    item: &crate::ProductionBatchItemV1,
+) -> bool {
+    existing.command.holder == batch.holder
+        && existing.command.scope == batch.scope
+        && existing.command.operation == item.operation
+}
+
+/// Admits one production batch: the issuer's authority over its holder once,
+/// its shape, and outcome room for every item not settled yet. Each item is
+/// otherwise checked when it settles.
+fn admit_production_batch(
+    view: &SimulationView<'_>,
+    context: &CommandContext,
+    payload: &Value,
+) -> Result<Vec<SystemDirective>, CanwuError> {
+    if context.ingress == CommandIngress::LegacyDirect {
+        return Err(CanwuError::new(
+            ErrorCode::MixedCommandIngress,
+            "production batches require tracked canonical command ingress",
+        ));
+    }
+    let batch: ProductionBatchEnvelopeV1 = decode(payload, "production batch")?;
+    require_canonical_payload(&batch, payload, "production batch")?;
+    require_holder_authority(context, &batch.holder)?;
+    let state = admission_root(view, batch.scope.as_ref())?;
+    if batch.items.is_empty() || batch.items.len() > state.limits.max_batch_items {
+        return Err(CanwuError::new(
+            ErrorCode::ValueOutOfRange,
+            "production batch must carry between one item and the root's batch item bound",
+        ));
+    }
+    let mut operation_ids = BTreeSet::new();
+    for item in &batch.items {
+        if !operation_ids.insert(&item.operation_id) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPayload,
+                "production batch names one operation ID twice",
+            ));
+        }
+        if matches!(
+            item.operation,
+            crate::ProductionOperation::ResolveDegradedFacility { .. }
+        ) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPayload,
+                "a degraded-facility choice is executed by its own decision, not in a batch",
+            ));
+        }
+    }
+    let mut fresh = Vec::new();
+    for item in &batch.items {
+        match state.operation_outcomes.get(&item.operation_id) {
+            Some(existing) if batch_item_settled(existing, &batch, item) => {}
+            Some(_) => {
+                return Err(CanwuError::new(
+                    ErrorCode::IdempotencyConflict,
+                    "production batch reuses an operation ID with different input",
+                ));
+            }
+            None => fresh.push(&item.operation),
+        }
+    }
+    if fresh.is_empty() {
+        return Ok(Vec::new());
+    }
+    state
+        .ensure_operations_outcome_admission_capacity(&fresh)
+        .map_err(admission_rejection)?;
+    for operation in &fresh {
+        if state
+            .project_operation_uses_reserved_outcome_at_capacity(operation)
+            .map_err(admission_rejection)?
+        {
+            return Err(CanwuError::new(
+                ErrorCode::ValueOutOfRange,
+                "archive_backpressure: a facility-project step that uses its reserved outcome while the outcome table is full is sent as its own command",
+            ));
+        }
+    }
+    let input_hash = canonical_hash("canwu.production.batch-input.v1", &batch)?;
+    Ok(vec![SystemDirective::EnqueuePluginIngress {
+        after: SimDuration::ZERO,
+        packet_type: PRODUCTION_BATCH_INGRESS.to_owned(),
+        priority: 0,
+        payload: serde_json::to_value(AdmittedProductionBatch {
+            batch,
+            command: context.command_id,
+            input_hash,
+        })
+        .map_err(|error| encode_error(&error))?,
+        affected: Vec::new(),
+    }])
+}
+
+/// The refusal event of `packet_type`.
+fn refusal_event(packet_type: &str) -> &'static str {
+    if packet_type == PRODUCTION_OUTPUT_ACK_INGRESS {
+        OUTPUT_ACK_REFUSED_EVENT
+    } else {
+        INGRESS_REFUSED_EVENT
+    }
+}
+
+/// The production root a packet belongs to.
+///
+/// Most packets name it in their payload; an output acknowledgement by the
+/// production source its execution pinned; and a resource participant's
+/// completion acknowledgement, which the resource plugin sends without a
+/// scope, by the coordinator source of the participant it acknowledges. A
+/// packet whose root cannot be read this way is refused.
+fn route_packet(
+    view: &SimulationView<'_>,
+    packet_type: &str,
+    payload: &Value,
+) -> Result<RootKey, CanwuError> {
+    let member = |name: &str| payload.get(name);
+    match packet_type {
+        PRODUCTION_COMMAND_INGRESS => {
+            payload_scope(member("envelope").and_then(|envelope| envelope.get("scope")))
+        }
+        PRODUCTION_BATCH_INGRESS => {
+            payload_scope(member("batch").and_then(|batch| batch.get("scope")))
+        }
+        PRODUCTION_ARCHIVE_COMMIT_INGRESS => {
+            payload_scope(member("commit").and_then(|commit| commit.get("scope")))
+        }
+        PRODUCTION_OUTPUT_ACK_INGRESS => {
+            let record: canwu_api::DomainRecordRef = decode(
+                &member("production_source")
+                    .and_then(|source| source.get("record"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "production output acknowledgement source",
+            )?;
+            root_of_record(&record).ok_or_else(|| {
+                invalid("production output acknowledgement source is not a production root")
+            })
+        }
+        PRODUCTION_COMPLETION_INGRESS
+            if member("completion").and_then(Value::as_str)
+                == Some("acknowledge_participant_completed") =>
+        {
+            let acquisition: canwu_resource::CompletionLeaseAcquisitionId = decode(
+                &member("request")
+                    .and_then(|request| request.get("acquisition"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "production completion acknowledgement acquisition",
+            )?;
+            completion_participant_root(view, &acquisition)
+        }
+        PRODUCTION_COMPLETION_INGRESS
+        | PRODUCTION_RESOURCE_CONTINUATION_INGRESS
+        | PRODUCTION_ARCHIVE_RETENTION_ACK_INGRESS
+        | PRODUCTION_OBSERVATION_WAKE_INGRESS => payload_scope(member("scope")),
+        _ => Err(invalid(format!(
+            "production packet type {packet_type} is not registered"
+        ))),
+    }
+}
+
+/// The production root a resource completion participant was granted for:
+/// the record of its coordinator source.
+fn completion_participant_root(
+    view: &SimulationView<'_>,
+    acquisition: &canwu_resource::CompletionLeaseAcquisitionId,
+) -> Result<RootKey, CanwuError> {
+    let resource = resource_root(
+        view,
+        [
+            canwu_resource::ResourceTerminalRecordKeyV1::ExternalCompletionParticipant(
+                acquisition.clone(),
+            ),
+        ],
+        "resource completion runtime is unavailable",
+    )?;
+    let participant = resource
+        .external_completion_participants
+        .participant(acquisition)
+        .ok_or_else(|| invalid("completed resource participant is unavailable"))?;
+    root_of_record(&participant.coordinator_source.record)
+        .ok_or_else(|| invalid("resource participant coordinator is not a production root"))
+}
+
+/// One production packet admitted to the boundary, routed to its root.
+struct RoutedPacket {
+    ingress: IngressId,
+    packet_type: String,
+    payload: Value,
+    cause: Option<CauseRef>,
+}
+
+/// What settling the packets of one root produced.
+struct RootSettlement {
+    state: ProductionState,
+    changed: bool,
+    trigger: Option<IngressId>,
+    /// Operations and batch items this boundary recorded an outcome for.
+    operations: usize,
+    directives: Vec<BoundaryDirective>,
+}
+
+impl RootSettlement {
+    fn applied(&mut self, ingress: IngressId) {
+        self.changed = true;
+        self.trigger.get_or_insert(ingress);
+    }
+
+    fn refuse(&mut self, packet_type: &str, error: &CanwuError) {
+        refuse_packet(
+            &mut self.directives,
+            refusal_event(packet_type),
+            packet_type,
+            error,
+        );
+    }
+}
+
+/// Whether an error raised while a production packet is checked or applied
+/// is a failed read of a store or an engine invariant, which fails the
+/// boundary, rather than a finding about the packet, which refuses it. A
+/// boundary that fails for a store read settles once the store serves the
+/// object.
+fn fails_boundary(error: &CanwuError) -> bool {
+    matches!(
+        error.code,
+        ErrorCode::InvalidArchive
+            | ErrorCode::InvalidBoundary
+            | ErrorCode::IdentifierExhausted
+            | ErrorCode::PluginPanicked
+            | ErrorCode::StatePageUnavailable
+            | ErrorCode::UndeclaredStateRead
+            | ErrorCode::UndeclaredStateWrite
+            | ErrorCode::UndeclaredRandomStream
+            | ErrorCode::UndeclaredKnowledgeWrite
+    )
+}
+
 #[allow(clippy::too_many_lines)]
 fn apply_production_ingress(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
-    let Some((record, mut state)) = load_state(view)? else {
-        return Ok(BoundaryProposal::default());
-    };
-    let mut changed = false;
-    let mut directives = Vec::new();
-    for ingress_id in &archive_commits_first(view, &context.admitted_ingress)? {
+    let mut refusals = Vec::new();
+    let mut routed = BTreeMap::<RootKey, (Vec<RoutedPacket>, Vec<RoutedPacket>)>::new();
+    for ingress_id in &context.admitted_ingress {
         let Some(ingress) = view.ingress(*ingress_id)? else {
             continue;
         };
@@ -468,331 +827,648 @@ fn apply_production_ingress(
         else {
             continue;
         };
-        if plugin != PLUGIN_NAME {
+        // Wakes only drive the report system.
+        if plugin != PLUGIN_NAME || packet_type == PRODUCTION_OBSERVATION_WAKE_INGRESS {
             continue;
         }
-        match packet_type.as_str() {
-            PRODUCTION_COMMAND_INGRESS => {
-                let admitted: AdmittedProductionOperation =
-                    match decode(payload, "admitted production operation") {
-                        Ok(admitted) => admitted,
-                        Err(error) => {
-                            refuse_packet(
-                                &mut directives,
-                                INGRESS_REFUSED_EVENT,
-                                packet_type,
-                                &error,
-                            );
-                            continue;
-                        }
-                    };
-                // The packet type is public, so only a packet that the
-                // admission of a tracked production command queued settles:
-                // that admission checked the issuer's authority, the run
-                // policy, the outcome capacity, and any degraded-facility
-                // decision. Any other packet settles nothing.
-                if validate_admitted_command(view, ingress.cause.as_ref(), &admitted).is_err() {
-                    directives.push(BoundaryDirective::Emit {
-                        event_type: INGRESS_REFUSED_EVENT.to_owned(),
-                        summary: format!(
-                            "production packet {packet_type} was refused: it does not match an admitted tracked production command"
-                        ),
-                        affected: Vec::new(),
-                    });
-                    continue;
-                }
-                if state
-                    .operation_outcomes
-                    .contains_key(&admitted.envelope.operation_id)
-                {
-                    continue;
-                }
-                let mut candidate = state.clone();
-                let result = validate_external_operation_evidence(
-                    view,
-                    &admitted.envelope.holder,
-                    &admitted.envelope.operation,
-                )
-                .and_then(|()| candidate.apply_operation(&admitted.envelope, context.at))
-                .and_then(|()| {
-                    if let Some(receipt) = &admitted.decision_receipt
-                        && candidate
-                            .decision_receipts
-                            .insert(receipt.ticket_id, receipt.clone())
-                            .is_some()
-                    {
-                        return Err(CanwuError::new(
-                            ErrorCode::IdempotencyConflict,
-                            "production decision ticket already has a receipt",
-                        ));
-                    }
-                    candidate.validate()
-                });
-                let (disposition, rejection_code, rejection_message) = match result {
-                    Ok(()) => {
-                        state = candidate;
-                        (ProductionOperationDisposition::Applied, None, None)
-                    }
-                    Err(error) if expected_domain_rejection(&error) => {
-                        state.revision = state.revision.checked_add(1).ok_or_else(|| {
-                            invalid("production runtime revision overflowed while rejecting an operation")
-                        })?;
-                        (
-                            ProductionOperationDisposition::Rejected,
-                            Some(error_code(&error.code).to_owned()),
-                            Some(error.message),
-                        )
-                    }
-                    Err(error) => return Err(error),
+        match route_packet(view, packet_type, payload) {
+            Ok(root) => {
+                let packet = RoutedPacket {
+                    ingress: *ingress_id,
+                    packet_type: packet_type.clone(),
+                    payload: payload.clone(),
+                    cause: ingress.cause.clone(),
                 };
-                let outcome = ProductionOperationOutcome {
-                    id: admitted.envelope.operation_id.clone(),
-                    canonical_input_hash: admitted.input_hash,
-                    command: admitted.envelope.clone(),
-                    disposition,
-                    work_order: operation_work_order(&admitted.envelope.operation),
-                    execution: operation_execution(&admitted.envelope.operation),
-                    project: operation_project(&admitted.envelope.operation),
-                    rejection_code,
-                    rejection_message,
-                    settled_at: context.at,
-                };
-                state.operation_outcomes.insert(outcome.id.clone(), outcome);
-                if disposition == ProductionOperationDisposition::Applied
-                    && let crate::ProductionOperation::AcceptFacilityCommissioning { project } =
-                        &admitted.envelope.operation
-                {
-                    let project = state
-                        .facility_projects
-                        .get(project)
-                        .ok_or_else(|| invalid("accepted facility project disappeared"))?;
-                    directives.push(BoundaryDirective::SchedulePluginIngress {
-                        target_plugin: canwu_resource::PLUGIN_NAME.to_owned(),
-                        after: SimDuration::ZERO,
-                        packet_type: canwu_resource::RESOURCE_COMPLETION_INGRESS.to_owned(),
-                        priority: 0,
-                        payload: serde_json::to_value(
-                            canwu_resource::ResourceCompletionOperationV1::CompleteExternalParticipant(
-                                canwu_resource::CompleteExternalCompletionParticipantGrantV1 {
-                                    acquisition: project.completion_certificate.acquisition.clone(),
-                                    operation_key: project.operation_key.clone(),
-                                },
-                            ),
-                        )
-                        .map_err(|error| encode_error(&error))?,
-                        affected: Vec::new(),
-                    });
-                }
-                state.validate()?;
-                changed = true;
-                directives.push(BoundaryDirective::Emit {
-                    event_type: if disposition == ProductionOperationDisposition::Applied {
-                        "canwu.production.operation_applied.v1"
-                    } else {
-                        "canwu.production.operation_rejected.v1"
-                    }
-                    .to_owned(),
-                    summary: format!(
-                        "production operation {} reached a terminal outcome",
-                        admitted.envelope.operation_id
-                    ),
-                    affected: Vec::new(),
-                });
-            }
-            PRODUCTION_OUTPUT_ACK_INGRESS => {
-                let acknowledgement: ProductionOutputAcknowledgement =
-                    match decode(payload, "production output acknowledgement") {
-                        Ok(acknowledgement) => acknowledgement,
-                        Err(error) => {
-                            refuse_packet(
-                                &mut directives,
-                                OUTPUT_ACK_REFUSED_EVENT,
-                                packet_type,
-                                &error,
-                            );
-                            continue;
-                        }
-                    };
-                let mut candidate = state.clone();
-                // An acknowledgement that does not settle its execution
-                // exactly is refused with a trace and changes nothing; it
-                // never fails the boundary.
-                let accepted = validate_output_ack_source(view, &acknowledgement).and_then(|()| {
-                    let completion = candidate
-                        .executions
-                        .get(&acknowledgement.execution)
-                        .map(|execution| {
-                            (
-                                execution.completion_certificate.acquisition.clone(),
-                                execution.completion_certificate.operation_key.clone(),
-                            )
-                        })
-                        .ok_or_else(|| {
-                            invalid("output acknowledgement execution is unavailable")
-                        })?;
-                    candidate
-                        .acknowledge_output(&acknowledgement, context.at)
-                        .map(|changed| (changed, completion))
-                });
-                let (settled, completion) = match accepted {
-                    Ok(accepted) => accepted,
-                    Err(error) if expected_domain_rejection(&error) => {
-                        directives.push(BoundaryDirective::Emit {
-                            event_type: OUTPUT_ACK_REFUSED_EVENT.to_owned(),
-                            summary: format!(
-                                "production output acknowledgement for execution {} was refused: {}",
-                                acknowledgement.execution, error.message
-                            ),
-                            affected: Vec::new(),
-                        });
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
-                if settled {
-                    state = candidate;
-                    changed = true;
-                    directives.push(BoundaryDirective::SchedulePluginIngress {
-                        target_plugin: canwu_resource::PLUGIN_NAME.to_owned(),
-                        after: SimDuration::ZERO,
-                        packet_type: canwu_resource::RESOURCE_COMPLETION_INGRESS.to_owned(),
-                        priority: 0,
-                        payload: serde_json::to_value(
-                            canwu_resource::ResourceCompletionOperationV1::CompleteExternalParticipant(
-                                canwu_resource::CompleteExternalCompletionParticipantGrantV1 {
-                                    acquisition: completion.0,
-                                    operation_key: completion.1,
-                                },
-                            ),
-                        )
-                        .map_err(|error| encode_error(&error))?,
-                        affected: Vec::new(),
-                    });
-                    directives.push(BoundaryDirective::Emit {
-                        event_type: "canwu.production.output_settled.v1".to_owned(),
-                        summary: format!(
-                            "production execution {} settled its resource output",
-                            acknowledgement.execution
-                        ),
-                        affected: Vec::new(),
-                    });
+                let (commits, others) = routed.entry(root).or_default();
+                // Within one root, archive commits settle before the root's
+                // other packets, each group in its admitted order: every other
+                // packet advances the runtime revision the archive source root
+                // binds, so a commit prepared from the root the boundary
+                // started from applies even when another packet was admitted
+                // ahead of it.
+                if packet_type == PRODUCTION_ARCHIVE_COMMIT_INGRESS {
+                    commits.push(packet);
+                } else {
+                    others.push(packet);
                 }
             }
-            PRODUCTION_COMPLETION_INGRESS => {
-                let operation: crate::ProductionCompletionIngressV1 =
-                    match decode(payload, "production completion operation") {
-                        Ok(operation) => operation,
-                        Err(error) => {
-                            refuse_packet(
-                                &mut directives,
-                                INGRESS_REFUSED_EVENT,
-                                packet_type,
-                                &error,
-                            );
-                            continue;
-                        }
-                    };
-                // A step that production's checks refuse settles nothing and
-                // is recorded; the boundary settles.
-                match settle_completion_step(view, context, &state, &operation) {
-                    Ok(candidate) => {
-                        state = candidate;
-                        changed = true;
-                    }
-                    Err(error) if expected_domain_rejection(&error) => {
-                        refuse_packet(&mut directives, INGRESS_REFUSED_EVENT, packet_type, &error);
-                    }
-                    Err(error) => return Err(error),
-                }
+            Err(error) if !fails_boundary(&error) => {
+                refuse_packet(
+                    &mut refusals,
+                    refusal_event(packet_type),
+                    packet_type,
+                    &error,
+                );
             }
-            PRODUCTION_RESOURCE_CONTINUATION_INGRESS => {
-                let witness: crate::ProductionResourceContinuationWitnessV1 =
-                    match decode(payload, "production resource continuation witness") {
-                        Ok(witness) => witness,
-                        Err(error) => {
-                            refuse_packet(
-                                &mut directives,
-                                INGRESS_REFUSED_EVENT,
-                                packet_type,
-                                &error,
-                            );
-                            continue;
-                        }
-                    };
-                // A witness that is stale or forged when it settles is refused
-                // and recorded; the boundary settles.
-                match settle_continuation_witness(view, &state, witness) {
-                    Ok(candidate) => {
-                        state = candidate;
-                        changed = true;
-                    }
-                    Err(error) if expected_domain_rejection(&error) => {
-                        refuse_packet(&mut directives, INGRESS_REFUSED_EVENT, packet_type, &error);
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            PRODUCTION_ARCHIVE_COMMIT_INGRESS => {
-                let commit: crate::VerifiedProductionArchiveCommitV1 = match payload
-                    .get("commit")
-                    .cloned()
-                    .ok_or_else(|| invalid("production archive commit payload is absent"))
-                    .and_then(|value| decode(&value, "production archive commit"))
-                {
-                    Ok(commit) => commit,
-                    Err(error) => {
-                        refuse_packet(&mut directives, INGRESS_REFUSED_EVENT, packet_type, &error);
-                        continue;
-                    }
-                };
-                let receipt = state.apply_production_archive_commit(&commit, context.at)?;
-                changed = true;
-                directives.push(BoundaryDirective::Emit {
-                    event_type: "canwu.production.archive_maintenance.v1".to_owned(),
-                    summary: format!(
-                        "production archive maintenance {} reached {:?}",
-                        receipt.id, receipt.disposition
-                    ),
-                    affected: Vec::new(),
-                });
-            }
-            PRODUCTION_ARCHIVE_RETENTION_ACK_INGRESS => {
-                let acknowledgement: ProductionArchiveRetentionAcknowledgementV1 =
-                    match decode(payload, "production archive retention acknowledgement") {
-                        Ok(acknowledgement) => acknowledgement,
-                        Err(error) => {
-                            refuse_packet(
-                                &mut directives,
-                                INGRESS_REFUSED_EVENT,
-                                packet_type,
-                                &error,
-                            );
-                            continue;
-                        }
-                    };
-                state.acknowledge_production_archive_retention(&acknowledgement.handle_id)?;
-                changed = true;
-            }
-            _ => {}
+            Err(error) => return Err(error),
         }
     }
-    if changed {
-        let draft = state.draft()?;
-        directives.insert(
-            0,
-            BoundaryDirective::MutateRecord {
+    let mut mutations = Vec::new();
+    let mut directives = refusals;
+    let mut activity = Vec::new();
+    for (root, (commits, others)) in routed {
+        let Some((record, state)) = load_root(view, root.as_ref())? else {
+            let error = CanwuError::new(
+                ErrorCode::DomainRecordNotFound,
+                "production packet names a production root that is not installed",
+            );
+            for packet in commits.iter().chain(&others) {
+                refuse_packet(
+                    &mut directives,
+                    refusal_event(&packet.packet_type),
+                    &packet.packet_type,
+                    &error,
+                );
+            }
+            continue;
+        };
+        let mut settlement = RootSettlement {
+            state,
+            changed: false,
+            trigger: None,
+            operations: 0,
+            directives: Vec::new(),
+        };
+        for packet in commits.iter().chain(&others) {
+            settle_packet(view, context, &mut settlement, packet)?;
+        }
+        if settlement.changed {
+            mutations.push(BoundaryDirective::MutateRecord {
                 mutation: DomainRecordMutation::Update {
-                    record: draft,
+                    record: settlement.state.draft()?,
                     expected_version: record.version,
                 },
                 summary: "Apply bounded production lifecycle mutations".to_owned(),
-            },
-        );
+            });
+            activity.push(ProductionRootActivityV1 {
+                scope: root,
+                trigger: settlement.trigger,
+            });
+        }
+        directives.extend(settlement.directives);
     }
+    if !activity.is_empty() {
+        let activity = ProductionBoundaryActivityV1 {
+            boundary: context.boundary_id,
+            roots: activity,
+        };
+        let draft = canwu_api::DomainRecordDraft::from_typed(
+            production_boundary_activity_reference(),
+            &activity,
+        )?;
+        let mutation = match view.typed_domain_record(&production_boundary_activity_reference())? {
+            Some(existing) => DomainRecordMutation::Update {
+                record: draft,
+                expected_version: existing.version,
+            },
+            None => DomainRecordMutation::Create { record: draft },
+        };
+        mutations.push(BoundaryDirective::MutateRecord {
+            mutation,
+            summary: "Record the production roots this boundary settled".to_owned(),
+        });
+    }
+    mutations.extend(directives);
     Ok(BoundaryProposal {
-        directives,
+        directives: mutations,
         ..BoundaryProposal::default()
     })
+}
+
+/// Settles one production packet against its root.
+#[allow(clippy::too_many_lines)]
+fn settle_packet(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    root: &mut RootSettlement,
+    packet: &RoutedPacket,
+) -> Result<(), CanwuError> {
+    let packet_type = packet.packet_type.as_str();
+    match packet_type {
+        PRODUCTION_COMMAND_INGRESS => {
+            let admitted: AdmittedProductionOperation =
+                match decode(&packet.payload, "admitted production operation") {
+                    Ok(admitted) => admitted,
+                    Err(error) => {
+                        root.refuse(packet_type, &error);
+                        return Ok(());
+                    }
+                };
+            // The packet type is public, so only a packet that the admission
+            // of a tracked production command queued settles: that admission
+            // checked the issuer's authority, the run policy, the outcome
+            // capacity, and any degraded-facility decision. Any other packet
+            // settles nothing.
+            if let Err(error) = validate_admitted_command(
+                view,
+                packet.cause.as_ref(),
+                admitted.command,
+                PRODUCTION_COMMAND,
+                &serde_json::to_value(&admitted.envelope).map_err(|error| encode_error(&error))?,
+                &canonical_hash("canwu.production.operation-input.v1", &admitted.envelope)?,
+                &admitted.input_hash,
+            ) {
+                root.refuse(packet_type, &unmatched_command(&error));
+                return Ok(());
+            }
+            if root
+                .state
+                .operation_outcomes
+                .contains_key(&admitted.envelope.operation_id)
+            {
+                return Ok(());
+            }
+            let settled = settle_operation(
+                view,
+                context,
+                root,
+                &admitted.envelope,
+                &admitted.input_hash,
+                admitted.decision_receipt.as_ref(),
+            )?;
+            match settled {
+                Settled::Refused(error) => root.refuse(packet_type, &error),
+                Settled::Recorded(disposition) => {
+                    if disposition == ProductionOperationDisposition::Applied {
+                        root.applied(packet.ingress);
+                    } else {
+                        root.changed = true;
+                    }
+                    root.directives.push(BoundaryDirective::Emit {
+                        event_type: if disposition == ProductionOperationDisposition::Applied {
+                            "canwu.production.operation_applied.v1"
+                        } else {
+                            "canwu.production.operation_rejected.v1"
+                        }
+                        .to_owned(),
+                        summary: format!(
+                            "production operation {} reached a terminal outcome",
+                            admitted.envelope.operation_id
+                        ),
+                        affected: Vec::new(),
+                    });
+                }
+            }
+        }
+        PRODUCTION_BATCH_INGRESS => {
+            let admitted: AdmittedProductionBatch =
+                match decode(&packet.payload, "admitted production batch") {
+                    Ok(admitted) => admitted,
+                    Err(error) => {
+                        root.refuse(packet_type, &error);
+                        return Ok(());
+                    }
+                };
+            if let Err(error) = validate_admitted_command(
+                view,
+                packet.cause.as_ref(),
+                admitted.command,
+                PRODUCTION_BATCH_COMMAND,
+                &serde_json::to_value(&admitted.batch).map_err(|error| encode_error(&error))?,
+                &canonical_hash("canwu.production.batch-input.v1", &admitted.batch)?,
+                &admitted.input_hash,
+            ) {
+                root.refuse(packet_type, &unmatched_command(&error));
+                return Ok(());
+            }
+            settle_batch(view, context, root, packet.ingress, &admitted.batch)?;
+        }
+        PRODUCTION_OUTPUT_ACK_INGRESS => {
+            let acknowledgement: ProductionOutputAcknowledgement =
+                match decode(&packet.payload, "production output acknowledgement") {
+                    Ok(acknowledgement) => acknowledgement,
+                    Err(error) => {
+                        root.refuse(packet_type, &error);
+                        return Ok(());
+                    }
+                };
+            let mut candidate = root.state.clone();
+            // An acknowledgement that does not settle its execution exactly
+            // is refused with a trace and changes nothing; it never fails the
+            // boundary.
+            let accepted = validate_output_ack_source(view, &acknowledgement).and_then(|()| {
+                let completion = candidate
+                    .executions
+                    .get(&acknowledgement.execution)
+                    .map(|execution| {
+                        (
+                            execution.completion_certificate.acquisition.clone(),
+                            execution.completion_certificate.operation_key.clone(),
+                        )
+                    })
+                    .ok_or_else(|| invalid("output acknowledgement execution is unavailable"))?;
+                candidate
+                    .acknowledge_output(&acknowledgement, context.at)
+                    .map(|changed| (changed, completion))
+            });
+            let (settled, completion) = match accepted {
+                Ok(accepted) => accepted,
+                Err(error) if !fails_boundary(&error) => {
+                    root.directives.push(BoundaryDirective::Emit {
+                        event_type: OUTPUT_ACK_REFUSED_EVENT.to_owned(),
+                        summary: format!(
+                            "production output acknowledgement for execution {} was refused: {}",
+                            acknowledgement.execution, error.message
+                        ),
+                        affected: Vec::new(),
+                    });
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
+            if settled {
+                root.state = candidate;
+                root.applied(packet.ingress);
+                root.directives
+                    .push(BoundaryDirective::SchedulePluginIngress {
+                    target_plugin: canwu_resource::PLUGIN_NAME.to_owned(),
+                    after: SimDuration::ZERO,
+                    packet_type: canwu_resource::RESOURCE_COMPLETION_INGRESS.to_owned(),
+                    priority: 0,
+                    payload: serde_json::to_value(
+                        canwu_resource::ResourceCompletionOperationV1::CompleteExternalParticipant(
+                            canwu_resource::CompleteExternalCompletionParticipantGrantV1 {
+                                acquisition: completion.0,
+                                operation_key: completion.1,
+                            },
+                        ),
+                    )
+                    .map_err(|error| encode_error(&error))?,
+                    affected: Vec::new(),
+                });
+                root.directives.push(BoundaryDirective::Emit {
+                    event_type: "canwu.production.output_settled.v1".to_owned(),
+                    summary: format!(
+                        "production execution {} settled its resource output",
+                        acknowledgement.execution
+                    ),
+                    affected: Vec::new(),
+                });
+            }
+        }
+        PRODUCTION_COMPLETION_INGRESS => {
+            let operation: crate::ProductionCompletionIngressV1 = match decode(
+                &without_scope(&packet.payload),
+                "production completion operation",
+            ) {
+                Ok(operation) => operation,
+                Err(error) => {
+                    root.refuse(packet_type, &error);
+                    return Ok(());
+                }
+            };
+            // A step that production's checks refuse settles nothing and is
+            // recorded, whoever queued it; the boundary settles.
+            match settle_completion_step(view, context, &root.state, &operation) {
+                Ok(candidate) => {
+                    root.state = candidate;
+                    root.applied(packet.ingress);
+                }
+                Err(error) if !fails_boundary(&error) => root.refuse(packet_type, &error),
+                Err(error) => return Err(error),
+            }
+        }
+        PRODUCTION_RESOURCE_CONTINUATION_INGRESS => {
+            let witness: crate::ProductionResourceContinuationWitnessV1 = match decode(
+                &without_scope(&packet.payload),
+                "production resource continuation witness",
+            ) {
+                Ok(witness) => witness,
+                Err(error) => {
+                    root.refuse(packet_type, &error);
+                    return Ok(());
+                }
+            };
+            // A witness that is stale or forged when it settles is refused
+            // and recorded; the boundary settles.
+            // A witness records evidence and changes no lifecycle, so it is
+            // no trigger.
+            match settle_continuation_witness(view, &root.state, witness) {
+                Ok(candidate) => {
+                    root.state = candidate;
+                    root.changed = true;
+                }
+                Err(error) if !fails_boundary(&error) => root.refuse(packet_type, &error),
+                Err(error) => return Err(error),
+            }
+        }
+        PRODUCTION_ARCHIVE_COMMIT_INGRESS => {
+            let commit: crate::VerifiedProductionArchiveCommitV1 = match packet
+                .payload
+                .get("commit")
+                .cloned()
+                .ok_or_else(|| invalid("production archive commit payload is absent"))
+                .and_then(|value| decode(&value, "production archive commit"))
+            {
+                Ok(commit) => commit,
+                Err(error) => {
+                    root.refuse(packet_type, &error);
+                    return Ok(());
+                }
+            };
+            // A commit whose content production's checks refuse, whoever
+            // scheduled it, settles nothing and is recorded. Archive
+            // maintenance changes the root but drives no incident draw,
+            // dispatch, or report.
+            let mut candidate = root.state.clone();
+            match candidate.apply_production_archive_commit(&commit, context.at) {
+                Ok(receipt) => {
+                    root.state = candidate;
+                    root.changed = true;
+                    root.directives.push(BoundaryDirective::Emit {
+                        event_type: "canwu.production.archive_maintenance.v1".to_owned(),
+                        summary: format!(
+                            "production archive maintenance {} reached {:?}",
+                            receipt.id, receipt.disposition
+                        ),
+                        affected: Vec::new(),
+                    });
+                }
+                Err(error) if !fails_boundary(&error) => root.refuse(packet_type, &error),
+                Err(error) => return Err(error),
+            }
+        }
+        PRODUCTION_ARCHIVE_RETENTION_ACK_INGRESS => {
+            let acknowledgement: ProductionArchiveRetentionAcknowledgementV1 = match decode(
+                &packet.payload,
+                "production archive retention acknowledgement",
+            ) {
+                Ok(acknowledgement) => acknowledgement,
+                Err(error) => {
+                    root.refuse(packet_type, &error);
+                    return Ok(());
+                }
+            };
+            let mut candidate = root.state.clone();
+            match candidate.acknowledge_production_archive_retention(&acknowledgement.handle_id) {
+                Ok(true) => {
+                    root.state = candidate;
+                    root.changed = true;
+                }
+                Ok(false) => {}
+                Err(error) if !fails_boundary(&error) => root.refuse(packet_type, &error),
+                Err(error) => return Err(error),
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// How one operation or batch item settled.
+enum Settled {
+    /// Its outcome was recorded with this disposition.
+    Recorded(ProductionOperationDisposition),
+    /// Nothing was recorded: the root had no room for its outcome, or
+    /// recording it would break a bound of the root.
+    Refused(CanwuError),
+}
+
+/// Settles one admitted operation against `root` and records its outcome.
+///
+/// The operation is applied to one copy of the root, which is validated once
+/// with the outcome in it. An expected rejection is recorded on the root
+/// instead. When the root has no room for the outcome, or recording even a
+/// rejection would break one of its bounds, nothing is recorded and the
+/// operation is refused, so no bound of the root can fail the boundary.
+fn settle_operation(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    root: &mut RootSettlement,
+    envelope: &ProductionCommandEnvelope,
+    input_hash: &str,
+    decision_receipt: Option<&crate::ProductionDecisionReceiptV1>,
+) -> Result<Settled, CanwuError> {
+    if root.operations >= root.state.limits.max_operations_per_boundary {
+        return Ok(Settled::Refused(CanwuError::new(
+            ErrorCode::ValueOutOfRange,
+            "the root settled its operation bound for this boundary",
+        )));
+    }
+    if let Err(error) = root
+        .state
+        .ensure_operation_outcome_admission_capacity(&envelope.operation)
+    {
+        return Ok(Settled::Refused(error));
+    }
+    root.operations += 1;
+    let outcome = |disposition, rejection: Option<&CanwuError>| ProductionOperationOutcome {
+        id: envelope.operation_id.clone(),
+        canonical_input_hash: input_hash.to_owned(),
+        command: envelope.clone(),
+        disposition,
+        work_order: operation_work_order(&envelope.operation),
+        execution: operation_execution(&envelope.operation),
+        project: operation_project(&envelope.operation),
+        rejection_code: rejection.map(|error| error_code(&error.code).to_owned()),
+        rejection_message: rejection.map(|error| error.message.clone()),
+        settled_at: context.at,
+    };
+    let mut candidate = root.state.clone();
+    let result = validate_external_operation_evidence(
+        view,
+        &root.state,
+        &envelope.holder,
+        &envelope.operation,
+    )
+    .and_then(|()| candidate.apply_operation_in_place(envelope, context.at))
+    .and_then(|()| {
+        if let Some(receipt) = decision_receipt
+            && candidate
+                .decision_receipts
+                .insert(receipt.ticket_id, receipt.clone())
+                .is_some()
+        {
+            return Err(CanwuError::new(
+                ErrorCode::IdempotencyConflict,
+                "production decision ticket already has a receipt",
+            ));
+        }
+        candidate.operation_outcomes.insert(
+            envelope.operation_id.clone(),
+            outcome(ProductionOperationDisposition::Applied, None),
+        );
+        candidate.validate()
+    });
+    let rejection = match result {
+        Ok(()) => {
+            root.state = candidate;
+            if let crate::ProductionOperation::AcceptFacilityCommissioning { project } =
+                &envelope.operation
+            {
+                let project = root
+                    .state
+                    .facility_projects
+                    .get(project)
+                    .ok_or_else(|| invalid("accepted facility project disappeared"))?;
+                root.directives
+                    .push(BoundaryDirective::SchedulePluginIngress {
+                    target_plugin: canwu_resource::PLUGIN_NAME.to_owned(),
+                    after: SimDuration::ZERO,
+                    packet_type: canwu_resource::RESOURCE_COMPLETION_INGRESS.to_owned(),
+                    priority: 0,
+                    payload: serde_json::to_value(
+                        canwu_resource::ResourceCompletionOperationV1::CompleteExternalParticipant(
+                            canwu_resource::CompleteExternalCompletionParticipantGrantV1 {
+                                acquisition: project.completion_certificate.acquisition.clone(),
+                                operation_key: project.operation_key.clone(),
+                            },
+                        ),
+                    )
+                    .map_err(|error| encode_error(&error))?,
+                    affected: Vec::new(),
+                });
+            }
+            return Ok(Settled::Recorded(ProductionOperationDisposition::Applied));
+        }
+        Err(error) if expected_domain_rejection(&error) => error,
+        Err(error) => return Err(error),
+    };
+    let revision = root.state.revision;
+    root.state.revision = revision.checked_add(1).ok_or_else(|| {
+        invalid("production runtime revision overflowed while rejecting an operation")
+    })?;
+    root.state.operation_outcomes.insert(
+        envelope.operation_id.clone(),
+        outcome(ProductionOperationDisposition::Rejected, Some(&rejection)),
+    );
+    match root.state.validate() {
+        Ok(()) => Ok(Settled::Recorded(ProductionOperationDisposition::Rejected)),
+        Err(error) if expected_domain_rejection(&error) => {
+            root.state.operation_outcomes.remove(&envelope.operation_id);
+            root.state.revision = revision;
+            root.operations -= 1;
+            Ok(Settled::Refused(error))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Refused item IDs a batch summary lists before it only counts the rest.
+const BATCH_SUMMARY_REFUSED_IDS: usize = 16;
+
+/// Settles one production batch item by item, in order, against `root`.
+///
+/// A batch whose expected revision is not the root's, or whose items would
+/// take the root past the operations it settles in one boundary, is refused
+/// whole with a trace: nothing is recorded, so it can be sent again.
+fn settle_batch(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    root: &mut RootSettlement,
+    ingress: IngressId,
+    batch: &ProductionBatchEnvelopeV1,
+) -> Result<(), CanwuError> {
+    if let Some(expected) = batch.expected_runtime_revision
+        && expected != root.state.revision
+    {
+        root.refuse(
+            PRODUCTION_BATCH_INGRESS,
+            &CanwuError::new(
+                ErrorCode::DomainRecordVersionConflict,
+                format!(
+                    "the batch expected runtime revision {expected}, but the root is at revision {}",
+                    root.state.revision
+                ),
+            ),
+        );
+        return Ok(());
+    }
+    let fresh = batch
+        .items
+        .iter()
+        .filter(|item| {
+            !root
+                .state
+                .operation_outcomes
+                .contains_key(&item.operation_id)
+        })
+        .count();
+    if root
+        .operations
+        .checked_add(fresh)
+        .is_none_or(|total| total > root.state.limits.max_operations_per_boundary)
+    {
+        root.refuse(
+            PRODUCTION_BATCH_INGRESS,
+            &CanwuError::new(
+                ErrorCode::ValueOutOfRange,
+                "the batch would take the root past the operations it settles in one boundary",
+            ),
+        );
+        return Ok(());
+    }
+    let (mut applied, mut rejected, mut settled_before) = (0_usize, 0_usize, 0_usize);
+    let mut refused = Vec::new();
+    let mut first_refusal = None;
+    for item in &batch.items {
+        if let Some(existing) = root.state.operation_outcomes.get(&item.operation_id) {
+            if batch_item_settled(existing, batch, item) {
+                settled_before += 1;
+            } else {
+                refused.push(item.operation_id.to_string());
+                first_refusal.get_or_insert_with(|| {
+                    "an item reuses an operation ID with different input".to_owned()
+                });
+            }
+            continue;
+        }
+        // Each item's outcome records the envelope as it applied: the
+        // revision it settled against.
+        let envelope = ProductionCommandEnvelope {
+            operation_id: item.operation_id.clone(),
+            holder: batch.holder.clone(),
+            expected_runtime_revision: root.state.revision,
+            operation: item.operation.clone(),
+            scope: batch.scope.clone(),
+        };
+        let input_hash = canonical_hash("canwu.production.operation-input.v1", &envelope)?;
+        match settle_operation(view, context, root, &envelope, &input_hash, None)? {
+            Settled::Recorded(ProductionOperationDisposition::Applied) => {
+                applied += 1;
+                root.applied(ingress);
+            }
+            Settled::Recorded(_) => {
+                rejected += 1;
+                root.changed = true;
+            }
+            Settled::Refused(error) => {
+                refused.push(item.operation_id.to_string());
+                first_refusal.get_or_insert(error.message);
+            }
+        }
+    }
+    let listed = refused
+        .iter()
+        .take(BATCH_SUMMARY_REFUSED_IDS)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    root.directives.push(BoundaryDirective::Emit {
+        event_type: BATCH_SETTLED_EVENT.to_owned(),
+        summary: format!(
+            "production batch of {} items settled: {applied} applied, {rejected} rejected, {settled_before} settled before, {} refused{}{}",
+            batch.items.len(),
+            refused.len(),
+            if refused.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " [{listed}{}]",
+                    if refused.len() > BATCH_SUMMARY_REFUSED_IDS {
+                        ", ..."
+                    } else {
+                        ""
+                    }
+                )
+            },
+            first_refusal
+                .map(|reason| format!(" (first refusal: {reason})"))
+                .unwrap_or_default()
+        ),
+        affected: Vec::new(),
+    });
+    Ok(())
 }
 
 /// Settles one completion coordinator step on a copy of `state` and returns
@@ -805,7 +1481,7 @@ fn settle_completion_step(
     state: &ProductionState,
     operation: &crate::ProductionCompletionIngressV1,
 ) -> Result<ProductionState, CanwuError> {
-    validate_production_completion_ingress(view, context, operation)?;
+    validate_production_completion_ingress(view, context, state, operation)?;
     let mut candidate = state.clone();
     if let crate::ProductionCompletionIngressV1::AcknowledgeParticipantCompleted {
         acquisition,
@@ -899,14 +1575,27 @@ fn refuse_packet(
     });
 }
 
-/// Whether an operation packet is the one the admission of a tracked
-/// production command queued: its cause is that command, and the command's
-/// payload is the packet's envelope. The check reads the command's retained
-/// record, which a seal keeps while the packet is queued.
+/// The refusal of a packet no admitted tracked command queued.
+fn unmatched_command(error: &CanwuError) -> CanwuError {
+    CanwuError::new(
+        error.code.clone(),
+        "it does not match an admitted tracked production command",
+    )
+}
+
+/// Whether a packet is the one the admission of a tracked production command
+/// queued: its cause is that command, the command is `command_name` of this
+/// plugin with `expected_payload` as its payload, and the packet's input
+/// hash is the one admission computed. The check reads the command's
+/// retained record, which a seal keeps while the packet is queued.
 fn validate_admitted_command(
     view: &SimulationView<'_>,
     cause: Option<&CauseRef>,
-    admitted: &AdmittedProductionOperation,
+    admitted_command: canwu_api::CommandId,
+    command_name: &str,
+    expected_payload: &Value,
+    input_hash: &str,
+    admitted_hash: &str,
 ) -> Result<(), CanwuError> {
     let Some(CauseRef::Command(command)) = cause else {
         return Err(CanwuError::new(
@@ -920,17 +1609,15 @@ fn validate_admitted_command(
             "production command evidence is unavailable",
         )
     })?;
-    let matches = *command == admitted.command
+    let matches = *command == admitted_command
         && matches!(
             &record.envelope.command,
             Command::Plugin { plugin, command, payload }
                 if plugin == PLUGIN_NAME
-                    && command == PRODUCTION_COMMAND
-                    && decode::<ProductionCommandEnvelope>(payload, "production operation")
-                        .is_ok_and(|envelope| envelope == admitted.envelope)
+                    && command == command_name
+                    && payload == expected_payload
         )
-        && canonical_hash("canwu.production.operation-input.v1", &admitted.envelope)?
-            == admitted.input_hash;
+        && input_hash == admitted_hash;
     if !matches {
         return Err(CanwuError::new(
             ErrorCode::InvalidAuthority,
@@ -940,476 +1627,588 @@ fn validate_admitted_command(
     Ok(())
 }
 
-/// Orders the ingress one boundary admitted so that production archive
-/// commits settle before every other production packet, each group in its
-/// admitted order.
-///
-/// Every other production packet advances the runtime revision, which the
-/// archive source root binds. A commit prepared from the root the boundary
-/// started from therefore applies even when an operation or an
-/// acknowledgement was admitted ahead of it, instead of going stale behind
-/// it. A boundary that admits no archive commit keeps its order.
-fn archive_commits_first(
-    view: &SimulationView<'_>,
-    admitted: &[canwu_api::IngressId],
-) -> Result<Vec<canwu_api::IngressId>, CanwuError> {
-    let mut commits = Vec::new();
-    let mut others = Vec::new();
-    for ingress_id in admitted {
-        let is_commit = matches!(
-            view.ingress(*ingress_id)?.map(|ingress| &ingress.payload),
-            Some(IngressPayload::Plugin {
-                plugin,
-                packet_type,
-                ..
-            }) if plugin == PLUGIN_NAME && packet_type == PRODUCTION_ARCHIVE_COMMIT_INGRESS
-        );
-        if is_commit {
-            commits.push(*ingress_id);
-        } else {
-            others.push(*ingress_id);
-        }
-    }
-    commits.extend(others);
-    Ok(commits)
-}
-
+/// The roots the lifecycle system wrote in this boundary, each validated
+/// again as proposed.
 fn validate_production_candidate(
     view: &SimulationView<'_>,
-    _context: &BoundaryContext,
+    context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
-    if let Some((_, state)) = load_state(view)? {
-        state.validate()?;
+    for root in active_roots(view, context)?.keys() {
+        load_root(view, root.as_ref())?;
     }
     Ok(BoundaryProposal::default())
 }
 
+/// The roots whose production lifecycle a packet of this boundary changed,
+/// and the roots whose observation wake was admitted, with the refusal of
+/// each wake that names no root.
+fn triggered_or_woken_roots(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+) -> Result<(BTreeSet<RootKey>, Vec<CanwuError>), CanwuError> {
+    let mut roots = active_roots(view, context)?
+        .into_iter()
+        .filter(|(_, trigger)| trigger.is_some())
+        .map(|(root, _)| root)
+        .collect::<BTreeSet<_>>();
+    let mut refusals = Vec::new();
+    for ingress_id in &context.admitted_ingress {
+        let Some(ingress) = view.ingress(*ingress_id)? else {
+            continue;
+        };
+        if let IngressPayload::Plugin {
+            plugin,
+            packet_type,
+            payload,
+            ..
+        } = &ingress.payload
+            && plugin == PLUGIN_NAME
+            && packet_type == PRODUCTION_OBSERVATION_WAKE_INGRESS
+        {
+            match payload_scope(payload.get("scope")) {
+                Ok(root)
+                    if view
+                        .typed_domain_record(&production_root_reference(root.as_ref()))?
+                        .is_some() =>
+                {
+                    roots.insert(root);
+                }
+                Ok(_) => refusals.push(CanwuError::new(
+                    ErrorCode::InvalidPayload,
+                    "the wake names a production root that is not installed",
+                )),
+                Err(error) => refusals.push(error),
+            }
+        }
+    }
+    Ok((roots, refusals))
+}
+
+/// Pins the production source of every execution whose output waits for its
+/// first dispatch, in every root a packet of this boundary changed or a wake
+/// names: an output becomes pending when an operation completes its
+/// execution, and a root installed or restored with pending output resumes
+/// on its next wake.
 fn dispatch_pending_outputs(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
-    let Some((record, mut state)) = load_state(view)? else {
-        return Ok(BoundaryProposal::default());
-    };
-    let pending = state
-        .executions
-        .values()
-        .filter(|execution| {
-            execution.lifecycle == crate::WorkOrderLifecycle::CompletedPendingOutputSettlement
-                && execution.output_outcomes.is_empty()
-                && execution.output_source.is_none()
-        })
-        .map(|execution| execution.id.clone())
-        .collect::<Vec<_>>();
-    if pending.is_empty() {
-        return Ok(BoundaryProposal::default());
-    }
-    let source = view
-        .current_domain_record_version(&production_runtime_reference().into_untyped())?
-        .ok_or_else(|| invalid("production output source version is unavailable"))?;
-    let mut directives = Vec::with_capacity(pending.len().saturating_add(1));
-    for execution_id in pending {
-        let execution = state
-            .executions
-            .get_mut(&execution_id)
-            .expect("pending production output execution was selected");
-        execution.output_source = Some(source.clone());
-        let request = canwu_resource::ResourceProductionOutputBatchV1 {
-            provider_plugin: PLUGIN_NAME.to_owned(),
-            provider_source: source.clone(),
-            requests: execution
-                .output_requests
-                .iter()
-                .map(|output| {
-                    output.resource_credit_request(
-                        source.clone(),
-                        execution.completion_certificate.clone(),
-                        context.at,
-                    )
-                })
-                .collect(),
+    let mut mutations = Vec::new();
+    let mut directives = Vec::new();
+    for root in triggered_or_woken_roots(view, context)?.0 {
+        let Some((record, mut state)) = load_root(view, root.as_ref())? else {
+            continue;
         };
-        directives.push(BoundaryDirective::SchedulePluginIngress {
-            target_plugin: canwu_resource::PLUGIN_NAME.to_owned(),
-            after: SimDuration::ZERO,
-            packet_type: canwu_resource::RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS.to_owned(),
-            priority: 0,
-            payload: serde_json::to_value(request).map_err(|error| encode_error(&error))?,
-            affected: Vec::new(),
-        });
-    }
-    state.revision = state
-        .revision
-        .checked_add(1)
-        .ok_or_else(|| invalid("production output dispatch revision overflowed"))?;
-    state.validate()?;
-    directives.insert(
-        0,
-        BoundaryDirective::MutateRecord {
+        let pending = state
+            .executions
+            .values()
+            .filter(|execution| {
+                execution.lifecycle == crate::WorkOrderLifecycle::CompletedPendingOutputSettlement
+                    && execution.output_outcomes.is_empty()
+                    && execution.output_source.is_none()
+            })
+            .map(|execution| execution.id.clone())
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            continue;
+        }
+        let source = view
+            .current_domain_record_version(&record.reference)?
+            .ok_or_else(|| invalid("production output source version is unavailable"))?;
+        for execution_id in pending {
+            let execution = state
+                .executions
+                .get_mut(&execution_id)
+                .expect("pending production output execution was selected");
+            execution.output_source = Some(source.clone());
+            let request = canwu_resource::ResourceProductionOutputBatchV1 {
+                provider_plugin: PLUGIN_NAME.to_owned(),
+                provider_source: source.clone(),
+                requests: execution
+                    .output_requests
+                    .iter()
+                    .map(|output| {
+                        output.resource_credit_request(
+                            source.clone(),
+                            execution.completion_certificate.clone(),
+                            context.at,
+                        )
+                    })
+                    .collect(),
+            };
+            directives.push(BoundaryDirective::SchedulePluginIngress {
+                target_plugin: canwu_resource::PLUGIN_NAME.to_owned(),
+                after: SimDuration::ZERO,
+                packet_type: canwu_resource::RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS.to_owned(),
+                priority: 0,
+                payload: serde_json::to_value(request).map_err(|error| encode_error(&error))?,
+                affected: Vec::new(),
+            });
+        }
+        state.revision = state
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| invalid("production output dispatch revision overflowed"))?;
+        mutations.push(BoundaryDirective::MutateRecord {
             mutation: DomainRecordMutation::Update {
                 record: state.draft()?,
                 expected_version: record.version,
             },
             summary: "Pin exact production sources for pending output settlement".to_owned(),
-        },
-    );
+        });
+    }
+    mutations.extend(directives);
     Ok(BoundaryProposal {
-        directives,
+        directives: mutations,
         ..BoundaryProposal::default()
     })
 }
 
+/// Evaluates the incident candidates of every root that a packet of this
+/// boundary changed. A root changed only by refused packets or recorded
+/// rejections draws nothing, so queued junk cannot cause incident draws.
 fn evaluate_incident_candidates(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
-    let Some((record, mut state)) = load_state(view)? else {
-        return Ok(BoundaryProposal::default());
-    };
-    let operation_evidence = context.admitted_ingress.iter().find_map(|ingress_id| {
-        let ingress = view.ingress(*ingress_id).ok().flatten()?;
-        matches!(
-            &ingress.payload,
-            IngressPayload::Plugin { plugin, .. } if plugin == PLUGIN_NAME
-        )
-        .then_some(EvidenceRef::Ingress(*ingress_id))
-    });
-    let Some(operation_evidence) = operation_evidence else {
-        return Ok(BoundaryProposal::default());
-    };
-    let source_record_digest = canonical_hash("canwu.production.runtime-cut.v1", &record)?;
-    let candidates = state
-        .incident_due_index
-        .iter()
-        .take(crate::ProductionLimitsV1::canonical().max_incidents_per_boundary)
-        .cloned()
-        .collect::<Vec<_>>();
-    let evaluated = candidates.last().cloned();
-    let mut committed = 0_usize;
-    for facility_id in candidates {
-        let facility = state
-            .facilities
-            .get(&facility_id)
-            .ok_or_else(|| invalid("incident due index lost its facility"))?
-            .clone();
-        let operation_key = format!(
-            "canwu.production:incident:{}:{}:{}:{}",
-            facility.id,
-            facility.generation,
-            record.version,
-            context.boundary_id.get()
-        );
-        if state.incident_receipts.contains_key(&operation_key) {
+    let mut mutations = Vec::new();
+    let mut directives = Vec::new();
+    for (root, trigger) in active_roots(view, context)? {
+        let Some(trigger) = trigger else {
             continue;
-        }
-        let target = RandomOperationTarget::CanonicalKey(facility.id.to_string());
-        let trigger = view.random_sample_for_operation(
-            &production_incident_random_stream(),
-            operation_evidence.clone(),
-            "production_facility_incident",
-            &operation_key,
-            target.clone(),
-            0,
-            1_000,
-            "select a configured production facility incident",
-        )?;
-        if trigger.value >= u64::from(facility.incident_risk_per_mille) {
+        };
+        let Some((record, mut state)) = load_root(view, root.as_ref())? else {
             continue;
-        }
-        let severity = view.random_sample_for_operation(
-            &production_incident_random_stream(),
-            operation_evidence.clone(),
-            "production_facility_incident",
-            &operation_key,
-            target,
-            1,
-            u64::from(facility.incident_max_severity_per_mille),
-            "determine the selected production facility incident severity",
-        )?;
-        let loss = u16::try_from(severity.value.saturating_add(1))
-            .map_err(|_| invalid("production incident severity overflowed"))?
-            .min(facility.condition_per_mille);
-        let condition_after = facility.condition_per_mille.saturating_sub(loss);
-        let mut transition = crate::ProductionIncidentTransitionV1 {
-            id: crate::ProductionIncidentId::new(format!(
-                "canwu.production:incident-receipt:{}:{}:{}",
+        };
+        let operation_evidence = EvidenceRef::Ingress(trigger);
+        let folded = state.fold_incident_receipts(context.boundary_id)?;
+        let source_record_digest = canonical_hash("canwu.production.runtime-cut.v1", &record)?;
+        let candidates = state
+            .incident_due_index
+            .iter()
+            .take(state.limits.max_incidents_per_boundary)
+            .cloned()
+            .collect::<Vec<_>>();
+        let evaluated = candidates.last().cloned();
+        let mut committed = 0_usize;
+        for facility_id in candidates {
+            let facility = state
+                .facilities
+                .get(&facility_id)
+                .ok_or_else(|| invalid("incident due index lost its facility"))?
+                .clone();
+            // An incident marks its site's reports dirty; while the dirty
+            // index is full the remaining candidates wait for a later round.
+            if state.observation_dirty_index.len() >= state.limits.max_observation_dirty {
+                break;
+            }
+            let operation_key = format!(
+                "canwu.production:incident:{}:{}:{}:{}:{}",
+                record.reference.id,
                 facility.id,
                 facility.generation,
+                record.version,
                 context.boundary_id.get()
-            ))?,
-            operation_key,
-            facility: facility.id,
-            expected_generation: facility.generation,
-            condition_before: facility.condition_per_mille,
-            condition_after,
-            lifecycle_after: if condition_after <= 250 {
-                crate::FacilityLifecycle::Damaged
-            } else {
-                crate::FacilityLifecycle::Degraded
+            );
+            if state.incident_receipts.contains_key(&operation_key) {
+                continue;
+            }
+            let target = RandomOperationTarget::CanonicalKey(facility.id.to_string());
+            let trigger = view.random_sample_for_operation(
+                &production_incident_random_stream(),
+                operation_evidence.clone(),
+                "production_facility_incident",
+                &operation_key,
+                target.clone(),
+                0,
+                1_000,
+                "select a configured production facility incident",
+            )?;
+            if trigger.value >= u64::from(facility.incident_risk_per_mille) {
+                continue;
+            }
+            let severity = view.random_sample_for_operation(
+                &production_incident_random_stream(),
+                operation_evidence.clone(),
+                "production_facility_incident",
+                &operation_key,
+                target,
+                1,
+                u64::from(facility.incident_max_severity_per_mille),
+                "determine the selected production facility incident severity",
+            )?;
+            let loss = u16::try_from(severity.value.saturating_add(1))
+                .map_err(|_| invalid("production incident severity overflowed"))?
+                .min(facility.condition_per_mille);
+            let condition_after = facility.condition_per_mille.saturating_sub(loss);
+            let mut transition = crate::ProductionIncidentTransitionV1 {
+                id: crate::ProductionIncidentId::new(format!(
+                    "canwu.production:incident-receipt:{}:{}:{}",
+                    facility.id,
+                    facility.generation,
+                    context.boundary_id.get()
+                ))?,
+                operation_key,
+                facility: facility.id,
+                expected_generation: facility.generation,
+                condition_before: facility.condition_per_mille,
+                condition_after,
+                lifecycle_after: if condition_after <= 250 {
+                    crate::FacilityLifecycle::Damaged
+                } else {
+                    crate::FacilityLifecycle::Degraded
+                },
+                source_record_revision: record.version,
+                source_record_digest: source_record_digest.clone(),
+                random: crate::ProductionIncidentRandomEvidenceV1 {
+                    stream: production_incident_random_stream(),
+                    trigger,
+                    severity: Some(severity),
+                    operation_evidence: operation_evidence.clone(),
+                },
+                evaluated_at: context.at,
+                evaluation_boundary: context.boundary_id,
+                canonical_digest: String::new(),
+            };
+            transition.canonical_digest =
+                canonical_hash("canwu.production.incident-transition.v1", &transition)?;
+            state.apply_incident_transition(&transition)?;
+            committed = committed.saturating_add(1);
+        }
+        if evaluated.is_none() && !folded {
+            continue;
+        }
+        state.advance_incident_cursor(evaluated)?;
+        mutations.push(BoundaryDirective::MutateRecord {
+            mutation: DomainRecordMutation::Update {
+                record: state.draft()?,
+                expected_version: record.version,
             },
-            source_record_revision: record.version,
-            source_record_digest: source_record_digest.clone(),
-            random: crate::ProductionIncidentRandomEvidenceV1 {
-                stream: production_incident_random_stream(),
-                trigger,
-                severity: Some(severity),
-                operation_evidence: operation_evidence.clone(),
-            },
-            evaluated_at: context.at,
-            evaluation_boundary: context.boundary_id,
-            canonical_digest: String::new(),
-        };
-        transition.canonical_digest =
-            canonical_hash("canwu.production.incident-transition.v1", &transition)?;
-        state.apply_incident_transition(transition)?;
-        committed = committed.saturating_add(1);
-    }
-    if evaluated.is_none() {
-        return Ok(BoundaryProposal::default());
-    }
-    state.advance_incident_cursor(evaluated)?;
-    let draft = state.draft()?;
-    let mut directives = vec![BoundaryDirective::MutateRecord {
-        mutation: DomainRecordMutation::Update {
-            record: draft,
-            expected_version: record.version,
-        },
-        summary: "Persist the bounded production incident fairness cursor and any operation-keyed transition bundles for kernel commit".to_owned(),
-    }];
-    if committed > 0 {
-        directives.push(BoundaryDirective::Emit {
+            summary: "Persist the bounded production incident fairness cursor and any operation-keyed transition bundles for kernel commit".to_owned(),
+        });
+        if committed > 0 {
+            directives.push(BoundaryDirective::Emit {
                 event_type: "canwu.production.incident_committed.v1".to_owned(),
                 summary: format!("staged {committed} bounded production incident transition(s) for atomic conditional commit"),
                 affected: Vec::new(),
             });
+        }
     }
+    mutations.extend(directives);
     Ok(BoundaryProposal {
-        directives,
+        directives: mutations,
         ..BoundaryProposal::default()
     })
 }
 
 fn audit_incident_transition_commit(
     view: &SimulationView<'_>,
-    _context: &BoundaryContext,
+    context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
-    if let Some((_, state)) = load_state(view)? {
-        state.validate()?;
+    for root in active_roots(view, context)?.keys() {
+        load_root(view, root.as_ref())?;
     }
     Ok(BoundaryProposal::default())
 }
 
+/// Publishes the holder reports of every root a packet of this boundary
+/// changed and of every root whose wake was admitted, within the engine's
+/// publication budget and the roots' report bounds. A report that does not
+/// fit waits as due work: for the publication budget, a wake one minute
+/// later retries it; for a knowledge bound, it waits for the root's next
+/// activity.
+#[allow(clippy::too_many_lines)]
 fn publish_holder_reports(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
-    let triggers = context
-        .admitted_ingress
-        .iter()
-        .filter_map(|ingress_id| {
-            let ingress = view.ingress(*ingress_id).ok().flatten()?;
-            matches!(
-                &ingress.payload,
-                IngressPayload::Plugin { plugin, .. } if plugin == PLUGIN_NAME
-            )
-            .then_some(EvidenceRef::Ingress(*ingress_id))
-        })
-        .collect::<Vec<_>>();
-    if triggers.is_empty() {
-        return Ok(BoundaryProposal::default());
-    }
-    let Some((record, mut state)) = load_state(view)? else {
-        return Ok(BoundaryProposal::default());
-    };
-    let provider_source = view
-        .current_domain_record_version(&production_runtime_reference().into_untyped())?
-        .ok_or_else(|| invalid("production observation provider source is unavailable"))?;
-    let limits = crate::ProductionLimitsV1::canonical();
-    let mut namespace_count = view.knowledge_record_count_in_namespace(PLUGIN_NAMESPACE)?;
-    let mut holder_counts = std::collections::BTreeMap::new();
-    let mut reserved_total = 0_usize;
-    let mut reserved_by_holder = std::collections::BTreeMap::new();
+    let (roots, wake_refusals) = triggered_or_woken_roots(view, context)?;
+    let mut mutations = Vec::new();
     let mut directives = Vec::new();
-    let dirty = state
-        .observation_dirty_index
-        .iter()
-        .take(limits.max_reports_per_boundary)
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut state_changed = false;
-    for key in dirty {
-        let holder_count = if let Some(count) = holder_counts.get(&key.holder) {
-            *count
-        } else {
-            let count = production_holder_knowledge_count(view, &key.holder)?;
-            holder_counts.insert(key.holder.clone(), count);
-            count
-        };
-        let holder_reserved = reserved_by_holder
-            .get(&key.holder)
-            .copied()
-            .unwrap_or_default();
-        if namespace_count.saturating_add(reserved_total) < limits.max_observation_records
-            && holder_count.saturating_add(holder_reserved)
-                < limits.max_observation_records_per_holder
-        {
-            state.materialize_observation_head(
-                &key,
-                context.at,
-                EvidenceRef::DomainRecordVersion(provider_source.clone()),
-            )?;
-            reserved_total = reserved_total.saturating_add(1);
-            reserved_by_holder.insert(key.holder.clone(), holder_reserved.saturating_add(1));
-            state_changed = true;
-        } else {
-            directives.push(BoundaryDirective::Emit {
-                event_type: "canwu.production.report_capacity_rejected.v1".to_owned(),
-                summary: "Retain dirty production observation work because bounded knowledge capacity is exhausted".to_owned(),
-                affected: Vec::new(),
-            });
-        }
+    for error in &wake_refusals {
+        refuse_packet(
+            &mut directives,
+            INGRESS_REFUSED_EVENT,
+            PRODUCTION_OBSERVATION_WAKE_INGRESS,
+            error,
+        );
     }
-    let due_times = state
-        .observation_due_index
-        .range(..=context.at)
-        .map(|(due, _)| *due)
-        .collect::<Vec<_>>();
-    let mut due_keys = Vec::new();
-    for due in due_times {
-        if let Some(keys) = state.observation_due_index.remove(&due) {
-            for key in keys {
-                if due_keys.len() == limits.max_reports_per_boundary {
-                    state
-                        .observation_due_index
-                        .entry(due)
-                        .or_default()
-                        .insert(key);
-                } else {
-                    due_keys.push(key);
-                }
-            }
-            state_changed = true;
-        }
-    }
-    let mut candidates = Vec::new();
-    for key in due_keys {
-        let Some(site) = state.sites.get(&key.scope) else {
-            continue;
-        };
-        let head =
-            crate::query::eligible_observation_head(&state, &key.holder, &key.scope, context.at)?;
-        let report = crate::query::production_report_from_head(head, context.at)?;
-        candidates.push((
-            key.clone(),
-            key.holder,
-            site.place.clone(),
-            report,
-            head.source_evidence.clone(),
-        ));
-    }
-    candidates.sort_by(|left, right| {
-        (&left.1, &left.3.scope, &left.3.id).cmp(&(&right.1, &right.3.scope, &right.3.id))
-    });
-    for (key, holder, place, report, source_evidence) in candidates {
-        let holder_count = if let Some(count) = holder_counts.get(&holder) {
-            *count
-        } else {
-            let count = production_holder_knowledge_count(view, &holder)?;
-            holder_counts.insert(holder.clone(), count);
-            count
-        };
-        if namespace_count < limits.max_observation_records
-            && holder_count < limits.max_observation_records_per_holder
-        {
-            directives.push(BoundaryDirective::PublishKnowledge {
-                visibility: StateVisibility::SameBoundary,
-                producer_correlation: Some(report.id.to_string()),
-                supersession: canwu_api::KnowledgeSupersession::Explicit,
-                groups: vec![canwu_api::KnowledgePublicationGroup {
-                    holders: vec![holder.clone()],
-                    records: vec![KnowledgeRecordDraft {
-                        schema: production_report_knowledge_schema_id(),
-                        subjects: vec![KnowledgeSubject {
-                            role: "site".to_owned(),
-                            target: KnowledgeSubjectTarget::Entity(place),
-                        }],
-                        payload: serde_json::to_value(&report)
-                            .map_err(|error| encode_error(&error))?,
-                        as_of: Some(report.observed_at),
-                        confidence_per_mille: match report.role {
-                            crate::ProductionObservationRole::Operator => 1_000,
-                            crate::ProductionObservationRole::LocalOwner => 900,
-                            crate::ProductionObservationRole::RemoteOwner => 700,
-                        },
-                        origin: KnowledgeOrigin {
-                            method: "production_holder_report_v1".to_owned(),
-                            evidence: source_evidence,
-                        },
-                        supersedes: Vec::new(),
-                        contradicts: Vec::new(),
-                    }],
-                }],
-                summary: "Publish one bounded holder-relative production report".to_owned(),
-            });
-            namespace_count = namespace_count.saturating_add(1);
-            holder_counts.insert(holder, holder_count.saturating_add(1));
-        } else {
-            state
-                .observation_due_index
-                .entry(context.at)
-                .or_default()
-                .insert(key);
-            state_changed = true;
-            directives.push(BoundaryDirective::Emit {
-                event_type: "canwu.production.report_capacity_rejected.v1".to_owned(),
-                summary: "Reject periodic production report because its bounded knowledge capacity is exhausted".to_owned(),
-                affected: Vec::new(),
-            });
-        }
-    }
-    if let Some(next_due) = state.observation_due_index.keys().next().copied()
-        && next_due > context.at
-    {
-        directives.push(BoundaryDirective::SchedulePluginIngress {
-            target_plugin: PLUGIN_NAME.to_owned(),
-            after: next_due
-                .checked_sub(context.at)
-                .ok_or_else(|| invalid("production observation wake delay overflowed"))?,
-            packet_type: PRODUCTION_OBSERVATION_WAKE_INGRESS.to_owned(),
-            priority: 0,
-            payload: serde_json::json!({ "due_at": next_due }),
-            affected: Vec::new(),
+    if roots.is_empty() {
+        return Ok(BoundaryProposal {
+            directives,
+            ..BoundaryProposal::default()
         });
     }
-    if state_changed {
-        state.revision = state
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| invalid("production runtime revision overflowed"))?;
-        state.validate()?;
-        directives.insert(
-            0,
-            BoundaryDirective::MutateRecord {
+    let mut budget = view.knowledge_publication_budget();
+    let mut namespace_count = view.knowledge_record_count_in_namespace(PLUGIN_NAMESPACE)?;
+    let mut holder_counts = HolderReportCounts::default();
+    for root in roots {
+        let Some((record, mut state)) = load_root(view, root.as_ref())? else {
+            continue;
+        };
+        let provider_source = view
+            .current_domain_record_version(&record.reference)?
+            .ok_or_else(|| invalid("production observation provider source is unavailable"))?;
+        let limits = state.limits;
+        let mut reserved_total = 0_usize;
+        let mut reserved_by_holder = BTreeMap::new();
+        let dirty = state
+            .observation_dirty_index
+            .iter()
+            .take(limits.max_reports_per_boundary)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut state_changed = false;
+        // Work this boundary could not take for want of room in its own
+        // bounds is retried by a wake one minute later: work past the
+        // publication budget always, and work past the report bound per
+        // boundary while the pass made progress. Work blocked by a knowledge
+        // bound waits for the root's next activity instead, since a wake
+        // would find the bound still reached.
+        let mut overflow = state.observation_dirty_index.len() > dirty.len();
+        let mut progress = false;
+        let mut budget_deferred = false;
+        // The pairs due now prune first: their newest eligible heads can free
+        // room in the root's shared rollover for a dirty pair of another
+        // holder or site, which would otherwise wait for a later run.
+        let due_now = state
+            .observation_due_index
+            .range(..=context.at)
+            .flat_map(|(_, keys)| keys.iter().cloned())
+            .take(limits.max_reports_per_boundary)
+            .collect::<Vec<_>>();
+        for key in &due_now {
+            state_changed |= state.prune_observation_key(key, context.at)?;
+        }
+        for key in dirty {
+            let holder_count = holder_counts.count(view, &key.holder, &limits)?;
+            let holder_reserved = reserved_by_holder
+                .get(&key.holder)
+                .copied()
+                .unwrap_or_default();
+            state_changed |= state.prune_observation_key(&key, context.at)?;
+            if namespace_count.saturating_add(reserved_total) < limits.max_observation_records
+                && holder_count.saturating_add(holder_reserved)
+                    < limits.max_observation_records_per_holder
+                && state.observation_head_fits(&key)?
+            {
+                state.materialize_observation_head(
+                    &key,
+                    context.at,
+                    EvidenceRef::DomainRecordVersion(provider_source.clone()),
+                )?;
+                reserved_total = reserved_total.saturating_add(1);
+                reserved_by_holder.insert(key.holder.clone(), holder_reserved.saturating_add(1));
+                state_changed = true;
+                progress = true;
+            } else {
+                directives.push(BoundaryDirective::Emit {
+                    event_type: "canwu.production.report_capacity_rejected.v1".to_owned(),
+                    summary: "Retain dirty production observation work because bounded knowledge capacity is exhausted".to_owned(),
+                    affected: Vec::new(),
+                });
+            }
+        }
+        let due_times = state
+            .observation_due_index
+            .range(..=context.at)
+            .map(|(due, _)| *due)
+            .collect::<Vec<_>>();
+        let mut due_keys = Vec::new();
+        for due in due_times {
+            if let Some(keys) = state.observation_due_index.remove(&due) {
+                for key in keys {
+                    if due_keys.len() == limits.max_reports_per_boundary {
+                        overflow = true;
+                        state
+                            .observation_due_index
+                            .entry(due)
+                            .or_default()
+                            .insert(key);
+                    } else {
+                        due_keys.push(key);
+                    }
+                }
+                state_changed = true;
+            }
+        }
+        let mut candidates = Vec::new();
+        for key in due_keys {
+            // A due pair's newest eligible head dominates its older rolled-out
+            // heads from now on.
+            state_changed |= state.prune_observation_key(&key, context.at)?;
+            let Some(site) = state.sites.get(&key.scope) else {
+                continue;
+            };
+            let head = crate::query::eligible_observation_head(
+                &state,
+                &key.holder,
+                &key.scope,
+                context.at,
+            )?;
+            let report = crate::query::production_report_from_head(head, context.at)?;
+            candidates.push((
+                key.clone(),
+                key.holder,
+                site.place.clone(),
+                report,
+                head.source_evidence.clone(),
+            ));
+        }
+        candidates.sort_by(|left, right| {
+            (&left.1, &left.3.scope, &left.3.id).cmp(&(&right.1, &right.3.scope, &right.3.id))
+        });
+        for (key, holder, place, report, source_evidence) in candidates {
+            let holder_count = holder_counts.count(view, &holder, &limits)?;
+            let payload = serde_json::to_value(&report).map_err(|error| encode_error(&error))?;
+            let payload_bytes = serde_json::to_vec(&payload)
+                .map_err(|error| encode_error(&error))?
+                .len();
+            let within_bounds = namespace_count < limits.max_observation_records
+                && holder_count < limits.max_observation_records_per_holder;
+            if within_bounds && budget.take(1, 1, payload_bytes) {
+                directives.push(BoundaryDirective::PublishKnowledge {
+                    visibility: StateVisibility::SameBoundary,
+                    producer_correlation: Some(report.id.to_string()),
+                    supersession: canwu_api::KnowledgeSupersession::Explicit,
+                    groups: vec![canwu_api::KnowledgePublicationGroup {
+                        holders: vec![holder.clone()],
+                        records: vec![KnowledgeRecordDraft {
+                            schema: production_report_knowledge_schema_id(),
+                            subjects: vec![KnowledgeSubject {
+                                role: "site".to_owned(),
+                                target: KnowledgeSubjectTarget::Entity(place),
+                            }],
+                            payload,
+                            as_of: Some(report.observed_at),
+                            confidence_per_mille: match report.role {
+                                crate::ProductionObservationRole::Operator => 1_000,
+                                crate::ProductionObservationRole::LocalOwner => 900,
+                                crate::ProductionObservationRole::RemoteOwner => 700,
+                            },
+                            origin: KnowledgeOrigin {
+                                method: "production_holder_report_v1".to_owned(),
+                                evidence: source_evidence,
+                            },
+                            supersedes: Vec::new(),
+                            contradicts: Vec::new(),
+                        }],
+                    }],
+                    summary: "Publish one bounded holder-relative production report".to_owned(),
+                });
+                namespace_count = namespace_count.saturating_add(1);
+                holder_counts.published(holder);
+                progress = true;
+            } else {
+                budget_deferred |= within_bounds;
+                state
+                    .observation_due_index
+                    .entry(context.at)
+                    .or_default()
+                    .insert(key);
+                state_changed = true;
+                directives.push(BoundaryDirective::Emit {
+                    event_type: "canwu.production.report_capacity_rejected.v1".to_owned(),
+                    summary: if within_bounds {
+                        "Defer periodic production report because the boundary's knowledge publication budget is exhausted"
+                    } else {
+                        "Reject periodic production report because its bounded knowledge capacity is exhausted"
+                    }
+                    .to_owned(),
+                    affected: Vec::new(),
+                });
+            }
+        }
+        let next_due = state
+            .observation_due_index
+            .range((
+                std::ops::Bound::Excluded(context.at),
+                std::ops::Bound::Unbounded,
+            ))
+            .next()
+            .map(|(due, _)| *due);
+        let retry_at = (budget_deferred || (overflow && progress))
+            .then(|| context.at.checked_add(SimDuration::minutes(1)))
+            .flatten();
+        let wake_at = match (next_due, retry_at) {
+            (Some(due), Some(retry)) => Some(due.min(retry)),
+            (due, retry) => due.or(retry),
+        };
+        if let Some(wake_at) = wake_at {
+            directives.push(BoundaryDirective::SchedulePluginIngress {
+                target_plugin: PLUGIN_NAME.to_owned(),
+                after: wake_at
+                    .checked_sub(context.at)
+                    .ok_or_else(|| invalid("production observation wake delay overflowed"))?,
+                packet_type: PRODUCTION_OBSERVATION_WAKE_INGRESS.to_owned(),
+                priority: 0,
+                payload: with_scope(serde_json::json!({ "due_at": wake_at }), root.as_ref()),
+                affected: Vec::new(),
+            });
+        }
+        if state_changed {
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| invalid("production runtime revision overflowed"))?;
+            mutations.push(BoundaryDirective::MutateRecord {
                 mutation: DomainRecordMutation::Update {
                     record: state.draft()?,
                     expected_version: record.version,
                 },
                 summary: "Persist bounded production observation cuts and delivery indexes"
                     .to_owned(),
-            },
-        );
+            });
+        }
     }
+    mutations.extend(directives);
     Ok(BoundaryProposal {
-        directives,
+        directives: mutations,
         ..BoundaryProposal::default()
     })
+}
+
+/// The production reports each holder keeps, as far as the report bounds of
+/// the roots a boundary publishes for need them counted, plus the reports
+/// this boundary proposed for the holder so far.
+#[derive(Default)]
+struct HolderReportCounts {
+    /// Per holder: the bound counted up to and the count, which is exact
+    /// when it is below the bound.
+    ledger: BTreeMap<KnowledgeHolderRef, (usize, usize)>,
+    published: BTreeMap<KnowledgeHolderRef, usize>,
+}
+
+impl HolderReportCounts {
+    fn count(
+        &mut self,
+        view: &SimulationView<'_>,
+        holder: &KnowledgeHolderRef,
+        limits: &crate::ProductionLimitsV1,
+    ) -> Result<usize, CanwuError> {
+        let bound = limits.max_observation_records_per_holder;
+        let counted = match self.ledger.get(holder) {
+            Some((counted_to, count)) if *counted_to >= bound || count < counted_to => *count,
+            _ => {
+                let count = production_holder_knowledge_count(view, holder, limits)?;
+                self.ledger.insert(holder.clone(), (bound, count));
+                count
+            }
+        };
+        Ok(counted.saturating_add(self.published.get(holder).copied().unwrap_or_default()))
+    }
+
+    fn published(&mut self, holder: KnowledgeHolderRef) {
+        *self.published.entry(holder).or_default() += 1;
+    }
 }
 
 fn production_holder_knowledge_count(
     view: &SimulationView<'_>,
     holder: &KnowledgeHolderRef,
+    limits: &crate::ProductionLimitsV1,
 ) -> Result<usize, CanwuError> {
-    let maximum = crate::ProductionLimitsV1::canonical().max_observation_records_per_holder;
+    let maximum = limits.max_observation_records_per_holder;
     let mut after = None;
     let mut count = 0_usize;
     loop {
@@ -1478,11 +2277,29 @@ impl crate::ProductionArchiveStore for PluginProductionArchiveProvider<'_> {
     }
 }
 
+/// Every production root the view holds, in record order.
+fn production_roots_in_view(view: &SimulationView<'_>) -> Result<Vec<DomainRecord>, CanwuError> {
+    const PAGE: usize = 256;
+    let kind = production_root_kind();
+    let mut roots = Vec::new();
+    let mut after = None;
+    loop {
+        let page = view.domain_records_of_kind_after(&kind, after.as_ref(), PAGE)?;
+        let full = page.len() == PAGE;
+        after = page.last().map(|record| record.reference.clone());
+        roots.extend(page);
+        if !full {
+            return Ok(roots);
+        }
+    }
+}
+
 /// Marks every production archive object a restore, a replay, a fork, or a
-/// queued commit can still read: the commits reachable from the archive
-/// head, from each unacknowledged retention handle, and from each commit the
-/// kernel lists as queued, with their blobs, pages, and lookup pages. The
-/// archive is audited first, as at restore.
+/// queued commit can still read: for every production root, the commits
+/// reachable from its archive head and from each unacknowledged retention
+/// handle, and every commit the kernel lists as queued, with their blobs,
+/// pages, and lookup pages. Each root's archive is audited first, as at
+/// restore.
 fn production_archive_reachability(
     view: &SimulationView<'_>,
     provider: &dyn PluginArchiveObjectProvider,
@@ -1490,7 +2307,8 @@ fn production_archive_reachability(
 ) -> Result<(), CanwuError> {
     let provider = PluginProductionArchiveProvider(provider);
     // Queued commits: the kernel marks the directory each queued archive
-    // commit retains. Each may become the head, so its index must be whole.
+    // commit retains. Each may become the head of its root, so its index
+    // must be whole.
     let queued = manifest
         .plugin_objects
         .get(crate::PRODUCTION_ARCHIVE_INDEX_DIRECTORY_NAMESPACE)
@@ -1499,7 +2317,9 @@ fn production_archive_reachability(
     let mut roots = queued.clone();
     let mut complete = queued;
     let mut bound = roots.len();
-    if let Some((_, state)) = load_state(view)? {
+    for record in production_roots_in_view(view)? {
+        let state = record.decode_payload::<ProductionRuntimeRecord>()?;
+        state.validate()?;
         crate::validate_production_archive(&provider, &state)?;
         if let Some(root) = &state.archive.directory_root {
             roots.insert(root.clone());
@@ -1530,23 +2350,50 @@ fn production_archive_reachability(
     Ok(())
 }
 
+/// The production root `scope` names, decoded from a run.
+fn host_root<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
+    scope: Option<&ProductionScopeId>,
+) -> Result<ProductionState, CanwuError> {
+    let state = canwu_api::typed_domain_record(canwu, &production_root_reference(scope))
+        .ok_or_else(|| CanwuError::new(ErrorCode::PluginNotActive, "production runtime is absent"))?
+        .decode_payload::<ProductionRuntimeRecord>()?;
+    if state.scope.as_ref() != scope {
+        return Err(invalid(
+            "production root names another scope than its record",
+        ));
+    }
+    Ok(state)
+}
+
+/// The production root `scope` names, as the run holds it: `None` for the
+/// primary root. Takes either runtime handle.
+pub fn production_root_state<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
+    scope: Option<&ProductionScopeId>,
+) -> Result<Option<ProductionState>, CanwuError> {
+    if canwu_api::typed_domain_record(canwu, &production_root_reference(scope)).is_none() {
+        return Ok(None);
+    }
+    host_root(canwu, scope).map(Some)
+}
+
 /// Stores, reads back, verifies, and queues a production cold-archive commit
 /// through a plugin-owned ingress capability.
 ///
 /// The batch must equal what
 /// [`crate::ProductionState::prepare_production_archive`] derives from the
-/// current production root and `store` for the same number of records,
-/// including its lookup-index pages. The boundary that settles the commit
-/// reads no archive object: it applies the commit when the root still is the
-/// one the batch was prepared from, and otherwise records it as stale.
+/// current production root it names (`prepared.scope`) and `store` for the
+/// same number of records, including its lookup-index pages. The boundary
+/// that settles the commit reads no archive object: it applies the commit
+/// when the root still is the one the batch was prepared from, and otherwise
+/// records it as stale.
 pub fn enqueue_production_archive<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &mut H,
     prepared: &crate::PreparedProductionArchiveBatchV1,
     store: &dyn crate::ProductionArchiveStore,
 ) -> Result<ProductionArchiveIngressReceiptV1, CanwuError> {
-    let state = canwu_api::typed_domain_record(&*canwu, &production_runtime_reference())
-        .ok_or_else(|| CanwuError::new(ErrorCode::PluginNotActive, "production runtime is absent"))?
-        .decode_payload::<ProductionRuntimeRecord>()?;
+    let state = host_root(&*canwu, prepared.scope.as_ref())?;
     let canonical = state.prepare_production_archive(prepared.selected_count(), store)?;
     if &canonical != prepared {
         return Err(CanwuError::new(
@@ -1568,6 +2415,7 @@ pub fn enqueue_production_archive<H: canwu_api::CanwuRun + ?Sized>(
     store.persist_production_archive_retention(&commit.retention)?;
     let retention_handle_id = commit.retention.handle_id.clone();
     let directory_root = commit.directory_root.clone();
+    let scope = commit.scope.clone();
     let request = PluginIngressRequest::new(
         PLUGIN_NAME,
         PRODUCTION_ARCHIVE_COMMIT_INGRESS,
@@ -1581,6 +2429,7 @@ pub fn enqueue_production_archive<H: canwu_api::CanwuRun + ?Sized>(
     match canwu.enqueue_permitted_plugin_ingress(request, permit) {
         Ok(ingress) => Ok(ProductionArchiveIngressReceiptV1 {
             ingress,
+            scope,
             retention_handle_id,
             directory_root,
         }),
@@ -1594,11 +2443,23 @@ pub fn enqueue_production_archive<H: canwu_api::CanwuRun + ?Sized>(
     }
 }
 
-/// Queues one canonical production-owned completion coordinator transition.
-/// Participant state remains authoritative in the participant plugin and is
-/// accepted here only through an exact current provider record acknowledgement.
+/// Queues one canonical production-owned completion coordinator transition
+/// for the primary production root. Participant state remains authoritative
+/// in the participant plugin and is accepted here only through an exact
+/// current provider record acknowledgement.
 pub fn enqueue_production_completion_operation<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &mut H,
+    due_at: canwu_api::SimTime,
+    operation: &crate::ProductionCompletionIngressV1,
+) -> Result<canwu_api::IngressReceipt, CanwuError> {
+    enqueue_production_completion_operation_in_scope(canwu, None, due_at, operation)
+}
+
+/// Queues one completion coordinator transition for the production root
+/// `scope` names (`None` for the primary root).
+pub fn enqueue_production_completion_operation_in_scope<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
+    scope: Option<&ProductionScopeId>,
     due_at: canwu_api::SimTime,
     operation: &crate::ProductionCompletionIngressV1,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
@@ -1613,23 +2474,36 @@ pub fn enqueue_production_completion_operation<H: canwu_api::CanwuRun + ?Sized>(
             PLUGIN_NAME,
             PRODUCTION_COMPLETION_INGRESS,
             due_at,
-            serde_json::to_value(operation).map_err(|error| encode_error(&error))?,
+            with_scope(
+                serde_json::to_value(operation).map_err(|error| encode_error(&error))?,
+                scope,
+            ),
         ),
         permit,
     )
 }
 
 /// Authenticates every compacted resource input for one active facility
-/// project against the resource archive provider, then queues a package-owned
-/// witness used by later canonical project ingress.
+/// project of the primary production root against the resource archive
+/// provider, then queues a package-owned witness used by later canonical
+/// project ingress.
 pub fn enqueue_production_resource_continuation<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &mut H,
     project_id: &crate::FacilityProjectId,
     store: &dyn canwu_resource::ResourceArchiveStore,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
-    let production_record = canwu_api::typed_domain_record(canwu, &production_runtime_reference())
-        .ok_or_else(|| invalid("production runtime is unavailable"))?;
-    let production = production_record.decode_payload::<ProductionRuntimeRecord>()?;
+    enqueue_production_resource_continuation_in_scope(canwu, None, project_id, store)
+}
+
+/// [`enqueue_production_resource_continuation`] for the production root
+/// `scope` names.
+pub fn enqueue_production_resource_continuation_in_scope<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
+    scope: Option<&ProductionScopeId>,
+    project_id: &crate::FacilityProjectId,
+    store: &dyn canwu_resource::ResourceArchiveStore,
+) -> Result<canwu_api::IngressReceipt, CanwuError> {
+    let production = host_root(&*canwu, scope)?;
     let project = production
         .facility_projects
         .get(project_id)
@@ -1703,17 +2577,20 @@ pub fn enqueue_production_resource_continuation<H: canwu_api::CanwuRun + ?Sized>
             PLUGIN_NAME,
             PRODUCTION_RESOURCE_CONTINUATION_INGRESS,
             canwu.time(),
-            serde_json::to_value(witness).map_err(|error| encode_error(&error))?,
+            with_scope(
+                serde_json::to_value(witness).map_err(|error| encode_error(&error))?,
+                scope,
+            ),
         ),
         permit,
     )
 }
 
 /// Finalizes a terminal production archive retention handle and queues the
-/// package-owned acknowledgement that clears it, and every stale receipt
-/// recorded under it, from authoritative hot state.
+/// package-owned acknowledgement that clears it, and the stale receipt
+/// recorded under it, from the root the commit applied to.
 ///
-/// The handle must still be in the production root when this is called. An
+/// The handle must still be in that root when this is called. An
 /// acknowledgement that settles after another one retired the handle is a
 /// no-op, so calling this twice before the next boundary is harmless.
 pub fn finalize_production_archive_retention<H: canwu_api::CanwuRun + ?Sized>(
@@ -1721,9 +2598,7 @@ pub fn finalize_production_archive_retention<H: canwu_api::CanwuRun + ?Sized>(
     store: &dyn crate::ProductionArchiveStore,
     receipt: &ProductionArchiveIngressReceiptV1,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
-    let record = canwu_api::typed_domain_record(canwu, &production_runtime_reference())
-        .ok_or_else(|| invalid("production runtime is unavailable"))?;
-    let state = record.decode_payload::<ProductionRuntimeRecord>()?;
+    let state = host_root(&*canwu, receipt.scope.as_ref())?;
     let handle = state
         .archive
         .pending_handles
@@ -1755,22 +2630,12 @@ pub fn finalize_production_archive_retention<H: canwu_api::CanwuRun + ?Sized>(
             canwu.time(),
             serde_json::to_value(ProductionArchiveRetentionAcknowledgementV1 {
                 handle_id: handle.handle_id.clone(),
+                scope: receipt.scope.clone(),
             })
             .map_err(|error| encode_error(&error))?,
         ),
         permit,
     )
-}
-
-pub(crate) fn load_state(
-    view: &SimulationView<'_>,
-) -> Result<Option<(DomainRecord, ProductionState)>, CanwuError> {
-    let Some(record) = view.typed_domain_record(&production_runtime_reference())? else {
-        return Ok(None);
-    };
-    let state = record.decode_payload::<ProductionRuntimeRecord>()?;
-    state.validate()?;
-    Ok(Some((record.clone(), state)))
 }
 
 fn require_holder_authority(
@@ -2082,8 +2947,12 @@ fn refuse_output_keys_held_by_resource(
     Ok(())
 }
 
+/// Checks the evidence an operation cites outside the production root
+/// against `production`, the root as the operations settled before it left
+/// it.
 fn validate_external_operation_evidence(
     view: &SimulationView<'_>,
+    production: &ProductionState,
     holder: &KnowledgeHolderRef,
     operation: &crate::ProductionOperation,
 ) -> Result<(), CanwuError> {
@@ -2095,8 +2964,6 @@ fn validate_external_operation_evidence(
     {
         // Holder, lifecycle, ratio, and declared-kind rules run first, so only
         // an admissible completion ever resolves its evidence record.
-        let (_, production) = load_state(view)?
-            .ok_or_else(|| invalid("production provider validation runtime is unavailable"))?;
         production.completion_admission(
             holder,
             execution,
@@ -2115,10 +2982,8 @@ fn validate_external_operation_evidence(
         }
         return Ok(());
     }
-    let (_, production) = load_state(view)?
-        .ok_or_else(|| invalid("production provider validation runtime is unavailable"))?;
     if let crate::ProductionOperation::CreateFacilityProject { project } = operation {
-        validate_external_project_evidence(view, &production, project)?;
+        validate_external_project_evidence(view, production, project)?;
         return Ok(());
     }
     if let crate::ProductionOperation::AdvanceFacilityProject { project, .. } = operation {
@@ -2130,7 +2995,7 @@ fn validate_external_operation_evidence(
         // neither its exact bodies nor the project's holder, site, process,
         // and time can change. A seal can remove those bodies while exact
         // replay keeps them, so only the live resource evidence is rechecked.
-        validate_project_resource_evidence(view, &production, project)?;
+        validate_project_resource_evidence(view, production, project)?;
         return Ok(());
     }
     let crate::ProductionOperation::StartExecution { execution, .. } = operation else {
@@ -2967,6 +3832,7 @@ fn holder_entity_ref(holder: &KnowledgeHolderRef) -> canwu_api::EntityRef {
 fn validate_production_completion_ingress(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
+    state: &ProductionState,
     operation: &crate::ProductionCompletionIngressV1,
 ) -> Result<(), CanwuError> {
     use crate::ProductionCompletionIngressV1 as Ingress;
@@ -2980,7 +3846,7 @@ fn validate_production_completion_ingress(
                     "production completion grant must use the canonical boundary and owner",
                 ));
             }
-            validate_production_locked_targets(view, &request.target_versions)?;
+            validate_production_locked_targets(view, state, &request.target_versions)?;
         }
         Ingress::PrepareLocal(request) => {
             if request.current_boundary != context.boundary_id.get() {
@@ -3001,9 +3867,6 @@ fn validate_production_completion_ingress(
                     "production completion activation must use the canonical boundary",
                 ));
             }
-            let (_, state) = load_state(view)?.ok_or_else(|| {
-                invalid("production completion coordinator runtime is unavailable")
-            })?;
             if state
                 .completion_acquisitions
                 .get(acquisition)
@@ -3094,7 +3957,11 @@ fn validate_production_completion_ingress(
                 .grants
                 .get(acquisition)
                 .ok_or_else(|| invalid("resource participant grant is unavailable"))?;
-            if authoritative.grant != *grant || authoritative.coordinator_plugin != PLUGIN_NAME {
+            if authoritative.grant != *grant
+                || authoritative.coordinator_plugin != PLUGIN_NAME
+                || authoritative.coordinator_source.record
+                    != state.runtime_reference().into_untyped()
+            {
                 return Err(invalid(
                     "production completion participant acknowledgement differs from the authoritative resource grant",
                 ));
@@ -3124,6 +3991,8 @@ fn validate_production_completion_ingress(
                 .participant(acquisition)
                 .ok_or_else(|| invalid("completed resource participant is unavailable"))?;
             if authoritative.coordinator_plugin != PLUGIN_NAME
+                || authoritative.coordinator_source.record
+                    != state.runtime_reference().into_untyped()
                 || authoritative.grant.state != canwu_resource::CompletionGrantStateV1::Completed
             {
                 return Err(CanwuError::new(
@@ -3138,17 +4007,26 @@ fn validate_production_completion_ingress(
 
 fn validate_production_locked_targets(
     view: &SimulationView<'_>,
+    state: &ProductionState,
     targets: &[canwu_resource::CompletionLockedTargetV1],
 ) -> Result<(), CanwuError> {
     if targets.is_empty() {
         return Err(invalid("production completion local target set is empty"));
     }
+    let own = state.runtime_reference().into_untyped();
     for target in targets {
         let canwu_resource::CompletionLockedTargetV1::ExternalRecord { version } = target else {
             return Err(invalid(
                 "production completion local capacity may lock only exact production records",
             ));
         };
+        // A root's lease locks only that root's own record.
+        if version.record != own {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "production completion local grant may lock only its own root",
+            ));
+        }
         if !view.domain_record_version_is_current(version)? {
             return Err(CanwuError::new(
                 ErrorCode::InvalidAuthority,
@@ -3212,9 +4090,13 @@ fn expected_domain_rejection(error: &CanwuError) -> bool {
     )
 }
 
-fn structured_reserved_project_rejection(error: CanwuError) -> CanwuError {
+/// A finding of the admission checks about the command's own content, as a
+/// code the engine records as a command rejection (`InvalidPayload`): the
+/// engine fails a boundary for any other code a command handler returns.
+fn admission_rejection(error: CanwuError) -> CanwuError {
     match error.code {
         ErrorCode::InvalidDomainRecord
+        | ErrorCode::InvalidDecision
         | ErrorCode::DomainRecordNotFound
         | ErrorCode::DomainRecordVersionConflict
         | ErrorCode::DuplicateDomainRecord => {
