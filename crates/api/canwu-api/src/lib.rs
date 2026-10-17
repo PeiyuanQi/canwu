@@ -125,9 +125,11 @@ pub use canwu_sim::{
     BoundaryIngressProvenance, CONTINUATION_CHECKPOINT_FORMAT_VERSION, ContinuationBase,
     ContinuationCheckpoint, CurrentRecordVersion, EvidenceTimeRun, EvidenceTimes, HistoryFlags,
     JournalFrontier, JournalFrontiers, KeyedDrawEntry, PinnedEvidenceRecords, PinnedRecordVersion,
-    PluginIngressProvenanceFact, PluginIngressStatus, RequestIndex, SettledCommandRequest,
-    SettledDecisionRequest, SettledQueuedCommand, UnadmittedEvidence,
+    PluginIngressProvenanceFact, PluginIngressStatus, RequestIndex, RetiredRequestRange,
+    SettledCommandRequest, SettledDecisionRequest, SettledQueuedCommand, UnadmittedEvidence,
 };
+// How long a tracked command request's exact outcome answers a retry (E-28).
+pub use canwu_sim::{DEFAULT_REQUEST_OUTCOME_RETENTION, MAX_REQUEST_OUTCOME_RETENTION};
 // The boundaries of a window of simulated time (gap G-60).
 pub use canwu_sim::{
     BoundaryIngressCount, BoundaryIngressKind, BoundaryIngressOrigin, BoundarySummary,

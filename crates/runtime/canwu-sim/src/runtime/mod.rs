@@ -80,8 +80,8 @@ pub use continuation::{
     BoundaryIngressProvenance, CONTINUATION_CHECKPOINT_FORMAT_VERSION, ContinuationBase,
     ContinuationCheckpoint, CurrentRecordVersion, EvidenceTimeRun, EvidenceTimes, HistoryFlags,
     JournalFrontier, JournalFrontiers, PinnedEvidenceRecords, PinnedRecordVersion,
-    PluginIngressProvenanceFact, PluginIngressStatus, RequestIndex, SettledCommandRequest,
-    SettledDecisionRequest, SettledQueuedCommand, UnadmittedEvidence,
+    PluginIngressProvenanceFact, PluginIngressStatus, RequestIndex, RetiredRequestRange,
+    SettledCommandRequest, SettledDecisionRequest, SettledQueuedCommand, UnadmittedEvidence,
 };
 pub use decision::{
     DECISION_REQUEST_COMMITMENT_DOMAIN, DecisionEvaluation, DecisionIngressRequest,
@@ -139,9 +139,9 @@ pub use plugins::{
     PluginArchiveObjectProvider, PluginArchiveReachabilityParticipant,
 };
 pub use policy::{
-    CommandPolicyContext, ControllerPolicy, InteractionPolicy, ObservationPolicy,
-    RUN_CONFIGURATION_FORMAT_VERSION, RunConfiguration, RunConfigurationSnapshot, RunPurpose,
-    SeatBinding, SeatPolicy, TracePolicy,
+    CommandPolicyContext, ControllerPolicy, DEFAULT_REQUEST_OUTCOME_RETENTION, InteractionPolicy,
+    MAX_REQUEST_OUTCOME_RETENTION, ObservationPolicy, RUN_CONFIGURATION_FORMAT_VERSION,
+    RunConfiguration, RunConfigurationSnapshot, RunPurpose, SeatBinding, SeatPolicy, TracePolicy,
 };
 pub use profile::{
     BoundaryEnginePhase, BoundaryEngineTiming, BoundaryHandlerKind, BoundaryHandlerTiming,
@@ -1664,6 +1664,7 @@ impl Simulation {
                     archived_ingress_requests: im::OrdMap::new(),
                     archived_decision_requests: im::OrdMap::new(),
                     archived_decision_command_requests: im::OrdSet::new(),
+                    retired_command_requests: state::RetiredRequestIds::default(),
                     events: Vec::new(),
                     commands: state::RetainedJournal::default(),
                     command_attempts: state::RetainedJournal::default(),
@@ -2640,6 +2641,7 @@ impl Simulation {
             archived_ingress_requests: im::OrdMap::new(),
             archived_decision_requests: im::OrdMap::new(),
             archived_decision_command_requests: im::OrdSet::new(),
+            retired_command_requests: state::RetiredRequestIds::default(),
             events: std::mem::take(&mut snapshot.events),
             commands: state::RetainedJournal::default(),
             command_attempts: state::RetainedJournal::default(),

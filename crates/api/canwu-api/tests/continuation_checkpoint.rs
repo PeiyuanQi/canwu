@@ -662,9 +662,7 @@ impl Run {
         }
     }
 
-    fn step(&mut self, at: SimTime, dispatch: Option<(u64, i64)>) -> BoundaryReceipt {
-        let revision = self.revision();
-        let request = dispatch.map(|(id, n)| command(id, revision, n));
+    fn step(&mut self, at: SimTime, request: Option<CommandRequest>) -> BoundaryReceipt {
         match self {
             Self::Unsealed(run) => {
                 if let Some(request) = request {
@@ -683,6 +681,32 @@ impl Run {
                     .expect("boundary settles")
             }
         }
+    }
+
+    /// Queues `request` again at `at`, as a host retrying it would.
+    fn enqueue(
+        &mut self,
+        at: SimTime,
+        request: CommandRequest,
+    ) -> Result<canwu_api::IngressReceipt, ErrorCode> {
+        match self {
+            Self::Unsealed(run) => run.enqueue_command(at, 0, request),
+            Self::Compact(run) => run.enqueue_command(at, 0, request),
+        }
+        .map_err(|error| error.code)
+    }
+
+    /// Queues a decision request, as a host would.
+    fn enqueue_decision(
+        &mut self,
+        at: SimTime,
+        request: canwu_api::DecisionIngressRequest,
+    ) -> Result<canwu_api::IngressReceipt, ErrorCode> {
+        match self {
+            Self::Unsealed(run) => run.enqueue_decision(at, 0, request),
+            Self::Compact(run) => run.enqueue_decision(at, 0, request),
+        }
+        .map_err(|error| error.code)
     }
 
     fn hashes(&self) -> (String, String) {
@@ -729,10 +753,12 @@ fn scenario() -> Scenario {
     )
 }
 
-/// The host input of day `d`: a dispatch every third day.
+/// The host input of day `d`: a dispatch every third day, with consecutive
+/// request IDs, so retired requests collapse into one range across seals and
+/// restores.
 const fn dispatch_on(day: i64) -> Option<(u64, i64)> {
     if day % 3 == 0 {
-        Some((day.unsigned_abs(), day))
+        Some((day.unsigned_abs() / 3, day))
     } else {
         None
     }
@@ -762,11 +788,17 @@ fn lockstep() {
     let mut cross_plugin_fact_seen = false;
     let mut ungenerated_fact_seen = false;
 
+    // Every queued dispatch, with its due time and first receipt, for the
+    // retries below.
+    let mut sent: Vec<(SimTime, CommandRequest, canwu_api::IngressReceipt)> = Vec::new();
+    let mut retired_retry_seen = false;
     for d in 1..=RESTORE_AT + 40 {
         let at = day(d);
+        let revision = runs[0].revision();
+        let request = dispatch_on(d).map(|(id, n)| command(id, revision, n));
         let receipts: Vec<_> = runs
             .iter_mut()
-            .map(|run| run.step(at, dispatch_on(d)))
+            .map(|run| run.step(at, request.clone()))
             .collect();
         assert!(
             receipts.windows(2).all(|pair| pair[0] == pair[1]),
@@ -777,6 +809,66 @@ fn lockstep() {
             hashes.windows(2).all(|pair| pair[0] == pair[1]),
             "hashes differ at day {d}"
         );
+        if let Some(request) = request {
+            let receipt = runs[0]
+                .enqueue(at, request.clone())
+                .expect("an exact retry at its own instant returns its receipt");
+            sent.push((at, request, receipt));
+        }
+        // Every run answers a retry of every dispatch alike: its receipt
+        // while its attempt is inside the 30-day retention, then
+        // `RequestOutcomeRetired`, without changing the run. A retired ID with
+        // new content is refused the same way.
+        let kept_from = SimTime::from_minutes(
+            at.as_minutes() - canwu_api::DEFAULT_REQUEST_OUTCOME_RETENTION.as_minutes(),
+        );
+        for (due, request, receipt) in &sent {
+            let expected = if *due < kept_from {
+                Err(ErrorCode::RequestOutcomeRetired)
+            } else {
+                Ok(receipt.clone())
+            };
+            retired_retry_seen |= expected.is_err();
+            for run in &mut runs {
+                assert_eq!(
+                    run.enqueue(*due, request.clone()),
+                    expected,
+                    "a retry of request {} at day {d}",
+                    request.request_id
+                );
+            }
+        }
+        if let Some((due, oldest, _)) = sent.first()
+            && *due < kept_from
+        {
+            let reused = command(oldest.request_id.get(), runs[0].revision(), -1);
+            let mut nested = reused.clone();
+            nested.envelope = nested.envelope.at_time(at);
+            let decision = canwu_api::DecisionIngressRequest::new(
+                canwu_api::DecisionRequestId::new(d.unsigned_abs()),
+                runs[0].revision(),
+                canwu_api::DecisionMutation::Cancel {
+                    ticket_id: canwu_api::DecisionTicketId::new(1),
+                    expected_version: 0,
+                    reason: "fixture".to_owned(),
+                },
+            )
+            .with_command(nested);
+            for run in &mut runs {
+                assert_eq!(
+                    run.enqueue(at, reused.clone()),
+                    Err(ErrorCode::RequestOutcomeRetired),
+                    "a retired ID with new content at day {d}"
+                );
+                assert_eq!(
+                    run.enqueue_decision(at, decision.clone()),
+                    Err(ErrorCode::RequestOutcomeRetired),
+                    "a decision that nests a retired ID at day {d}"
+                );
+            }
+        }
+        let hashes_after: Vec<_> = runs.iter().map(Run::hashes).collect();
+        assert_eq!(hashes_after, hashes, "retries change nothing at day {d}");
 
         // The sealed run: a cancellation of a packet that an earlier seal
         // pinned, whose producing boundary is sealed (edge case b).
@@ -880,8 +972,38 @@ fn lockstep() {
                 .ingress_provenance
                 .iter()
                 .any(|fact| fact.generation.is_none());
+            // The index keeps the outcomes inside the retention and names
+            // every retired dispatch.
+            let kept_from = SimTime::from_minutes(
+                at.as_minutes() - canwu_api::DEFAULT_REQUEST_OUTCOME_RETENTION.as_minutes(),
+            );
+            let retired: Vec<u64> = sent
+                .iter()
+                .filter(|(due, _, _)| *due < kept_from)
+                .map(|(_, request, _)| request.request_id.get())
+                .collect();
+            let listed: Vec<u64> = checkpoint
+                .requests
+                .retired_commands
+                .iter()
+                .flat_map(|range| range.first.get()..=range.last.get())
+                .collect();
+            assert_eq!(listed, retired, "retired requests at day {d}");
+            assert!(
+                checkpoint.requests.retired_commands.len() <= 1,
+                "consecutive retired IDs form one range at day {d}"
+            );
+            assert!(
+                checkpoint
+                    .requests
+                    .commands
+                    .iter()
+                    .all(|entry| !retired.contains(&entry.request_id.get())),
+                "no retired outcome is kept at day {d}"
+            );
         }
     }
+    assert!(retired_retry_seen, "requests retired during the run");
     assert!(sealed_pinned_cancellation, "edge case b was exercised");
     assert!(known_versions_seen, "edge case a was exercised");
     assert!(pinned_payload_seen, "edge case c was exercised");
@@ -947,7 +1069,11 @@ fn a_tampered_continuation_checkpoint_is_refused() {
     let mut run =
         Run::Unsealed(Canwu::new_with_plugins(1602, scenario(), &plugins).expect("fixture starts"));
     for d in 1..=12 {
-        run.step(day(d), dispatch_on(d));
+        let revision = run.revision();
+        run.step(
+            day(d),
+            dispatch_on(d).map(|(id, n)| command(id, revision, n)),
+        );
     }
     let (checkpoint, hash) = run.continuation();
     let restore = |checkpoint: ContinuationCheckpoint| {
@@ -1086,6 +1212,89 @@ fn a_tampered_continuation_checkpoint_is_refused() {
         panic!("a cause beyond the journal end is refused");
     };
     assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+    // A request index that is not the canonical one for its state is refused
+    // even with a recomputed hash: retired ranges that are empty, unsorted,
+    // or adjacent; a kept outcome or receipt inside a range; an outcome
+    // outside the retention.
+    let kept = checkpoint
+        .requests
+        .commands
+        .first()
+        .expect("the run settled requests")
+        .request_id;
+    let range = |first: u64, last: u64| canwu_api::RetiredRequestRange {
+        first: CommandRequestId::new(first),
+        last: CommandRequestId::new(last),
+    };
+    let spare = checkpoint
+        .requests
+        .commands
+        .iter()
+        .map(|entry| entry.request_id.get())
+        .max()
+        .unwrap_or_default()
+        + 10;
+    let forged_indexes = [
+        vec![range(spare + 1, spare)],
+        vec![range(spare + 3, spare + 4), range(spare, spare + 1)],
+        vec![range(spare, spare), range(spare + 1, spare + 1)],
+        vec![range(kept.get(), kept.get())],
+    ];
+    for retired in forged_indexes {
+        let mut forged = checkpoint.clone();
+        forged.requests.retired_commands = retired.clone();
+        let Err(error) = restore(rehashed(forged)) else {
+            panic!("a forged retired range {retired:?} is refused");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    }
+    let mut old_outcome = checkpoint.clone();
+    let entry = old_outcome
+        .requests
+        .commands
+        .first_mut()
+        .expect("the run settled requests");
+    if let canwu_api::CommandOutcome::Accepted { receipt } = &mut entry.outcome {
+        receipt.accepted_at = SimTime::from_minutes(
+            old_outcome.state.now.as_minutes()
+                - canwu_api::DEFAULT_REQUEST_OUTCOME_RETENTION.as_minutes()
+                - 1,
+        );
+    }
+    let Err(error) = restore(rehashed(old_outcome)) else {
+        panic!("an outcome outside the retention is refused");
+    };
+    assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+    // A pending queued command keeps its receipt and is never retired: a
+    // forged index that drops the receipt, or retires the pending ID, would
+    // let its boundary admit it without an attempt.
+    let mut pending_run = run;
+    let revision = pending_run.revision();
+    let pending = command(900, revision, 900);
+    pending_run
+        .enqueue(day(20), pending.clone())
+        .expect("a command queued for later");
+    let (with_pending, _) = pending_run.continuation();
+    assert!(restore(with_pending.clone()).is_ok());
+    let mut dropped = with_pending.clone();
+    dropped
+        .requests
+        .queued_commands
+        .retain(|entry| entry.request_id != pending.request_id);
+    let mut retired_pending = with_pending.clone();
+    retired_pending.requests.queued_commands = dropped.requests.queued_commands.clone();
+    retired_pending.requests.retired_commands = vec![range(900, 900)];
+    for (forged, case) in [
+        (dropped, "dropped receipt"),
+        (retired_pending, "retired pending ID"),
+    ] {
+        let Err(error) = restore(rehashed(forged)) else {
+            panic!("a pending command with a {case} is refused");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    }
 
     // A pinned payload is in no commitment: with a recomputed hash the
     // unverified restore accepts it, and only the stored hash refuses it.

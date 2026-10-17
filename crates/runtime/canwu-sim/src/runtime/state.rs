@@ -5,8 +5,9 @@ use super::{
     EvidenceCursor, EvidenceRef, Government, GovernmentId, IngressPayload, IngressQueueKey,
     IngressReceipt, IngressRecord, KnowledgeSnapshot, PersistentDomainRecordStore, Person,
     PersonAvailability, PersonId, PluginComponentKey, PluginComponentRecord, RandomDrawRecord,
-    RandomStreamKey, RandomStreamState, Route, RouteId, RunConfigurationSnapshot, RunManifest,
-    Scenario, ScheduleKey, ScheduledAction, SimEvent, SimTime, Territory, TerritoryId,
+    RandomStreamKey, RandomStreamState, RetiredRequestRange, Route, RouteId,
+    RunConfigurationSnapshot, RunManifest, Scenario, ScheduleKey, ScheduledAction, SimEvent,
+    SimTime, Territory, TerritoryId,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,6 +30,11 @@ pub(super) struct RuntimeEvidence {
     pub(super) archived_ingress_requests: im::OrdMap<CommandRequestId, ArchivedIngressRequest>,
     pub(super) archived_decision_requests: im::OrdMap<DecisionRequestId, ArchivedIngressRequest>,
     pub(super) archived_decision_command_requests: im::OrdSet<CommandRequestId>,
+    /// Retired command requests whose attempts lie at or below the archived
+    /// cut, moved here by a seal or carried by a continuation checkpoint. A
+    /// retired request's outcome and queued receipt leave the archived tables
+    /// above; its ID stays used.
+    pub(super) retired_command_requests: RetiredRequestIds,
     pub(super) events: Vec<SimEvent>,
     pub(super) commands: RetainedJournal<CommandRecord>,
     pub(super) command_attempts: RetainedJournal<CommandAttemptRecord>,
@@ -198,6 +204,95 @@ pub(super) struct ArchivedCommandRequestOutcome {
     pub(super) outcome: CommandOutcome,
 }
 
+/// When a command outcome settled: its attempt's time, which an accepted
+/// outcome records as `accepted_at` and a rejection as `rejected_at`.
+pub(super) const fn command_outcome_time(outcome: &CommandOutcome) -> SimTime {
+    match outcome {
+        CommandOutcome::Accepted { receipt } => receipt.accepted_at,
+        CommandOutcome::Rejected { rejection } => rejection.rejected_at,
+    }
+}
+
+/// The IDs of retired command requests, as sorted, disjoint, non-adjacent
+/// inclusive ranges. It changes only at a seal and a restore, which replace
+/// it whole, so a fork shares it; it is read by binary search.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct RetiredRequestIds(Arc<Vec<RetiredRequestRange>>);
+
+impl RetiredRequestIds {
+    /// Ranges a continuation checkpoint carries, checked canonical first.
+    pub(super) fn from_ranges(ranges: Vec<RetiredRequestRange>) -> Self {
+        Self(Arc::new(ranges))
+    }
+
+    pub(super) fn ranges(&self) -> &[RetiredRequestRange] {
+        &self.0
+    }
+
+    pub(super) fn contains(&self, request: CommandRequestId) -> bool {
+        ranges_contain(&self.0, request)
+    }
+
+    /// These ranges with `requests` added, in canonical form.
+    pub(super) fn with(&self, requests: impl IntoIterator<Item = CommandRequestId>) -> Self {
+        let mut added: Vec<CommandRequestId> = requests.into_iter().collect();
+        if added.is_empty() {
+            return self.clone();
+        }
+        added.sort_unstable();
+        added.dedup();
+        let mut merged: Vec<RetiredRequestRange> = Vec::with_capacity(self.0.len() + 1);
+        let mut push = |first: CommandRequestId, last: CommandRequestId| {
+            if let Some(previous) = merged.last_mut()
+                && previous.last.get().saturating_add(1) >= first.get()
+            {
+                previous.last = previous.last.max(last);
+                return;
+            }
+            merged.push(RetiredRequestRange { first, last });
+        };
+        let mut ranges = self.0.iter().peekable();
+        let mut ids = added.into_iter().peekable();
+        loop {
+            match (ranges.peek(), ids.peek()) {
+                (Some(range), Some(id)) if range.first <= *id => {
+                    push(range.first, range.last);
+                    ranges.next();
+                }
+                (_, Some(id)) => {
+                    push(*id, *id);
+                    ids.next();
+                }
+                (Some(range), None) => {
+                    push(range.first, range.last);
+                    ranges.next();
+                }
+                (None, None) => break,
+            }
+        }
+        Self(Arc::new(merged))
+    }
+}
+
+/// Whether sorted, disjoint ranges hold `request`.
+pub(super) fn ranges_contain(ranges: &[RetiredRequestRange], request: CommandRequestId) -> bool {
+    let index = ranges.partition_point(|range| range.last < request);
+    ranges
+        .get(index)
+        .is_some_and(|range| range.first <= request)
+}
+
+/// Whether ranges are in the canonical form [`RetiredRequestIds::with`]
+/// writes: each `first <= last`, increasing, and never adjacent. Zero is a
+/// valid member: admission records the rejected attempt of a request whose
+/// ID is zero, and it retires like any other.
+pub(super) fn retired_ranges_are_canonical(ranges: &[RetiredRequestRange]) -> bool {
+    ranges.iter().all(|range| range.first <= range.last)
+        && ranges
+            .windows(2)
+            .all(|pair| pair[0].last.get().saturating_add(1) < pair[1].first.get())
+}
+
 #[derive(Clone)]
 pub(super) struct ArchivedIngressRequest {
     pub(super) input_hash: String,
@@ -268,6 +363,60 @@ pub(super) fn ingress_command_request(record: &IngressRecord) -> Option<CommandR
 }
 
 impl RuntimeEvidence {
+    /// Whether a tracked command request is retired: its attempt, sealed or
+    /// retained, settled before `kept_from`, the earliest time whose outcomes
+    /// the run's request outcome retention still keeps. A seal only moves
+    /// retired outcomes into [`Self::retired_command_requests`]; the answer
+    /// does not depend on when the run sealed.
+    pub(super) fn command_request_retired(
+        &self,
+        request: CommandRequestId,
+        kept_from: SimTime,
+    ) -> bool {
+        self.retired_command_requests.contains(request)
+            || self
+                .archived_command_requests
+                .get(&request)
+                .is_some_and(|archived| command_outcome_time(&archived.outcome) < kept_from)
+            || self
+                .retained_attempt_for_request(request)
+                .is_some_and(|attempt| attempt.at < kept_from)
+    }
+
+    /// Moves every archived outcome that settled before `kept_from` out of
+    /// the archived tables, with its request's queued receipt, and its ID
+    /// into the retired ranges. Archived outcomes are all of sealed attempts,
+    /// so a receipt leaves only with its own request's sealed outcome and no
+    /// retained attempt loses the receipt that marks it queued.
+    pub(super) fn retire_command_requests(&mut self, kept_from: SimTime) {
+        let retired: Vec<CommandRequestId> = self
+            .archived_command_requests
+            .iter()
+            .filter(|(_, archived)| command_outcome_time(&archived.outcome) < kept_from)
+            .map(|(request, _)| *request)
+            .collect();
+        if retired.is_empty() {
+            return;
+        }
+        let is_retired = |request: &CommandRequestId| retired.binary_search(request).is_ok();
+        // Rebuilt rather than removed from: a removal from the persistent
+        // map holds several of its nodes on the stack at once in a debug
+        // build, which overflows a 1 MiB thread.
+        self.archived_command_requests = self
+            .archived_command_requests
+            .iter()
+            .filter(|(request, _)| !is_retired(request))
+            .map(|(request, archived)| (*request, Arc::clone(archived)))
+            .collect();
+        self.archived_ingress_requests = self
+            .archived_ingress_requests
+            .iter()
+            .filter(|(request, _)| !is_retired(request))
+            .map(|(request, archived)| (*request, archived.clone()))
+            .collect();
+        self.retired_command_requests = self.retired_command_requests.with(retired);
+    }
+
     /// Whether a seal archived a command request as queued command or
     /// decision ingress.
     pub(super) fn archived_request_was_queued(&self, request: CommandRequestId) -> bool {

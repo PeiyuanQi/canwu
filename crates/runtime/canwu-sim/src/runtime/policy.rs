@@ -1,8 +1,24 @@
-use super::{CanwuError, ErrorCode, EvaluationLimitsV1, canonical_hash};
+use super::{CanwuError, ErrorCode, EvaluationLimitsV1, SimDuration, canonical_hash};
 use canwu_core::{EntityRef, PersonId};
 use serde::{Deserialize, Serialize};
 
 pub const RUN_CONFIGURATION_FORMAT_VERSION: u32 = 2;
+
+/// How long, by default, a tracked command request's exact outcome answers a
+/// retry: [`RunConfiguration::request_outcome_retention`].
+pub const DEFAULT_REQUEST_OUTCOME_RETENTION: SimDuration = SimDuration::days(30);
+
+/// The longest request outcome retention a run may declare.
+pub const MAX_REQUEST_OUTCOME_RETENTION: SimDuration = SimDuration::days(366);
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_default_request_outcome_retention(retention: &SimDuration) -> bool {
+    *retention == DEFAULT_REQUEST_OUTCOME_RETENTION
+}
+
+const fn default_request_outcome_retention() -> SimDuration {
+    DEFAULT_REQUEST_OUTCOME_RETENTION
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,6 +101,19 @@ pub struct RunConfiguration {
     /// and so from the configuration hash, at [`EvaluationLimitsV1::DEFAULT`].
     #[serde(default, skip_serializing_if = "EvaluationLimitsV1::is_default")]
     pub evaluation_limits: EvaluationLimitsV1,
+    /// How long, in simulated time after its attempt, a tracked command
+    /// request's exact outcome answers a retry. A request whose attempt
+    /// settled earlier than `now` minus the retention is retired: the run keeps
+    /// only its ID, and every later host request with the ID is refused with
+    /// `RequestOutcomeRetired` (a boundary-generated decision's nested command
+    /// with `InvalidDecision`, as for any used ID). From zero to [`MAX_REQUEST_OUTCOME_RETENTION`]; omitted
+    /// from the wire, and so from the configuration hash, at
+    /// [`DEFAULT_REQUEST_OUTCOME_RETENTION`].
+    #[serde(
+        default = "default_request_outcome_retention",
+        skip_serializing_if = "is_default_request_outcome_retention"
+    )]
+    pub request_outcome_retention: SimDuration,
 }
 
 /// Command-relevant policy deliberately omits run purpose, observation, and
@@ -131,6 +160,7 @@ impl RunConfiguration {
             diagnostic_commands_enabled: false,
             require_idempotency_keys: true,
             evaluation_limits: EvaluationLimitsV1::DEFAULT,
+            request_outcome_retention: DEFAULT_REQUEST_OUTCOME_RETENTION,
         }
     }
 
@@ -149,6 +179,7 @@ impl RunConfiguration {
             diagnostic_commands_enabled: false,
             require_idempotency_keys: true,
             evaluation_limits: EvaluationLimitsV1::DEFAULT,
+            request_outcome_retention: DEFAULT_REQUEST_OUTCOME_RETENTION,
         }
     }
 
@@ -178,6 +209,7 @@ impl RunConfiguration {
             diagnostic_commands_enabled: false,
             require_idempotency_keys: true,
             evaluation_limits: EvaluationLimitsV1::DEFAULT,
+            request_outcome_retention: DEFAULT_REQUEST_OUTCOME_RETENTION,
         }
     }
 
@@ -185,6 +217,14 @@ impl RunConfiguration {
     #[must_use]
     pub const fn with_evaluation_limits(mut self, limits: EvaluationLimitsV1) -> Self {
         self.evaluation_limits = limits;
+        self
+    }
+
+    /// Replaces how long a tracked command request's exact outcome answers a
+    /// retry ([`Self::request_outcome_retention`]).
+    #[must_use]
+    pub const fn with_request_outcome_retention(mut self, retention: SimDuration) -> Self {
+        self.request_outcome_retention = retention;
         self
     }
 
@@ -214,6 +254,13 @@ impl RunConfiguration {
             );
         }
         self.evaluation_limits.validate()?;
+        if self.request_outcome_retention.is_negative()
+            || self.request_outcome_retention > MAX_REQUEST_OUTCOME_RETENTION
+        {
+            return invalid_configuration(
+                "the request outcome retention must be from zero to 366 days",
+            );
+        }
 
         match self.seat {
             SeatPolicy::CharacterBound => {
@@ -390,6 +437,18 @@ impl RunConfigurationSnapshot {
             Self::Declared(configuration) => configuration.evaluation_limits,
             Self::CompatibilityV1 | Self::ManifestOnlyV1 | Self::LegacyUnspecified => {
                 EvaluationLimitsV1::DEFAULT
+            }
+        }
+    }
+
+    /// How long the run answers an exact retry from a request's outcome;
+    /// undeclared provenance uses [`DEFAULT_REQUEST_OUTCOME_RETENTION`].
+    #[must_use]
+    pub const fn request_outcome_retention(&self) -> SimDuration {
+        match self {
+            Self::Declared(configuration) => configuration.request_outcome_retention,
+            Self::CompatibilityV1 | Self::ManifestOnlyV1 | Self::LegacyUnspecified => {
+                DEFAULT_REQUEST_OUTCOME_RETENTION
             }
         }
     }

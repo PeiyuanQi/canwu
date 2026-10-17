@@ -2363,3 +2363,268 @@ fn continuation_checkpoints_agree_under_knowledge_retention() {
     }
     assert!(kept_by_one(unsealed.knowledge()));
 }
+
+/// A direct run with a one-day request outcome retention: within the window
+/// an exact retry gets its original outcome and a reused ID a collision; past
+/// it every request with a used ID is refused as retired, without evidence,
+/// while fresh IDs are admitted. An unsealed run, a run sealed before and
+/// after the requests cross the window, and a run restored from the sealed
+/// run's continuation checkpoint answer alike and write the same checkpoint,
+/// whose request index keeps only the retired IDs, as one range that starts
+/// at the zero ID admission recorded as a rejection.
+#[test]
+fn request_outcomes_retire_by_simulated_time_alike_in_every_run() {
+    let (scenario, ids) = demo_scenario();
+    let configuration = RunConfiguration::play_as_character(
+        "seat.commander",
+        "controller.human",
+        ids.commander,
+        "permission.military-command",
+    )
+    .with_request_outcome_retention(SimDuration::days(1));
+    let manifest = manifest_for_configuration(&scenario, &configuration);
+    let order = |destination, at| {
+        CommandEnvelope::new(
+            Issuer::Human("controller.human".to_owned()),
+            Command::OrderMovement {
+                subject: EntityRef::Army(ids.army),
+                destination,
+                cargo: Vec::new(),
+            },
+        )
+        .with_authority(character_authority(
+            ids.commander,
+            ids.army,
+            "seat.commander",
+            "permission.military-command",
+        ))
+        .at_time(at)
+    };
+    let day = |day| SimTime::EPOCH + SimDuration::days(day);
+    let mut unsealed =
+        Simulation::new_with_run_configuration(35, scenario, manifest, configuration)
+            .expect("declared character run should load");
+    let accepted_request = CommandRequest::new(
+        CommandRequestId::new(1),
+        0,
+        order(ids.eastern_territory, SimTime::EPOCH),
+    );
+    let accepted = unsealed
+        .process_command(accepted_request.clone())
+        .expect("the request should produce an outcome");
+    assert!(matches!(accepted, CommandOutcome::Accepted { .. }));
+    let stale_request = CommandRequest::new(
+        CommandRequestId::new(2),
+        0,
+        order(ids.eastern_territory, SimTime::EPOCH),
+    );
+    let stale = unsealed
+        .process_command(stale_request.clone())
+        .expect("the stale request should produce an outcome");
+    assert!(matches!(
+        &stale,
+        CommandOutcome::Rejected { rejection }
+            if rejection.error.code == ErrorCode::SimulationRevisionConflict
+    ));
+    let zero_request = CommandRequest::new(
+        CommandRequestId::new(0),
+        unsealed.revision(),
+        order(ids.eastern_territory, SimTime::EPOCH),
+    );
+    let zero = unsealed
+        .process_command(zero_request.clone())
+        .expect("a zero request ID should produce an outcome");
+    assert!(matches!(
+        &zero,
+        CommandOutcome::Rejected { rejection }
+            if rejection.attempt_id.is_some() && rejection.error.code == ErrorCode::InvalidPayload
+    ));
+    let collision_request = CommandRequest::new(
+        CommandRequestId::new(1),
+        unsealed.revision(),
+        order(ids.western_territory, SimTime::EPOCH),
+    );
+    unsealed
+        .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+        .expect("the boundary should admit both attempts");
+    let mut sealed = unsealed
+        .fork()
+        .into_compacted()
+        .expect("the copy should enter compact mode");
+    let mut segments = vec![
+        sealed
+            .seal_evidence()
+            .expect("the admitted attempts should seal")
+            .expect("the admitted attempts should form a segment"),
+    ];
+
+    let codes = |outcomes: &[CommandOutcome]| -> Vec<Option<ErrorCode>> {
+        outcomes
+            .iter()
+            .map(|outcome| match outcome {
+                CommandOutcome::Accepted { .. } => None,
+                CommandOutcome::Rejected { rejection } => Some(rejection.error.code.clone()),
+            })
+            .collect()
+    };
+    let retries = [
+        accepted_request.clone(),
+        stale_request.clone(),
+        zero_request.clone(),
+        collision_request.clone(),
+    ];
+
+    // Day 1: inside the window.
+    unsealed
+        .settle_boundary(BoundaryRequest::at(day(1)))
+        .expect("day 1 should settle");
+    sealed
+        .settle_boundary(BoundaryRequest::at(day(1)))
+        .expect("day 1 should settle");
+    let revision = unsealed.revision();
+    let inside: Vec<_> = retries
+        .iter()
+        .map(|request| unsealed.process_command(request.clone()).expect("answer"))
+        .collect();
+    assert_eq!(inside[0], accepted);
+    assert_eq!(inside[1], stale);
+    assert_eq!(inside[2], zero);
+    assert_eq!(
+        codes(&inside[3..]),
+        vec![Some(ErrorCode::IdempotencyConflict)]
+    );
+    let sealed_inside: Vec<_> = retries
+        .iter()
+        .map(|request| sealed.process_command(request.clone()).expect("answer"))
+        .collect();
+    assert_eq!(sealed_inside, inside);
+    let (checkpoint, _) = unsealed.continuation_checkpoint().expect("checkpoint");
+    assert_eq!(checkpoint.requests.commands.len(), 3);
+    assert!(checkpoint.requests.retired_commands.is_empty());
+    assert_eq!(
+        sealed.continuation_checkpoint().expect("checkpoint"),
+        unsealed.continuation_checkpoint().expect("checkpoint")
+    );
+    segments.push(
+        sealed
+            .seal_evidence()
+            .expect("day 1 should seal")
+            .expect("day 1 should form a segment"),
+    );
+
+    // Day 2: both attempts settled before `now` minus one day. The sealed
+    // run's last seal kept them, so its lookups apply the window themselves.
+    unsealed
+        .settle_boundary(BoundaryRequest::at(day(2)))
+        .expect("day 2 should settle");
+    sealed
+        .settle_boundary(BoundaryRequest::at(day(2)))
+        .expect("day 2 should settle");
+    let revision_after = unsealed.revision();
+    assert_eq!(revision_after, revision + 1, "only the boundary moved it");
+    let past: Vec<_> = retries
+        .iter()
+        .map(|request| unsealed.process_command(request.clone()).expect("answer"))
+        .collect();
+    assert_eq!(
+        codes(&past),
+        vec![Some(ErrorCode::RequestOutcomeRetired); 4]
+    );
+    assert!(past.iter().all(|outcome| matches!(
+        outcome,
+        CommandOutcome::Rejected { rejection }
+            if rejection.attempt_id.is_none() && rejection.retained_revision == revision_after
+    )));
+    assert_eq!(
+        unsealed.revision(),
+        revision_after,
+        "a retired answer is not evidence"
+    );
+    let (checkpoint, hash) = unsealed.continuation_checkpoint().expect("checkpoint");
+    assert!(checkpoint.requests.commands.is_empty());
+    assert_eq!(
+        checkpoint.requests.retired_commands,
+        vec![RetiredRequestRange {
+            first: CommandRequestId::new(0),
+            last: CommandRequestId::new(2),
+        }]
+    );
+    assert_eq!(
+        sealed.continuation_checkpoint().expect("checkpoint"),
+        (checkpoint.clone(), hash.clone())
+    );
+    let mut restored =
+        CompactedSimulation::from_continuation_checkpoint_verified(checkpoint.clone(), &hash, &[])
+            .expect("the checkpoint should restore");
+    let sealed_before_trim: Vec<_> = retries
+        .iter()
+        .map(|request| sealed.process_command(request.clone()).expect("answer"))
+        .collect();
+    assert_eq!(sealed_before_trim, past);
+    segments.push(
+        sealed
+            .seal_evidence()
+            .expect("day 2 should seal")
+            .expect("day 2 should form a segment"),
+    );
+    let evidence = &sealed.runtime().state.evidence;
+    assert!(
+        evidence.archived_command_requests.is_empty(),
+        "the seal moves retired outcomes out of the table"
+    );
+    assert_eq!(
+        evidence.retired_command_requests.ranges(),
+        checkpoint.requests.retired_commands.as_slice()
+    );
+    assert_eq!(
+        sealed.continuation_checkpoint().expect("checkpoint"),
+        (checkpoint, hash)
+    );
+    let sealed_past: Vec<_> = retries
+        .iter()
+        .map(|request| sealed.process_command(request.clone()).expect("answer"))
+        .collect();
+    assert_eq!(sealed_past, past);
+    // The compact checkpoint's dependencies, which no longer cite the retired
+    // outcomes, are what the full history rebuilt from its segments derives.
+    let from_segments = CompactedSimulation::from_checkpoint_and_journal_with_plugins(
+        sealed
+            .checkpoint()
+            .expect("the sealed run should checkpoint"),
+        segments,
+        &[],
+    )
+    .expect("the compact checkpoint should restore from its segments");
+    assert_eq!(from_segments.checkpoint_hash(), sealed.checkpoint_hash());
+    let restored_past: Vec<_> = retries
+        .iter()
+        .map(|request| restored.process_command(request.clone()).expect("answer"))
+        .collect();
+    assert_eq!(restored_past, past);
+
+    // A fresh ID is still admitted and recorded, alike in every run (the
+    // army has moved, so the order is an expected domain rejection).
+    let fresh = CommandRequest::new(
+        CommandRequestId::new(3),
+        revision_after,
+        order(ids.western_territory, day(2)),
+    );
+    let outcome = unsealed
+        .process_command(fresh.clone())
+        .expect("a fresh request should produce an outcome");
+    assert!(
+        matches!(
+            &outcome,
+            CommandOutcome::Rejected { rejection }
+                if rejection.attempt_id.is_some() && rejection.error.code == ErrorCode::NoRoute
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        sealed.process_command(fresh.clone()).expect("answer"),
+        outcome
+    );
+    assert_eq!(restored.process_command(fresh).expect("answer"), outcome);
+    assert_eq!(sealed.checkpoint_hash(), unsealed.checkpoint_hash());
+    assert_eq!(restored.checkpoint_hash(), unsealed.checkpoint_hash());
+}

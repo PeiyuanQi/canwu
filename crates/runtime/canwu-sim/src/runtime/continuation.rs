@@ -380,8 +380,9 @@ impl Simulation {
 }
 
 /// Version of the continuation checkpoint. Version 2 embeds snapshot format
-/// 9.
-pub const CONTINUATION_CHECKPOINT_FORMAT_VERSION: u32 = 2;
+/// 9; version 3 keeps retired command requests as ranges in the request
+/// index.
+pub const CONTINUATION_CHECKPOINT_FORMAT_VERSION: u32 = 3;
 /// Hash domain of the continuation checkpoint's own identity.
 const CONTINUATION_CHECKPOINT_DOMAIN: &str = "canwu.continuation-checkpoint.v1";
 
@@ -471,13 +472,32 @@ pub struct SettledDecisionRequest {
     pub receipt: IngressReceipt,
 }
 
+/// A run of consecutive retired command request IDs, `first` to `last`
+/// inclusive.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RetiredRequestRange {
+    pub first: CommandRequestId,
+    pub last: CommandRequestId,
+}
+
 /// Exact idempotency for every tracked request at or below the settled cut.
+///
+/// A command request whose attempt settled before the run's request outcome
+/// retention is retired: its outcome and its queued receipt leave the index
+/// and its ID joins `retired_commands`, which keeps it used for the run.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct RequestIndex {
+    /// The outcomes of command requests that are not retired, in request
+    /// order.
     pub commands: Vec<SettledCommandRequest>,
+    /// The ingress receipts of queued command requests that are not in
+    /// `retired_commands`, in request order.
     pub queued_commands: Vec<SettledQueuedCommand>,
     pub decisions: Vec<SettledDecisionRequest>,
     pub decision_commands: Vec<CommandRequestId>,
+    /// The retired command request IDs whose attempts lie at or below the
+    /// cut, as sorted, disjoint, non-adjacent ranges.
+    pub retired_commands: Vec<RetiredRequestRange>,
 }
 
 /// Facts about the history below the settled cut that later admission
@@ -744,23 +764,37 @@ impl Simulation {
         let settled_attempts = &evidence.command_attempts[..attempts];
 
         let tables = self.archived_request_tables(settled_attempts, &evidence.ingress)?;
-        let mut command_requests: BTreeMap<_, _> = evidence
+        // Outcomes at or below the cut that settled before the retention are
+        // retired whether or not a seal has moved them yet, and their queued
+        // receipts go with them, so every run writes the same index.
+        let kept_from = self.request_outcomes_kept_from();
+        let mut command_requests = BTreeMap::new();
+        let mut retired = Vec::new();
+        for (id, input_hash, outcome) in evidence
             .archived_command_requests
             .iter()
-            .map(|(id, outcome)| (*id, (outcome.input_hash.clone(), outcome.outcome.clone())))
-            .collect();
-        command_requests.extend(
-            tables
-                .commands
-                .into_iter()
-                .map(|(id, outcome)| (id, (outcome.input_hash, outcome.outcome))),
-        );
+            .map(|(id, outcome)| (*id, outcome.input_hash.clone(), outcome.outcome.clone()))
+            .chain(
+                tables
+                    .commands
+                    .into_iter()
+                    .map(|(id, outcome)| (id, outcome.input_hash, outcome.outcome)),
+            )
+        {
+            if super::state::command_outcome_time(&outcome) < kept_from {
+                retired.push(id);
+            } else {
+                command_requests.insert(id, (input_hash, outcome));
+            }
+        }
+        let retired = evidence.retired_command_requests.with(retired);
         let mut queued_commands: BTreeMap<_, _> = evidence
             .archived_ingress_requests
             .iter()
             .map(|(id, request)| (*id, request.clone()))
             .collect();
         queued_commands.extend(tables.ingress);
+        queued_commands.retain(|id, _| !retired.contains(*id));
         let mut decisions: BTreeMap<_, _> = evidence
             .archived_decision_requests
             .iter()
@@ -801,6 +835,7 @@ impl Simulation {
                 })
                 .collect(),
             decision_commands: decision_commands.into_iter().collect(),
+            retired_commands: retired.ranges().to_vec(),
         };
         let (legacy, tracked, unqueued) =
             self.history_flags_of(settled_commands, settled_attempts, &evidence.ingress);
@@ -1267,6 +1302,7 @@ impl ContinuationCheckpoint {
                 "continuation request tables must be sorted and settled",
             ));
         }
+        self.check_retired_requests()?;
         let times = &self.evidence_times;
         if !canonical_time_runs(&times.events, cut.event_count, state.now)
             || !canonical_time_runs(&times.commands, cut.command_count, state.now)
@@ -1309,6 +1345,105 @@ impl ContinuationCheckpoint {
         {
             return Err(invalid(
                 "continuation journal frontier item counts must equal the journal counts",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ContinuationCheckpoint {
+    /// The retired command requests: canonical ranges that no listed
+    /// outcome, queued receipt, or unadmitted attempt falls in, and outcomes
+    /// that are all inside the retention at the checkpoint's time and name
+    /// their own attempt at or below the cut.
+    fn check_retired_requests(&self) -> Result<(), CanwuError> {
+        let requests = &self.requests;
+        let ranges = requests.retired_commands.as_slice();
+        let retired = |request| super::state::ranges_contain(ranges, request);
+        if !super::state::retired_ranges_are_canonical(ranges)
+            || requests
+                .commands
+                .iter()
+                .map(|entry| entry.request_id)
+                .chain(
+                    requests
+                        .queued_commands
+                        .iter()
+                        .map(|entry| entry.request_id),
+                )
+                .chain(
+                    self.unadmitted
+                        .command_attempts
+                        .iter()
+                        .filter_map(|attempt| attempt.request_id),
+                )
+                .any(retired)
+        {
+            return Err(invalid(
+                "continuation retired requests must be canonical ranges that no kept request falls in",
+            ));
+        }
+        let now = self.state.now;
+        let retention = self.state.run_configuration.as_ref().map_or(
+            super::DEFAULT_REQUEST_OUTCOME_RETENTION,
+            super::RunConfigurationSnapshot::request_outcome_retention,
+        );
+        let kept_from = super::boundary_window::kept_from(now, retention);
+        let attempts = self.settled_cut.command_attempt_count;
+        let settled = |entry: &SettledCommandRequest| {
+            let (attempt, request) = match &entry.outcome {
+                CommandOutcome::Accepted { receipt } => (receipt.attempt_id, receipt.request_id),
+                CommandOutcome::Rejected { rejection } => {
+                    (rejection.attempt_id, rejection.request_id)
+                }
+            };
+            let at = super::state::command_outcome_time(&entry.outcome);
+            request == Some(entry.request_id)
+                && attempt.is_some_and(|attempt| attempt.get() != 0 && attempt.get() <= attempts)
+                && kept_from <= at
+                && at <= now
+        };
+        if !requests.commands.iter().all(settled) {
+            return Err(invalid(
+                "continuation request outcomes must be settled at or below the cut and inside the retention",
+            ));
+        }
+        // A pending command request keeps its receipt or its decision's
+        // listing and is never retired, or its admission would find it used.
+        let pending_requests_kept = self.pending_ingress.iter().all(|id| {
+            let Ok(index) = self
+                .pinned
+                .ingress
+                .binary_search_by_key(id, |record| record.id)
+            else {
+                return true;
+            };
+            match &self.pinned.ingress[index].payload {
+                IngressPayload::Command { request } => {
+                    !retired(request.request_id)
+                        && requests
+                            .queued_commands
+                            .binary_search_by_key(&request.request_id, |entry| entry.request_id)
+                            .is_ok()
+                }
+                IngressPayload::Decision { request } => {
+                    request.command.as_ref().is_none_or(|command| {
+                        !retired(command.request_id)
+                            && requests
+                                .decision_commands
+                                .binary_search(&command.request_id)
+                                .is_ok()
+                    })
+                }
+                IngressPayload::Plugin { .. }
+                | IngressPayload::Calendar { .. }
+                | IngressPayload::Maintenance { .. }
+                | IngressPayload::PluginCancellation { .. } => true,
+            }
+        });
+        if !pending_requests_kept {
+            return Err(invalid(
+                "continuation pending command requests must keep their receipts and never be retired",
             ));
         }
         Ok(())
@@ -1532,6 +1667,9 @@ impl Simulation {
                 })
                 .collect(),
             archived_decision_command_requests: requests.decision_commands.into_iter().collect(),
+            retired_command_requests: super::state::RetiredRequestIds::from_ranges(
+                requests.retired_commands,
+            ),
             events: unadmitted.events,
             commands: super::state::RetainedJournal::default(),
             command_attempts: super::state::RetainedJournal::default(),

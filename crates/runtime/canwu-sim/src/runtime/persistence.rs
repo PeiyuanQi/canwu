@@ -2943,10 +2943,20 @@ impl Simulation {
         // exact retry without reading evidence, and ordinal identities stay
         // provable from the journal counters after a seal.
 
-        for archived in self.state.evidence.archived_command_requests.values() {
+        // A retired request answers no retry, so neither its outcome nor its
+        // queued receipt cites evidence, sealed or retained alike.
+        let kept_from = self.request_outcomes_kept_from();
+        let evidence = &self.state.evidence;
+        for archived in evidence.archived_command_requests.values() {
+            if super::state::command_outcome_time(&archived.outcome) < kept_from {
+                continue;
+            }
             add_command_outcome_dependencies(&mut dependencies, &archived.outcome);
         }
-        for archived in self.state.evidence.archived_ingress_requests.values() {
+        for (request, archived) in &evidence.archived_ingress_requests {
+            if evidence.command_request_retired(*request, kept_from) {
+                continue;
+            }
             promote_dependency(
                 &mut dependencies,
                 EvidenceRef::Ingress(archived.receipt.ingress_id),
@@ -2961,7 +2971,7 @@ impl Simulation {
             );
         }
         for attempt in &self.state.evidence.command_attempts {
-            if attempt.request_id.is_none() {
+            if attempt.request_id.is_none() || attempt.at < kept_from {
                 continue;
             }
             promote_dependency(
@@ -2975,13 +2985,7 @@ impl Simulation {
                     EvidenceRef::Command(command_id),
                     identity,
                 );
-                if let Some(command) = self
-                    .state
-                    .evidence
-                    .commands
-                    .iter()
-                    .find(|command| command.id == command_id)
-                {
+                if let Some(command) = evidence.retained_command(command_id) {
                     for event in &command.emitted_events {
                         promote_dependency(&mut dependencies, EvidenceRef::Event(*event), identity);
                     }
@@ -2989,10 +2993,17 @@ impl Simulation {
             }
         }
         for ingress in &self.state.evidence.ingress {
-            if matches!(
-                ingress.payload,
-                IngressPayload::Command { .. } | IngressPayload::Decision { .. }
-            ) {
+            let cited = match &ingress.payload {
+                IngressPayload::Command { request } => {
+                    !evidence.command_request_retired(request.request_id, kept_from)
+                }
+                IngressPayload::Decision { .. } => true,
+                IngressPayload::Plugin { .. }
+                | IngressPayload::Calendar { .. }
+                | IngressPayload::Maintenance { .. }
+                | IngressPayload::PluginCancellation { .. } => false,
+            };
+            if cited {
                 promote_dependency(
                     &mut dependencies,
                     EvidenceRef::Ingress(ingress.id),
@@ -3264,6 +3275,7 @@ impl Simulation {
             &segment.command_attempts,
             &segment.ingress,
         );
+        let kept_from = self.request_outcomes_kept_from();
 
         let evidence = &mut self.state.evidence;
         evidence.archived_boundary_head = segment
@@ -3286,6 +3298,9 @@ impl Simulation {
         evidence.archived = cut;
         evidence.events.drain(..event_count);
         evidence.seal_command_history(command_count, attempt_count);
+        // Only sealed outcomes retire, each with its own queued receipt, so
+        // no retained attempt loses the receipt that marks it queued.
+        evidence.retire_command_requests(kept_from);
         evidence.boundaries.clear();
         evidence.random_draws.clear();
         self.state.scheduler.cancelled_ingress.clear();

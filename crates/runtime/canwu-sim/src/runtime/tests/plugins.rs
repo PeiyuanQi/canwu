@@ -791,6 +791,7 @@ fn domain_record_snapshot_cannot_delete_the_bound_seat_institution() {
         diagnostic_commands_enabled: false,
         require_idempotency_keys: true,
         evaluation_limits: crate::EvaluationLimitsV1::DEFAULT,
+        request_outcome_retention: crate::DEFAULT_REQUEST_OUTCOME_RETENTION,
     };
     let mut forged = simulation.snapshot();
     let run_manifest = manifest_for_configuration(&initial_scenario, &configuration);

@@ -337,6 +337,9 @@ impl Simulation {
                     "nested decision command must use the decision request revision and due-time guards",
                 ));
             }
+            if self.command_request_retired(command.request_id) {
+                return Err(super::ingress::retired_request_error(command.request_id));
+            }
             if self.command_request_id_is_in_use(command.request_id) {
                 return Err(CanwuError::new(
                     ErrorCode::IdempotencyConflict,
@@ -826,6 +829,11 @@ impl Simulation {
                 .evidence
                 .archived_decision_command_requests
                 .contains(&request_id)
+            || self
+                .state
+                .evidence
+                .retired_command_requests
+                .contains(request_id)
             || self.retained_attempt_exists(request_id)
             || self.retained_queued_request_count(request_id) > 0
     }
@@ -883,6 +891,7 @@ impl Simulation {
         let retained = self.retained_queued_request_count(request_id);
         !evidence.archived_command_requests.contains_key(&request_id)
             && !evidence.archived_ingress_requests.contains_key(&request_id)
+            && !evidence.retired_command_requests.contains(request_id)
             && !self.retained_attempt_exists(request_id)
             && archived + retained == 1
     }

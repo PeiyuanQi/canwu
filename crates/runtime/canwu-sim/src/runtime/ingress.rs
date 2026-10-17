@@ -517,6 +517,16 @@ pub struct IngressRecord {
     pub cause: Option<CauseRef>,
 }
 
+/// The refusal of a request whose ID a retired command request used.
+pub(super) fn retired_request_error(request_id: CommandRequestId) -> CanwuError {
+    CanwuError::new(
+        ErrorCode::RequestOutcomeRetired,
+        format!(
+            "command request {request_id} settled before the run's request outcome retention: its outcome is no longer kept, its ID stays used, and a new request needs a new ID"
+        ),
+    )
+}
+
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_zero(value: &u64) -> bool {
     *value == 0
@@ -575,6 +585,9 @@ impl Simulation {
         self.ensure_runtime_ready()?;
         self.ensure_canonical_ingress_can_start()?;
         self.ensure_command_ingress_family(CommandIngress::LiveRequest)?;
+        if self.command_request_retired(request.request_id) {
+            return Err(retired_request_error(request.request_id));
+        }
         if let Some(existing) = self
             .state
             .evidence
@@ -1474,6 +1487,17 @@ impl Simulation {
         let Some(request_id) = request_id else {
             return Ok(None);
         };
+        if self.command_request_retired(request_id) {
+            return Ok(Some(CommandOutcome::Rejected {
+                rejection: CommandRejection {
+                    attempt_id: None,
+                    request_id: Some(request_id),
+                    retained_revision: self.revision(),
+                    rejected_at: self.state.scheduler.now,
+                    error: retired_request_error(request_id),
+                },
+            }));
+        }
         if let Some(cached) = self
             .state
             .evidence
@@ -1530,6 +1554,26 @@ impl Simulation {
             }));
         }
         Ok(Some(self.command_outcome_from_attempt(attempt)?))
+    }
+
+    /// The earliest attempt time whose outcome still answers a retry: `now`
+    /// minus the run's request outcome retention, as the settled-boundary
+    /// ledger keeps its horizon.
+    pub(super) fn request_outcomes_kept_from(&self) -> SimTime {
+        super::boundary_window::kept_from(
+            self.state.scheduler.now,
+            self.state
+                .metadata
+                .run_configuration
+                .request_outcome_retention(),
+        )
+    }
+
+    /// Whether a tracked command request is retired at the current time.
+    pub(super) fn command_request_retired(&self, request_id: CommandRequestId) -> bool {
+        self.state
+            .evidence
+            .command_request_retired(request_id, self.request_outcomes_kept_from())
     }
 
     pub(super) fn command_outcome_from_attempt(

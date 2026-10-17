@@ -47,7 +47,16 @@ pub enum ErrorCode {
     DuplicateKnowledgeRecordKind,
     InvalidRandomOperationEvidence,
     RandomOperationConflict,
+    /// An idempotency key, such as a command request ID, was already used for
+    /// different input. A host that reads this as "the command request ID is
+    /// taken" reads [`Self::RequestOutcomeRetired`] the same way.
     IdempotencyConflict,
+    /// The command request with this ID settled before the run's request
+    /// outcome retention: its outcome is no longer kept, so the engine cannot
+    /// tell an exact retry from a reused ID, and the ID stays used for the
+    /// run. A host that needs the outcome reads it from the receipt it was
+    /// given; a new request needs a new ID.
+    RequestOutcomeRetired,
     InteractionReadOnly,
     InvalidPayload,
     InvalidPluginRegistration,
@@ -186,6 +195,7 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::InvalidRandomOperationEvidence => "invalid_random_operation_evidence",
         ErrorCode::RandomOperationConflict => "random_operation_conflict",
         ErrorCode::IdempotencyConflict => "idempotency_conflict",
+        ErrorCode::RequestOutcomeRetired => "request_outcome_retired",
         ErrorCode::InteractionReadOnly => "interaction_read_only",
         ErrorCode::InvalidPayload => "invalid_payload",
         ErrorCode::InvalidPluginRegistration => "invalid_plugin_registration",
