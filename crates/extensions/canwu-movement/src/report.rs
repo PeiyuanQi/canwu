@@ -4,12 +4,14 @@
 //! cut: the current time for the operator and owner, and the current time
 //! minus the grant delay for a delayed remote observer. Only the operator and
 //! owner see the execution detail (state, revision reasons, handoffs,
-//! bookings, and failure reasons); a remote observer sees coarse progress.
+//! bookings, failure reasons, and the hold on a departed leg); a remote
+//! observer sees coarse progress and learns of a hold only from the leg's
+//! arrival time.
 
 use crate::PLUGIN_NAMESPACE;
 use crate::model::{
-    MovementError, MovementErrorCode, MovementObserverGrant, MovementObserverRole,
-    MovementOrderRecordV1, MovementState, route_leg,
+    MovementError, MovementErrorCode, MovementLegHoldV1, MovementObserverGrant,
+    MovementObserverRole, MovementOrderRecordV1, MovementState, route_leg,
 };
 use canwu_api::{
     CapacityBooking, Handoff, ItineraryRevisionId, ItineraryRevisionReason, KnowledgeHolderRef,
@@ -89,6 +91,10 @@ pub struct MovementReportDetailV1 {
     pub failures: Vec<MovementLegFailureV1>,
     pub handoffs: Vec<Handoff>,
     pub bookings: Vec<CapacityBooking>,
+    /// The latest hold on the departed current leg, until it arrives or
+    /// fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<MovementLegHoldV1>,
 }
 
 /// Payload of one `canwu.movement.movement_report` knowledge record.
@@ -300,6 +306,7 @@ fn detail(
             .collect(),
         handoffs: execution.handoffs.clone(),
         bookings: execution.bookings.clone(),
+        hold: record.hold.clone(),
     })
 }
 
@@ -338,7 +345,7 @@ pub(crate) fn observer_cut(at: SimTime, grant: &MovementObserverGrant) -> Option
 }
 
 /// Every time at which a fact in the reports about `record` changed;
-/// handoff and allocation times count only for detailed reports.
+/// handoff, allocation, and hold times count only for detailed reports.
 pub(crate) fn event_times(
     state: &MovementState,
     record: &MovementOrderRecordV1,
@@ -359,6 +366,7 @@ pub(crate) fn event_times(
         times.extend(leg.failed_at);
     }
     if detailed {
+        times.extend(record.hold.as_ref().map(|hold| hold.held_at));
         times.extend(execution.handoffs.iter().map(|handoff| handoff.at));
         times.extend(
             state

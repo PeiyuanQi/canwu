@@ -4,9 +4,10 @@
 
 use crate::model::{
     MovementBookingBindingV1, MovementBookingRequestV1, MovementError, MovementErrorCode,
-    MovementLegDueKind, MovementLegDueV1, MovementLimitsV1, MovementObserverGrant,
-    MovementObserverRole, MovementOperation, MovementOrderRecordV1, MovementOrderRequestV1,
-    MovementPoolOfferV1, MovementState, is_label, route_leg, validate_plan, within_time_bound,
+    MovementLegDueKind, MovementLegDueV1, MovementLegHoldV1, MovementLimitsV1,
+    MovementObserverGrant, MovementObserverRole, MovementOperation, MovementOrderRecordV1,
+    MovementOrderRequestV1, MovementPoolOfferV1, MovementState, is_label, planned_duration,
+    route_leg, scheduled_arrival, validate_plan, within_time_bound,
 };
 use canwu_api::{
     BoundaryId, CanwuError, CapacityBookingRequestV1, CapacityBookingStatus, DomainRecord,
@@ -18,9 +19,12 @@ use canwu_api::{
     delivery_completion_operation_key,
 };
 
-/// Read access the lifecycle needs from the settlement view.
+/// Read access the lifecycle needs from the settlement view. Every answer is
+/// a function of current state, never of retained evidence, so a sealed run
+/// and its exact replay decide alike.
 pub(crate) trait EvidenceReader {
-    fn version_exists(&self, version: &DomainRecordVersionRef) -> Result<bool, CanwuError>;
+    /// Whether `version` is the current version of its record.
+    fn version_is_current(&self, version: &DomainRecordVersionRef) -> Result<bool, CanwuError>;
     /// The record at `version` when that version is current.
     fn current_record(
         &self,
@@ -83,21 +87,24 @@ impl MovementState {
             if !matches!(
                 operation,
                 MovementOperation::FailLeg { .. }
+                    | MovementOperation::DelayLeg { .. }
                     | MovementOperation::Reroute { .. }
                     | MovementOperation::RecordHandoff { .. }
                     | MovementOperation::Reconcile { .. }
             ) {
                 return Err(unauthorized(
-                    "an incident may only fail a leg, reroute, record a handoff, or reconcile a delivery",
+                    "an incident may only fail or delay a leg, reroute, record a handoff, or reconcile a delivery",
                 ));
             }
+            // A superseded version would resolve only while the run retains
+            // its evidence, which a seal removes and exact replay keeps.
             if !reader
-                .version_exists(evidence)
+                .version_is_current(evidence)
                 .map_err(|error| evidence_error(&error))?
             {
                 return Err(MovementError::new(
                     MovementErrorCode::Evidence,
-                    "incident evidence version does not exist",
+                    "incident evidence must be the current version of its record",
                 ));
             }
         }
@@ -129,6 +136,15 @@ impl MovementState {
             } => {
                 self.authorize(*execution, actor)?;
                 self.fail_leg(*execution, *leg, reason, at)
+            }
+            MovementOperation::DelayLeg {
+                execution,
+                leg,
+                until,
+                reason,
+            } => {
+                self.authorize(*execution, actor)?;
+                self.delay_leg(*execution, *leg, *until, reason, at, scheduled)
             }
             MovementOperation::Reroute {
                 execution,
@@ -327,12 +343,12 @@ impl MovementState {
         }
         if let Some(attempt) = &request.delivery_attempt
             && !reader
-                .version_exists(attempt)
+                .version_is_current(attempt)
                 .map_err(|error| evidence_error(&error))?
         {
             return Err(MovementError::new(
                 MovementErrorCode::Evidence,
-                "delivery attempt version does not exist",
+                "the delivery attempt must be the current version of its record",
             ));
         }
         let observers = observer_grants(holder, request)?;
@@ -371,6 +387,7 @@ impl MovementState {
                 operation_key: operation_key.to_owned(),
                 admitted_at: at,
                 pending_due: None,
+                hold: None,
                 closed_at: None,
             },
         );
@@ -658,11 +675,7 @@ impl MovementState {
         if expected_leg.is_some_and(|expected| expected != leg_id) {
             return Err(MovementError::state("the named leg is not the current leg"));
         }
-        let planned = route_leg(execution, revision, index)?;
-        let duration = planned
-            .planned_arrival_at
-            .checked_sub(planned.planned_departure_at)
-            .unwrap_or(SimDuration::ZERO);
+        let duration = planned_duration(route_leg(execution, revision, index)?);
         let mut waiting_until = None;
         let mut unavailable = false;
         let mut consume = Vec::new();
@@ -783,7 +796,7 @@ impl MovementState {
         let arrived_everywhere = self
             .execution_mut(execution_id)?
             .complete_current_leg(at, endpoint)?;
-        self.order_mut(execution_id)?.pending_due = None;
+        self.clear_due(execution_id)?;
         if arrived_everywhere {
             return Ok(());
         }
@@ -858,7 +871,73 @@ impl MovementState {
         self.execution_mut(execution_id)?
             .fail_current_leg(reason.to_owned(), at)?;
         self.release_leg_bookings(execution_id, |binding| binding.leg == leg, at)?;
-        self.order_mut(execution_id)?.pending_due = None;
+        self.clear_due(execution_id)
+    }
+
+    /// Holds the current departed leg until `until`: the leg's arrival due
+    /// moves to `until` and the order keeps this hold in place of any
+    /// earlier one. `until` may not precede the settling boundary, which
+    /// would schedule due work in the past, nor the arrival scheduled when
+    /// the leg departed, so a hold never makes a leg faster than planned.
+    fn delay_leg(
+        &mut self,
+        execution_id: TransportExecutionId,
+        leg: LegExecutionId,
+        until: SimTime,
+        reason: &str,
+        at: SimTime,
+        scheduled: &mut Vec<MovementLegDueV1>,
+    ) -> Result<(), MovementError> {
+        if !is_label(reason, MovementLimitsV1::CURRENT.text_bytes) {
+            return Err(MovementError::invalid("a leg delay needs a bounded reason"));
+        }
+        let execution = self
+            .executions
+            .get(&execution_id)
+            .ok_or_else(|| MovementError::new(MovementErrorCode::NotFound, "unknown execution"))?;
+        let departed = current_leg(execution).ok().filter(|(current, _, _)| {
+            *current == leg
+                && execution
+                    .legs
+                    .iter()
+                    .any(|item| item.id == leg && item.status == LegExecutionStatus::Departed)
+        });
+        let Some((_, revision, _)) = departed else {
+            return Err(MovementError::state(
+                "only the current departed leg can be delayed",
+            ));
+        };
+        let scheduled_arrival_at = scheduled_arrival(execution, leg)?;
+        if until < at || until < scheduled_arrival_at {
+            return Err(MovementError::invalid(
+                "a delay holds a leg until no earlier than now and its scheduled arrival",
+            ));
+        }
+        self.schedule(
+            MovementLegDueV1 {
+                execution: execution_id,
+                revision,
+                leg,
+                kind: MovementLegDueKind::Arrival,
+                due_at: until,
+            },
+            scheduled,
+        )?;
+        self.order_mut(execution_id)?.hold = Some(MovementLegHoldV1 {
+            leg,
+            scheduled_arrival_at,
+            until,
+            reason: reason.to_owned(),
+            held_at: at,
+        });
+        Ok(())
+    }
+
+    /// Clears an order's due work and any hold on its leg.
+    fn clear_due(&mut self, execution_id: TransportExecutionId) -> Result<(), MovementError> {
+        let order = self.order_mut(execution_id)?;
+        order.pending_due = None;
+        order.hold = None;
         Ok(())
     }
 
@@ -1121,7 +1200,7 @@ impl MovementState {
     }
 
     /// Closes a terminal execution: cancels unallocated requests, returns
-    /// confirmed capacity, and clears due work.
+    /// confirmed capacity, and clears due work and any hold.
     fn close(
         &mut self,
         execution_id: TransportExecutionId,
@@ -1129,9 +1208,8 @@ impl MovementState {
         confirmed_to: CapacityBookingStatus,
     ) -> Result<(), MovementError> {
         self.release_leg_bookings_with(execution_id, |_| true, at, confirmed_to)?;
-        let order = self.order_mut(execution_id)?;
-        order.pending_due = None;
-        order.closed_at = Some(at);
+        self.clear_due(execution_id)?;
+        self.order_mut(execution_id)?.closed_at = Some(at);
         Ok(())
     }
 

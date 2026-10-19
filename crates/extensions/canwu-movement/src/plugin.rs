@@ -30,16 +30,22 @@ use serde_json::Value;
 pub const MOVEMENT_COMMAND: &str = "apply_movement_operation_v1";
 /// Command-caused packet settled by the lifecycle writer.
 pub const MOVEMENT_OPERATION_INGRESS: &str = "movement_operation_v1";
-/// Application-reported leg failure, reroute, or handoff ([`MovementIncidentV1`]).
+/// Application-reported leg failure, leg delay, reroute, handoff, or delivery
+/// reconciliation ([`MovementIncidentV1`]).
 pub const MOVEMENT_INCIDENT_INGRESS: &str = "movement_incident_v1";
 /// Plugin-scheduled departure or arrival of the current leg at its due time.
 pub const MOVEMENT_LEG_DUE_INGRESS: &str = "movement_leg_due_v1";
 /// Plugin-scheduled wake that publishes delayed remote reports.
 pub const MOVEMENT_REPORT_WAKE_INGRESS: &str = "movement_report_wake_v1";
+/// BLAKE3 of `canwu-movement plugin semantic hash 0.19.0: DelayLeg holds a
+/// departed leg; cited versions must be current`.
 pub const MOVEMENT_SEMANTIC_HASH: &str =
-    "2d3c7d8e4c526ca9ce231e0271818e62476c343e330ac9f914a01584e0dea383";
+    "6cf78f1fc81cd752cfbf8a2363c43de513a1233f572a04c1131b90b43151550e";
 
-const REPORT_SCHEMA_HASH: &str = "31cf5c80ace3b83a2ffd5e3e227b2b4ee7284a0e9e5fd9794aee0b6f55ac1e3a";
+/// BLAKE3 of `canwu-movement movement_report knowledge schema 0.19.0:
+/// MovementReportDetailV1::hold`. The schema id stays at version 1: a report
+/// without a hold is byte-identical.
+const REPORT_SCHEMA_HASH: &str = "81cf8978b25fd602a46ae69b18c5d493f1318fd6ceb915cd7a78cc403b604f11";
 const APPLY_SYSTEM: &str = "movement_lifecycle_apply_v1";
 const VALIDATE_SYSTEM: &str = "movement_lifecycle_validate_v1";
 const REPORT_SYSTEM: &str = "movement_report_publish_v1";
@@ -176,7 +182,8 @@ impl SimulationPlugin for MovementPlugin {
         })?;
         registrar.register_ingress(PluginIngressDescriptor {
             name: MOVEMENT_INCIDENT_INGRESS.to_owned(),
-            description: "Record one evidence-backed leg failure, reroute, or handoff".to_owned(),
+            description: "Record one evidence-backed leg failure, delay, reroute, or handoff"
+                .to_owned(),
             class: IngressClass::Information,
             payload_schema: PayloadSchema::Any,
         })?;
@@ -377,15 +384,15 @@ fn admit_movement_command(
 struct ViewEvidence<'a, 'b>(&'a SimulationView<'b>);
 
 impl EvidenceReader for ViewEvidence<'_, '_> {
-    fn version_exists(&self, version: &DomainRecordVersionRef) -> Result<bool, CanwuError> {
-        self.0.domain_record_version_evidence_exists(version)
+    fn version_is_current(&self, version: &DomainRecordVersionRef) -> Result<bool, CanwuError> {
+        self.0.domain_record_version_is_current(version)
     }
 
     fn current_record(
         &self,
         version: &DomainRecordVersionRef,
     ) -> Result<Option<DomainRecord>, CanwuError> {
-        if !self.0.domain_record_version_is_current(version)? {
+        if !self.version_is_current(version)? {
             return Ok(None);
         }
         Ok(self

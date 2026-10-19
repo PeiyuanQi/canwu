@@ -40,9 +40,18 @@ otherwise). Operations are:
   `delivery_attempt`, arrival enters `ArrivalPending`; without one, arrival on
   the final leg settles the execution.
 - `StartLeg`, `CompleteLeg`, `FailLeg`: act on the named current leg now.
+- `DelayLeg`: hold the named current departed leg until `until`, with a
+  bounded reason. The hold replaces the leg's arrival due, so later delays
+  lengthen, shorten, or lift it; `until` may not precede the settling
+  boundary or the arrival scheduled when the leg departed (its departure
+  plus its planned duration), so a hold never makes a leg faster. Only the
+  latest hold is kept, and it clears when the leg arrives or fails. A later
+  leg whose booking expires meanwhile fails with `capacity_unavailable` when
+  it is due to depart.
 - `Reroute`: install a successor itinerary revision. It starts where the
-  movement stands unless a leg failed after departing. An `ExternalCondition`
-  reason must cite an existing version of a declared record kind.
+  movement stands unless a leg failed after departing; a departed leg must
+  arrive or fail first. An `ExternalCondition` reason must cite an existing
+  version of a declared record kind.
 - `RecordHandoff`: record a planned handoff into a leg of the active itinerary.
 - `RequestBooking`: request pool capacity for one unstarted leg; the booking
   window must lie inside the leg's planned window.
@@ -51,12 +60,15 @@ otherwise). Operations are:
   holder.
 
 Application systems report incidents with the `movement_incident_v1` plugin
-ingress (`MovementIncidentV1`), citing an existing exact version of a declared
-record kind. An incident may fail a leg, reroute, record a handoff, including a
-seizure `HandoffKind::Seizure`, or reconcile a delivery. A seizure asserts an
-act by someone outside the itinerary and a reconciliation asserts the
-delivery's outcome, so neither is accepted from a command; a reconciliation
-must cite the execution's delivery-attempt record.
+ingress (`MovementIncidentV1`), citing an exact version of a declared record
+kind that must be the record's current version when the incident settles: a
+superseded version is refused even while the run still retains it, so a
+sealed run and its exact replay decide alike. An order's `delivery_attempt`
+must likewise be current. An incident may fail or delay a leg, reroute,
+record a handoff, including a seizure `HandoffKind::Seizure`, or reconcile a
+delivery. A seizure asserts an act by someone outside the itinerary and a
+reconciliation asserts the delivery's outcome, so neither is accepted from a
+command; a reconciliation must cite the execution's delivery-attempt record.
 
 Operation keys are unique per holder for commands and per evidence record kind
 for incidents, so no source can claim another's keys. Every key has one durable
@@ -78,10 +90,11 @@ rather than failing the boundary.
 Leg timing uses the internal scheduled ingress `movement_leg_due_v1`. An order
 schedules its first departure at the planned departure time; a departure
 schedules the arrival after the leg's planned duration; an arrival schedules
-the next departure. A due packet acts only when it matches the order's
-persisted `pending_due`, so explicit operations make older packets stale. Due
-work never fails a boundary: if it cannot be applied, the current leg fails
-with `due_settlement_failed`.
+the next departure; a hold moves the arrival to its `until`. A due packet
+acts only when it matches the order's persisted `pending_due`, so explicit
+operations make older packets stale, and an operation settled in the same
+boundary as a due packet acts first. Due work never fails a boundary: if it
+cannot be applied, the current leg fails with `due_settlement_failed`.
 
 Pools are allocated in phase 7 with `canwu_transport::allocate_capacity_bookings`
 rather than kernel phase-6 reservations: every booking requested in a boundary
@@ -97,13 +110,15 @@ until it opens.
 
 `canwu.movement/movement_report` knowledge records carry a `MovementReportV1`
 projected for one holder. The owner and operator see the current execution,
-including its state, revision reasons, handoffs, bookings, and failure
-reasons. A delayed remote observer sees only coarse progress as it stood the
-grant delay earlier, published by the internal `movement_report_wake_v1`
-ingress when that delay elapses. `observed_as_of` is the time of the latest
-fact a report reflects, and a report is published only when it changes.
-Holders without a grant see nothing. Reports are published only to living
-person holders.
+including its state, revision reasons, handoffs, bookings, failure reasons,
+and the hold on a departed leg (`MovementLegHoldV1`: its scheduled arrival,
+`until`, reason, and when it was set). A delayed remote observer sees only
+coarse progress as it stood the grant delay earlier, published by the
+internal `movement_report_wake_v1` ingress when that delay elapses; it learns
+of a hold only from the leg's arrival time. `observed_as_of` is the time of
+the latest fact a report reflects, and a report is published only when it
+changes. Holders without a grant see nothing. Reports are published only to
+living person holders.
 
 ## Retention and limits
 

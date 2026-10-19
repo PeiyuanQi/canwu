@@ -173,12 +173,14 @@ pub struct MovementCommandV1 {
     pub operation: MovementOperation,
 }
 
-/// An application-reported leg failure, reroute, handoff (including a
-/// seizure), or delivery reconciliation delivered as
+/// An application-reported leg failure, leg delay, reroute, handoff
+/// (including a seizure), or delivery reconciliation delivered as
 /// [`crate::MOVEMENT_INCIDENT_INGRESS`].
 ///
-/// `evidence` must be an existing exact version of a record whose kind was
-/// declared to [`crate::MovementPlugin::new`]; the movement plugin never
+/// `evidence` must be the current version of a record whose kind was
+/// declared to [`crate::MovementPlugin::new`] when the incident settles; a
+/// superseded version is refused even while the run still retains it, so a
+/// sealed run and its exact replay decide alike. The movement plugin never
 /// draws the incident itself.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -210,6 +212,18 @@ pub enum MovementOperation {
     FailLeg {
         execution: TransportExecutionId,
         leg: LegExecutionId,
+        reason: String,
+    },
+    /// Hold the current departed leg until `until`, replacing its arrival
+    /// due. `until` is absolute and no earlier than the settling boundary or
+    /// the arrival scheduled when the leg departed, so a later delay can
+    /// lengthen, shorten, or lift a hold but never make the leg faster than
+    /// its planned duration. Only the latest hold is kept
+    /// ([`MovementOrderRecordV1::hold`]).
+    DelayLeg {
+        execution: TransportExecutionId,
+        leg: LegExecutionId,
+        until: SimTime,
         reason: String,
     },
     /// Install a successor itinerary revision.
@@ -249,6 +263,7 @@ impl MovementOperation {
             Self::StartLeg { execution, .. }
             | Self::CompleteLeg { execution, .. }
             | Self::FailLeg { execution, .. }
+            | Self::DelayLeg { execution, .. }
             | Self::Reroute { execution, .. }
             | Self::RecordHandoff { execution, .. }
             | Self::Cancel { execution, .. }
@@ -370,8 +385,30 @@ pub struct MovementOrderRecordV1 {
     pub admitted_at: SimTime,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_due: Option<MovementLegDueV1>,
+    /// The latest hold on the current departed leg; its `until` is the
+    /// pending arrival due. Cleared when the leg arrives or fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<MovementLegHoldV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_at: Option<SimTime>,
+}
+
+/// The current hold on a departed leg, set by
+/// [`MovementOperation::DelayLeg`]. Owner and operator reports show it; a
+/// delayed remote observer learns of it only from the leg's arrival time.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MovementLegHoldV1 {
+    pub leg: LegExecutionId,
+    /// The arrival scheduled when the leg departed: its actual departure plus
+    /// its planned duration. A hold never ends before it.
+    pub scheduled_arrival_at: SimTime,
+    /// The held arrival, the pending arrival due; equal to
+    /// `scheduled_arrival_at` once a hold is lifted.
+    pub until: SimTime,
+    pub reason: String,
+    /// When the latest delay settled.
+    pub held_at: SimTime,
 }
 
 /// Plugin binding of one booking to its pool and leg.
@@ -585,8 +622,9 @@ impl MovementState {
 
     /// Validates every movement invariant: order and execution pairing, leg
     /// continuity, one active itinerary revision, bookings inside leg and
-    /// pool windows with matching pool counters, pending due work, terminal
-    /// closure, one active movement per subject, and bounded collections.
+    /// pool windows with matching pool counters, pending due work (a departed
+    /// leg's arrival at its scheduled or held time), terminal closure, one
+    /// active movement per subject, and bounded collections.
     pub fn validate(&self) -> Result<(), MovementError> {
         let limits = MovementLimitsV1::CURRENT;
         if self.orders.len() > limits.orders_per_runtime
@@ -1030,6 +1068,45 @@ fn validate_execution(
     } else if !departed.is_empty() {
         return Err(MovementError::state("a departed leg needs its arrival due"));
     }
+    // A departed leg arrives at its scheduled arrival unless a hold names a
+    // later instant; only a departed leg awaiting its arrival is held.
+    if let Some(due) = record
+        .pending_due
+        .as_ref()
+        .filter(|due| due.kind == MovementLegDueKind::Arrival)
+    {
+        let scheduled = scheduled_arrival(execution, due.leg)?;
+        let expected = match &record.hold {
+            None => scheduled,
+            Some(hold) => {
+                let departed_at = departed
+                    .first()
+                    .and_then(|leg| leg.actual_departure_at)
+                    .ok_or_else(|| MovementError::state("a held leg must have departed"))?;
+                if hold.leg != due.leg
+                    || hold.scheduled_arrival_at != scheduled
+                    || hold.until < scheduled
+                    || hold.held_at < departed_at
+                    || hold.held_at > hold.until
+                    || !is_label(&hold.reason, limits.text_bytes)
+                {
+                    return Err(MovementError::state(
+                        "a hold names the departed leg and never ends before its scheduled arrival",
+                    ));
+                }
+                hold.until
+            }
+        };
+        if due.due_at != expected {
+            return Err(MovementError::state(
+                "a departed leg's arrival due is its scheduled or held arrival",
+            ));
+        }
+    } else if record.hold.is_some() {
+        return Err(MovementError::state(
+            "only a departed leg awaiting its arrival can be held",
+        ));
+    }
     // Terminal closure.
     if execution.state.is_terminal() {
         if record.pending_due.is_some()
@@ -1126,6 +1203,36 @@ pub(crate) fn route_leg(
         .find(|item| item.id == revision)
         .and_then(|item| item.plan.legs.get(index))
         .ok_or_else(|| MovementError::state("leg has no planned route leg"))
+}
+
+/// How long a planned leg takes once it departs.
+pub(crate) fn planned_duration(leg: &canwu_api::RouteLeg) -> SimDuration {
+    leg.planned_arrival_at
+        .checked_sub(leg.planned_departure_at)
+        .unwrap_or(SimDuration::ZERO)
+}
+
+/// The arrival a departed leg was scheduled for when it departed: its actual
+/// departure plus its planned duration.
+pub(crate) fn scheduled_arrival(
+    execution: &TransportExecution,
+    leg: LegExecutionId,
+) -> Result<SimTime, MovementError> {
+    let leg = execution
+        .legs
+        .iter()
+        .find(|item| item.id == leg)
+        .ok_or_else(|| MovementError::state("leg disappeared"))?;
+    let departed_at = leg
+        .actual_departure_at
+        .ok_or_else(|| MovementError::state("the leg has not departed"))?;
+    departed_at
+        .checked_add(planned_duration(route_leg(
+            execution,
+            leg.itinerary_revision,
+            leg.leg_index,
+        )?))
+        .ok_or_else(|| MovementError::invalid("leg arrival time overflows"))
 }
 
 pub(crate) fn is_label(value: &str, limit: usize) -> bool {
