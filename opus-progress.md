@@ -11,11 +11,10 @@
 > proposal and in `docs/versioning.md`.
 >
 > 0.19.0 closes every row the downstream filed after adopting 0.18.0 (G-62 to G-68; G-66 by documentation, as the
-> owner decided) and engine findings E-44 and E-45 (§3). Delete those rows when 0.19.0 is published. Still open: one
-> recorded design question (G-38), the known limits the 0.18.0 and 0.19.0 packages left on purpose (§4.2), two limits
-> the downstream met and worked around (§4.3), and E-46. The two engine facts the downstream design loop asked to
-> confirm are answered (§4.4). The owner decided the shape of every 0.19.0 fix on 2026-10-19 and confirmed the
-> choices the run made inside those decisions, and the Chinese terms, the same day (§6).
+> owner decided) and engine findings E-44 and E-45 (§3). Delete those rows when 0.19.0 is published. Open: one new
+> downstream row, G-69 (filed 2026-10-19, Low; §4), one recorded design question (G-38), the known limits the 0.18.0
+> and 0.19.0 packages left on purpose (§4.2, with E-46 to E-48), and two limits the downstream met and worked around
+> (§4.3). The two engine facts the downstream design loop asked to confirm are answered (§4.4).
 
 ## 1. Where things are
 
@@ -51,7 +50,12 @@ on 2026-10-19 (§6). Delete this section when 0.19.0 is published; the downstrea
 
 ## 4. Medium and Low
 
-No row filed by the downstream ledger is open beyond §3.
+Filed 2026-10-19 (after 0.19.0's scope was fixed); verified in the 0.19.0 source on `main`. Nothing is built around
+it downstream.
+
+| Id | Sev. | Crate | Gap at 0.19.0 | Proposed fix | Downstream effect |
+| --- | --- | --- | --- | --- | --- |
+| G-69 | Low | `canwu-sim` (calendar ingress) | A calendar boundary carries only the fixed cadences (`schedule_calendar_boundary(at, cadences: Vec<SystemCadence>)`: `SubDaily`, `Daily`, `Monthly`, `Seasonal`, `Annual`, `EraScheduled`). A host that runs two calendars whose month or term starts sometimes differ cannot mark which calendar a `Monthly`, `Seasonal`, or `Annual` boundary belongs to, so every system registered on that cadence wakes at each calendar's starts and must decide from the time whether the boundary is its own. | Host-defined calendar marks on a calendar boundary (for example `(cadence, calendar key)`), readable on the view, and an optional calendar key on a system's cadence registration so the system wakes only on its own calendar's boundaries. | Correct results today: each system filters itself and exits early on the other calendar's boundaries, at a small cost and with the same filter repeated in every plugin. The downstream's two calendars first diverge in its campaign year 1648. |
 
 ### 4.1 Recorded, not proposed
 
@@ -111,92 +115,17 @@ own leases) and E-37's publication-budget overshoot (the application's publisher
    order of `docs/releasing.md`, run a registry-only consumer smoke test, publish the GitHub release (send the §4.4
    answers with its notes), yank 0.18.0, and delete the remote branch `claude/sweet-bell-yqcrl9`. Then delete §3 and
    record the release here.
-2. The §4.2 limits and E-46 by downstream need; E-41's force-supply deferral first if a host runs the reference
-   economy near its byte cap; §4.3 if the downstream asks.
+2. **G-69** for the release after 0.19.0 (the downstream needs it before its campaigns reach 1648; Low). Then the §4.2
+   limits and E-46 to E-48 by downstream need; E-41's force-supply deferral first if a host runs the reference economy
+   near its byte cap; §4.3 if the downstream asks.
 3. Each change set follows the 0.18.0 pattern: one worktree and branch per package under `.worktrees/`, a proposal, durable tests that bite, an independent code review (two for persistence-heavy packages) and a delta review of the fixes, integration on a release branch, the pre-release tests of the release skill (the continuation gate included), then one release commit with the shared docs, the website (with its accuracy and copy reviews), and the skills.
 
 ## 6. Open decisions (owner)
 
-Decided and carried out through 0.18.0: the society transfer knob, the 0.16.0 and 0.17.0 terms, auditor appointment,
-G-15 High with the county-level world target, continuation checkpoint, world-scale fiscal, §4.2 findings staying
-engine-side, the 0.16.0 contract choices, the continuation gate as a release test, and the decisions of the 0.17.0
-run (confirmed 2026-10-16).
-
-Taken in the 0.18.0 run by the orchestrator under the owner's instruction to fix every remaining gap and finding and
-release (2026-10-16), and confirmed by the owner on 2026-10-17; each is recorded in its proposal:
-- G-34 and G-17 were implemented although the ledger filed them as conditional ("second consumer", "profile first").
-- G-33 is a society relation vocabulary (empty = unrestricted); intergroup-relation regions are identifiers, not record
-  references, so no edge pins another plugin's entity.
-- Delegations expire: an interpretation admitted at or after `expires_at` is refused even if dated inside the window.
-- `max_provider_packets` default lowered from 4,096 to 256.
-- Resource canonical limits were kept at what the measured costs support (accounts 8,192, allocation candidates and
-  dirty demands 2,048; hard maxima raised); hot buckets hold 2 records; every host `Expire` is refused at enqueue.
-- Production roots are sharded by host-assigned scope with a key prefix rule.
-- Paged restores take a required `PagedRestoreBudget` parameter (default 2 GiB for a host's own checkpoints).
-- 0.17.0 was yanked after 0.18.0 was verified on crates.io, following the one-live-version practice.
-
-Decided on 2026-10-17 (owner), the Chinese terms of the 0.18.0 concepts, as on `main` in `docs/terminology.md` and
-both website term pages: 请求结果保留期 request outcome retention, 已退役请求结果 retired request outcome, 社群结果留存策略
-society outcome retention, cohort 类别 cohort class, 群体间关系 intergroup relation, 案件量配置 caseload profile, 汇总案件量
-aggregate caseload, 结案率 clearance rate, 发布预留 publication reservation, 委托账 delegation ledger, 活动桶 live bucket,
-保管人索引 custodian index, 消费批次 consumption batch, 周期性班次 recurring departure, 连接条件 edge condition, 路由索引
-routing index, 恢复预算 restore budget, 组装字节数 assembled bytes.
-
-Decided on 2026-10-19 (owner, all as the orchestrator recommended from a source read), the shape of 0.19.0. Names,
-error codes, and the order of checks are the orchestrator's, recorded in each proposal for the owner to confirm after
-the release:
-- Scope: 0.19.0 closes G-62 to G-68, E-44, and E-45, and carries the §4.4 answers; §4.2, §4.3, and E-46 stay out.
-  0.18.0 is yanked once 0.19.0 is verified on crates.io.
-- G-64: a new movement operation `DelayLeg { execution, leg, until, reason }` replaces the arrival due of a departed
-  current leg. `until` is an absolute instant, not before the boundary time nor the arrival scheduled at departure, so
-  a hold can be lengthened, shortened, or lifted, never make the journey faster. It is requested by the owner or
-  operator command or by an incident with evidence (a current version), each with a short reason; any number of
-  delays, only the current due kept. Owner and operator reports show the hold; remote observers learn of it at
-  arrival. A later leg whose booking expires meanwhile fails through the recorded leg failure. `Reroute` stays refused
-  on a departed leg.
-- G-65: `RecordLoss` may take part of a transfer's escrow (controller command or provider ingress); the transfer keeps
-  its state and the rest of its escrow; `CompleteTransfer` stays terminal; the demand is credited only with what is
-  accepted, so a loss reopens its remainder; allowed in every non-terminal state. No `SplitTransfer`.
-- G-63: an `InTransit → InTransit` advance is admitted for the same execution with a new leg (not lower than the
-  current one) or a new handoff. The transfer keeps an ordered link history, capped at 16, through completion and into
-  the archive; past the cap a middle advance is a recorded rejection; arrival, return, and completion are always
-  admitted.
-- G-67: a host-only `RescopeAccount` with the expected account revision, the new place scope (or none), and an evidence
-  version current at settlement, kept in the outcome. Refused (recorded) while the account is the source or
-  destination of an unfinished transfer or a lease holds its current revision; reservations, demands, and grants carry
-  over. A holder never sets a place scope.
-- G-68: `Credit { ExternalInflow(evidence) }` is admitted as a custodian command under a host-issued single-step lease,
-  the mirror of `ExternalOutflow`, and its outcome keeps the evidence (E-45). No engine cap; conservation totals stay
-  global (E-46).
-- G-62: `pending_ingress()` on the `CanwuRun` trait (both handles) iterates the queued `IngressRecord`s in queue order,
-  unfiltered, for the trusted host only (never on `SimulationView` or `CanwuViewer`); no `ingress_record(id)`. It also
-  covers a sealed run, where the gap appears as well.
-- G-66: declined. The release documents the two ways around it: settle the second leg in a further boundary at the same
-  instant, or give each leg its own handover record. No shared lock and no combined exchange acceptance.
-
-Taken in the 0.19.0 run by the orchestrator inside the decisions above, each recorded in its proposal, and confirmed
-by the owner on 2026-10-19:
-- G-65 is a sibling operation `RecordTransferLoss`, not a transfer target of `RecordLoss`, so the account-loss path is
-  unchanged; it has the same controller-command and provider-ingress paths.
-- G-68's "host-issued lease" is enforced by a **lease operation binding** (`CompletionOperationBindingV1`: operation
-  kind, quantity, optionally the transfer disposition), carried in the certificate digest. A tracked inflow requires a
-  lease bound to exactly that credit; a holder cannot write a binding; a tracked command is refused at admission when
-  its lease's grants or expected participants name another plugin. The code review showed the plain lease let a
-  custodian mint under a lease issued for another operation.
-- E-44 extends to an order's `delivery_attempt`, which must also be the current version: an attempt record revised
-  before the order settles refuses the order, and the host resubmits.
-- Behaviour changes found necessary in review, beyond the rows: a demand is credited with what is accepted;
-  allocation passes count escrow in flight (0.18.0 could allocate it twice); `AmendDemand` cannot go below fulfilled +
-  reserved + in flight; an ended demand's closure waits for the transfers that draw on it; archived loss identities are
-  refused; a closure without room is a skip; a departed leg's arrival due must match its scheduled arrival or hold, so
-  a scenario that installs one otherwise is refused at load.
-- The Chinese terms of the 0.19.0 concepts, as in `docs/terminology.md` and both website term pages: 路段滞留 leg hold,
-  排定到达时刻 scheduled arrival, 待处理输入 pending ingress (the sheet's existing rendering, used instead of the
-  proposal's 待准入输入), 转移部分损耗 partial transfer loss, 运输关联历史 link history, 中间路段 intermediate leg,
-  账户改换地点 account rescope, 外部流入入账 external inflow credit, 租约操作绑定 lease operation binding; and in website
-  prose 资格信封 for `EligibilityEnvelopeV1`.
-
-Open: none.
+Open: none. Every decision through 0.19.0 is decided and confirmed by the owner (0.19.0's shape and the choices
+made inside it on 2026-10-19), and each is recorded where it lives: the release's proposals under
+`docs/proposals/`, its entry in `docs/versioning.md`, and the Chinese terms in `docs/terminology.md` and both
+website term pages. G-69's shape is the owner's when it is taken up.
 
 ## 7. Working rules
 
