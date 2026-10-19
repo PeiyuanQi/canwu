@@ -14,8 +14,8 @@
 > owner decided) and engine findings E-44 and E-45 (§3). Delete those rows when 0.19.0 is published. Still open: one
 > recorded design question (G-38), the known limits the 0.18.0 and 0.19.0 packages left on purpose (§4.2), two limits
 > the downstream met and worked around (§4.3), and E-46. The two engine facts the downstream design loop asked to
-> confirm are answered (§4.4). The owner decided the shape of every 0.19.0 fix on 2026-10-19; the choices the run
-> made inside those decisions wait for the owner's confirmation (§6).
+> confirm are answered (§4.4). The owner decided the shape of every 0.19.0 fix on 2026-10-19 and confirmed the
+> choices the run made inside those decisions, and the Chinese terms, the same day (§6).
 
 ## 1. Where things are
 
@@ -173,8 +173,8 @@ the release:
 - G-66: declined. The release documents the two ways around it: settle the second leg in a further boundary at the same
   instant, or give each leg its own handover record. No shared lock and no combined exchange acceptance.
 
-Open — taken in the 0.19.0 run by the orchestrator inside the decisions above, each recorded in its proposal, for the
-owner to confirm or reverse:
+Taken in the 0.19.0 run by the orchestrator inside the decisions above, each recorded in its proposal, and confirmed
+by the owner on 2026-10-19:
 - G-65 is a sibling operation `RecordTransferLoss`, not a transfer target of `RecordLoss`, so the account-loss path is
   unchanged; it has the same controller-command and provider-ingress paths.
 - G-68's "host-issued lease" is enforced by a **lease operation binding** (`CompletionOperationBindingV1`: operation
@@ -194,6 +194,8 @@ owner to confirm or reverse:
   proposal's 待准入输入), 转移部分损耗 partial transfer loss, 运输关联历史 link history, 中间路段 intermediate leg,
   账户改换地点 account rescope, 外部流入入账 external inflow credit, 租约操作绑定 lease operation binding; and in website
   prose 资格信封 for `EligibilityEnvelopeV1`.
+
+Open: none.
 
 ## 7. Working rules
 
