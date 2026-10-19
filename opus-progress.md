@@ -1,8 +1,8 @@
 # Opus progress — downstream engine gaps / Opus 进度记录
 
 > Updated 2026-10-19. The published release is Canwu **0.18.0** (tag `v0.18.0`, commit `ea85ca7` on `main`).
-> **0.19.0 is prepared and verified, not published**: the branch `claude/sweet-bell-yqcrl9` holds three package
-> commits and the release commit on top of `main`. This file is the to-do list of engine gaps that a downstream
+> **0.19.0 is merged to `main`** (release commit `89ac2a9`) and the website deploys from it; the tag, the crates.io
+> publication, the GitHub release, and the yank of 0.18.0 are the owner's to finish (§5). This file is the to-do list of engine gaps that a downstream
 > application has filed against the published crates. The application is Celestial Mandate (CM); its gap ledger
 > (implementation document `59`, in the CM repository) gives each row its id (`G-nn`) and the full evidence.
 > Priorities are the ledger's severities: High, Medium, Low.
@@ -21,10 +21,10 @@
 
 | Item | State |
 | --- | --- |
-| Release | 0.18.0 is published: all 24 library crates on crates.io, tag `v0.18.0`, GitHub release, website deployed (canwu.org shows 0.18.0 in both languages). 0.18.0 is the only live version: 0.17.0 was yanked on 2026-10-17 (0.14.0 to 0.16.0 earlier). Downstream pins `=0.18.0` since 2026-10-17 (its release 0.77.0) and has adopted G-44, G-47 to G-54, and G-56 to G-61 (G-46 is superseded by G-61); the other released rows wait for the downstream slices that consume them. 0.19.0 is prepared (workspace version `0.19.0`, every pin `=0.19.0`) and waits for the owner: merge to `main`, tag `v0.19.0`, publish, deploy the website, then yank 0.18.0. The downstream pins 0.19.0 as the first change set of its next build wave. |
+| Release | 0.18.0 is published: all 24 library crates on crates.io, tag `v0.18.0`, GitHub release, website deployed (canwu.org shows 0.18.0 in both languages). 0.18.0 is the only live version: 0.17.0 was yanked on 2026-10-17 (0.14.0 to 0.16.0 earlier). Downstream pins `=0.18.0` since 2026-10-17 (its release 0.77.0) and has adopted G-44, G-47 to G-54, and G-56 to G-61 (G-46 is superseded by G-61); the other released rows wait for the downstream slices that consume them. 0.19.0 (workspace version `0.19.0`, every pin `=0.19.0`) is on `main` since 2026-10-19 (release commit `89ac2a9`, CI green on Windows, macOS, and Linux), and the website deploys from `main`; not yet tagged or on crates.io. The downstream pins 0.19.0 as the first change set of its next build wave. |
 | Policy | **Same version only** (owner, 2026-10-14): Canwu crates depend only on the exact same version of each other (`=0.19.0` once released); nothing written by an earlier release is read; no migration. |
 | Proposals of 0.19.0 (all "implemented in 0.19.0") | `docs/proposals/`: `movement-delay-leg.md` (G-64, E-44), `pending-ingress-read.md` (G-62), `resource-transit-place-and-inflow.md` (G-63, G-65, G-67, G-68, E-45; G-66 documented). The 0.18.0 proposals are listed in the 0.18.0 entry of `docs/versioning.md`. |
-| Branches and worktrees | `main` (0.18.0 and the gap records) and `claude/sweet-bell-yqcrl9` (0.19.0: `034e558` movement, `8e07403` pending ingress, `2d68fb0` resource, then the release commit). The package and release worktrees under `.worktrees/` are removed once the release commit is pushed. |
+| Branches and worktrees | `main` (0.19.0: `034e558` movement, `8e07403` pending ingress, `2d68fb0` resource, `89ac2a9` release). The merged session branch `claude/sweet-bell-yqcrl9` is still on the remote: the session's git proxy refused branch deletion and tag pushes, so the owner deletes it (§5). No worktrees. |
 | Release procedure | `.agents/skills/canwu-contributor-release/SKILL.md` and `docs/releasing.md`. The full list and the pre-release tests ran once on the 0.19.0 release tree (2026-10-19, Linux, without debug info): fmt, clippy, workspace tests (841 passed, 0 failed, 3 ignored), `canwu-debug` check, rustdoc with `-Dwarnings`, the four examples, `+1.88.0` check, the performance harness (fmt, clippy, tests 4 and 6 with allocation counting), the continuation gate (clippy, and tests 841 passed, 0 failed, the expected panic included), and the release-only `--ignored` tests: the 65,537-action fiscal boundary and the persisted law boundary probe passed; the million-candidate law probe (`production_runtime_archive_prepare_scales_to_one_million_candidates`) could not run on this 15 GB machine, killed by the kernel at about 13.3 GB resident, and 0.18.0 is killed the same way at about 13.6 GB, so it is the machine, not the release. **Run that probe on the release machine before tagging** (`cargo test --release --locked -p canwu-law --test law_contract -- --ignored`). Dependencies did not change, so the third-party notices were not regenerated. Every package had an independent code review (two for resource) and delta reviews until no blocking finding remained; the website copy had an independent readability review. |
 | What the adopter must know first | (1) Pin every Canwu crate at `=0.19.0`; nothing earlier loads. (2) Read the "Upgrading from 0.18.0" notes of the 0.19.0 entry of `docs/versioning.md` and its "Known limits": `DelayLeg`; incident evidence and an order's delivery attempt must be the current version (resubmit an order whose attempt record changed); a scenario-installed departed leg needs the arrival due at departure plus planned duration; `pending_ingress()` after a seal or load (trusted host only; keep your own items); resource state format 5; `RecordTransferLoss`; the link history; `enqueue_resource_account_rescope`; a tracked inflow needs a lease the host bound with `CompletionOperationBindingV1`; a tracked command whose lease belongs to another plugin is refused at admission; demands are credited with what is accepted, allocation passes count escrow in flight, and `AmendDemand` cannot go below fulfilled + reserved + in flight; for G-66, settle the second leg one boundary later at the same instant or give each leg its own handover record. (3) The 0.18.0 notes still apply. |
 
@@ -106,10 +106,11 @@ own leases) and E-37's publication-budget overshoot (the application's publisher
 
 ## 5. Next steps
 
-1. **Owner: review and confirm the 0.19.0 choices (§6 "Open").** Then publish 0.19.0: merge
-   `claude/sweet-bell-yqcrl9` into `main`, tag `v0.19.0`, publish the 24 crates, create the GitHub release, deploy the
-   website, and yank 0.18.0 once 0.19.0 is verified on crates.io. Send the §4.4 answers with the release notes. The
-   pre-release tests ran once on the release tree (§1).
+1. **Owner: finish publishing 0.19.0** from a machine with crates.io and tag-push access, on the release commit
+   `89ac2a9`: run the million-candidate law probe (§1), push the annotated tag `v0.19.0`, publish the 24 crates in the
+   order of `docs/releasing.md`, run a registry-only consumer smoke test, publish the GitHub release (send the §4.4
+   answers with its notes), yank 0.18.0, and delete the remote branch `claude/sweet-bell-yqcrl9`. Then delete §3 and
+   record the release here.
 2. The §4.2 limits and E-46 by downstream need; E-41's force-supply deferral first if a host runs the reference
    economy near its byte cap; §4.3 if the downstream asks.
 3. Each change set follows the 0.18.0 pattern: one worktree and branch per package under `.worktrees/`, a proposal, durable tests that bite, an independent code review (two for persistence-heavy packages) and a delta review of the fixes, integration on a release branch, the pre-release tests of the release skill (the continuation gate included), then one release commit with the shared docs, the website (with its accuracy and copy reviews), and the skills.
