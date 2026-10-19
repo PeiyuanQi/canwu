@@ -41,9 +41,14 @@ pub const RESOURCE_REPORT_WAKE_INGRESS: &str = "resource_report_wake_v1";
 /// handed out, so no host can queue it; the resource plugin's lifecycle
 /// system schedules it.
 pub const RESOURCE_DEFERRED_INGRESS: &str = "resource_deferred_packet_v1";
+/// Internal ingress of the host application's account rescope
+/// ([`crate::ResourceOperationRequestV1::RescopeAccount`]). Its permit is
+/// handed out only through [`enqueue_resource_account_rescope`]; a packet
+/// another plugin's boundary system schedules on it settles nothing.
+pub const RESOURCE_ACCOUNT_RESCOPE_INGRESS: &str = "resource_account_rescope_v1";
 pub const RESOURCE_REPORT_KNOWLEDGE: &str = "resource_report";
 pub const RESOURCE_SEMANTIC_HASH: &str =
-    "56b1daef8b4a6a39b04f9454a5a7911d4b59ecbc1f3d4321ef5fce725e6a6778";
+    "3a1e04cb2e61f397db3ecb7b13ebaf0f7af0cc87f621121b726cf1e2221a32ac";
 
 const RESOURCE_REPORT_SCHEMA_HASH: &str =
     "2e271b9ea79404e662ba51360ce8061421ae896c1e70b09e99feb8d0de01a007";
@@ -52,6 +57,7 @@ static RESOURCE_COMPLETION_INGRESS_PERMIT: OnceLock<PluginIngressPermit> = OnceL
 static RESOURCE_ALLOCATION_INGRESS_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static RESOURCE_ARCHIVE_INGRESS_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static RESOURCE_ARCHIVE_RETENTION_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
+static RESOURCE_ACCOUNT_RESCOPE_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceArchiveIngressReceiptV1 {
@@ -407,6 +413,34 @@ fn lease_identity_refusal(
     Ok(taken.then(crate::lease_identity_taken))
 }
 
+/// The refusal of an operation that would record a loss under an identity
+/// an archived loss took. The root holds only its hot losses and refuses a
+/// hot identity itself; the archive is read for one that has left, as it is
+/// for a lease identity, so a loss never shadows an archived one.
+fn loss_identity_refusal(
+    view: &SimulationView<'_>,
+    state: &crate::ResourceState,
+    request: &ResourceOperationRequestV1,
+) -> Result<Option<crate::ResourceError>, CanwuError> {
+    let Some(loss_id) = request.loss_identity() else {
+        return Ok(None);
+    };
+    if state.losses.contains_key(loss_id) || state.archive_head.directory_root.is_none() {
+        return Ok(None);
+    }
+    let archived = crate::archived_resource_terminal_record(
+        state,
+        &ViewResourceArchiveProvider(view),
+        &crate::ResourceTerminalRecordKeyV1::Loss(loss_id.clone()),
+    )
+    .map_err(resource_canwu_error)?;
+    Ok(archived.is_some().then(|| {
+        crate::ResourceError::IdempotencyConflict(
+            "resource loss identity was already used by an archived loss".to_owned(),
+        )
+    }))
+}
+
 /// Refuses a request that names an operation key reserved for completion
 /// operations, before it can be queued.
 fn reject_reserved_operation_key(request: &ResourceOperationRequestV1) -> Result<(), CanwuError> {
@@ -675,6 +709,23 @@ impl SimulationPlugin for ResourcePlugin {
             return Err(CanwuError::new(
                 ErrorCode::InvalidPluginRegistration,
                 "resource archive acknowledgement permit changed across registrations",
+            ));
+        }
+        let rescope_permit = registrar.register_internal_ingress(PluginIngressDescriptor {
+            name: RESOURCE_ACCOUNT_RESCOPE_INGRESS.to_owned(),
+            description: "Move one resource account to the place scope the host application names"
+                .to_owned(),
+            class: IngressClass::ScheduledSystem,
+            payload_schema: PayloadSchema::Any,
+        })?;
+        if RESOURCE_ACCOUNT_RESCOPE_PERMIT
+            .set(rescope_permit.clone())
+            .is_err()
+            && RESOURCE_ACCOUNT_RESCOPE_PERMIT.get() != Some(&rescope_permit)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                "resource account rescope permit changed across registrations",
             ));
         }
         registrar.register_ingress(PluginIngressDescriptor {
@@ -1441,6 +1492,11 @@ fn packet_operation_keys(packet_type: &str, payload: &Value) -> Vec<crate::Resou
         RESOURCE_COMPLETION_INGRESS => decoded::<crate::ResourceCompletionOperationV1>(payload)
             .map(|operation| with_sibling(&ResourceOperationRequestV1::Completion(operation)))
             .unwrap_or_default(),
+        RESOURCE_ACCOUNT_RESCOPE_INGRESS => {
+            decoded::<crate::ResourceRescopeAccountRequestV1>(payload)
+                .map(|request| vec![request.operation_key])
+                .unwrap_or_default()
+        }
         RESOURCE_DEFERRED_INGRESS => decoded::<ResourceDeferredPacketV1>(payload)
             .map(|deferred| packet_operation_keys(&deferred.packet_type, &deferred.payload))
             .unwrap_or_default(),
@@ -1599,6 +1655,9 @@ fn settle_lifecycle_on<S: crate::HotTerminalSource + ?Sized>(
             RESOURCE_DEFERRED_INGRESS => {
                 settle_deferred_packet(view, context, ingress, payload, state, &mut settlement)?;
             }
+            RESOURCE_ACCOUNT_RESCOPE_INGRESS => {
+                settle_rescope_packet(view, context, ingress, payload, state, &mut settlement)?;
+            }
             RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS => {
                 settle_expiry_tick(view, context, ingress.id, state, &mut settlement)?;
             }
@@ -1730,11 +1789,29 @@ fn settle_command_packet(
         );
         return Ok(());
     }
-    let refusal = match request {
-        ResourceOperationRequestV1::Completion(operation) => {
-            lease_identity_refusal(view, state, operation)?
-        }
-        _ => None,
+    // Admission refused a lease of another plugin; one that appeared since
+    // is skipped, so the command takes none of that plugin's keys.
+    if let Some(refusal) = state.tracked_foreign_lease_refusal(request) {
+        out.skip(
+            ingress.id,
+            crate::ResourceIngressSkipReasonV1::FailedSettlementChecks,
+            Some(&operation_key),
+            &refusal.to_string(),
+            subject,
+        );
+        return Ok(());
+    }
+    // Admission refused a lease this command may not redeem; settlement
+    // checks again, in case the lease changed in between, and refuses a
+    // holder's `Acquire` that writes a binding.
+    let refusal = match state.tracked_redemption_refusal(request) {
+        Some(refusal) => Some(refusal),
+        None => match request {
+            ResourceOperationRequestV1::Completion(operation) => {
+                lease_identity_refusal(view, state, operation)?
+            }
+            _ => loss_identity_refusal(view, state, request)?,
+        },
     };
     match state
         .settle_operation_refused_by(request, Some(context.at), refusal.as_ref())
@@ -1839,8 +1916,9 @@ fn settle_adapter_packet(
             &operation_key,
         );
     }
+    let refusal = loss_identity_refusal(view, state, &packet.request)?;
     match state
-        .settle_operation_at(&packet.request, context.at)
+        .settle_operation_refused_by(&packet.request, Some(context.at), refusal.as_ref())
         .map_err(resource_canwu_error)?
     {
         crate::OperationSettlement::Settled(outcome) => {
@@ -2316,6 +2394,133 @@ fn settle_deferred_packet(
             );
             Ok(())
         }
+    }
+}
+
+/// Settles the host application's account rescope.
+///
+/// It settles nothing, with a skip event, when the packet does not decode,
+/// when another plugin's boundary system scheduled it (only the host
+/// application moves an account, through [`enqueue_resource_account_rescope`]),
+/// when its key is reserved or another request holds it, when its evidence
+/// cannot be read for a reason other than its kind, or when its result does
+/// not fit the root. A resend whose outcome is recorded settles nothing and
+/// leaves no event. Every domain refusal is the operation's recorded
+/// rejection, the evidence not being its record's current version or of a
+/// kind the plugin reads included.
+fn settle_rescope_packet(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    ingress: &IngressRecord,
+    payload: &Value,
+    state: &mut crate::ResourceState,
+    out: &mut LifecycleSettlement,
+) -> Result<(), CanwuError> {
+    let Ok(request) =
+        decode::<crate::ResourceRescopeAccountRequestV1>(payload, "resource account rescope")
+    else {
+        out.skip_undecodable(ingress.id, "resource account rescope");
+        return Ok(());
+    };
+    let evidence = request.evidence.clone();
+    let operation = ResourceOperationRequestV1::RescopeAccount(request);
+    let operation_key = operation.operation_key();
+    if PacketOrigin::of(ingress) != PacketOrigin::Host {
+        out.skip(
+            ingress.id,
+            crate::ResourceIngressSkipReasonV1::FailedSettlementChecks,
+            Some(&operation_key),
+            "an account rescope is the host application's; one another plugin scheduled settles nothing",
+            EventHolder::Nobody,
+        );
+        return Ok(());
+    }
+    // `enqueue_resource_account_rescope` refuses such a packet.
+    if operation.names_reserved_operation_key() {
+        out.skip(
+            ingress.id,
+            crate::ResourceIngressSkipReasonV1::ReservedOperationKey,
+            Some(&operation_key),
+            RESERVED_OPERATION_KEY_DETAIL,
+            EventHolder::Nobody,
+        );
+        return Ok(());
+    }
+    let request_digest = operation.request_digest().map_err(resource_canwu_error)?;
+    if !out.operation_key_is_free(
+        view,
+        state,
+        &operation,
+        &request_digest,
+        ingress.id,
+        EventHolder::Nobody,
+    )? {
+        return Ok(());
+    }
+    let refusal = match rescope_evidence_refusal(view, &evidence) {
+        Ok(refusal) => refusal,
+        Err(error) => {
+            out.skip(
+                ingress.id,
+                crate::ResourceIngressSkipReasonV1::FailedSettlementChecks,
+                Some(&operation_key),
+                &error.message,
+                EventHolder::Nobody,
+            );
+            return Ok(());
+        }
+    };
+    match state
+        .settle_operation_refused_by(&operation, Some(context.at), refusal.as_ref())
+        .map_err(resource_canwu_error)?
+    {
+        crate::OperationSettlement::Settled(_) => out.changed = true,
+        crate::OperationSettlement::NoRoom(shortage) => {
+            out.skip_for_room(
+                ingress.id,
+                shortage,
+                Some(&operation_key),
+                EventHolder::Nobody,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// What the simulation view holds against the evidence of an account
+/// rescope, or `None`: a version that is not its record's current version,
+/// or a record that is not of a declared adapter evidence kind. Only the
+/// current-version index is read, never retained evidence, so a sealed run
+/// and its exact replay find the same.
+fn rescope_evidence_refusal(
+    view: &SimulationView<'_>,
+    evidence: &canwu_api::DomainRecordVersionRef,
+) -> Result<Option<crate::ResourceError>, CanwuError> {
+    // The lifecycle system reads its own records and the production runtime
+    // for itself; of the records it reads, only the declared adapter
+    // evidence kinds prove a move. A record it does not read at all is
+    // refused below, by the read.
+    let kind = &evidence.record.kind;
+    if kind.namespace == PLUGIN_NAMESPACE
+        || (kind.namespace == "canwu.production" && kind.name == "runtime")
+    {
+        return Ok(Some(crate::ResourceError::Authority(
+            "resource account rescope evidence must be a record of a declared adapter evidence kind"
+                .to_owned(),
+        )));
+    }
+    match is_current_version(view, evidence) {
+        Ok(true) => Ok(None),
+        Ok(false) => Ok(Some(crate::ResourceError::VersionConflict(
+            "resource account rescope evidence is not its record's current version".to_owned(),
+        ))),
+        Err(error) if error.code == ErrorCode::UndeclaredStateRead => {
+            Ok(Some(crate::ResourceError::Authority(
+                "resource account rescope evidence is of a record kind the resource plugin does not read"
+                    .to_owned(),
+            )))
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -3040,10 +3245,11 @@ fn validate_adapter_packet(
     authoritative_provider_operation(&source.payload, packet, resource_state)
 }
 
-/// Production output credits settle only through
-/// [`RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS`], which binds every output leg
-/// of one execution to the source version production pinned on it. Adapter
-/// ingress never credits production output.
+/// Refuses what adapter ingress never carries. Production output credits
+/// settle only through [`RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS`], which
+/// binds every output leg of one execution to the source version production
+/// pinned on it, and an account rescope only through the host application's
+/// [`RESOURCE_ACCOUNT_RESCOPE_INGRESS`].
 fn reject_adapter_production_credit(
     request: &ResourceOperationRequestV1,
 ) -> Result<(), CanwuError> {
@@ -3053,6 +3259,12 @@ fn reject_adapter_production_credit(
         return Err(CanwuError::new(
             ErrorCode::InvalidAuthority,
             "production output credits settle only through the production output batch ingress",
+        ));
+    }
+    if matches!(request, ResourceOperationRequestV1::RescopeAccount(_)) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "an account's place scope is changed only by the host application",
         ));
     }
     Ok(())
@@ -3248,6 +3460,9 @@ fn validate_local_provider_participant(
         }
         ResourceOperationRequestV1::ExternalOutflow(value) => Some(&value.completion_certificate),
         ResourceOperationRequestV1::RecordLoss(value) => Some(&value.completion_certificate),
+        ResourceOperationRequestV1::RecordTransferLoss(value) => {
+            Some(&value.completion_certificate)
+        }
         _ => None,
     };
     let Some(certificate) = certificate else {
@@ -3643,6 +3858,7 @@ const fn request_time(request: &ResourceOperationRequestV1) -> Option<SimTime> {
         ResourceOperationRequestV1::Credit(value) => Some(value.at),
         ResourceOperationRequestV1::ExternalOutflow(value) => Some(value.at),
         ResourceOperationRequestV1::RecordLoss(value) => Some(value.at),
+        ResourceOperationRequestV1::RecordTransferLoss(value) => Some(value.at),
         _ => None,
     }
 }
@@ -4194,21 +4410,7 @@ fn validate_request_certificate_evidence(
     view: &SimulationView<'_>,
     request: &ResourceOperationRequestV1,
 ) -> Result<(), CanwuError> {
-    let certificates = match request {
-        ResourceOperationRequestV1::Consume(value) => vec![&value.completion_certificate],
-        ResourceOperationRequestV1::ConsumeBatch(value) => vec![&value.completion_certificate],
-        ResourceOperationRequestV1::BeginTransfer(value) => vec![&value.completion_certificate],
-        ResourceOperationRequestV1::CompleteTransfer(value) => vec![&value.completion_certificate],
-        ResourceOperationRequestV1::Credit(value) => vec![&value.completion_certificate],
-        ResourceOperationRequestV1::ExternalOutflow(value) => vec![&value.completion_certificate],
-        ResourceOperationRequestV1::RecordLoss(value) => vec![&value.completion_certificate],
-        ResourceOperationRequestV1::BeginExchange(value) => vec![
-            &value.leg_a.completion_certificate,
-            &value.leg_b.completion_certificate,
-        ],
-        _ => Vec::new(),
-    };
-    for certificate in certificates {
+    for certificate in request.completion_certificates() {
         for target in &certificate.locked_target_versions {
             if let crate::CompletionLockedTargetV1::ExternalRecord { version } = target {
                 require_known_version(view, version)?;
@@ -4318,15 +4520,18 @@ fn adapter_source_matches(packet: &ResourceAdapterOperationV1) -> bool {
         }
         ResourceOperationRequestV1::Credit(value) => match &value.source {
             crate::ResourceCreditSourceV1::Production(source)
-            | crate::ResourceCreditSourceV1::ExternalInflow(
-                canwu_api::EvidenceRef::DomainRecordVersion(source),
-            ) => source == &packet.provider_source,
-            crate::ResourceCreditSourceV1::ExternalInflow(_) => false,
+            | crate::ResourceCreditSourceV1::ExternalInflow(source) => {
+                source == &packet.provider_source
+            }
         },
         ResourceOperationRequestV1::ExternalOutflow(value) => {
             value.authority_evidence == packet.provider_source
         }
         ResourceOperationRequestV1::RecordLoss(value) => matches!(
+            &value.cause,
+            canwu_api::EvidenceRef::DomainRecordVersion(cause) if cause == &packet.provider_source
+        ),
+        ResourceOperationRequestV1::RecordTransferLoss(value) => matches!(
             &value.cause,
             canwu_api::EvidenceRef::DomainRecordVersion(cause) if cause == &packet.provider_source
         ),
@@ -4362,7 +4567,8 @@ fn adapter_source_matches(packet: &ResourceAdapterOperationV1) -> bool {
         | ResourceOperationRequestV1::CancelDemand(_)
         | ResourceOperationRequestV1::Completion(_)
         | ResourceOperationRequestV1::IssueAccessGrant(_)
-        | ResourceOperationRequestV1::RevokeAccessGrant(_) => false,
+        | ResourceOperationRequestV1::RevokeAccessGrant(_)
+        | ResourceOperationRequestV1::RescopeAccount(_) => false,
     }
 }
 
@@ -4447,6 +4653,38 @@ fn validate_resource_authority(
             .accounts
             .get(&request.account)
             .map(|account| account.custodian.clone()),
+        // A partial loss of a transfer's escrow, like its whole loss, comes
+        // from the transfer's controller.
+        ResourceOperationRequestV1::RecordTransferLoss(request) => {
+            let transfer = state.transfers.get(&request.transfer).ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "resource transfer target is unavailable",
+                )
+            })?;
+            state.transfer_controller(transfer)
+        }
+        // The counterpart of an external outflow: the custodian credits its
+        // own account with value from outside the modelled accounts. A
+        // production credit settles only through the output batch ingress.
+        ResourceOperationRequestV1::Credit(request) => match &request.source {
+            crate::ResourceCreditSourceV1::ExternalInflow(_) => state
+                .accounts
+                .get(&request.account)
+                .map(|account| account.custodian.clone()),
+            crate::ResourceCreditSourceV1::Production(_) => {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "production output credits settle only through the production output batch ingress",
+                ));
+            }
+        },
+        ResourceOperationRequestV1::RescopeAccount(_) => {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "an account's place scope is changed only by the host application",
+            ));
+        }
         ResourceOperationRequestV1::CancelTransfer(request) => {
             let transfer = state.transfers.get(&request.transfer).ok_or_else(|| {
                 CanwuError::new(
@@ -4515,7 +4753,6 @@ fn validate_resource_authority(
         | ResourceOperationRequestV1::Consume(_)
         | ResourceOperationRequestV1::ConsumeBatch(_)
         | ResourceOperationRequestV1::AdvanceTransfer(_)
-        | ResourceOperationRequestV1::Credit(_)
         | ResourceOperationRequestV1::RecordObservation(_)
         | ResourceOperationRequestV1::Completion(_) => {
             return Err(CanwuError::new(
@@ -4534,6 +4771,21 @@ fn validate_resource_authority(
         return Err(CanwuError::new(
             ErrorCode::InvalidAuthority,
             "resource operation subject does not control the actual target holder",
+        ));
+    }
+    // A lease the command may not redeem is known before it settles, so the
+    // command is refused here and takes no operation key: a front-run of
+    // another plugin's lease leaves that plugin's operation free to settle
+    // under its key. A holder's `Acquire` that writes a binding is instead
+    // the acquisition's recorded rejection.
+    if !matches!(value.request, ResourceOperationRequestV1::Completion(_))
+        && let Some(refusal) = state
+            .tracked_foreign_lease_refusal(&value.request)
+            .or_else(|| state.tracked_redemption_refusal(&value.request))
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            refusal.to_string(),
         ));
     }
     Ok(())
@@ -4785,6 +5037,54 @@ pub fn enqueue_resource_completion_operation<H: canwu_api::CanwuRun + ?Sized>(
             RESOURCE_COMPLETION_INGRESS,
             due_at,
             encode(operation)?,
+        ),
+        permit,
+    )
+}
+
+/// Queues the host application's move of one account to another place
+/// scope, or to none ([`crate::ResourceRescopeAccountRequestV1`]). Takes
+/// either runtime handle, [`canwu_api::Canwu`] or
+/// [`canwu_api::CompactedCanwu`].
+///
+/// This is the only way to change an account's place scope: a tracked
+/// command, an adapter packet, or a packet another plugin's boundary system
+/// schedules cannot carry the operation. The evidence must be its record's
+/// current version now, read from the current-version index, or the call
+/// refuses it; settlement reads it again. Every refusal at settlement (a
+/// stale account revision, a transfer that is not terminal naming the
+/// account, a completion lease locking its current revision, evidence that is
+/// no longer current or not of one of the plugin's adapter evidence kinds) is
+/// the operation's recorded rejection, and a result that does not fit the root is
+/// skipped with a [`crate::RESOURCE_INGRESS_SKIPPED_EVENT`].
+pub fn enqueue_resource_account_rescope<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
+    due_at: SimTime,
+    request: &crate::ResourceRescopeAccountRequestV1,
+) -> Result<canwu_api::IngressReceipt, CanwuError> {
+    reject_reserved_operation_key(&ResourceOperationRequestV1::RescopeAccount(request.clone()))?;
+    if canwu
+        .current_domain_record_version(&request.evidence.record)?
+        .as_ref()
+        != Some(&request.evidence)
+    {
+        return Err(CanwuError::new(
+            ErrorCode::EvidenceUnavailable,
+            "resource account rescope evidence is not its record's current version",
+        ));
+    }
+    let permit = RESOURCE_ACCOUNT_RESCOPE_PERMIT.get().ok_or_else(|| {
+        CanwuError::new(
+            ErrorCode::PluginNotActive,
+            "resource plugin must be active before account rescope ingress",
+        )
+    })?;
+    canwu.enqueue_permitted_plugin_ingress(
+        PluginIngressRequest::new(
+            PLUGIN_NAME,
+            RESOURCE_ACCOUNT_RESCOPE_INGRESS,
+            due_at,
+            encode(request)?,
         ),
         permit,
     )

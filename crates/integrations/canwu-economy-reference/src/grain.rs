@@ -3059,9 +3059,7 @@ impl GrainHarness {
                 // model the seasonal harvest as an evidence-qualified inflow
                 // from the economy reference while the production extension
                 // remains independently testable and replaceable.
-                source: ResourceCreditSourceV1::ExternalInflow(EvidenceRef::DomainRecordVersion(
-                    source,
-                )),
+                source: ResourceCreditSourceV1::ExternalInflow(source),
                 at: self.canwu.time(),
                 completion_certificate: certificate,
             }),

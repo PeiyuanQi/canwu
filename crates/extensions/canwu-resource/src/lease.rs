@@ -152,6 +152,87 @@ impl CompletionCapacityRecipeV1 {
     }
 }
 
+/// The one irreversible resource operation a completion lease authorizes:
+/// its kind and the quantity it moves.
+///
+/// A lease's targets say *what* its operation may touch, not *which*
+/// operation it is: an outflow, an inflow credit, and an account loss with a
+/// record cause all lock an account and an external record. The application
+/// that issues a lease for a holder binds it to the operation it means, and
+/// the lease then authorizes that operation alone: redeeming it for another
+/// kind or another quantity is refused, a tracked command at admission
+/// (it takes no operation key) and any redemption at settlement as its
+/// recorded rejection.
+///
+/// The quantity is the one the operation moves: the credit, outflow, or loss
+/// quantity; the allocation leg's quantity for a consumption or a transfer
+/// start (each leg's own for an exchange leg); the sum of the items' legs for
+/// a consumption batch; and the escrow a terminal transfer disposition
+/// settles.
+///
+/// A binding of a `CompleteTransfer` lease may also name the disposition
+/// (`disposition`), so a lease issued for a loss is not redeemed for an
+/// acceptance; without it, any disposition of that escrow is admitted.
+///
+/// A tracked external inflow `Credit` requires a lease bound to exactly that
+/// credit. Every other redemption checks a binding when its lease has one.
+/// Only the issuer of a lease writes its binding: a holder's tracked
+/// `Acquire` that carries one is refused.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CompletionOperationBindingV1 {
+    pub kind: crate::ResourceOperationKind,
+    pub quantity: u64,
+    /// The terminal disposition a `CompleteTransfer` lease authorizes, when
+    /// its issuer names one. Omitted from the canonical encoding while
+    /// `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<crate::ResourceTransferDispositionKindV1>,
+}
+
+impl CompletionOperationBindingV1 {
+    /// A binding to an operation of `kind` that moves `quantity`, of any
+    /// disposition.
+    #[must_use]
+    pub const fn new(kind: crate::ResourceOperationKind, quantity: u64) -> Self {
+        Self {
+            kind,
+            quantity,
+            disposition: None,
+        }
+    }
+
+    /// This binding, naming the terminal disposition it authorizes.
+    #[must_use]
+    pub const fn with_disposition(
+        mut self,
+        disposition: crate::ResourceTransferDispositionKindV1,
+    ) -> Self {
+        self.disposition = Some(disposition);
+        self
+    }
+
+    /// Whether the binding admits a redemption by an operation of `kind`,
+    /// of the transfer disposition `disposition` (`None` for any other
+    /// operation), that moves `quantity`. A `None` quantity is one the
+    /// redemption does not know yet, which only the settlement checks.
+    #[must_use]
+    pub fn admits(
+        &self,
+        kind: crate::ResourceOperationKind,
+        disposition: Option<crate::ResourceTransferDispositionKindV1>,
+        quantity: Option<u64>,
+    ) -> bool {
+        self.kind == kind
+            && self
+                .disposition
+                .is_none_or(|bound| Some(bound) == disposition)
+            && quantity.is_none_or(|quantity| quantity == self.quantity)
+    }
+}
+
+/// The facts a completion lease was found eligible on. Its digest is stored
+/// with the acquisition and carried by the activation certificate, so it
+/// also binds the operation the lease authorizes ([`Self::operation_binding`]).
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EligibilityEnvelopeV1 {
     pub digest: String,
@@ -160,6 +241,11 @@ pub struct EligibilityEnvelopeV1 {
     pub protected_floor_revisions: BTreeSet<String>,
     pub capability_bindings: Vec<DomainRecordVersionRef>,
     pub route_evidence: Vec<DomainRecordVersionRef>,
+    /// The operation the lease authorizes, when its issuer binds one
+    /// ([`CompletionOperationBindingV1`]). An unbound envelope encodes, and
+    /// digests, as it did before bindings existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_binding: Option<CompletionOperationBindingV1>,
 }
 
 impl EligibilityEnvelopeV1 {
@@ -177,10 +263,23 @@ impl EligibilityEnvelopeV1 {
             protected_floor_revisions,
             capability_bindings,
             route_evidence,
+            operation_binding: None,
         };
         value.canonicalize();
         value.digest = value.computed_digest()?;
         Ok(value)
+    }
+
+    /// This envelope bound to the one operation its lease authorizes, with
+    /// its digest recomputed.
+    pub fn bound_to(
+        mut self,
+        binding: CompletionOperationBindingV1,
+    ) -> Result<Self, ResourceError> {
+        self.operation_binding = Some(binding);
+        self.canonicalize();
+        self.digest = self.computed_digest()?;
+        Ok(self)
     }
 
     fn canonicalize(&mut self) {
@@ -2460,7 +2559,12 @@ impl CompletionLeaseBookV1 {
                         "canwu.resource.completion-activation-certificate.v1",
                         &detached,
                     )?
-                || !self.acquisitions.contains_key(acquisition_id)
+                // The certificate carries the digest of the envelope its
+                // acquisition holds, which binds the lease's operation.
+                || self.acquisitions.get(acquisition_id).is_none_or(|acquisition| {
+                    acquisition.eligibility_envelope.digest
+                        != certificate.eligibility_envelope_digest
+                })
             {
                 return Err(ResourceError::InvalidDefinition(
                     "completion activation certificate is forged or orphaned".to_owned(),

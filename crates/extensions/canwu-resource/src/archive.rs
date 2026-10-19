@@ -2328,6 +2328,13 @@ fn validate_resource_terminal_archive_record(
             ResourceTerminalArchivePayloadV1::Transfer(value),
         ) => {
             let digest = canonical_digest("canwu.resource.transfer.v1", value)?;
+            // A terminal transfer's quantity is what it accepted, lost
+            // (partial losses included), returned, and let out, and its link
+            // history is one its advances could record.
+            let settled = u128::from(value.accepted)
+                + u128::from(value.lost)
+                + u128::from(value.returned)
+                + u128::from(value.external_outflow);
             if id != &value.id
                 || record.operation_key != value.operation_key
                 || record.quantity != value.quantity
@@ -2344,6 +2351,8 @@ fn validate_resource_terminal_archive_record(
                         | ResourceTransferState::Returned
                 )
                 || value.escrow != 0
+                || settled != u128::from(value.quantity)
+                || !crate::transfer_link_history_is_valid(value)
             {
                 return Err(ResourceError::InvalidDefinition(
                     "archived resource transfer closure is forged".to_owned(),

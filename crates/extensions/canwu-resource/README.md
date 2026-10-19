@@ -62,8 +62,9 @@ hot terminal bucket when the root already holds terminal records.
 these, and refuses any other root. Activate
 `ResourcePlugin::new(adapter_evidence_kinds)` with the exact external record
 kinds allowed to prove adapter consumption, external-inflow credit, loss, or
-outflow. Production output credits do not use adapter ingress; they settle
-through the production output batch ingress.
+outflow, and those a completion lease or an account rescope cites. Production
+output credits do not use adapter ingress; they settle through the production
+output batch ingress.
 
 Player and institution decisions use tracked command ingress:
 
@@ -78,6 +79,9 @@ Player and institution decisions use tracked command ingress:
   exact requester. Its request must carry the current `ResourceState` revision;
   settlement only scans that requester's due/dirty demands, so a caller cannot
   allocate another holder's demand or relabel the allocation owner.
+- `enqueue_resource_account_rescope` queues the host application's move of an
+  account to another place scope on `RESOURCE_ACCOUNT_RESCOPE_INGRESS` (see
+  "Moving an account to another place").
 
 The plugin has one Phase 7 lifecycle writer, Phase 8 conservation/exact-version
 validation, bounded Phase 12 summary validation, and Phase 13 holder-relative
@@ -140,15 +144,193 @@ source field before settlement.
   transport execution when the transfer is still `PendingDispatch` with no
   transport link and both accounts declare the same `ResourceAccount::place_scope`.
   The scope is host-declared when an opening account is installed (tracked
-  `CreateAccount` commands cannot set it), is immutable, and defaults to
+  `CreateAccount` commands cannot set it), is changed only by the host
+  application (see "Moving an account to another place"), and defaults to
   `None`, which makes local acceptance unavailable. The exact handover record
   is locked by the terminal certificate and kept as evidence. A tracked
   command must come from the destination custodian; canonical adapter ingress
   may cite the handover record as its provider source.
+- Both legs of an exchange may be accepted locally against one handover
+  record, but not in one boundary: the terminal certificate of the first leg
+  locks the record's exact version from its activation until its completion,
+  so the second leg's lease cannot lock it meanwhile. Two ways around it:
+  settle the second leg in a further boundary at the same simulated instant,
+  since a host application may settle several boundaries at one instant (take
+  the second leg's lease once the first acceptance has settled, as each
+  holder's lease cooldown allows), or give each leg its own handover record,
+  since the lock is keyed by the exact record version.
 
 Holder observation heads, reports, and witnesses carry optional
 `ResourceLossObservationV1` entries, gated like transfer details. New fields
 are omitted from canonical JSON while empty, so existing digests are unchanged.
+
+### Partial transfer loss
+
+`ResourceOperationRequestV1::RecordTransferLoss(ResourceTransferLossRequestV1)`
+takes part of an open transfer's escrow: the transfer keeps its state and the
+rest of its escrow, `quantity` moves from `escrow` to `lost`, the transfer
+revision advances, and a `ResourceLoss` with `transfer: Some(..)` counts as
+admitted loss. It is allowed in every state that is not terminal, any number
+of times. The quantity must be above zero and below the escrow: a loss of the
+whole escrow ends the transfer and still settles as `CompleteTransfer` with
+`Lose`, which loses whatever partial losses left. Both are recorded
+rejections otherwise (`invalid_definition` for zero, `invalid_lifecycle` for
+the whole escrow or more).
+
+Its completion certificate locks the transfer at the expected revision and,
+for a domain-record cause, that record version. The loss completes that
+lease only; the lease the transfer was started under stays until the
+transfer's terminal disposition completes it. A tracked command must come
+from the transfer's controller, as for `Lose`: the source custodian, or the
+grantee of a transfer started under an access grant. Canonical adapter
+ingress may cite the cause record as its provider source.
+
+The demand of the transfer's allocation is credited with what is accepted,
+not with the allocation: a transfer of 100 that lost 30 and is accepted
+records a fulfillment of 70, so the demand keeps 30 of remainder. A transfer
+that is lost whole, returned, or let out credits its demand nothing.
+
+An allocation pass counts what open transfers carry toward a demand as drawn,
+beside its active reservations: their escrow neither is allocated again nor
+counts against the demand's minimum useful quantity, so a pass never rejects
+a demand for its minimum while a transfer for it is in flight. A loss gives
+back exactly what it takes from the escrow, and the next pass may supply that
+much; a returning transfer (`ReturnPending`) is never accepted, so its whole
+escrow is needed again as soon as it turns back. A demand that ends while a
+transfer for it is in flight (cancelled, expired, or rejected for its
+minimum) keeps its terminal status when the transfer is accepted: its
+`fulfilled` counts what was delivered, and it rejoins no due, expiry, or
+dirty index. Its closure (the demand, its reservations, and its legs) waits
+in the live root until no open transfer draws on its legs, and the
+transfer's terminal disposition makes it an archive candidate; a
+disposition whose closure does not fit the archive candidates is skipped
+for room, like any operation whose result does not fit.
+
+A partial loss advances the transfer revision, so an advance or cancellation
+that expects the earlier revision is a recorded `version_conflict`
+rejection. A lease that locks the transfer's current revision for a terminal
+disposition keeps the loss's own lease from locking it: the host application
+releases that lease and takes a new one for the revision the loss leaves.
+The transfer does not list its losses; each loss names the transfer, and
+`lost` totals them. A loss identity is used once for the run: an account
+loss, a partial loss, or a `Lose` disposition that names the identity of a
+loss already archived is a recorded `idempotency_conflict` rejection, found
+by an archive lookup as for a lease identity.
+
+### Transfer progress and link history
+
+`AdvanceTransfer` moves a transfer from `PendingDispatch` to `InTransit`
+(its dispatch), from `InTransit` to `InTransit` (an intermediate leg or
+handoff of a multi-leg execution), from `InTransit` to `ArrivalPending`, and
+from `PendingDispatch`, `InTransit`, or `ArrivalPending` to `ReturnPending`.
+An intermediate advance names the execution of the current link and either
+a new leg, not lower than the current one, or a handoff the transfer has not
+recorded; anything else is a recorded `invalid_lifecycle` rejection. The
+engine checks no other leg order.
+
+Each advance appends its link and the transport evidence it cites to
+`ResourceTransfer::link_history`, in order. The history is kept through
+completion and into the archive, so a terminal or archived transfer names
+every link it travelled. While the transfer is open the history is the only
+copy of its transport evidence, which the root declares as payload-required
+evidence, and `exact_evidence` is empty; a terminal disposition writes the
+evidence it cites to `exact_evidence`. It holds at most `MAX_RESOURCE_TRANSFER_LINKS` (16)
+entries, two of them kept for the arrival and the return: a transfer records
+its dispatch and at most thirteen intermediate links, an intermediate advance
+past that is a recorded `limit_exceeded` rejection, and an arrival, a
+return, and a terminal disposition are always admitted. A cancellation moves
+the transfer to `ReturnPending` without a link. A restored or archived
+transfer must carry a history its advances could have recorded, ending in
+the state it is in (or before a cancellation); an accepted one was accepted
+after an arrival, or locally before any link.
+
+### Moving an account to another place
+
+An account's place scope changes only when the host application says so:
+`enqueue_resource_account_rescope` queues
+`ResourceOperationRequestV1::RescopeAccount(ResourceRescopeAccountRequestV1)`
+with the expected account revision, the new `place_scope` (or `None`), and
+the evidence of the move, an exact record version such as the carriage that
+took the stock to its new place. The operation needs no completion lease,
+advances the account revision, and leaves one `RescopeAccount` outcome that
+keeps the evidence. No holder sets a place scope: a tracked command that
+carries the operation is refused at admission, as is one that creates an
+account with a scope; adapter ingress refuses it; and a packet another
+plugin's boundary system schedules on the rescope ingress settles nothing,
+with a `failed_settlement_checks` skip event.
+
+The evidence must be its record's current version, of one of the adapter
+evidence kinds the plugin was configured with: the lifecycle system also
+reads the resource plugin's own records and the production runtime, and
+neither proves a move. The call checks it when the host queues the
+operation and settlement checks it again, reading the current-version index
+rather than retained evidence, so a sealed run and its exact replay decide
+alike. A stale account revision, a transfer that is not terminal with the
+account as its source or destination, a completion lease (local or external
+participant) locking the account's current revision, and evidence that is no
+longer current or not of an adapter evidence kind are each a recorded
+rejection. Reservations, demands, and access grants that name the account
+carry over; an operation whose lease locked the earlier account revision is
+a `version_conflict` rejection, as after any account change.
+
+### External inflow credit
+
+`Credit` with `ResourceCreditSourceV1::ExternalInflow(DomainRecordVersionRef)`
+books value from outside the modelled accounts, the counterpart of
+`ExternalOutflow`, and counts in `ConservationTotalsV1::external_inflow`. A
+tracked command from the account's custodian carries it under a completion
+lease that locks the account revision and the inflow's evidence, the single
+step the host application queues with `enqueue_resource_completion_operation`,
+as for an outflow; canonical adapter ingress may carry it with the evidence
+as its provider source and the provider's participant grant. Its applied
+outcome keeps the evidence, on either path, as a production credit keeps its
+source and an outflow its authority. A production credit stays refused as a
+tracked command and on adapter ingress.
+
+The engine sets no cap on inflow. What bounds a holder's inflow is the lease
+the host application issues for it: a tracked inflow `Credit` is refused at
+admission unless its lease is bound to exactly that credit (see "Lease
+bindings"), so a custodian books only the quantity the host bound, once. An adapter inflow needs no binding; its lease, when bound,
+is checked as any other.
+
+### Lease bindings
+
+A completion lease's targets say what its operation may touch, not which
+operation it is: an outflow, an inflow, and an account loss with a record
+cause all lock an account revision and one record version. The application
+that issues a lease can bind it to one operation:
+`EligibilityEnvelopeV1::bound_to` sets `operation_binding`
+(`CompletionOperationBindingV1::new(kind, quantity)`, and for a
+`CompleteTransfer` lease optionally `with_disposition`) on the lease's
+eligibility envelope, whose digest the acquisition stores and the activation
+certificate carries, so the binding cannot be changed after the lease is
+requested; a restored lease book whose certificate carries another envelope
+digest than its acquisition is refused. An unbound envelope encodes and
+digests as before. Only the issuer writes a binding: a holder's tracked
+`Acquire` whose envelope carries one is a recorded `invalid_authority`
+rejection.
+
+Redeeming a bound lease for another kind, another disposition (when the
+binding names one), or another quantity is refused. The bound quantity is
+the credit, outflow, or loss quantity; the allocation leg's quantity for a
+consumption or a transfer start (each leg's own for an exchange); the items'
+legs together for a consumption batch; and the escrow a terminal transfer
+disposition settles.
+
+A tracked command is refused at admission, so it settles nothing and takes
+no operation key, when it redeems a lease whose expected participants or
+grants name another plugin (such a lease authorizes that plugin's
+operation, which reaches the root through its adapter ingress), when its
+lease's binding does not admit it as far as the request shows, and when it
+is an inflow `Credit` whose lease is unbound. The operation the lease was
+issued for then settles under its key. Settlement checks the same again: a
+lease of another plugin that appeared since admission is a
+`failed_settlement_checks` skip, which takes no key; a lease whose binding
+changed, a disposition whose escrow differs from its binding, and an adapter
+redemption the binding does not admit are recorded `invalid_authority`
+rejections, which take their key. A command that names a key before any
+lease carries it is refused when it settles and takes the key, so an issuer
+that expects front-runs takes the lease before it announces the key.
 
 ## Completion capacity
 
@@ -162,8 +344,8 @@ fairness and replay behavior independently testable.
 
 All irreversible requests (`ResourceConsumptionRequestV1`,
 `ResourceTransferStartRequestV1`, `ResourceTransferDispositionRequestV1`,
-`ResourceCreditRequestV1`, `ResourceExternalOutflowRequestV1`, and
-`ResourceAccountLossRequestV1`) require a
+`ResourceCreditRequestV1`, `ResourceExternalOutflowRequestV1`,
+`ResourceAccountLossRequestV1`, and `ResourceTransferLossRequestV1`) require a
 non-optional `CompletionLeaseActivationCertificateV1` plus exact locked target
 revisions. The persisted lease book verifies that certificate before any debit,
 escrow move, loss, outflow, or credit. Use `resource_completion_certificate`,
@@ -199,8 +381,8 @@ participants from the targets, so a resource grant may lock a record version
 another plugin owns, on this path as on the four-step path; whether that
 plugin should hold a grant of its own is the host application's decision. The
 single step is the lease of a tracked `BeginTransfer`, exchange leg,
-`CompleteTransfer` (`AcceptLocal`, `Lose`, `Return`), `ExternalOutflow`, or
-`RecordLoss`. A lease that needs a grant owned by another plugin (an adapter
+`CompleteTransfer` (`AcceptLocal`, `Lose`, `Return`), `ExternalOutflow`,
+external-inflow `Credit`, `RecordLoss`, or `RecordTransferLoss`. A lease that needs a grant owned by another plugin (an adapter
 operation, whose provider holds its own participant grant) or that another
 plugin coordinates (production, force supply) is refused with
 `invalid_lifecycle` and keeps the four operations.
@@ -443,7 +625,8 @@ the run. The reasons (`ResourceIngressSkipReasonV1`):
 - `failed_settlement_checks`: the packet does not decode or fails the checks
   its ingress makes at settlement (its tracked command, provider binding,
   certificate, boundary time, current evidence, or a refused credit of a
-  production output batch);
+  production output batch), or it is an account rescope another plugin
+  scheduled;
 - `archive_backlog`, `reserved_capacity`, `root_limit`: its result does not
   fit the root; the same request settles once room returns. The detail of a
   `reserved_capacity` skip says when no archive commit or lease release can
@@ -686,7 +869,7 @@ Since 0.11.0, every `ResourceDemand` persists a `source_policy`:
 
 The allocator computes available supply, minimum useful quantity and partial fulfillment from the selected accounts only. An insufficient exact list never falls back to the pool. Existing protected floors and later transfer/consumption authority checks still apply. The exact path visits only the listed accounts, bounded by `MAX_DEMAND_SOURCE_ACCOUNTS`; pooled selection retains its existing account scan.
 
-A demand may change its policy before its first allocation, with the expected revision. Once it has any reservation, including a consumed reservation backing in-flight transfer escrow, or any fulfillment, its policy is fixed. Cancel the demand and submit a new one for a new policy; cancellation does not cancel a separate transfer. Reservation history remains indexed until the demand is terminal and its archive closure is eligible; terminal demands cannot be amended. An amendment also cannot change the demand's lifecycle status, rejection reason, requester, fulfilled quantity, or resource and unit revisions; such an amendment settles as a durable `invalid_lifecycle` rejection.
+A demand may change its policy before its first allocation, with the expected revision. Once it has any reservation, including a consumed reservation backing in-flight transfer escrow, or any fulfillment, its policy is fixed. Cancel the demand and submit a new one for a new policy; cancellation does not cancel a separate transfer. Reservation history remains indexed until the demand is terminal and its archive closure is eligible; terminal demands cannot be amended. An amendment also cannot change the demand's lifecycle status, rejection reason, requester, fulfilled quantity, or resource and unit revisions, nor ask for less than its fulfilled, actively reserved, and in-flight quantities together; such an amendment settles as a durable `invalid_lifecycle` rejection.
 
 `Pooled` is a selection policy, not permission to spend another custodian's stock. A host application must control who may submit pooled demands and which requester it uses. An `ExactAccounts` list proves no delegation either. Cross-custodian delegation with a cap and a window is expressed only by an access grant and a `Granted` policy; appointments, purposes and who may grant whom remain application/domain responsibilities. Transfer custody and completion-lease checks remain separate requirements.
 

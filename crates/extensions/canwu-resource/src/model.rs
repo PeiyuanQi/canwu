@@ -496,8 +496,11 @@ pub struct ResourceAccount {
     pub protected_floor_policy: Option<ProtectedFloorPolicyRevisionId>,
     pub closed: bool,
     /// Host-declared place scope of the stock held by this account. The host
-    /// sets it when installing the account; it is never inferred, never
-    /// changes, and tracked `CreateAccount` commands cannot set it. Two
+    /// sets it when installing the account and is the only one who changes
+    /// it, with [`crate::ResourceOperationRequestV1::RescopeAccount`] queued
+    /// through [`crate::enqueue_resource_account_rescope`]. It is never
+    /// inferred, and no holder sets it: tracked `CreateAccount` commands
+    /// cannot set it and a tracked command cannot rescope an account. Two
     /// accounts with the same declared scope may settle a transfer through
     /// [`crate::ResourceTransferDispositionV1::AcceptLocal`] without a
     /// transport execution. `None` declares no place, so local acceptance is
@@ -872,6 +875,28 @@ pub struct TransportExecutionLink {
     pub capacity_booking: Option<CapacityBookingId>,
 }
 
+/// Most entries one transfer's link history holds
+/// ([`ResourceTransfer::link_history`]).
+///
+/// Two of them are kept for the arrival and the return, which are always
+/// admitted, so a transfer records at most fourteen in-transit links: its
+/// dispatch and thirteen intermediate legs or handoffs. An intermediate
+/// advance past that is a recorded `limit_exceeded` rejection.
+pub const MAX_RESOURCE_TRANSFER_LINKS: usize = 16;
+
+/// In-transit entries one transfer's link history holds at most: every entry
+/// but the two kept for an arrival and a return.
+pub(crate) const MAX_RESOURCE_TRANSFER_IN_TRANSIT_LINKS: usize = MAX_RESOURCE_TRANSFER_LINKS - 2;
+
+/// One transport link a transfer recorded when it advanced: the progress it
+/// advanced to, the link, and the exact transport evidence the advance cited.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceTransferLinkV1 {
+    pub progress: crate::TransferProgressV1,
+    pub transport: TransportExecutionLink,
+    pub evidence: DomainRecordVersionRef,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceTransferState {
@@ -898,12 +923,26 @@ pub struct ResourceTransfer {
     pub quantity: u64,
     pub escrow: u64,
     pub accepted: u64,
+    /// Escrow lost so far: by partial losses
+    /// ([`crate::ResourceOperationRequestV1::RecordTransferLoss`]) while the
+    /// transfer is open, and by a `Lose` disposition, which loses the rest.
     pub lost: u64,
     pub returned: u64,
     pub external_outflow: u64,
     pub state: ResourceTransferState,
+    /// The current transport link: the last entry of `link_history`.
     pub transport: Option<TransportExecutionLink>,
+    /// Empty while the transfer is open: its transport evidence is the
+    /// evidence of its `link_history`, which an open transfer keeps as a
+    /// payload-required dependency. Once it is terminal, the evidence of its
+    /// terminal disposition.
     pub exact_evidence: Vec<DomainRecordVersionRef>,
+    /// Every transport link the transfer recorded, in the order it advanced,
+    /// each with the evidence its advance cited, at most
+    /// [`MAX_RESOURCE_TRANSFER_LINKS`]. It is kept through completion and
+    /// into the archive. Omitted from the canonical encoding while empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_history: Vec<ResourceTransferLinkV1>,
     pub completion_acquisition: CompletionLeaseAcquisitionId,
     pub operation_key: ResourceOperationKey,
     pub terminal_sequence: u64,
@@ -971,7 +1010,11 @@ impl From<&ResourceConsumption> for ResourceConsumptionVersionV1 {
 
 /// Terminal loss evidence. Exactly one of `account` (an account-level loss
 /// settled by [`crate::ResourceOperationRequestV1::RecordLoss`]) or `transfer`
-/// (in-transit escrow settled by a `Lose` disposition) is present.
+/// (transfer escrow: part of it settled by
+/// [`crate::ResourceOperationRequestV1::RecordTransferLoss`] while the
+/// transfer stays open, or the rest of it by a `Lose` disposition) is
+/// present. A transfer may have several losses; each names the transfer, and
+/// the transfer's `lost` totals them.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceLoss {
     pub id: ResourceLossId,
@@ -1064,7 +1107,10 @@ pub enum ResourceOperationKind {
     CancelDemand,
     Observation,
     CompletionLease,
-    /// Account-level loss settled without a transfer.
+    /// A loss: of account stock settled in place
+    /// ([`crate::ResourceOperationRequestV1::RecordLoss`]), or of part of a
+    /// transfer's escrow while the transfer stays open
+    /// ([`crate::ResourceOperationRequestV1::RecordTransferLoss`]).
     Loss,
     /// Atomic start of two transfer legs under one operation outcome.
     BeginExchange,
@@ -1076,6 +1122,9 @@ pub enum ResourceOperationKind {
     /// ([`crate::ResourceConsumptionBatchRequestV1`]). The batch outcome
     /// totals the applied items; each item has an outcome of its own.
     ConsumeBatch,
+    /// The host application changes an account's place scope
+    /// ([`crate::ResourceOperationRequestV1::RescopeAccount`]).
+    RescopeAccount,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1189,7 +1238,13 @@ impl ResourceOperationOutcome {
                 | ResourceOperationKind::ExternalOutflow
                 | ResourceOperationKind::ConsumeBatch => evidence_count == 1,
                 ResourceOperationKind::AdvanceTransfer => evidence_count == 1,
-                ResourceOperationKind::Credit | ResourceOperationKind::Loss => evidence_count <= 1,
+                // A production credit keeps its source and an external
+                // inflow its evidence; a rescope keeps the evidence of the
+                // move.
+                ResourceOperationKind::Credit | ResourceOperationKind::RescopeAccount => {
+                    evidence_count == 1
+                }
+                ResourceOperationKind::Loss => evidence_count <= 1,
                 ResourceOperationKind::BeginExchange | ResourceOperationKind::RevokeAccessGrant => {
                     evidence_count == 0
                 }
@@ -1289,7 +1344,8 @@ fn result_ref_matches_kind(
         | ResourceOperationKind::CancelDemand
         | ResourceOperationKind::Observation
         | ResourceOperationKind::IssueAccessGrant
-        | ResourceOperationKind::RevokeAccessGrant => result_ref.is_none(),
+        | ResourceOperationKind::RevokeAccessGrant
+        | ResourceOperationKind::RescopeAccount => result_ref.is_none(),
         ResourceOperationKind::Credit | ResourceOperationKind::ExternalOutflow => {
             result_ref.is_none()
         }
@@ -1575,7 +1631,13 @@ impl ResourceState {
                         | ResourceTransferState::Returned
                 )
             })
-            .flat_map(|transfer| transfer.exact_evidence.iter().cloned())
+            .flat_map(|transfer| {
+                transfer
+                    .exact_evidence
+                    .iter()
+                    .chain(transfer.link_history.iter().map(|link| &link.evidence))
+                    .cloned()
+            })
             .chain(
                 self.completion_leases
                     .acquisitions

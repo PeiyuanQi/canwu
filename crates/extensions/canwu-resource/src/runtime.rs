@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const RESOURCE_STATE_FORMAT_VERSION: u32 = 4;
+pub const RESOURCE_STATE_FORMAT_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceAllocationRequestV1 {
@@ -301,6 +301,21 @@ pub enum TransferProgressV1 {
     ReturnPending,
 }
 
+/// Advances a transfer along its transport execution and records the link
+/// in the transfer's ordered link history
+/// ([`crate::ResourceTransfer::link_history`]).
+///
+/// A transfer advances from `PendingDispatch` to `InTransit` (its
+/// dispatch), from `InTransit` to `InTransit` (an intermediate leg or
+/// handoff), from `InTransit` to `ArrivalPending`, and from `PendingDispatch`,
+/// `InTransit`, or `ArrivalPending` to `ReturnPending`. An intermediate
+/// advance names the same execution as the current link and either a new
+/// leg, not lower than the current one, or a handoff the history does not
+/// record yet; any other is a recorded `invalid_lifecycle` rejection. The
+/// history holds at most [`crate::MAX_RESOURCE_TRANSFER_LINKS`] entries, two
+/// of them kept for the arrival and the return, so an intermediate advance
+/// past fourteen in-transit links is a recorded `limit_exceeded` rejection,
+/// while an arrival or a return is always admitted.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceTransferProgressRequestV1 {
     pub operation_key: ResourceOperationKey,
@@ -352,6 +367,32 @@ pub enum ResourceTransferDispositionV1 {
     },
 }
 
+/// Which terminal disposition a [`ResourceTransferDispositionV1`] is, without
+/// its data: what a lease binding names
+/// ([`crate::CompletionOperationBindingV1::disposition`]).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceTransferDispositionKindV1 {
+    Accept,
+    AcceptLocal,
+    Lose,
+    Return,
+    ExternalOutflow,
+}
+
+impl ResourceTransferDispositionV1 {
+    #[must_use]
+    pub const fn kind(&self) -> ResourceTransferDispositionKindV1 {
+        match self {
+            Self::Accept { .. } => ResourceTransferDispositionKindV1::Accept,
+            Self::AcceptLocal { .. } => ResourceTransferDispositionKindV1::AcceptLocal,
+            Self::Lose { .. } => ResourceTransferDispositionKindV1::Lose,
+            Self::Return { .. } => ResourceTransferDispositionKindV1::Return,
+            Self::ExternalOutflow { .. } => ResourceTransferDispositionKindV1::ExternalOutflow,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceTransportAcceptanceV1 {
     pub evidence: DomainRecordVersionRef,
@@ -394,15 +435,26 @@ pub struct ResourceTransferDispositionRequestV1 {
     pub completion_certificate: CompletionLeaseActivationCertificateV1,
 }
 
+/// Where credited stock comes from. The applied credit's outcome keeps the
+/// cited version as its exact evidence, on every path.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "source", content = "evidence", rename_all = "snake_case")]
 pub enum ResourceCreditSourceV1 {
+    /// Output of a production execution. It settles only through the
+    /// production output batch ingress.
     Production(DomainRecordVersionRef),
-    ExternalInflow(EvidenceRef),
+    /// Value from outside the modelled accounts, the counterpart of
+    /// [`ResourceExternalOutflowRequestV1`], proven by an exact record
+    /// version. A tracked command from the account's custodian may carry it,
+    /// under a completion lease (the single step the host application
+    /// queues) that locks the account and this version; canonical adapter
+    /// ingress may carry it with this version as its provider source.
+    ExternalInflow(DomainRecordVersionRef),
 }
 
-/// Production-output settlement request. The source record body remains
-/// payload-required until the returned exact outcome is acknowledged.
+/// Credit of one account: production output, or an external inflow. The
+/// production source record body remains payload-required until the
+/// returned exact outcome is acknowledged.
 ///
 /// When the certificate belongs to an external completion participant, the
 /// participant locked the coordinator's runtime record at the version current
@@ -451,6 +503,72 @@ pub struct ResourceAccountLossRequestV1 {
     pub allow_protected: bool,
     pub at: SimTime,
     pub completion_certificate: CompletionLeaseActivationCertificateV1,
+}
+
+/// Loss of part of an open transfer's escrow.
+///
+/// The transfer keeps its state and the rest of its escrow: `quantity`
+/// moves from `escrow` to `lost`, the transfer revision advances, and a
+/// [`crate::ResourceLoss`] with `transfer: Some(..)` counts as admitted loss
+/// in [`crate::ConservationTotalsV1`]. It is allowed in every state that is
+/// not terminal. `quantity` must be above zero and below the escrow: a loss
+/// of the whole escrow ends the transfer, and settles as `CompleteTransfer`
+/// with the `Lose` disposition. The demand of the transfer's allocation is
+/// credited only with what is accepted, so a loss reopens that much of it.
+///
+/// The completion certificate locks the transfer at
+/// `expected_transfer_revision` and, for a domain-record cause, that record
+/// version. The loss completes this certificate's lease, never the lease the
+/// transfer was started under. A tracked command must come from the
+/// transfer's controller, the source custodian or, for a transfer started
+/// under an access grant, its grantee; canonical adapter ingress may cite the
+/// cause record as its provider source. Because the transfer revision
+/// advances, an advance or cancellation that expects the earlier revision
+/// settles as a `version_conflict` rejection. A lease that locks the
+/// transfer's current revision for a terminal disposition keeps the loss's
+/// own lease from locking it, so the host application releases that lease
+/// first and takes a new one for the revision the loss leaves.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceTransferLossRequestV1 {
+    pub operation_key: ResourceOperationKey,
+    pub loss_id: ResourceLossId,
+    pub transfer: ResourceTransferId,
+    pub expected_transfer_revision: ResourceRevision,
+    pub quantity: u64,
+    pub cause: EvidenceRef,
+    pub at: SimTime,
+    pub completion_certificate: CompletionLeaseActivationCertificateV1,
+}
+
+/// The host application moves an account to another place scope, or to
+/// none: the account's stock was carried elsewhere.
+///
+/// Only the host application sends it, through
+/// [`crate::enqueue_resource_account_rescope`]; a tracked command, an adapter
+/// packet, or a packet another plugin schedules cannot carry it. It needs no
+/// completion lease, leaves one `RescopeAccount` outcome that keeps
+/// `evidence` as its exact evidence, and advances the account revision.
+/// `evidence` is the record of the move (the carriage that took the stock to
+/// its new place, for example) and must be its record's current version when
+/// the operation settles, read from the current-version index rather than
+/// from retained evidence, so a sealed run and its exact replay decide alike;
+/// its record kind must be one of the adapter evidence kinds the resource
+/// plugin was configured with, not one the plugin reads for itself.
+///
+/// It is refused, as a recorded rejection, while the account is the source
+/// or destination of a transfer that is not terminal, or while a completion
+/// lease locks the account's current revision. Reservations, demands, and
+/// access grants that name the account carry over unchanged. A new scope
+/// equal to the current one is applied like any other, with its evidence.
+/// [`ResourceState::apply_operation`] has no simulation view, so a detached
+/// root does not read the evidence; the resource plugin does.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceRescopeAccountRequestV1 {
+    pub operation_key: ResourceOperationKey,
+    pub account: ResourceAccountId,
+    pub expected_account_revision: ResourceRevision,
+    pub place_scope: Option<crate::ResourceScopeId>,
+    pub evidence: DomainRecordVersionRef,
 }
 
 /// Points one account at a protected-floor policy revision, or at none.
@@ -689,6 +807,24 @@ impl ResourceCompletionOperationV1 {
     }
 }
 
+/// The refusal of a redemption that a lease's binding does not admit.
+fn lease_bound_elsewhere() -> ResourceError {
+    ResourceError::Authority(
+        "completion lease is bound to another operation kind, disposition, or quantity".to_owned(),
+    )
+}
+
+/// One completion lease a request redeems
+/// ([`ResourceOperationRequestV1::lease_redemptions`]): its certificate, and
+/// the kind, the transfer disposition, and the quantity of the operation
+/// that redeems it, the quantity `None` when only the settlement knows it.
+pub(crate) struct LeaseRedemption<'a> {
+    pub(crate) certificate: &'a CompletionLeaseActivationCertificateV1,
+    pub(crate) kind: ResourceOperationKind,
+    pub(crate) disposition: Option<ResourceTransferDispositionKindV1>,
+    pub(crate) quantity: Option<u64>,
+}
+
 /// The refusal of a lease start whose acquisition identity an earlier lease
 /// took ([`ResourceCompletionOperationV1::sibling_lease_operation_key`]): an
 /// applied outcome under the sibling key. A refused lease start took
@@ -722,6 +858,12 @@ pub enum ResourceOperationRequestV1 {
     IssueAccessGrant(ResourceIssueAccessGrantRequestV1),
     RevokeAccessGrant(ResourceRevokeAccessGrantRequestV1),
     ConsumeBatch(ResourceConsumptionBatchRequestV1),
+    /// Loss of part of an open transfer's escrow; see
+    /// [`ResourceTransferLossRequestV1`].
+    RecordTransferLoss(ResourceTransferLossRequestV1),
+    /// The host application's change of an account's place scope; see
+    /// [`ResourceRescopeAccountRequestV1`].
+    RescopeAccount(ResourceRescopeAccountRequestV1),
 }
 
 impl ResourceOperationRequestV1 {
@@ -729,6 +871,8 @@ impl ResourceOperationRequestV1 {
     pub fn operation_key(&self) -> ResourceOperationKey {
         match self {
             Self::RecordLoss(value) => value.operation_key.clone(),
+            Self::RecordTransferLoss(value) => value.operation_key.clone(),
+            Self::RescopeAccount(value) => value.operation_key.clone(),
             Self::BeginExchange(value) => value.operation_key.clone(),
             Self::IssueAccessGrant(value) => value.operation_key.clone(),
             Self::RevokeAccessGrant(value) => value.operation_key.clone(),
@@ -769,11 +913,118 @@ impl ResourceOperationRequestV1 {
             Self::CancelDemand(_) => ResourceOperationKind::CancelDemand,
             Self::RecordObservation(_) => ResourceOperationKind::Observation,
             Self::Completion(_) => ResourceOperationKind::CompletionLease,
-            Self::RecordLoss(_) => ResourceOperationKind::Loss,
+            Self::RecordLoss(_) | Self::RecordTransferLoss(_) => ResourceOperationKind::Loss,
+            Self::RescopeAccount(_) => ResourceOperationKind::RescopeAccount,
             Self::BeginExchange(_) => ResourceOperationKind::BeginExchange,
             Self::IssueAccessGrant(_) => ResourceOperationKind::IssueAccessGrant,
             Self::RevokeAccessGrant(_) => ResourceOperationKind::RevokeAccessGrant,
             Self::ConsumeBatch(_) => ResourceOperationKind::ConsumeBatch,
+        }
+    }
+
+    /// The completion certificates this request redeems: one for each
+    /// irreversible operation, two for an exchange, none for any other
+    /// request.
+    #[must_use]
+    pub fn completion_certificates(&self) -> Vec<&CompletionLeaseActivationCertificateV1> {
+        self.lease_redemptions()
+            .into_iter()
+            .map(|redemption| redemption.certificate)
+            .collect()
+    }
+
+    /// Each completion lease this request redeems, with what the request
+    /// alone says of the operation that redeems it
+    /// ([`crate::CompletionOperationBindingV1::admits`]).
+    pub(crate) fn lease_redemptions(&self) -> Vec<LeaseRedemption<'_>> {
+        let redemption = |certificate, quantity| LeaseRedemption {
+            certificate,
+            kind: self.kind(),
+            disposition: None,
+            quantity,
+        };
+        match self {
+            Self::Consume(value) => vec![redemption(
+                &value.completion_certificate,
+                Some(value.allocation.quantity),
+            )],
+            Self::ConsumeBatch(value) => vec![redemption(
+                &value.completion_certificate,
+                value.items.iter().try_fold(0_u64, |total, item| {
+                    total.checked_add(item.allocation.quantity)
+                }),
+            )],
+            Self::BeginTransfer(value) => vec![redemption(
+                &value.completion_certificate,
+                Some(value.allocation.quantity),
+            )],
+            // The escrow a disposition settles is the one it finds.
+            Self::CompleteTransfer(value) => vec![LeaseRedemption {
+                disposition: Some(value.disposition.kind()),
+                ..redemption(&value.completion_certificate, None)
+            }],
+            Self::Credit(value) => {
+                vec![redemption(
+                    &value.completion_certificate,
+                    Some(value.quantity),
+                )]
+            }
+            Self::ExternalOutflow(value) => {
+                vec![redemption(
+                    &value.completion_certificate,
+                    Some(value.quantity),
+                )]
+            }
+            Self::RecordLoss(value) => {
+                vec![redemption(
+                    &value.completion_certificate,
+                    Some(value.quantity),
+                )]
+            }
+            Self::RecordTransferLoss(value) => {
+                vec![redemption(
+                    &value.completion_certificate,
+                    Some(value.quantity),
+                )]
+            }
+            Self::BeginExchange(value) => vec![
+                redemption(
+                    &value.leg_a.completion_certificate,
+                    Some(value.leg_a.allocation.quantity),
+                ),
+                redemption(
+                    &value.leg_b.completion_certificate,
+                    Some(value.leg_b.allocation.quantity),
+                ),
+            ],
+            Self::CreateAccount(_)
+            | Self::SubmitDemand(_)
+            | Self::AmendDemand(_)
+            | Self::Allocate(_)
+            | Self::AdvanceTransfer(_)
+            | Self::CancelTransfer(_)
+            | Self::SetProtectedFloor(_)
+            | Self::CancelDemand(_)
+            | Self::RecordObservation(_)
+            | Self::Completion(_)
+            | Self::IssueAccessGrant(_)
+            | Self::RevokeAccessGrant(_)
+            | Self::RescopeAccount(_) => Vec::new(),
+        }
+    }
+
+    /// The loss identity this request would record: an account loss, a
+    /// partial transfer loss, or a transfer's `Lose` disposition.
+    #[must_use]
+    pub fn loss_identity(&self) -> Option<&ResourceLossId> {
+        match self {
+            Self::RecordLoss(value) => Some(&value.loss_id),
+            Self::RecordTransferLoss(value) => Some(&value.loss_id),
+            Self::CompleteTransfer(value) => match &value.disposition {
+                ResourceTransferDispositionV1::Lose { loss_id, .. } => Some(loss_id),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -1268,6 +1519,56 @@ impl ResourceState {
         Ok(())
     }
 
+    /// The allocation legs open transfers draw on.
+    fn open_transfer_legs(&self) -> BTreeSet<&ResourceAllocationLegId> {
+        self.active_transfers
+            .iter()
+            .filter_map(|id| self.transfers.get(id))
+            .map(|transfer| &transfer.allocation_leg)
+            .collect()
+    }
+
+    /// Whether the closure of the ended demand `demand_id` (the demand, its
+    /// reservations, and its legs) is held back from the archive: one of its
+    /// reservations is still active, one of its legs is still reserved, or
+    /// an open transfer draws on one of its legs (`open_transfer_legs`),
+    /// whose terminal disposition reads the leg and marks the closure then.
+    /// [`Self::mark_terminal_demand_closure`] and validation read this one
+    /// rule.
+    fn demand_closure_held(
+        &self,
+        demand_id: &ResourceDemandId,
+        open_transfer_legs: &BTreeSet<&ResourceAllocationLegId>,
+    ) -> Result<bool, ResourceError> {
+        for reservation_id in self
+            .reservation_by_demand
+            .get(demand_id)
+            .into_iter()
+            .flatten()
+        {
+            let reservation = self.reservations.get(reservation_id).ok_or_else(|| {
+                ResourceError::InvalidDefinition(
+                    "terminal resource demand lost its reservation".to_owned(),
+                )
+            })?;
+            let leg = self
+                .allocation_legs
+                .get(&reservation.allocation_leg)
+                .ok_or_else(|| {
+                    ResourceError::InvalidDefinition(
+                        "terminal resource reservation lost its allocation leg".to_owned(),
+                    )
+                })?;
+            if reservation.status == ReservationStatus::Active
+                || leg.status == AllocationLegStatus::Reserved
+                || open_transfer_legs.contains(&leg.id)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn mark_terminal_demand_closure(
         &mut self,
         demand_id: &ResourceDemandId,
@@ -1280,6 +1581,9 @@ impl ResourceState {
             demand.status,
             DemandStatus::Open | DemandStatus::PartiallyFulfilled
         ) {
+            return Ok(());
+        }
+        if self.demand_closure_held(demand_id, &self.open_transfer_legs())? {
             return Ok(());
         }
         let reservation_ids = self
@@ -1303,11 +1607,6 @@ impl ResourceState {
                         "terminal resource reservation lost its allocation leg".to_owned(),
                     )
                 })?;
-            if reservation.status == ReservationStatus::Active
-                || leg.status == AllocationLegStatus::Reserved
-            {
-                return Ok(());
-            }
             keys.push(crate::ResourceTerminalRecordKeyV1::AllocationLeg(
                 leg.id.clone(),
             ));
@@ -1325,9 +1624,10 @@ impl ResourceState {
             .hot_terminal_records()
             .checked_add(keys.len())
             .ok_or(ResourceError::Overflow)?;
-        // A consumption batch measures room on its whole result instead
-        // ([`Self::room_shortage`]), so a closure it cannot hold is a skip
-        // that records nothing, not a refusal of the batch.
+        // A consumption batch and a terminal transfer disposition measure
+        // room on their whole result instead ([`Self::room_shortage`]), so a
+        // closure they cannot hold is a skip that records nothing, not a
+        // refusal that takes their key.
         if !room_is_measured_after && projected > self.limits.max_archive_candidates {
             return Err(ResourceError::LimitExceeded(
                 "resource terminal demand closure requires archive progress".to_owned(),
@@ -1656,10 +1956,15 @@ impl ResourceState {
     }
 
     /// Settles an operation that the plugin settles in a boundary, at
-    /// `settled_at` when it is time-bound, with `external_refusal`, what the
+    /// `settled_at` when it is time-bound (detached callers of
+    /// [`Self::apply_operation`] have no separate settlement clock, so their
+    /// request times stand in for it), with `external_refusal`, what the
     /// plugin found against the simulation view, as its recorded rejection.
-    /// Only a lease start reads such a refusal (an archived outcome that took
-    /// its identity).
+    /// A lease start (an archived outcome that took its identity), an
+    /// account rescope (evidence that is not current or not of an adapter
+    /// evidence kind), and an operation that redeems a completion lease (a
+    /// loss identity an archived loss took, or a lease a tracked command may
+    /// not redeem) read such a refusal.
     pub(crate) fn settle_operation_refused_by(
         &mut self,
         request: &ResourceOperationRequestV1,
@@ -1674,18 +1979,6 @@ impl ResourceState {
             external_refusal,
             settled_at,
         )
-    }
-
-    /// Settles an operation that the plugin settles in a boundary at
-    /// `settled_at`. Detached callers of [`Self::apply_operation`] have no
-    /// separate settlement clock, so their request times stand in for it.
-    pub(crate) fn settle_operation_at(
-        &mut self,
-        request: &ResourceOperationRequestV1,
-        settled_at: SimTime,
-    ) -> Result<OperationSettlement, ResourceError> {
-        let request_digest = canonical_digest("canwu.resource.operation-request.v1", request)?;
-        self.settle_operation_with_context(request, request_digest, None, None, Some(settled_at))
     }
 
     /// Apply every credit in one production output batch atomically. A
@@ -2160,6 +2453,16 @@ impl ResourceState {
         external_refusal: Option<&ResourceError>,
         settled_at: Option<SimTime>,
     ) -> Result<AppliedOperation, ResourceError> {
+        // What the plugin found about an operation that redeems a completion
+        // lease and that the root alone cannot tell (a loss identity an
+        // archived loss took, or a lease a tracked command may not redeem)
+        // refuses it before its own checks. A completion operation and a
+        // rescope read their refusal themselves.
+        if let Some(refusal) = external_refusal
+            && !request.completion_certificates().is_empty()
+        {
+            return Err(refusal.clone());
+        }
         match request {
             ResourceOperationRequestV1::ConsumeBatch(value) => {
                 self.consume_batch(value, request_digest, settled_at)
@@ -2199,6 +2502,12 @@ impl ResourceState {
             }
             ResourceOperationRequestV1::IssueAccessGrant(value) => self.issue_access_grant(value),
             ResourceOperationRequestV1::RevokeAccessGrant(value) => self.revoke_access_grant(value),
+            ResourceOperationRequestV1::RecordTransferLoss(value) => {
+                self.record_transfer_loss(value)
+            }
+            ResourceOperationRequestV1::RescopeAccount(value) => {
+                self.rescope_account(value, external_refusal)
+            }
         }
     }
 
@@ -2732,6 +3041,25 @@ impl ResourceState {
                 "resource demand amendment changes immutable or settled fields".to_owned(),
             ));
         }
+        // What is reserved for the demand and what open transfers carry
+        // toward it will still be fulfilled or given back; the demand may not
+        // ask for less than that and what it holds.
+        let drawn = self
+            .active_reserved_for_demand(&current.id)?
+            .checked_add(
+                self.in_flight_by_demand()?
+                    .get(&current.id)
+                    .copied()
+                    .unwrap_or(0),
+            )
+            .and_then(|drawn| drawn.checked_add(current.fulfilled))
+            .ok_or(ResourceError::Overflow)?;
+        if request.replacement.requested < drawn {
+            return Err(ResourceError::InvalidLifecycle(
+                "resource demand amendment asks for less than is fulfilled, reserved, and in flight"
+                    .to_owned(),
+            ));
+        }
         self.validate_demand_contract(&request.replacement)?;
         // Reservations remain indexed, including consumed legs, until the demand is
         // terminal and its closure is archived. Terminal demands cannot be amended.
@@ -2823,6 +3151,7 @@ impl ResourceState {
                 "allocation due/dirty candidate budget was exceeded".to_owned(),
             ));
         }
+        let in_flight = self.in_flight_by_demand()?;
         let mut candidates: Vec<_> = candidate_ids
             .iter()
             .filter_map(|id| self.demands.get(id))
@@ -2835,6 +3164,11 @@ impl ResourceState {
                     && demand.remainder()
                         > self
                             .active_reserved_for_demand(&demand.id)
+                            .ok()
+                            .and_then(|reserved| {
+                                reserved
+                                    .checked_add(in_flight.get(&demand.id).copied().unwrap_or(0))
+                            })
                             .unwrap_or(u64::MAX)
             })
             .map(|demand| {
@@ -2863,8 +3197,14 @@ impl ResourceState {
                 ResourceError::NotFound("allocation demand disappeared".to_owned())
             })?;
             self.validate_demand_sources(&demand)?;
-            let reserved = self.active_reserved_for_demand(&demand.id)?;
-            let needed = demand.remainder().saturating_sub(reserved);
+            // What open transfers carry toward the demand is drawn already:
+            // their acceptance fulfils it, and only what a loss or a return
+            // takes from them is needed again.
+            let drawn = self
+                .active_reserved_for_demand(&demand.id)?
+                .checked_add(in_flight.get(&demand.id).copied().unwrap_or(0))
+                .ok_or(ResourceError::Overflow)?;
+            let needed = demand.remainder().saturating_sub(drawn);
             if needed == 0 {
                 continue;
             }
@@ -2915,12 +3255,12 @@ impl ResourceState {
             let grantable = needed.min(total_available);
             let minimum_remaining = demand
                 .minimum_useful
-                .saturating_sub(demand.fulfilled + reserved);
+                .saturating_sub(demand.fulfilled.saturating_add(drawn));
             let partial_blocked = demand.partial_fulfillment
                 == PartialFulfillmentPolicy::RejectPartial
                 && grantable < needed;
             if grantable == 0 || grantable < minimum_remaining || partial_blocked {
-                if reserved == 0 && demand.fulfilled == 0 && grantable < demand.minimum_useful {
+                if drawn == 0 && demand.fulfilled == 0 && grantable < demand.minimum_useful {
                     let current = self.demands.get_mut(&demand.id).expect("candidate exists");
                     current.status = DemandStatus::RejectedMinimum;
                     current.rejection_reason = Some(if grant_limit == Some(0) {
@@ -3097,6 +3437,10 @@ impl ResourceState {
                 request.at,
                 &request.operation_key,
                 &local_targets,
+                crate::CompletionOperationBindingV1::new(
+                    ResourceOperationKind::Consume,
+                    leg.quantity,
+                ),
             )?
         };
         let (consumption, fulfillment) = self.settle_consumption(
@@ -3161,7 +3505,7 @@ impl ResourceState {
             .admitted_consumption
             .checked_add(u128::from(leg.quantity))
             .ok_or(ResourceError::Overflow)?;
-        let fulfillment = self.record_fulfillment(leg, operation_key.clone())?;
+        let fulfillment = self.record_fulfillment(leg, leg.quantity, operation_key.clone())?;
         let mut consumption = ResourceConsumption {
             id: consumption_id.clone(),
             revision: ResourceRevision::INITIAL,
@@ -3230,11 +3574,20 @@ impl ResourceState {
                 "a resource consumption batch runs under a local completion lease".to_owned(),
             ));
         }
+        let batch_quantity = request.items.iter().try_fold(0_u64, |total, item| {
+            total
+                .checked_add(item.allocation.quantity)
+                .ok_or(ResourceError::Overflow)
+        })?;
         let (acquisition, grant) = self.consume_completion_certificate(
             certificate,
             request.at,
             &request.operation_key,
             &request.locked_targets(),
+            crate::CompletionOperationBindingV1::new(
+                ResourceOperationKind::ConsumeBatch,
+                batch_quantity,
+            ),
         )?;
         let mut consumed = 0_u64;
         let mut refused = 0_u64;
@@ -3533,6 +3886,10 @@ impl ResourceState {
             request.at,
             &request.operation_key,
             &targets,
+            crate::CompletionOperationBindingV1::new(
+                ResourceOperationKind::BeginTransfer,
+                leg.quantity,
+            ),
         )?;
         self.settle_transfer_start(request, leg.clone(), acquisition, access_grant)?;
         Ok(AppliedOperation {
@@ -3623,6 +3980,10 @@ impl ResourceState {
                 leg.at,
                 &leg.operation_key,
                 &targets,
+                crate::CompletionOperationBindingV1::new(
+                    ResourceOperationKind::BeginExchange,
+                    allocation.quantity,
+                ),
             )?;
             self.settle_transfer_start(leg, allocation, acquisition, access_grant)?;
         }
@@ -3697,6 +4058,7 @@ impl ResourceState {
             state: ResourceTransferState::PendingDispatch,
             transport: None,
             exact_evidence: Vec::new(),
+            link_history: Vec::new(),
             completion_acquisition: acquisition,
             operation_key: request.operation_key.clone(),
             terminal_sequence: 0,
@@ -3723,6 +4085,10 @@ impl ResourceState {
             (ResourceTransferState::PendingDispatch, TransferProgressV1::InTransit) => {
                 ResourceTransferState::InTransit
             }
+            (ResourceTransferState::InTransit, TransferProgressV1::InTransit) => {
+                check_intermediate_link(transfer, &request.transport)?;
+                ResourceTransferState::InTransit
+            }
             (ResourceTransferState::InTransit, TransferProgressV1::ArrivalPending) => {
                 ResourceTransferState::ArrivalPending
             }
@@ -3738,13 +4104,17 @@ impl ResourceState {
                 ));
             }
         };
+        // An arrival and a return always fit: an intermediate advance leaves
+        // room for both, and each happens at most once.
         transfer.state = next;
         transfer.transport = Some(request.transport.clone());
-        transfer
-            .exact_evidence
-            .push(request.transport_evidence.clone());
-        transfer.exact_evidence.sort();
-        transfer.exact_evidence.dedup();
+        // The link history is the open transfer's only copy of its transport
+        // evidence; `exact_evidence` is written when the transfer ends.
+        transfer.link_history.push(crate::ResourceTransferLinkV1 {
+            progress: request.progress,
+            transport: request.transport.clone(),
+            evidence: request.transport_evidence.clone(),
+        });
         transfer.revision = transfer.revision.next()?;
         Ok(AppliedOperation {
             quantity: transfer.escrow,
@@ -3859,6 +4229,11 @@ impl ResourceState {
             request.at,
             &request.operation_key,
             &terminal_targets,
+            crate::CompletionOperationBindingV1::new(
+                ResourceOperationKind::CompleteTransfer,
+                quantity,
+            )
+            .with_disposition(request.disposition.kind()),
         )?;
         let original_grant =
             self.resource_grant_for_acquisition(&snapshot.completion_acquisition)?;
@@ -3980,7 +4355,12 @@ impl ResourceState {
                     .transfers
                     .get_mut(&request.transfer)
                     .expect("checked above");
-                transfer.lost = quantity;
+                // Partial losses may have taken part of the escrow before:
+                // this loses the rest.
+                transfer.lost = transfer
+                    .lost
+                    .checked_add(quantity)
+                    .ok_or(ResourceError::Overflow)?;
                 transfer.escrow = 0;
                 transfer.state = ResourceTransferState::Lost;
                 transfer.revision = transfer.revision.next()?;
@@ -4043,6 +4423,17 @@ impl ResourceState {
             crate::ResourceTerminalRecordKeyV1::Transfer(request.transfer.clone()),
         )?;
         self.active_transfers.remove(&request.transfer);
+        // A demand that ended while this transfer was in flight held its
+        // closure back for it ([`Self::mark_terminal_demand_closure`]); its
+        // leg is in the live root until then.
+        if let Some(demand) = self
+            .allocation_legs
+            .get(&snapshot.allocation_leg)
+            .map(|leg| leg.demand.clone())
+            && self.demands.contains_key(&demand)
+        {
+            self.mark_terminal_demand_closure(&demand, true)?;
+        }
         self.completion_leases
             .complete_grant(&snapshot.completion_acquisition, &original_grant)?;
         self.completion_leases
@@ -4065,9 +4456,12 @@ impl ResourceState {
         })
     }
 
-    /// Credits the destination with the whole escrow, records fulfillment,
-    /// and closes the transfer and both completion leases. Shared by
-    /// transport-backed and same-place acceptance after their own checks.
+    /// Credits the destination with the whole escrow, records it as the
+    /// fulfillment of the allocation's demand, and closes the transfer and
+    /// both completion leases. Shared by transport-backed and same-place
+    /// acceptance after their own checks. The demand is credited with what is
+    /// accepted, not with the allocation: escrow that partial losses took
+    /// stays in the demand's remainder.
     fn settle_transfer_acceptance(
         &mut self,
         request: &ResourceTransferDispositionRequestV1,
@@ -4101,8 +4495,11 @@ impl ResourceState {
             .ok_or_else(|| {
                 ResourceError::InvalidDefinition("transfer lost its allocation leg".to_owned())
             })?;
-        let fulfillment = self.record_fulfillment(&leg, request.operation_key.clone())?;
-        self.mark_terminal_demand_closure(&leg.demand, false)?;
+        let fulfillment = self.record_fulfillment(&leg, quantity, request.operation_key.clone())?;
+        // The transfer is no longer in flight, so its leg no longer holds
+        // back its demand's closure.
+        self.active_transfers.remove(&request.transfer);
+        self.mark_terminal_demand_closure(&leg.demand, true)?;
         let terminal_sequence = self.next_sequence()?;
         let transfer = self
             .transfers
@@ -4119,7 +4516,6 @@ impl ResourceState {
             terminal_sequence,
             crate::ResourceTerminalRecordKeyV1::Transfer(transfer_id.clone()),
         )?;
-        self.active_transfers.remove(&request.transfer);
         self.completion_leases
             .complete_grant(&snapshot.completion_acquisition, &original_grant)?;
         self.completion_leases
@@ -4172,6 +4568,7 @@ impl ResourceState {
             request.at,
             &request.operation_key,
             &targets,
+            crate::CompletionOperationBindingV1::new(ResourceOperationKind::Loss, request.quantity),
         )?;
         let quantities = self.account_quantities(&request.account)?;
         let account = self.accounts.get_mut(&request.account).ok_or_else(|| {
@@ -4228,6 +4625,174 @@ impl ResourceState {
         })
     }
 
+    /// Settles the loss of part of an open transfer's escrow. The transfer
+    /// keeps its state and the rest of its escrow, and its revision advances.
+    /// The certificate locks the exact transfer revision and, when the cause
+    /// is a domain record, that record version; the loss completes that
+    /// lease, never the one the transfer was started under, which its
+    /// terminal disposition completes.
+    fn record_transfer_loss(
+        &mut self,
+        request: &ResourceTransferLossRequestV1,
+    ) -> Result<AppliedOperation, ResourceError> {
+        if self.losses.contains_key(&request.loss_id) {
+            return Err(ResourceError::IdempotencyConflict(
+                "resource loss identity already exists".to_owned(),
+            ));
+        }
+        let transfer = self.transfers.get(&request.transfer).ok_or_else(|| {
+            ResourceError::NotFound("resource transfer is unavailable".to_owned())
+        })?;
+        if transfer.revision != request.expected_transfer_revision || transfer.escrow == 0 {
+            return Err(ResourceError::VersionConflict(
+                "resource transfer exact revision is stale or terminal".to_owned(),
+            ));
+        }
+        if request.quantity == 0 {
+            return Err(ResourceError::InvalidDefinition(
+                "a partial resource transfer loss must lose a positive quantity".to_owned(),
+            ));
+        }
+        if request.quantity >= transfer.escrow {
+            return Err(ResourceError::InvalidLifecycle(
+                "a partial resource transfer loss leaves part of the escrow; a loss of the whole escrow completes the transfer with the Lose disposition"
+                    .to_owned(),
+            ));
+        }
+        let mut targets = vec![CompletionLockedTargetV1::Transfer {
+            id: transfer.id.clone(),
+            revision: transfer.revision,
+        }];
+        let exact_evidence = match &request.cause {
+            EvidenceRef::DomainRecordVersion(version) => {
+                targets.push(CompletionLockedTargetV1::ExternalRecord {
+                    version: version.clone(),
+                });
+                vec![version.clone()]
+            }
+            _ => Vec::new(),
+        };
+        let (acquisition, grant) = self.consume_completion_certificate(
+            &request.completion_certificate,
+            request.at,
+            &request.operation_key,
+            &targets,
+            crate::CompletionOperationBindingV1::new(ResourceOperationKind::Loss, request.quantity),
+        )?;
+        let transfer = self
+            .transfers
+            .get_mut(&request.transfer)
+            .expect("checked above");
+        transfer.escrow -= request.quantity;
+        transfer.lost = transfer
+            .lost
+            .checked_add(request.quantity)
+            .ok_or(ResourceError::Overflow)?;
+        transfer.revision = transfer.revision.next()?;
+        let remainder = transfer.escrow;
+        let resource_revision = transfer.resource_revision.clone();
+        let unit_revision = transfer.unit_revision.clone();
+        self.conservation.admitted_loss = self
+            .conservation
+            .admitted_loss
+            .checked_add(u128::from(request.quantity))
+            .ok_or(ResourceError::Overflow)?;
+        let loss = ResourceLoss {
+            id: request.loss_id.clone(),
+            revision: ResourceRevision::INITIAL,
+            account: None,
+            transfer: Some(request.transfer.clone()),
+            resource_revision,
+            unit_revision,
+            quantity: request.quantity,
+            cause: request.cause.clone(),
+            operation_key: request.operation_key.clone(),
+            terminal_sequence: self.next_sequence()?,
+        };
+        self.add_hot_candidate(
+            loss.terminal_sequence,
+            crate::ResourceTerminalRecordKeyV1::Loss(loss.id.clone()),
+        )?;
+        self.losses.insert(loss.id.clone(), loss);
+        self.completion_leases
+            .complete_grant(&acquisition, &grant)?;
+        self.record_completed_completion(request.operation_key.clone(), acquisition, grant)?;
+        Ok(AppliedOperation {
+            quantity: request.quantity,
+            remainder,
+            result_ref: Some(ResourceRecordRefV1::Loss(request.loss_id.clone())),
+            exact_evidence,
+        })
+    }
+
+    /// Moves an account to another place scope, or to none: the host
+    /// application's operation. `external_refusal` is what the plugin found
+    /// against the simulation view about the evidence (a version that is not
+    /// its record's current version, or not of an adapter evidence kind),
+    /// checked after the root's own refusals. A detached caller has no view
+    /// and passes none.
+    fn rescope_account(
+        &mut self,
+        request: &ResourceRescopeAccountRequestV1,
+        external_refusal: Option<&ResourceError>,
+    ) -> Result<AppliedOperation, ResourceError> {
+        let account = self
+            .accounts
+            .get(&request.account)
+            .ok_or_else(|| ResourceError::NotFound("resource account is unavailable".to_owned()))?;
+        if account.revision != request.expected_account_revision {
+            return Err(ResourceError::VersionConflict(
+                "resource account rescope expected a stale account revision".to_owned(),
+            ));
+        }
+        // Every transfer that is not terminal holds escrow, and the live
+        // root holds every such transfer.
+        if self
+            .active_transfers
+            .iter()
+            .filter_map(|id| self.transfers.get(id))
+            .any(|transfer| {
+                transfer.source == request.account
+                    || transfer.destination.as_ref() == Some(&request.account)
+            })
+        {
+            return Err(ResourceError::InvalidLifecycle(
+                "a resource account is not rescoped while a transfer that is not terminal names it"
+                    .to_owned(),
+            ));
+        }
+        let current = CompletionLockedTargetV1::Account {
+            id: request.account.clone(),
+            revision: account.revision,
+        };
+        if self.completion_leases.target_locks.contains_key(&current)
+            || self
+                .external_completion_participants
+                .target_locks
+                .contains_key(&current)
+        {
+            return Err(ResourceError::InvalidLifecycle(
+                "a resource account is not rescoped while a completion lease locks its current revision"
+                    .to_owned(),
+            ));
+        }
+        if let Some(refusal) = external_refusal {
+            return Err(refusal.clone());
+        }
+        let account = self
+            .accounts
+            .get_mut(&request.account)
+            .expect("checked above");
+        account.place_scope.clone_from(&request.place_scope);
+        account.revision = account.revision.next()?;
+        Ok(AppliedOperation {
+            quantity: 0,
+            remainder: 0,
+            result_ref: None,
+            exact_evidence: vec![request.evidence.clone()],
+        })
+    }
+
     fn credit(
         &mut self,
         request: &ResourceCreditRequestV1,
@@ -4242,17 +4807,12 @@ impl ResourceState {
             revision: request.expected_account_revision,
         }];
         match &request.source {
-            ResourceCreditSourceV1::Production(version) => {
+            ResourceCreditSourceV1::Production(version)
+            | ResourceCreditSourceV1::ExternalInflow(version) => {
                 targets.push(CompletionLockedTargetV1::ExternalRecord {
                     version: version.clone(),
                 });
             }
-            ResourceCreditSourceV1::ExternalInflow(EvidenceRef::DomainRecordVersion(version)) => {
-                targets.push(CompletionLockedTargetV1::ExternalRecord {
-                    version: version.clone(),
-                });
-            }
-            ResourceCreditSourceV1::ExternalInflow(_) => {}
         }
         let external_participant = matches!(request.source, ResourceCreditSourceV1::Production(_))
             && self
@@ -4290,6 +4850,10 @@ impl ResourceState {
                 request.at,
                 &request.operation_key,
                 &targets,
+                crate::CompletionOperationBindingV1::new(
+                    ResourceOperationKind::Credit,
+                    request.quantity,
+                ),
             )?
         };
         let account = self.accounts.get_mut(&request.account).ok_or_else(|| {
@@ -4313,13 +4877,15 @@ impl ResourceState {
                     .ok_or(ResourceError::Overflow)?;
                 vec![evidence.clone()]
             }
-            ResourceCreditSourceV1::ExternalInflow(_) => {
+            // The outcome keeps the inflow's evidence, as it keeps a
+            // production source and an outflow's authority.
+            ResourceCreditSourceV1::ExternalInflow(evidence) => {
                 self.conservation.external_inflow = self
                     .conservation
                     .external_inflow
                     .checked_add(u128::from(request.quantity))
                     .ok_or(ResourceError::Overflow)?;
-                Vec::new()
+                vec![evidence.clone()]
             }
         };
         if !external_participant {
@@ -4353,6 +4919,10 @@ impl ResourceState {
             request.at,
             &request.operation_key,
             &targets,
+            crate::CompletionOperationBindingV1::new(
+                ResourceOperationKind::ExternalOutflow,
+                request.quantity,
+            ),
         )?;
         let quantities = self.account_quantities(&request.account)?;
         let account = self.accounts.get_mut(&request.account).ok_or_else(|| {
@@ -4656,38 +5226,56 @@ impl ResourceState {
         Ok(())
     }
 
+    /// Records `quantity` of the allocation `leg` as fulfilled on its demand:
+    /// the leg's whole quantity for a consumption, what was accepted for a
+    /// transfer.
+    ///
+    /// Only an open demand (`Open` or `PartiallyFulfilled`) changes status
+    /// and its due, expiry, and dirty indexes. A demand cancelled, expired, or
+    /// rejected for its minimum while a transfer drawn on it was in flight
+    /// counts what that transfer delivers in `fulfilled` and keeps its
+    /// terminal status.
     fn record_fulfillment(
         &mut self,
         leg: &ResourceAllocationLeg,
+        quantity: u64,
         operation_key: ResourceOperationKey,
     ) -> Result<ResourceFulfillment, ResourceError> {
-        let (demand_id, remainder, due_at, expires_at) = {
+        let (demand_id, remainder, due_at, expires_at, open) = {
             let demand = self.demands.get_mut(&leg.demand).ok_or_else(|| {
                 ResourceError::InvalidDefinition("allocation leg lost its demand".to_owned())
             })?;
             demand.fulfilled = demand
                 .fulfilled
-                .checked_add(leg.quantity)
+                .checked_add(quantity)
                 .ok_or(ResourceError::Overflow)?;
             if demand.fulfilled > demand.requested {
                 return Err(ResourceError::Conservation(
                     "resource demand fulfillment exceeded its requested quantity".to_owned(),
                 ));
             }
-            demand.status = if demand.fulfilled == demand.requested {
-                DemandStatus::Fulfilled
-            } else {
-                DemandStatus::PartiallyFulfilled
-            };
+            let open = matches!(
+                demand.status,
+                DemandStatus::Open | DemandStatus::PartiallyFulfilled
+            );
+            if open {
+                demand.status = if demand.fulfilled == demand.requested {
+                    DemandStatus::Fulfilled
+                } else {
+                    DemandStatus::PartiallyFulfilled
+                };
+            }
             demand.revision = demand.revision.next()?;
             (
                 demand.id.clone(),
                 demand.remainder(),
                 demand.due_at,
                 demand.expires_at,
+                open,
             )
         };
-        if remainder == 0 {
+        // A terminal demand left its indexes when it became terminal.
+        if open && remainder == 0 {
             if let Some(ids) = self.demand_due_index.get_mut(&due_at) {
                 ids.remove(&demand_id);
             }
@@ -4697,7 +5285,7 @@ impl ResourceState {
             self.demand_due_index.retain(|_, ids| !ids.is_empty());
             self.demand_expiry_index.retain(|_, ids| !ids.is_empty());
             self.dirty_demands.remove(&demand_id);
-        } else {
+        } else if open {
             self.dirty_demands.insert(demand_id.clone());
         }
         let sequence = self.next_sequence()?;
@@ -4708,7 +5296,7 @@ impl ResourceState {
             revision: ResourceRevision::INITIAL,
             demand: demand_id,
             allocation_legs: vec![leg.id.clone()],
-            consumed_quantity: leg.quantity,
+            consumed_quantity: quantity,
             remainder,
             status: if remainder == 0 {
                 FulfillmentStatus::Complete
@@ -4881,6 +5469,11 @@ impl ResourceState {
                     .certificate(&request.completion_certificate.acquisition)
                     == Some(&request.completion_certificate)
             }
+            ResourceOperationRequestV1::RecordTransferLoss(request) => {
+                self.completion_leases
+                    .certificate(&request.completion_certificate.acquisition)
+                    == Some(&request.completion_certificate)
+            }
             ResourceOperationRequestV1::BeginExchange(request) => {
                 [&request.leg_a, &request.leg_b].iter().all(|leg| {
                     self.completion_leases
@@ -4991,7 +5584,8 @@ impl ResourceState {
             | ResourceOperationRequestV1::CancelDemand(_)
             | ResourceOperationRequestV1::RecordObservation(_)
             | ResourceOperationRequestV1::IssueAccessGrant(_)
-            | ResourceOperationRequestV1::RevokeAccessGrant(_) => false,
+            | ResourceOperationRequestV1::RevokeAccessGrant(_)
+            | ResourceOperationRequestV1::RescopeAccount(_) => false,
         }
     }
 
@@ -5082,12 +5676,18 @@ impl ResourceState {
         Ok(())
     }
 
+    /// Consumes the lease `certificate` certifies for the operation
+    /// `redeemed`, the kind, quantity, and (for a terminal transfer
+    /// disposition) disposition of the operation that redeems it, which a
+    /// lease bound to an operation must admit
+    /// ([`crate::CompletionOperationBindingV1::admits`]).
     fn consume_completion_certificate(
         &mut self,
         certificate: &CompletionLeaseActivationCertificateV1,
         at: SimTime,
         operation_key: &ResourceOperationKey,
         required_targets: &[CompletionLockedTargetV1],
+        redeemed: crate::CompletionOperationBindingV1,
     ) -> Result<(CompletionLeaseAcquisitionId, CompletionCapacityGrantId), ResourceError> {
         if &certificate.operation_key != operation_key {
             return Err(ResourceError::Authority(
@@ -5103,6 +5703,17 @@ impl ResourceState {
             .ok_or_else(|| {
                 ResourceError::NotFound("completion acquisition is unavailable".to_owned())
             })?;
+        // The binding is read from the acquisition the root holds, whose
+        // envelope digest the certificate must carry.
+        if acquisition
+            .eligibility_envelope
+            .operation_binding
+            .is_some_and(|bound| {
+                !bound.admits(redeemed.kind, redeemed.disposition, Some(redeemed.quantity))
+            })
+        {
+            return Err(lease_bound_elsewhere());
+        }
         let mut covered_targets = Vec::new();
         let mut participant_grants = Vec::new();
         for grant_id in acquisition.grants.values() {
@@ -5461,6 +6072,115 @@ impl ResourceState {
         }
     }
 
+    /// The refusal of a tracked command that redeems a lease of another
+    /// plugin: one whose expected participants name a plugin other than the
+    /// resource plugin, or in which such a plugin holds a grant. Such a lease
+    /// authorizes that plugin's operation, which reaches the root through its
+    /// adapter ingress, never a holder's command. Checking the expected
+    /// participants, not only the grants, refuses a command sent while the
+    /// other plugin's grant is still on its way.
+    ///
+    /// The plugin refuses such a command at admission, and skips it at
+    /// settlement if the lease appeared in between; either way the command
+    /// takes no operation key, so the other plugin's operation still settles
+    /// under it. `None` when the request redeems no such lease the root holds.
+    pub(crate) fn tracked_foreign_lease_refusal(
+        &self,
+        request: &ResourceOperationRequestV1,
+    ) -> Option<ResourceError> {
+        request.lease_redemptions().into_iter().find_map(|redemption| {
+            let acquisition = self
+                .completion_leases
+                .acquisitions
+                .get(&redemption.certificate.acquisition)?;
+            let foreign = acquisition
+                .expected_participants
+                .iter()
+                .any(|participant| participant != crate::PLUGIN_NAME)
+                || acquisition.grants.values().any(|grant| {
+                    self.completion_leases
+                        .grants
+                        .get(grant)
+                        .is_some_and(|grant| grant.owner_plugin != crate::PLUGIN_NAME)
+                });
+            foreign.then(|| {
+                ResourceError::Authority(
+                    "a tracked command redeems only a completion lease whose only participant is the resource plugin"
+                        .to_owned(),
+                )
+            })
+        })
+    }
+
+    /// The refusal of a tracked command that redeems a completion lease it
+    /// may not redeem, or of a tracked `Acquire` that writes a binding:
+    ///
+    /// - a lease bound to another operation, as far as the request alone
+    ///   shows it (kind, disposition, and the quantity when the request fixes
+    ///   it; the redemption checks the rest);
+    /// - for an external inflow `Credit`, a lease that is not bound to an
+    ///   operation ([`crate::CompletionOperationBindingV1`]); and
+    /// - an `Acquire` whose envelope carries a binding: only the issuer of a
+    ///   lease, the host application or a plugin that coordinates it, binds
+    ///   it.
+    ///
+    /// The plugin refuses a redemption at admission, so it takes no key, and
+    /// again at settlement, as a recorded rejection, if the lease changed in
+    /// between; the `Acquire` is its recorded rejection. A lease of another
+    /// plugin is [`Self::tracked_foreign_lease_refusal`]. `None` when the
+    /// request redeems no lease the root holds; the operation then refuses
+    /// itself.
+    pub(crate) fn tracked_redemption_refusal(
+        &self,
+        request: &ResourceOperationRequestV1,
+    ) -> Option<ResourceError> {
+        if let ResourceOperationRequestV1::Completion(ResourceCompletionOperationV1::Acquire(
+            acquisition,
+        )) = request
+            && acquisition.eligibility_envelope.operation_binding.is_some()
+        {
+            return Some(ResourceError::Authority(
+                "a holder's completion lease acquisition carries no operation binding; the lease's issuer binds it"
+                    .to_owned(),
+            ));
+        }
+        for redemption in request.lease_redemptions() {
+            let Some(acquisition) = self
+                .completion_leases
+                .acquisitions
+                .get(&redemption.certificate.acquisition)
+            else {
+                continue;
+            };
+            match acquisition.eligibility_envelope.operation_binding {
+                Some(binding)
+                    if !binding.admits(
+                        redemption.kind,
+                        redemption.disposition,
+                        redemption.quantity,
+                    ) =>
+                {
+                    return Some(lease_bound_elsewhere());
+                }
+                None if matches!(
+                    request,
+                    ResourceOperationRequestV1::Credit(ResourceCreditRequestV1 {
+                        source: ResourceCreditSourceV1::ExternalInflow(_),
+                        ..
+                    })
+                ) =>
+                {
+                    return Some(ResourceError::Authority(
+                        "a tracked external inflow credit requires a completion lease bound to exactly that credit"
+                            .to_owned(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Returns the one coordinator record version that an external
     /// participant grant locked for `source.record`, provided `source` is that
     /// version or a later version of the same record.
@@ -5512,6 +6232,34 @@ impl ResourceState {
 
     /// What the active reservations of a demand hold. A live demand's
     /// reservations are all in the root, indexed by demand.
+    /// The escrow of the open transfers drawn on each demand: what an
+    /// allocation already moved toward the demand, which its acceptance
+    /// fulfils and a loss or a return gives back. A returning transfer
+    /// (`ReturnPending`) is never accepted, so its escrow does not count.
+    ///
+    /// The live root holds every open transfer and, while a demand is open,
+    /// every allocation leg drawn on it, so the totals of open demands are
+    /// whole in a partial state. A leg that is not attached belongs to a
+    /// terminal demand, which no allocation pass reads, and is passed over.
+    fn in_flight_by_demand(&self) -> Result<BTreeMap<ResourceDemandId, u64>, ResourceError> {
+        let mut in_flight = BTreeMap::<ResourceDemandId, u64>::new();
+        for transfer in self
+            .active_transfers
+            .iter()
+            .filter_map(|id| self.transfers.get(id))
+            .filter(|transfer| transfer.state != ResourceTransferState::ReturnPending)
+        {
+            let Some(leg) = self.allocation_legs.get(&transfer.allocation_leg) else {
+                continue;
+            };
+            let total = in_flight.entry(leg.demand.clone()).or_default();
+            *total = total
+                .checked_add(transfer.escrow)
+                .ok_or(ResourceError::Overflow)?;
+        }
+        Ok(in_flight)
+    }
+
     fn active_reserved_for_demand(
         &self,
         demand_id: &ResourceDemandId,
@@ -5983,6 +6731,32 @@ impl ResourceState {
             }
             self.validate_demand_contract_within(demand, true)?;
         }
+        // An ended demand stays out of the archive candidates only while its
+        // closure is held back ([`Self::demand_closure_held`], the rule
+        // [`Self::mark_terminal_demand_closure`] reads); any other is a
+        // closure that leaked.
+        let candidate_demands: BTreeSet<_> = self
+            .terminal_archive_candidates
+            .values()
+            .filter_map(|key| match key {
+                crate::ResourceTerminalRecordKeyV1::Demand(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        let open_transfer_legs = self.open_transfer_legs();
+        for demand in self.demands.values() {
+            if !matches!(
+                demand.status,
+                DemandStatus::Open | DemandStatus::PartiallyFulfilled
+            ) && !candidate_demands.contains(&demand.id)
+                && !self.demand_closure_held(&demand.id, &open_transfer_legs)?
+            {
+                return Err(ResourceError::InvalidDefinition(
+                    "an ended resource demand is neither an archive candidate nor held back by a reservation or a transfer in flight"
+                        .to_owned(),
+                ));
+            }
+        }
         let expected_due: BTreeSet<_> = self
             .demands
             .values()
@@ -6128,6 +6902,12 @@ impl ResourceState {
             {
                 return Err(ResourceError::Conservation(
                     "resource transfer escrow partition is invalid".to_owned(),
+                ));
+            }
+            if !transfer_link_history_is_valid(transfer) {
+                return Err(ResourceError::InvalidDefinition(
+                    "resource transfer link history is not one its advances could record"
+                        .to_owned(),
                 ));
             }
         }
@@ -6502,6 +7282,124 @@ fn credit_account(account: &mut ResourceAccount, quantity: u64) -> Result<(), Re
     Ok(())
 }
 
+/// Whether `next` may follow `current`, the link of an in-transit transfer
+/// whose recorded links are `history`, as an intermediate link: the same
+/// execution, a leg not lower than the current one (a link without a leg is
+/// lower than one with a leg), and either a new leg or a handoff `history`
+/// does not record. Leg order beyond that is the transport's.
+fn is_intermediate_link(
+    current: &TransportExecutionLink,
+    history: &[crate::ResourceTransferLinkV1],
+    next: &TransportExecutionLink,
+) -> bool {
+    let lower_leg = match (current.leg_execution, next.leg_execution) {
+        (Some(current), Some(next)) => next < current,
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+    let new_leg = next.leg_execution.is_some() && next.leg_execution != current.leg_execution;
+    let new_handoff = next.handoff.is_some_and(|handoff| {
+        !history
+            .iter()
+            .any(|entry| entry.transport.handoff == Some(handoff))
+    });
+    next.execution == current.execution && !lower_leg && (new_leg || new_handoff)
+}
+
+/// Admits an intermediate advance of an in-transit transfer to `link`, which
+/// must be an intermediate link ([`is_intermediate_link`]) and leave room in
+/// the history for an arrival and a return. Each refusal is the advance's
+/// recorded rejection.
+fn check_intermediate_link(
+    transfer: &ResourceTransfer,
+    link: &TransportExecutionLink,
+) -> Result<(), ResourceError> {
+    let intermediate = transfer
+        .transport
+        .as_ref()
+        .is_some_and(|current| is_intermediate_link(current, &transfer.link_history, link));
+    if !intermediate {
+        return Err(ResourceError::InvalidLifecycle(
+            "an intermediate resource transfer advance names the execution of the current link with a new leg, not lower than the current one, or a handoff not recorded before"
+                .to_owned(),
+        ));
+    }
+    let in_transit = transfer
+        .link_history
+        .iter()
+        .filter(|entry| entry.progress == TransferProgressV1::InTransit)
+        .count();
+    if in_transit >= crate::MAX_RESOURCE_TRANSFER_IN_TRANSIT_LINKS {
+        return Err(ResourceError::LimitExceeded(format!(
+            "a resource transfer records at most {} in-transit links; its arrival and return stay admitted",
+            crate::MAX_RESOURCE_TRANSFER_IN_TRANSIT_LINKS
+        )));
+    }
+    Ok(())
+}
+
+/// Whether a transfer's link history is one its advances could have
+/// recorded: at most [`crate::MAX_RESOURCE_TRANSFER_LINKS`] entries and
+/// [`crate::MAX_RESOURCE_TRANSFER_IN_TRANSIT_LINKS`] in-transit ones, each a
+/// transition `advance_transfer` admits from the state the entries before it
+/// left, intermediate links included, with `transport` its last link. An
+/// open transfer is in the state its history leaves, or returning after a
+/// cancellation, which records no link, and keeps no `exact_evidence` beside
+/// its history. An accepted transfer was accepted at its destination after
+/// an arrival, or locally without a link.
+pub(crate) fn transfer_link_history_is_valid(transfer: &ResourceTransfer) -> bool {
+    let history = &transfer.link_history;
+    if history.len() > crate::MAX_RESOURCE_TRANSFER_LINKS
+        || transfer.transport.as_ref() != history.last().map(|entry| &entry.transport)
+    {
+        return false;
+    }
+    let mut state = ResourceTransferState::PendingDispatch;
+    let mut in_transit = 0_usize;
+    for (index, entry) in history.iter().enumerate() {
+        state = match (state, entry.progress) {
+            (ResourceTransferState::PendingDispatch, TransferProgressV1::InTransit) => {
+                ResourceTransferState::InTransit
+            }
+            (ResourceTransferState::InTransit, TransferProgressV1::InTransit)
+                if is_intermediate_link(
+                    &history[index - 1].transport,
+                    &history[..index],
+                    &entry.transport,
+                ) =>
+            {
+                ResourceTransferState::InTransit
+            }
+            (ResourceTransferState::InTransit, TransferProgressV1::ArrivalPending) => {
+                ResourceTransferState::ArrivalPending
+            }
+            (
+                ResourceTransferState::PendingDispatch
+                | ResourceTransferState::InTransit
+                | ResourceTransferState::ArrivalPending,
+                TransferProgressV1::ReturnPending,
+            ) => ResourceTransferState::ReturnPending,
+            _ => return false,
+        };
+        if entry.progress == TransferProgressV1::InTransit {
+            in_transit += 1;
+        }
+    }
+    let ends_in_place = if transfer.escrow > 0 {
+        transfer.exact_evidence.is_empty()
+            && (transfer.state == state
+                || (transfer.state == ResourceTransferState::ReturnPending
+                    && state != ResourceTransferState::ReturnPending))
+    } else {
+        // A return, a loss, and an outflow end a transfer in any open state
+        // (a return after a cancellation, which records no link).
+        transfer.state != ResourceTransferState::Accepted
+            || history.is_empty()
+            || state == ResourceTransferState::ArrivalPending
+    };
+    in_transit <= crate::MAX_RESOURCE_TRANSFER_IN_TRANSIT_LINKS && ends_in_place
+}
+
 fn debit_account(account: &mut ResourceAccount, quantity: u64) -> Result<(), ResourceError> {
     if quantity == 0 || quantity > account.balance {
         return Err(ResourceError::Conservation(
@@ -6550,6 +7448,7 @@ fn request_remainder(state: &ResourceState, request: &ResourceOperationRequestV1
         ResourceOperationRequestV1::Credit(value) => value.quantity,
         ResourceOperationRequestV1::ExternalOutflow(value) => value.quantity,
         ResourceOperationRequestV1::RecordLoss(value) => value.quantity,
+        ResourceOperationRequestV1::RecordTransferLoss(value) => value.quantity,
         ResourceOperationRequestV1::CancelDemand(value) => state
             .demands
             .get(&value.demand)
@@ -6563,7 +7462,8 @@ fn request_remainder(state: &ResourceState, request: &ResourceOperationRequestV1
         | ResourceOperationRequestV1::RecordObservation(_)
         | ResourceOperationRequestV1::Completion(_)
         | ResourceOperationRequestV1::BeginExchange(_)
-        | ResourceOperationRequestV1::RevokeAccessGrant(_) => 0,
+        | ResourceOperationRequestV1::RevokeAccessGrant(_)
+        | ResourceOperationRequestV1::RescopeAccount(_) => 0,
         ResourceOperationRequestV1::IssueAccessGrant(value) => value.grant.cap_quantity,
     }
 }
