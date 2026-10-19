@@ -30,6 +30,7 @@ coding agents.
 - [Engine load and budget guards](proposals/engine-load-and-budget-guards.md)
 - [Runtime state copies](proposals/runtime-state-copies.md)
 - [Paged restore budget and seal cost](proposals/paged-restore-budget-and-seal-cost.md)
+- [Pending ingress read](proposals/pending-ingress-read.md)
 - [End-state design](end-state.md)
 - [Reusable-engine conformance](engine-conformance.md)
 - [Versioning and compatibility](versioning.md)
@@ -69,6 +70,8 @@ current published **social diffusion simulation module**
 - [Resource series scale](proposals/resource-series-scale.md)
 - [Reference archive receipts and operation room](proposals/reference-archive-receipts.md)
 - [Production at series scale](proposals/production-series-scale.md)
+- [Movement leg delay and current incident evidence](proposals/movement-delay-leg.md)
+- [Resource transit, account place, and external inflow](proposals/resource-transit-place-and-inflow.md)
 - [Downstream grand-strategy gap set](proposals/downstream-grand-strategy-gap-set.md)
 
 ## Runnable cases, reference content, and starter kits

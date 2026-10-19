@@ -1,11 +1,10 @@
 # Movement Leg Delay and Current Incident Evidence
 
-Status: implemented on branch `pkg/movement-sim-0190` for the release after
-0.18.0; not released. It closes downstream gap G-64 (no operation delays the
-arrival of a departed leg) and engine finding E-44 of `opus-progress.md`
-(incident evidence checked against retained evidence). It changes
-`canwu-movement` only; `canwu-transport`, `canwu-sim`, and `canwu-api` are
-untouched. Same version only: no compatibility work with 0.18.0 bytes or
+Status: implemented in 0.19.0. It closes downstream gap G-64 (no operation
+delays the arrival of a departed leg) and engine finding E-44 of
+`opus-progress.md` (incident evidence checked against retained evidence). It
+changes `canwu-movement` only; `canwu-transport`, `canwu-sim`, and `canwu-api`
+are untouched. Same version only: no compatibility work with 0.18.0 bytes or
 hashes.
 
 "Today" means 0.18.0 as it is on `main`.
@@ -374,3 +373,20 @@ languages each):
 
 ## Review record
 
+
+The code was reviewed once by an independent reviewer and the fixes once in a
+delta review; neither found a blocking issue. Accepted findings:
+
+- No test failed a held leg: a `fail_leg` that left the hold in place passed
+  every test. A test now fails a held leg and reroutes it.
+- Requiring the order's `delivery_attempt` to be current is correct under the
+  rule that no decision may depend on retained evidence, but goes beyond the
+  owner's wording for E-44 and was untested. A sealed-and-unsealed test now
+  covers it, and the extension is listed for the owner to confirm.
+- The stale-packet known limit now states that superseded due packets stay
+  queued, pinned, and listed until their time.
+- A scenario-installed departed leg whose arrival due is neither its
+  scheduled arrival nor its hold is now refused at load; the versioning
+  notes state it.
+- Optional: an assertion message in the sealed-and-unsealed test, and one
+  sentence of this proposal aligned with the versioning notes.

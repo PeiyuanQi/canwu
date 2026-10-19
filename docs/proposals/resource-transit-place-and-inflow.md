@@ -1,9 +1,8 @@
 # Resource Transit, Account Place, and External Inflow
 
-Status: implemented on branch `pkg/resource-0190` for the release after
-0.18.0; not released. It closes downstream gaps G-63, G-65, G-67, and G-68 and
-the engine finding E-45 in `canwu-resource`, and documents the ways around
-downstream gap G-66, for which the owner declined an engine change. A
+Status: implemented in 0.19.0. It closes downstream gaps G-63, G-65, G-67, and
+G-68 and the engine finding E-45 in `canwu-resource`, and documents the ways
+around downstream gap G-66, for which the owner declined an engine change. A
 transfer can lose part of its escrow and stay open, a transfer carried by a
 multi-leg execution records every leg and handoff in order and keeps them into
 the archive, the host application can move an account to another place, and a
@@ -593,8 +592,7 @@ Beyond the new operations, a run on this release settles differently from
   archive candidates is a no-room skip, not a recorded `limit_exceeded`;
 - a demand that ends while its transfer is in flight keeps its status when
   the transfer is accepted;
-- `Lose` adds the escrow left to `lost` (0.18.0 set it).
-
+- `Lose` adds the escrow left to `lost` (0.18.0 set it);
 - an `AmendDemand` that asks for less than the demand's fulfilled, actively
   reserved, and in-flight quantities together is a recorded
   `invalid_lifecycle` rejection (0.18.0 compared `requested` with `fulfilled`

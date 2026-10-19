@@ -344,13 +344,15 @@ leg at its due time, and publishes reports to the owner, the operator, and
 delayed remote observers. Moving anyone but the owner requires a current
 authority-basis record that names the owner and every subject. Seizures,
 failures caused by hazards, and delivery reconciliation arrive only as
-application incidents that cite exact evidence; the plugin never draws
-randomness. Capacity pools offer windowed transport capacity, and one
-deterministic, all-or-nothing allocation pass per pool orders requests by
-priority, window start, tie-break key, admission sequence, and booking identity
-without preempting confirmed capacity. After a terminal seizure a
-transport execution can only be closed by its owner. Closed executions retire from hot state once their final
-reports are out, and within a bounded time.
+application incidents that cite the current version of an evidence record; the
+plugin never draws randomness. Since 0.19.0 an owner, operator, or incident can
+hold a departed leg (`DelayLeg`). Capacity pools offer windowed transport
+capacity, and one deterministic, all-or-nothing allocation pass per pool orders
+requests by priority, window start, tie-break key, admission sequence, and
+booking identity without preempting confirmed capacity. After a terminal
+seizure a transport execution can only be closed by its owner. Closed
+executions retire from hot state once their final reports are out, and within a
+bounded time.
 
 Movement commands follow the same boundary. The canonical intent is
 `OrderMovement`, with subject-specific transit and custody state. A voluntary
@@ -413,9 +415,13 @@ custodian and bound to the digest of the agreed terms, so each side consents to
 the whole exchange, and the two transfers then settle independently. Local
 acceptance settles an undispatched transfer without a transport execution when
 both accounts carry the same host-declared place scope, which the scenario sets
-at installation and the engine never infers. None of these grants delegated
-access to another custodian's stock; since 0.13.0 only an explicit access
-grant does.
+at installation, only the host application changes, citing the record of the
+move, and the engine never infers. None of these grants delegated access to
+another custodian's stock; since 0.13.0 only an explicit access grant does.
+Since 0.19.0 a transfer may lose part of its escrow and stay open, a
+multi-leg carriage leaves every leg and handoff on the transfer it carries, in
+order and into the archive, and value from outside the modelled accounts
+enters as a custodian's evidence-backed inflow, the counterpart of an outflow.
 
 An access grant is a grantor custodian's recorded consent, citing exact
 authority evidence, that a grantee may draw on its stock of one exact resource

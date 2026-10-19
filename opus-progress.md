@@ -1,70 +1,65 @@
 # Opus progress — downstream engine gaps / Opus 进度记录
 
-> Updated 2026-10-19 at Canwu **0.18.0** (tag `v0.18.0`, commit `ea85ca7` on `main`). This file is the to-do list of
-> engine gaps that a downstream application has filed against the published crates. The application is Celestial
-> Mandate (CM); its gap ledger (implementation document `59`, in the CM repository) gives each row its id (`G-nn`) and
-> the full evidence. Priorities are the ledger's severities: High, Medium, Low.
+> Updated 2026-10-19. The published release is Canwu **0.18.0** (tag `v0.18.0`, commit `ea85ca7` on `main`).
+> **0.19.0 is prepared and verified, not published**: the branch `claude/sweet-bell-yqcrl9` holds three package
+> commits and the release commit on top of `main`. This file is the to-do list of engine gaps that a downstream
+> application has filed against the published crates. The application is Celestial Mandate (CM); its gap ledger
+> (implementation document `59`, in the CM repository) gives each row its id (`G-nn`) and the full evidence.
+> Priorities are the ledger's severities: High, Medium, Low.
 >
 > This file holds the current state only. When a release closes a row, delete the row and record the change in its
 > proposal and in `docs/versioning.md`.
 >
-> 0.18.0 closed every row this file held after 0.17.0: the series-scale rows G-17, G-18, G-24, G-30 (with G42-1),
-> G-33, and G-34, and engine findings E-19 to E-33. Since then the downstream adopted 0.18.0 and filed seven new rows
-> while building on it (G-62 to G-68, 2026-10-17 and 2026-10-18; §3 and §4), each verified in the published 0.18.0
-> source. Also open: one recorded design question (G-38), the known limits the 0.18.0 packages left on purpose
-> (§4.2), two limits the downstream met and worked around (§4.3), and three engine findings of the 0.19.0 source read
-> (§4.5). The two engine facts the downstream design loop asked to confirm are answered (§4.4). On 2026-10-19 the
-> owner decided the shape of every fix for 0.19.0 (§6).
+> 0.19.0 closes every row the downstream filed after adopting 0.18.0 (G-62 to G-68; G-66 by documentation, as the
+> owner decided) and engine findings E-44 and E-45 (§3). Delete those rows when 0.19.0 is published. Still open: one
+> recorded design question (G-38), the known limits the 0.18.0 and 0.19.0 packages left on purpose (§4.2), two limits
+> the downstream met and worked around (§4.3), and E-46. The two engine facts the downstream design loop asked to
+> confirm are answered (§4.4). The owner decided the shape of every 0.19.0 fix on 2026-10-19; the choices the run
+> made inside those decisions wait for the owner's confirmation (§6).
 
 ## 1. Where things are
 
 | Item | State |
 | --- | --- |
-| Release | 0.18.0 is published: all 24 library crates on crates.io, tag `v0.18.0`, GitHub release, website deployed (canwu.org shows 0.18.0 in both languages). 0.18.0 is the only live version: 0.17.0 was yanked on 2026-10-17 (0.14.0 to 0.16.0 earlier). Downstream pins `=0.18.0` since 2026-10-17 (its release 0.77.0) and has adopted G-44, G-47 to G-54, and G-56 to G-61 (G-46 is superseded by G-61); the other released rows wait for the downstream slices that consume them. The downstream plans to pin the next release as the first change set of its next build wave, after the rows below are fixed. |
-| Policy | **Same version only** (owner, 2026-10-14): Canwu crates depend only on the exact same version of each other (`=0.18.0`); nothing written by an earlier release is read; no migration. |
-| Proposals of 0.18.0 (all "implemented in 0.18.0") | `docs/proposals/`: `recurring-traversal.md` (G-24), `society-intergroup-relations.md` (G-33, G-34), `law-aggregate-caseload.md` (G-30, E-25), `request-outcome-retention.md` (E-28, part of E-29), `fiscal-archive-and-due-instant-cost.md` (E-26, E-30), `engine-load-and-budget-guards.md` (E-27, E-31, E-33), `resource-series-scale.md` (G-17, G-18, E-24), `reference-archive-receipts.md` (E-22), `production-series-scale.md` (G-18, E-23), `runtime-state-copies.md` (E-19, E-20), `paged-restore-budget-and-seal-cost.md` (E-21, E-29, E-32). |
-| Branches and worktrees | Only `main`, locally and on the remote. |
-| Release procedure | `.agents/skills/canwu-contributor-release/SKILL.md` and `docs/releasing.md`; the pre-release tests ran once on the 0.18.0 release commit (workspace 821 passed; release-only `--ignored` 3 passed; continuation gate 821 passed, 0 failed). |
-| What the adopter must know first | (1) Pin every Canwu crate at `=0.18.0`; nothing earlier loads. (2) Read the "Upgrading from 0.17.0" notes of the 0.18.0 entry of `docs/versioning.md` and its "Known limits" first: the knowledge publication contract of 0.17.0 (groups, budget read, `retention` on every schema), request-outcome retention (a late retry of a retired request is `RequestOutcomeRetired`; treat it like `IdempotencyConflict`), resource roots installed with `into_records` (accounts and grants live in live buckets), production scope roots and the key rule (no `/` in primary-root keys, `{scope}/` in scope roots), fiscal `prepare_fiscal_archive(run, …)` and "seal at each save", paged restores take a `PagedRestoreBudget`, society settlement writes its root once, law `max_provider_packets` default 256 and delegations that expire. (3) Saves: a continuation checkpoint saved from a fork on a worker thread (forks are O(1); the first boundary after a fork pays the journal copy while the fork is alive). |
+| Release | 0.18.0 is published: all 24 library crates on crates.io, tag `v0.18.0`, GitHub release, website deployed (canwu.org shows 0.18.0 in both languages). 0.18.0 is the only live version: 0.17.0 was yanked on 2026-10-17 (0.14.0 to 0.16.0 earlier). Downstream pins `=0.18.0` since 2026-10-17 (its release 0.77.0) and has adopted G-44, G-47 to G-54, and G-56 to G-61 (G-46 is superseded by G-61); the other released rows wait for the downstream slices that consume them. 0.19.0 is prepared (workspace version `0.19.0`, every pin `=0.19.0`) and waits for the owner: merge to `main`, tag `v0.19.0`, publish, deploy the website, then yank 0.18.0. The downstream pins 0.19.0 as the first change set of its next build wave. |
+| Policy | **Same version only** (owner, 2026-10-14): Canwu crates depend only on the exact same version of each other (`=0.19.0` once released); nothing written by an earlier release is read; no migration. |
+| Proposals of 0.19.0 (all "implemented in 0.19.0") | `docs/proposals/`: `movement-delay-leg.md` (G-64, E-44), `pending-ingress-read.md` (G-62), `resource-transit-place-and-inflow.md` (G-63, G-65, G-67, G-68, E-45; G-66 documented). The 0.18.0 proposals are listed in the 0.18.0 entry of `docs/versioning.md`. |
+| Branches and worktrees | `main` (0.18.0 and the gap records) and `claude/sweet-bell-yqcrl9` (0.19.0: `034e558` movement, `8e07403` pending ingress, `2d68fb0` resource, then the release commit). The package and release worktrees under `.worktrees/` are removed once the release commit is pushed. |
+| Release procedure | `.agents/skills/canwu-contributor-release/SKILL.md` and `docs/releasing.md`. The full list and the pre-release tests ran once on the 0.19.0 release tree (2026-10-19, Linux, without debug info): fmt, clippy, workspace tests (841 passed, 0 failed, 3 ignored), `canwu-debug` check, rustdoc with `-Dwarnings`, the four examples, `+1.88.0` check, the performance harness (fmt, clippy, tests 4 and 6 with allocation counting), the continuation gate (clippy, and tests 841 passed, 0 failed, the expected panic included), and the release-only `--ignored` tests: the 65,537-action fiscal boundary and the persisted law boundary probe passed; the million-candidate law probe (`production_runtime_archive_prepare_scales_to_one_million_candidates`) could not run on this 15 GB machine, killed by the kernel at about 13.3 GB resident, and 0.18.0 is killed the same way at about 13.6 GB, so it is the machine, not the release. **Run that probe on the release machine before tagging** (`cargo test --release --locked -p canwu-law --test law_contract -- --ignored`). Dependencies did not change, so the third-party notices were not regenerated. Every package had an independent code review (two for resource) and delta reviews until no blocking finding remained; the website copy had an independent readability review. |
+| What the adopter must know first | (1) Pin every Canwu crate at `=0.19.0`; nothing earlier loads. (2) Read the "Upgrading from 0.18.0" notes of the 0.19.0 entry of `docs/versioning.md` and its "Known limits": `DelayLeg`; incident evidence and an order's delivery attempt must be the current version (resubmit an order whose attempt record changed); a scenario-installed departed leg needs the arrival due at departure plus planned duration; `pending_ingress()` after a seal or load (trusted host only; keep your own items); resource state format 5; `RecordTransferLoss`; the link history; `enqueue_resource_account_rescope`; a tracked inflow needs a lease the host bound with `CompletionOperationBindingV1`; a tracked command whose lease belongs to another plugin is refused at admission; demands are credited with what is accepted, allocation passes count escrow in flight, and `AmendDemand` cannot go below fulfilled + reserved + in flight; for G-66, settle the second leg one boundary later at the same instant or give each leg its own handover record. (3) The 0.18.0 notes still apply. |
 
 ## 2. High
 
 No row filed by the downstream ledger is open.
 
-## 3. Medium
+## 3. Closed by 0.19.0 (prepared, not yet published)
 
-Filed 2026-10-18; each verified in the published 0.18.0 source. Nothing is built around them downstream: the
-application ships the limitation and states it.
+Each row was filed 2026-10-17 or 2026-10-18 and verified in the published 0.18.0 source; the owner decided each fix
+on 2026-10-19 (§6). Delete this section when 0.19.0 is published; the downstream ledger records each adoption.
 
-| Id | Crate | Gap at 0.18.0 | Proposed fix | Downstream effect |
+| Id | Sev. | Crate | Gap at 0.18.0 | 0.19.0 |
 | --- | --- | --- | --- | --- |
-| G-64 | `canwu-movement` | No operation delays the arrival of a departed leg: `Reroute` is refused while a leg is `Departed` (`lifecycle.rs` `reroute`: "a departed leg must arrive or fail before a reroute"), `CompleteLeg` only arrives a leg now, and `FailLeg` then `Reroute` re-runs the leg as an interruption. | `DelayLeg { execution, leg, until }`, or `Reroute` admitting a departed current leg whose replacement keeps its departure and moves its arrival, rescheduling the leg's arrival due. | An under-way leg is never held; holds are decided before departure only. |
-| G-65 | `canwu-resource` | A transfer cannot lose part of its escrow: `CompleteTransfer { Lose }` settles on `transfer.escrow`, the whole remaining quantity (`runtime.rs` `complete_transfer`). | `Lose { quantity }` (partial) leaving the remainder in escrow at the next revision, or a `SplitTransfer` before departure. | Medium once the application turns on drawn transit losses; until then no transit loss is drawn. A cargo would have to be booked as several transfers. |
-| G-67 | `canwu-resource` | An installed account's `place_scope` cannot change, and `CreateAccount` refuses a place scope from a tracked command. After an application carries a store's contents to another place, the account keeps its old place scope, so `AcceptLocal` refuses a same-place transfer at the new place. | A holder or host operation that re-scopes an account to a new place, with evidence (the carriage that moved it). | A moved store cannot be paid or drawn at its new place until it returns. |
-| G-68 | `canwu-resource` | Value from outside the modelled accounts cannot be credited: `Credit { source: ExternalInflow }` is refused as a holder command (`validate_resource_authority`), needs a completion certificate as provider ingress (`validate_local_provider_participant`), and no lease can be issued at the packet's own boundary time. There is no inflow counterpart to `ExternalOutflow`. | An `ExternalInflow` credit that a holder (or a host adapter) may request with its evidence, the counterpart of `ExternalOutflow`. | A monthly inflow from an off-ledger source is recorded but never booked. |
+| G-64 | Medium | `canwu-movement` | No operation delays the arrival of a departed leg. | `DelayLeg { execution, leg, until, reason }` holds the current departed leg; `until` is absolute and never before the boundary or the arrival scheduled at departure. |
+| G-65 | Medium | `canwu-resource` | A transfer cannot lose part of its escrow. | `RecordTransferLoss` takes part of the escrow and keeps the transfer open; the demand is credited with what is accepted. |
+| G-67 | Medium | `canwu-resource` | An account's `place_scope` cannot change. | Host-only `RescopeAccount` (`enqueue_resource_account_rescope`) with current evidence. |
+| G-68 | Medium | `canwu-resource` | Value from outside the modelled accounts cannot be credited. | Tracked `Credit { ExternalInflow(evidence) }` under a lease the host bound to exactly that credit (`CompletionOperationBindingV1`). |
+| G-62 | Low | `canwu-api`, `canwu-sim` | After a seal or a continuation restore a host cannot read its pending ingress. | `pending_ingress()` on `CanwuRun`, `Canwu`, and `CompactedCanwu`. |
+| G-63 | Low | `canwu-resource` | A multi-leg transfer cannot record its intermediate legs. | `InTransit → InTransit` advances and an ordered link history (16 entries) kept into the archive. |
+| G-66 | Low | `canwu-sim`, `canwu-resource` | Two completion leases cannot lock one external record at once. | Declined by the owner; documented: settle the second leg one boundary later at the same instant, or give each leg its own handover record. The "a day later" came from settling one boundary per day. |
+| E-44 | Medium | `canwu-movement` | Incident evidence was read through a retained-evidence check. | Incident evidence and an order's delivery attempt must be the current version. |
+| E-45 | Low | `canwu-resource` | An `ExternalInflow` outcome kept no evidence. | The outcome keeps its evidence. |
 
-## 4. Low
+## 4. Medium and Low
 
-Filed 2026-10-17 (G-62) and 2026-10-18; each verified in the published 0.18.0 source.
-
-| Id | Crate | Gap at 0.18.0 | Proposed fix | Downstream effect |
-| --- | --- | --- | --- | --- |
-| G-62 | `canwu-api` (`CompactedCanwu`), `canwu-sim` | After a continuation restore a host cannot read the payload or id of ingress queued before the save and still pending: `restore_continuation` keeps ingress at or below the settled cut out of the retained journal and pins the pending ones in `RuntimeEvidence.pinned.ingress`; `CompactedCanwu::ingress_log` returns only the retained tail; `boundaries_between` returns queued boundaries with counts per kind, not records; `SimulationView::ingress` reads a pinned record only inside a boundary system. | `CompactedCanwu::pending_ingress()` (or `ingress_record(id)` resolving pinned records), returning the queued `IngressRecord`s a continuation checkpoint pins, as a live run's `ingress_log` holds them. | After a load the host cannot list its own pending commands (a "sent" line is missing until the command applies), and an adapter that deduplicates by payload must rely on the engine's idempotency. Nothing is lost. |
-| G-63 | `canwu-resource` | A transfer carried by a multi-leg execution cannot record a completed intermediate leg or the handoff after it: `advance_transfer` admits only `PendingDispatch → InTransit`, `InTransit → ArrivalPending`, and `→ ReturnPending`; an `InTransit → InTransit` advance with a new `TransportExecutionLink { leg_execution, handoff }` is `InvalidLifecycle`. | Admit `TransferProgressV1::InTransit` from `InTransit` when the link names a later leg or a new handoff of the same execution, appending the evidence. | The transfer's custody evidence names only its first and last legs; the legs between are in the movement root only. |
-| G-66 | `canwu-sim` / `canwu-resource` | Two completion leases cannot both lock one external record in the same instant, so two `AcceptLocal` completions that share a record (the two legs of one exchange) cannot settle on the same day. | Let two completion leases hold one external record's lock in the same instant when they complete disjoint transfers, or a combined completion. | The second leg of an exchange lands a day after the first. |
-
-The source read of 2026-10-19 narrows G-66: the lock lasts from activation to completion, not for an instant, and a
-host can settle several boundaries at one simulated time (the G-12 acceptance test settles two at minute 4), so the
-second leg can settle at the same instant one boundary later; the day comes from settling one boundary per day. The
-owner declined the engine change (§6); 0.19.0 documents the workarounds.
+No row filed by the downstream ledger is open beyond §3.
 
 ### 4.1 Recorded, not proposed
 
 G-38 (the `canwu-military` shape contradicts the downstream design; relevant only if downstream ever reconsiders adopting `canwu-military`; the ledger files no fix).
 
-### 4.2 Known limits left by the 0.18.0 packages (engine-side; not numbered by the downstream ledger)
+### 4.2 Known limits left by the 0.18.0 and 0.19.0 packages (engine-side; not numbered by the downstream ledger)
 
-Each is stated in the 0.18.0 "Known limits" of `docs/versioning.md` and in its proposal. `E-nn` ids are local to this
+Each is stated in the "Known limits" of its release in `docs/versioning.md` and in its proposal. `E-nn` ids are local to this
 file and continue the earlier numbering. Severity is this file's suggestion; none blocks the downstream adoption.
 
 | Id | Sev. | Crate | Limit at 0.18.0 | Possible fix |
@@ -77,6 +72,9 @@ file and continue the earlier numbering. Severity is this file's suggestion; non
 | E-39 | Low | `canwu-law` | A law boundary at ~1,555 jurisdictions still decodes the plan once (~8 ms); directory object routes grow with live legal objects; the provider index costs ~9 µs per kept packet per boundary and keeps only the newest 256 (citation window); a delegation with no `expires_at` stays for the run. | A decoded-plan cache; directory sharding. |
 | E-40 | Low | `canwu-society` | The society root is still one record (10 MB at 4,000 cohorts, about half materialized views); under the default `Keep` the ledger grows; the intergroup relations record is rewritten whole on each revision boundary. | Shard the root; archive the ledger. |
 | E-41 | Low | reference crates, `canwu-correspondence` | Past the byte cap, the force-supply plugin's acknowledgements of resource and externality outcomes can still fail a boundary (should defer as `canwu-resource` does); correspondence plans with plain `plan_route` (no edge conditions or compiled index) and a malformed `recurring` connection payload in a carrier's knowledge still fails the boundary as `InvalidDomainRecord`. | Deferral for force-supply acknowledgements; correspondence adopts `RoutingIndex` and refuses malformed connection knowledge as a recorded rejection. |
+| E-46 | Low | `canwu-resource` | Conservation totals are global across resources and units; the design asks for totals per resource and unit. Authority, not the identity check, stops minting. | Per-resource-and-unit totals when a consumer needs them. |
+| E-47 | Low | `canwu-resource` (0.19.0) | The link history keeps 14 in-transit links (later intermediate links of a longer execution stay in the movement root only); an open transfer costs about 5.2 KB of live root at 16 links (about 43 MB at 8,192 transfers); a demand with more than `(max_archive_candidates − 1) / 2` legs (127 at the canonical 256) can never close; an operation key can be taken before any lease carries it, so issuers must not use guessable keys for provider operations; an unbound lease other than a tracked inflow authorizes whatever its targets allow; partial losses are capped only by the escrow; a rescope checks its evidence's currency and kind, not what it says. | A per-demand leg cap; key reservation by the issuer; a compact link encoding. |
+| E-48 | Low | `canwu-movement` (0.19.0) | Each `DelayLeg` leaves the due packet it replaces queued until that packet's time (pinned through seals and continuation checkpoints, listed by `pending_ingress()`, waking an otherwise empty boundary); they accumulate on a long run with many holds. | Cancel the superseded due when a hold replaces it. |
 
 ### 4.3 Limits the downstream met and worked around (not filed)
 
@@ -106,19 +104,12 @@ own leases) and E-37's publication-budget overshoot (the application's publisher
    `planning_knowledge_query()`, then `plan_route`), which matches the engine's plan only while the actor's knowledge is
    what the carrier planned with.
 
-### 4.5 Engine findings of the 0.19.0 source read (2026-10-19)
-
-| Id | Sev. | Crate | Finding at 0.18.0 | Fix |
-| --- | --- | --- | --- | --- |
-| E-44 | Medium | `canwu-movement` | Incident operations check their evidence with `domain_record_version_evidence_exists` (`lifecycle.rs` incident check, `plugin.rs` `ViewEvidence`), whose answer differs between a sealed run and its exact replay for a superseded version, so a boundary decision depends on retained evidence. | 0.19.0: incident evidence must be a current or replay-stable version. |
-| E-45 | Low | `canwu-resource` | A `Credit { ExternalInflow }` outcome keeps no evidence (`runtime.rs` `credit`), unlike production credits and outflow, against the immutable-outcome-evidence rule. | 0.19.0, with G-68. |
-| E-46 | Low | `canwu-resource` | Conservation totals are global across resources and units; the design asks for totals per resource and unit. Authority, not the identity check, stops minting. | Left; per-resource-and-unit totals when a consumer needs them. |
-
 ## 5. Next steps
 
-1. **Build 0.19.0 as decided in §6**: G-62 to G-68, E-44, and E-45, the Medium rows first (G-64, G-65, G-67, G-68).
-   The downstream has finished the build wave that filed them and pins the next release as the first change set of
-   its next wave (owner ruling, 2026-10-18). Send the §4.4 answers with the release notes.
+1. **Owner: review and confirm the 0.19.0 choices (§6 "Open").** Then publish 0.19.0: merge
+   `claude/sweet-bell-yqcrl9` into `main`, tag `v0.19.0`, publish the 24 crates, create the GitHub release, deploy the
+   website, and yank 0.18.0 once 0.19.0 is verified on crates.io. Send the §4.4 answers with the release notes. The
+   pre-release tests ran once on the release tree (§1).
 2. The §4.2 limits and E-46 by downstream need; E-41's force-supply deferral first if a host runs the reference
    economy near its byte cap; §4.3 if the downstream asks.
 3. Each change set follows the 0.18.0 pattern: one worktree and branch per package under `.worktrees/`, a proposal, durable tests that bite, an independent code review (two for persistence-heavy packages) and a delta review of the fixes, integration on a release branch, the pre-release tests of the release skill (the continuation gate included), then one release commit with the shared docs, the website (with its accuracy and copy reviews), and the skills.
@@ -182,7 +173,27 @@ the release:
 - G-66: declined. The release documents the two ways around it: settle the second leg in a further boundary at the same
   instant, or give each leg its own handover record. No shared lock and no combined exchange acceptance.
 
-Open: none.
+Open — taken in the 0.19.0 run by the orchestrator inside the decisions above, each recorded in its proposal, for the
+owner to confirm or reverse:
+- G-65 is a sibling operation `RecordTransferLoss`, not a transfer target of `RecordLoss`, so the account-loss path is
+  unchanged; it has the same controller-command and provider-ingress paths.
+- G-68's "host-issued lease" is enforced by a **lease operation binding** (`CompletionOperationBindingV1`: operation
+  kind, quantity, optionally the transfer disposition), carried in the certificate digest. A tracked inflow requires a
+  lease bound to exactly that credit; a holder cannot write a binding; a tracked command is refused at admission when
+  its lease's grants or expected participants name another plugin. The code review showed the plain lease let a
+  custodian mint under a lease issued for another operation.
+- E-44 extends to an order's `delivery_attempt`, which must also be the current version: an attempt record revised
+  before the order settles refuses the order, and the host resubmits.
+- Behaviour changes found necessary in review, beyond the rows: a demand is credited with what is accepted;
+  allocation passes count escrow in flight (0.18.0 could allocate it twice); `AmendDemand` cannot go below fulfilled +
+  reserved + in flight; an ended demand's closure waits for the transfers that draw on it; archived loss identities are
+  refused; a closure without room is a skip; a departed leg's arrival due must match its scheduled arrival or hold, so
+  a scenario that installs one otherwise is refused at load.
+- The Chinese terms of the 0.19.0 concepts, as in `docs/terminology.md` and both website term pages: 路段滞留 leg hold,
+  排定到达时刻 scheduled arrival, 待处理输入 pending ingress (the sheet's existing rendering, used instead of the
+  proposal's 待准入输入), 转移部分损耗 partial transfer loss, 运输关联历史 link history, 中间路段 intermediate leg,
+  账户改换地点 account rescope, 外部流入入账 external inflow credit, 租约操作绑定 lease operation binding; and in website
+  prose 资格信封 for `EligibilityEnvelopeV1`.
 
 ## 7. Working rules
 

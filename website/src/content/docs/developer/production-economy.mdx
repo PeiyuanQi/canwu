@@ -64,7 +64,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 1. **需求。** 申请者以带请求标识的资源命令提交 `SubmitDemand`，之后可用 `AmendDemand` 或 `CancelDemand` 修改或取消。适配器输入不能提交或修改需求。
 2. **分配。** 上层应用用 `enqueue_resource_allocation` 为某个申请者排入一次分配。`canwu-resource` 依据受保护存量底线、最低有用量、部分履约策略、到期时间、优先级和稳定的 tie-break 键做确定性分配，并记录资源预留和分配腿。
 3. **扣减。** 消费者插件经适配器输入消费分配结果（`Consume`），或者由来源保管人（授权下的分配则为被授权方）发起转移（`BeginTransfer`），把相应数量移入托管。
-4. **运输。** `canwu-transport` 和 `canwu-movement` 负责运送。转移进度（`AdvanceTransfer`）经适配器输入提交，并引用运输证据。
+4. **运输。** `canwu-transport` 和 `canwu-movement` 负责运送。转移进度（`AdvanceTransfer`）经适配器输入提交，并引用运输证据。多段运输执行中，提供方为之后的每个路段或交接（中间路段）再发送一次 `AdvanceTransfer`；转移按顺序把它们记入运输关联历史（`link_history`，最多 16 条，其中在途的最多 14 条）。
 5. **到达。** `CompleteTransfer` 结束转移：经适配器输入的 `Accept` 为目的地入账；`AcceptLocal` 处理同地交接；其余情况用 `Lose` 或 `Return` 结束。
 6. **使用。** 生产、军事补给等消费者在之后的结算边界使用已入账的存量。它们引用精确的分配与履约证据，只写自己的记录。
 
@@ -86,7 +86,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 ## 完成租约
 
-每个不可逆请求（消费、发起转移、转移的终态处置、入账、对外流出、账户损耗）都要携带一份完成租约的激活凭证。租约操作用 `enqueue_resource_completion_operation` 排入队列。
+每个不可逆请求（消费、发起转移、转移的终态处置、入账、对外流出、账户损耗、转移部分损耗）都要携带一份完成租约的激活凭证。租约操作用 `enqueue_resource_completion_operation` 排入队列。
 
 一份租约可以有多个参与方，各自授权、各自准备，所以通用路径要四个操作：`Acquire`、`Grant`、`Prepare` 和 `Activate`，每个操作都留下一条操作结果和一条租约凭证。租约需要其他插件拥有的授权时（例如适配器操作），或者租约由其他插件协调时（例如 `canwu-production` 和军事补给参考消费者），走这条路径。
 
@@ -101,7 +101,7 @@ ResourceCompletionOperationV1::SingleStepLease(SingleStepCompletionLeaseV1 {
 })
 ```
 
-- **适用场合。** “唯一的参与方”的确切含义是：`lease.expected_participants` 正好是 `{"canwu-resource"}`。带请求标识的 `BeginTransfer`、交换的一条腿、以 `AcceptLocal`、`Lose` 或 `Return` 处置的 `CompleteTransfer`、`ExternalOutflow` 和 `RecordLoss`，背后都是这种租约。写了其他参与方的一步式请求会以 `invalid_lifecycle` 被拒绝。
+- **适用场合。** “唯一的参与方”的确切含义是：`lease.expected_participants` 正好是 `{"canwu-resource"}`。带请求标识的 `BeginTransfer`、交换的一条腿、以 `AcceptLocal`、`Lose` 或 `Return` 处置的 `CompleteTransfer`、`ExternalOutflow`、外部流入的 `Credit`、`RecordLoss` 和 `RecordTransferLoss`，背后都是这种租约。写了其他参与方的一步式请求会以 `invalid_lifecycle` 被拒绝。
 - **检查相同，凭证相同。** 这个操作依次执行四个步骤，每一步的检查与单独执行时一样。对同一个申请、同一份授权和同一组目标，只要激活发生在同一个边界，它得到的凭证与四步路径完全相同，所以携带凭证的请求不需要任何改动。
 - **记录更少。** 它只留下一条 `CompletionLease` 操作结果（键为 `resource:completion:lease:{acquisition}`）和一条凭证，四步路径则各留四条。在仓库的测试用例中，一次同地转移留下 15 条终态记录、做 9 次归档查找，而四步路径是 27 条和 15 次。
 - **进入方式。** 带请求标识的持有人命令不能携带它，因为已激活的租约不会过期，并且一直锁着目标。它由上层应用排入队列，或者由声明了资源完成租约输入的插件安排。
@@ -115,6 +115,19 @@ ResourceCompletionOperationV1::SingleStepLease(SingleStepCompletionLeaseV1 {
 - 持有人仍然可以用带请求标识的命令发送 `Acquire`。它在准入时就必须已经可用，并且引用当前的证据；这样的申请在等待第一份授权期间，公平排序中排在它后面的所有一步式请求都会以 `invalid_lifecycle` 被拒绝。只使用一步式租约的上层应用要留意这种申请，并把它中止。如果持有人自己那条被拒绝的 `Abort` 已经占用了中止操作的键，就改为给这份申请授权，再释放该授权。
 
 普通请求不能使用以保留前缀 `resource:completion:` 开头的操作键，用了的会以 `reserved_operation_key` 被跳过。持有人仍然可以通过它能以带请求标识的命令发送的两种完成操作占用完成操作的键：`Acquire`，以及对自己持有的租约的 `Abort`。键已被另一个请求占用的数据包，在任何入口都什么也不结算，所在边界照常提交；跳过事件以 `operation_key_taken` 指明它，该键下的操作结果属于另一个请求。
+
+### 租约操作绑定
+
+完成租约的目标只说明它的操作可以动哪些记录，不说明是哪一个操作：外部流出、外部流入，以及以记录为原因的账户损耗，锁定的都是一个账户修订号和一个记录版本。租约的签发方（上层应用，或协调这份租约的插件）可以把租约绑定到一个操作上：`EligibilityEnvelopeV1::bound_to` 设置资格信封的 `operation_binding`（`CompletionOperationBindingV1::new(kind, quantity)`；`CompleteTransfer` 的租约还可以用 `with_disposition` 指定处置方式）。申请保存信封的摘要，激活凭证也带着它，所以租约申请之后，绑定就无法再改。未绑定的信封，编码和摘要都与 0.18.0 相同。
+
+- **只有签发方能绑定。** 持有人以带请求标识的命令发送的 `Acquire` 如果信封带有绑定，会记为一条 `invalid_authority` 拒绝。
+- **每次兑现都要检查。** 把已绑定的租约用于另一种操作、另一种处置方式（绑定写明了处置方式时）或另一个数量，会记为一条 `invalid_authority` 拒绝。绑定的数量是：入账、流出或损耗的数量；消费或发起转移时分配腿的数量（交换则是每条腿各自的数量）；消费批次各项分配腿的合计；以及终态转移处置所结算的托管量。
+- **带请求标识的命令提前被拒。** 出现以下情况时，带请求标识的命令在准入时就被拒绝，什么也不结算，也不占用操作键：
+  - 它的租约包含其他插件持有的参与方授权，或者把其他插件列为预期参与方（这样的租约授权的是那个插件的操作，该操作经适配器输入到达）；
+  - 从请求本身就能看出租约的绑定不接受它；
+  - 它是外部流入的 `Credit`，而租约没有绑定。
+
+  租约原本授权的操作仍可以用它自己的键结算。结算时还会再检查一次：准入之后才出现的其他插件的租约会以 `failed_settlement_checks` 被跳过，不占用操作键；绑定有变化的租约、所结算的托管量与绑定不符的处置，以及绑定不接受的适配器兑现，都会记为 `invalid_authority` 拒绝，并占用各自的操作键。
 
 ## 受保护存量底线
 
@@ -164,7 +177,7 @@ ResourceOperationRequestV1::SetProtectedFloor(ResourceProtectedFloorRequestV1 {
 - `ExactAccounts` 和 `Granted` 的列表含 1 到 256 个账户（`MAX_DEMAND_SOURCE_ACCOUNTS`），ID 严格递增、不能重复。列表无效时，命令在任何存量变化之前就被拒绝；分配时还会再检查一次。
 - 分配只根据所选账户计算可用量、最低有用量和部分履约。列出的账户不够时，需求只能拿到这些账户里的存量。受保护存量底线以及之后的转移、消费校验照常适用。
 - 在需求第一次分配之前，可以凭预期需求修订号修改策略。一旦有了任何资源预留（包括已消费、但仍对应在途转移的预留）或任何履约，策略就固定下来；要换策略，请取消需求再提交新需求。取消需求不会影响它已经发起的转移。
-- `AmendDemand` 不能修改需求的状态、拒绝原因或申请者，这类修改会被记录为拒绝。已终止的需求不能修改。
+- `AmendDemand` 不能修改需求的状态、拒绝原因或申请者，这类修改会被记录为拒绝。它也不能把请求量改得少于需求已经占用的数量，即已履约、已预留和在途数量之和（退回中的转移不计在内）；这样的修改会记为一条 `invalid_lifecycle` 拒绝。已终止的需求不能修改。
 
 权限：`Pooled` 和 `ExactAccounts` 只决定从哪里取得供给，不赋予动用其他保管人存量的权利。由你的应用控制谁可以提交资源池需求、以哪个申请者身份提交。要让一个保管人在限额和时间窗口内动用另一方的存量，请使用动用授权和 `Granted` 策略。任命、用途以及谁可以授权给谁，仍由你的应用决定。
 
@@ -220,7 +233,7 @@ canwu.enqueue_command(
 
 撤销：授权方凭预期授权修订号提交 `RevokeAccessGrant`。授权下一旦有过任何预留或扣减，撤销就会被拒绝，所以额度和有效期要按实际委托来定。
 
-上限与读取：授权（包括已撤销的）一直保存在热状态中，每个资源状态最多 4,096 份（`MAX_RESOURCE_ACCESS_GRANTS`）。要像控制账户创建一样控制谁能签发授权。`resource_access_grant_status(canwu, holder, grant_id)` 向授权方或被授权方返回授权内容及其额度核算。
+上限与读取：授权（包括已撤销的）在资源根的整个生命期内都保存在活动桶中，每个资源状态最多 16,384 份（`MAX_RESOURCE_ACCESS_GRANTS`），不会归档。要像控制账户创建一样控制谁能签发授权。`resource_access_grant_status(canwu, holder, grant_id)` 向授权方或被授权方返回授权内容及其额度核算。
 
 举个例子：应用中的征发流程先记录人口所有者的同意；所有者再引用这条记录签发授权，军队提交 `Granted` 需求，并用自己的租约扣减分配结果。[动用授权测试](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-resource/tests/gap_g05_resource_access_grant.rs)通过对外 API 演示了签发授权、在授权下分配、以转移方式扣减以及撤销授权。
 
@@ -232,6 +245,18 @@ canwu.enqueue_command(
 - 扣减不动用已预留的存量；除非设置了 `allow_protected`，否则遵守受保护存量底线。账户修订号过期会被拒绝。
 - 作为带请求标识的命令时，必须来自账户保管人。经适配器输入时，`cause` 必须是提供方的精确来源记录。
 - 持有人报告会包含 `ResourceLossObservationV1` 条目，可见性规则与转移详情相同。
+
+## 转移部分损耗
+
+`ResourceOperationRequestV1::RecordTransferLoss(ResourceTransferLossRequestV1)` 记录在途转移的一部分托管量的损耗，例如途中腐坏的粮食。请求携带 `loss_id`、转移、转移的预期修订号、数量、`cause`、时间和完成凭证。
+
+- 转移保持原来的状态和其余的托管量：这部分数量从 `escrow` 移到 `lost`，转移修订号前进，并记下一条 `transfer: Some(..)` 的 `ResourceLoss`，计为已准入损耗。转移处于任何非终态时都可以记录，次数不限。
+- 数量必须大于零（否则以 `invalid_definition` 拒绝），并且小于托管量（否则以 `invalid_lifecycle` 拒绝）。要让剩下的全部损耗，请用 `CompleteTransfer` 的 `Lose` 结束转移，部分损耗之后剩下的数量都会记为损耗。
+- 凭证锁定处于预期修订号的转移；原因是领域记录时，还锁定那个记录版本。这次损耗只完成它自己的租约，发起转移时的租约一直保留到终态处置。如果已有一份租约为终态处置锁定了转移的当前修订号，损耗的租约就锁不上：请先释放那份租约，再按损耗之后的修订号取一份新的。
+- 由于转移修订号前进，仍按旧修订号排队的推进或取消会以 `version_conflict` 被拒绝。
+- 作为带请求标识的命令时，它必须来自转移的控制方，与 `Lose` 相同：来源保管人，或者授权下发起的转移的被授权方。经适配器输入时，`cause` 必须是提供方的精确来源记录。
+- 验收按实际验收的数量为需求记履约，而不是按分配：一项 100 的转移损耗 30 之后被验收，记下 70 的履约，需求还剩 30，下一次分配可以补上。分配时把在途转移为需求运送的数量计为已动用，所以在途的托管量不会被分配两次；退回中的转移永远不会被验收，所以它一开始退回，这部分托管量就重新需要供给。为需求运送的转移还在途中时需求已经终止的，转移被验收时需求保持原来的终态，它的记录留在活动根里，直到转移结束。
+- 转移不列出自己的损耗；每条损耗都写明所属的转移，`lost` 是它们的合计。损耗标识在整个运行期内只能用一次，损耗归档之后也一样。
 
 ## 原子交换
 
@@ -248,9 +273,19 @@ canwu.enqueue_command(
 
 `ResourceTransferDispositionV1::AcceptLocal { destination, expected_destination_revision, handover_evidence }` 不经运输执行就结算一项转移，例如同一仓库或同一城镇内的交接。它只适用于仍处于 `PendingDispatch`、没有运输关联的转移，且两个账户声明了相同的 `ResourceAccount::place_scope`。
 
-- `place_scope` 由场景在安装账户时声明，之后保持不变，参伍不做推断。默认值 `None` 表示该账户不能使用本地验收。带请求标识的 `CreateAccount` 命令不能设置它。
+- `place_scope` 由场景在安装账户时声明，之后只有上层应用可以用 `enqueue_resource_account_rescope` 更改，并须引用记载这次搬迁的那条记录的当前版本；参伍不做推断。默认值 `None` 表示该账户不能使用本地验收。带请求标识的 `CreateAccount` 命令不能设置它。
+- 更改地点范围的请求（`ResourceRescopeAccountRequestV1 { operation_key, account, expected_account_revision, place_scope, evidence }`）不需要完成租约，会让账户修订号前进。它的证据必须是某条记录的当前版本，记录种类必须是传给 `ResourcePlugin::new` 的种类之一；引擎只检查证据是否为当前版本、种类是否允许，不检查它是否表明存量已在新地点。有非终态的转移指向该账户、或有租约锁定账户的当前修订号时，请求会被拒绝。引用该账户的资源预留、需求和动用授权都保持不变。
 - 地点范围缺失或不一致时以 `invalid_definition` 拒绝；已有运输关联的转移以 `invalid_lifecycle` 拒绝。
 - 终结凭证会锁定精确的交接记录。作为带请求标识的命令时，`AcceptLocal` 必须来自目的地保管人；经适配器输入时，交接记录必须是提供方的来源记录。
+- 交换的两条腿可以都对同一条交接记录做本地验收，但不能在同一个边界中：第一条腿的终结凭证从激活到完成一直锁定这条记录的精确版本。可以在同一模拟时刻的下一个边界结算第二条腿（上层应用可以在同一时刻结算多个边界；等第一次验收结算之后，在各持有人的租约冷却允许时再为第二条腿取租约），也可以为每条腿各用一条交接记录。
+
+## 外部流入入账
+
+来源为 `ResourceCreditSourceV1::ExternalInflow(DomainRecordVersionRef)` 的 `Credit` 把来自模型账户之外的价值记入账户，例如贡赋或从外地购入的物资，它与 `ExternalOutflow` 相对应。它计入 `ConservationTotalsV1::external_inflow`，已应用的结果把所引用的记录版本保留为证据。
+
+- **作为带请求标识的命令**由账户保管人发送时，需要一份一步式完成租约：锁定账户修订号和流入所引用的记录版本，并且恰好绑定这笔入账。用 `bound_to(CompletionOperationBindingV1::new(ResourceOperationKind::Credit, quantity))` 构建租约的资格信封，再用 `enqueue_resource_completion_operation` 排入这份租约。租约未绑定、或绑定到另一种操作或另一个数量时，带请求标识的外部流入在准入时就被拒绝，所以保管人只能按上层应用绑定的数量入账一次。
+- **经适配器输入**时，提供方插件可以把这条记录作为提供方来源，在自己的参与方授权下发送。这条路径不需要绑定，带绑定的租约照常检查。
+- 引擎不限制流入的数量：限制持有人流入的是上层应用签发的租约。生产入账仍然不能作为带请求标识的命令或经适配器输入提交，只能经生产产出批次结算。
 
 ## 生产产出
 

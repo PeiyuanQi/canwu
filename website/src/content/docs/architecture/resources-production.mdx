@@ -85,7 +85,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | 已准入产出 | 来源为 `ResourceCreditSourceV1::Production` 的 `Credit`，只能通过生产产出批次结算 |
 | 外部流入 | 来源为 `ResourceCreditSourceV1::ExternalInflow` 的 `Credit`，须引用证据 |
 | 已准入消费 | 对某条分配腿的 `Consume` |
-| 已准入损耗 | 账户上的 `RecordLoss`，或转移的 `Lose` 处置 |
+| 已准入损耗 | 账户上的 `RecordLoss`、针对转移部分托管量的 `RecordTransferLoss`，或转移的 `Lose` 处置 |
 | 外部流出 | `ExternalOutflow`，可以是针对账户的请求，也可以是转移的处置方式，须引用权限证据 |
 
 另有三条规则保证这个等式可信。单位从不隐式换算，因为每个账户、需求和转移都指定一个确切的资源版本和一个确切的单位版本。每个操作都带一个 `ResourceOperationKey`：重发同一请求会得到原来的 `ResourceOperationOutcome`，同一个键配上不同的请求则以幂等冲突失败。违反领域规则的操作会结算为 `Rejected` 结果，所有数量保持原样。如果候选状态仍然不满足等式，第 8 阶段的检查失败，整个结算边界回滚。
@@ -101,7 +101,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `ProtectedFloorPolicyRevision` | 不参与普通分配的保留量，例如种粮，以及允许动用底线以下存量的需求类别。政策版本可以由场景预先编写，也可以由账户的保管人在运行中安装 |
 | `ResourceDemand` | 申请者提出的需求：数量、最低有用量、`PartialFulfillmentPolicy`、到期与失效时间、优先级、平局决胜键和 `source_policy` |
 | `ResourceReservation`、`ResourceAllocationLeg` | 某个账户为某项需求分出的一份数量；消费者引用分配腿作为精确证据 |
-| `ResourceTransfer` | 两个账户之间处于托管中的存量，带 `ResourceTransferState` 和可选的 `TransportExecutionLink` |
+| `ResourceTransfer` | 两个账户之间处于托管中的存量，带 `ResourceTransferState`、可选的 `TransportExecutionLink`（当前的运输关联），以及记录它推进时经过的每条运输关联的 `link_history` |
 | `ResourceConsumption`、`ResourceLoss`、`ResourceFulfillment` | 终态证据：用掉了多少、损失了多少、需求满足了多少 |
 | `ResourceOperationOutcome` | 每个操作的不可变凭证，状态为 `Applied`、`Rejected` 或 `Duplicate` |
 | `ResourceAccessGrantV1` | 授权方保管人记录在案的同意：被授权方可以在额度和时间窗口内动用它的存量 |
@@ -144,12 +144,13 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 `}
 />
 
-资源操作有三条入口。带请求标识的命令是通过 `CommandRequest` 提交、带请求 ID 和预期修订版本的命令。每条入口只接受一部分操作：
+资源操作有四条入口。带请求标识的命令是通过 `CommandRequest` 提交、带请求 ID 和预期修订版本的命令。每条入口只接受一部分操作：
 
 | 入口 | 由谁发送 | 操作 |
 | --- | --- | --- |
-| 带请求标识的命令 `apply_resource_operation_v1` | 对自己掌控的存量采取行动的持有人。命令主体必须是掌控目标记录的持有人。 | `CreateAccount`、`SubmitDemand`、`AmendDemand`、`CancelDemand`、`BeginTransfer`、`BeginExchange`、`CancelTransfer`、以 `AcceptLocal`、`Lose` 或 `Return` 处置的 `CompleteTransfer`、`RecordLoss`、`ExternalOutflow`、`SetProtectedFloor`、`IssueAccessGrant`、`RevokeAccessGrant`，以及租约的申请和放弃 |
-| 适配器输入 `resource_adapter_operation_v1` | 提供方插件。请求中的证据字段必须等于数据包引用的精确记录版本，带时间的请求只能在它写明的时间结算。 | `Consume`、`AdvanceTransfer`、以 `Accept`、`AcceptLocal` 或 `ExternalOutflow` 处置的 `CompleteTransfer`、`RecordLoss`、`ExternalOutflow`、外部流入的 `Credit`，以及观察记录 |
+| 带请求标识的命令 `apply_resource_operation_v1` | 对自己掌控的存量采取行动的持有人。命令主体必须是掌控目标记录的持有人。 | `CreateAccount`、`SubmitDemand`、`AmendDemand`、`CancelDemand`、`BeginTransfer`、`BeginExchange`、`CancelTransfer`、以 `AcceptLocal`、`Lose` 或 `Return` 处置的 `CompleteTransfer`、`RecordLoss`、`RecordTransferLoss`、`ExternalOutflow`、外部流入的 `Credit`、`SetProtectedFloor`、`IssueAccessGrant`、`RevokeAccessGrant`，以及租约的申请和放弃 |
+| 适配器输入 `resource_adapter_operation_v1` | 提供方插件。请求中的证据字段必须等于数据包引用的精确记录版本，带时间的请求只能在它写明的时间结算。 | `Consume`、`AdvanceTransfer`、以 `Accept`、`AcceptLocal` 或 `ExternalOutflow` 处置的 `CompleteTransfer`、`RecordLoss`、`RecordTransferLoss`、`ExternalOutflow`、外部流入的 `Credit`，以及观察记录 |
+| 上层应用的 `resource_account_rescope_v1`（`enqueue_resource_account_rescope`） | 只有上层应用；其他插件安排的数据包什么也不结算。 | `RescopeAccount` |
 | 插件自有的数据包 | 上层应用通过辅助函数发送，或由 `canwu-production` 发送 | 分配请求（`resource_authorized_allocation_v1`）、租约状态转移（`resource_completion_operation_v1`，包括一步式完成租约）和生产产出批次（`resource_production_output_batch_v1`） |
 
 <Steps>
@@ -157,7 +158,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 2. 需求。申请者发送带请求标识的[领域命令](/reference/terminology/) `apply_resource_operation_v1`，命令用 `resource_command` 构建。命令处理器检查签发者能否代表命令的 `subject`、`subject` 是否掌控每个目标，然后排入一条 `resource_command_v1` 输入。
 3. 分配。上层应用用 `enqueue_resource_allocation` 为一个申请者排入一次分配。边界准入这条输入后，第 7 阶段的写入系统先让过期的需求失效，再收集该申请者已到期或有变化的需求；需求数超过请求中的 `candidate_limit` 时，这次分配失败。随后按优先级从高到低依次满足这些需求，优先级相同时再依次比较到期时间、平局决胜键、准入序号和需求 ID。每分出一份，就写入一条资源预留和一条分配腿。
 4. 租约。执行任何不可逆步骤之前，行动的持有人需要一份已激活的完成租约，通过 `enqueue_resource_completion_operation` 取得。租约要经过四个操作（申请、授权、准备、激活）才会激活，因为每个参与方各自授权、各自准备：对于生产执行，由 `canwu-production` 协调租约，`canwu-resource` 作为参与方加入。如果资源插件是唯一的参与方（例如发起转移、本地验收、损耗或流出），一个 `SingleStepLease` 操作就能完成全部四步，检查相同，得到的凭证也相同，见[完成租约](/developer/production-economy/#完成租约)。凭证锁定该步骤依赖的精确账户、分配腿和记录。每次消费、转移发起、转移处置、入账、损耗和流出都必须携带这份凭证。
-5. 扣减。消费者插件用 `enqueue_resource_adapter_operation` 经适配器输入发送 `Consume`，并引用授权这次扣减的自有记录的精确版本。另一种方式是来源保管人用 `BeginTransfer` 发起转移，相应数量移入托管。转移进度和 `Accept` 以适配器操作的形式到达，并引用运输证据。`AcceptLocal`、`Lose` 和 `Return` 以其他方式结束转移。转移的每一步都写明预期的转移修订号，所以同一次到货不会入账两次。
+5. 扣减。消费者插件用 `enqueue_resource_adapter_operation` 经适配器输入发送 `Consume`，并引用授权这次扣减的自有记录的精确版本。另一种方式是来源保管人用 `BeginTransfer` 发起转移，相应数量移入托管。转移进度和 `Accept` 以适配器操作的形式到达，并引用运输证据。经过多个路段运送的转移会在运输关联历史中记下每个路段和交接；途中可能损耗一部分托管量，而转移仍然继续。`AcceptLocal`、`Lose` 和 `Return` 以其他方式结束转移。转移的每一步都写明预期的转移修订号，所以同一次到货不会入账两次。
 6. 生产。生产命令（`apply_production_operation_v1`）创建并批准工单。`StartExecution` 引用 `canwu-resource` 已经消费的投入：每个 `ResourceInputBinding` 写明分配腿、消费记录和对应结果。它还带上产能分配，由第 7 阶段标为 `Consumed`。`AdvanceExecution` 推进在制品，`CompleteExecution` 让生产执行进入 `CompletedPendingOutputSettlement`，其产出数量可以按实际产出比例缩放。
 7. 产出。在第 12 阶段，生产插件把当前的生产记录版本固定为该执行的 `output_source`，并安排一条 `resource_production_output_batch_v1` 输入。在之后的某个边界，资源写入系统要么为批次中的全部产出入账，要么一项也不入账，然后安排一条带 `settled_at`（入账结算的时刻）的 `production_output_ack_v1`。在资源记录里放不下的批次会被延后，不会丢失（见[跳过的数据包与延后结算](#跳过的数据包与延后结算)），它的各笔入账改到实际结算的时刻。生产插件的第 7 阶段检查每个结果的请求摘要都绑定了 `settled_at`，保存这些结果和 `output_settled_at`，释放产能，并把生产执行标为 `Settled`。
 8. 检查与发布。第 8 阶段校验每个扩展的候选状态；守恒或产能规则被破坏属于引擎不变量失败，边界失败。第 13 阶段发布持有人报告。
@@ -292,6 +293,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `ResourceLimitsV1::canonical()` | 账户、需求、转移各 8,192 个（硬上限 262,144；池化需求的分配会读取每一个账户，每个约 30 微秒，所以规范账户数保持不变，要调高它的上层应用应改为动用精确账户或动用授权）；资源定义和单位版本各 16,384 个；每次分配 2,048 个候选、2,048 个待处理需求（硬上限各 16,384）；每个边界 32 个消费批次条目（`max_batch_items_per_boundary`，硬上限 2,048）、256 份报告；8,192 条热操作结果（硬上限 16,384）；256 条热终态归档候选（硬上限 16,384；维护凭证预算不得小于它）；状态 256 MiB，按活动根加全部常驻终态条目和活动条目计算 |
 | `MAX_DEMAND_SOURCE_ACCOUNTS` | `ExactAccounts` 或 `Granted` 列表最多 256 个账户 |
 | `MAX_RESOURCE_ACCESS_GRANTS` | 每个资源状态最多 16,384 份动用授权，已撤销的也计入 |
+| `MAX_RESOURCE_TRANSFER_LINKS` | 一项转移的运输关联历史最多 16 条，其中在途的最多 14 条；再有中间推进会以 `limit_exceeded` 被拒绝，到达、退回或终态处置则总会被接受。每条运输关联让活动根中未结束的转移增加约 286 字节（只测量过一次，标识长 20 到 30 个字符） |
 | `MAX_RESOURCE_CONSUMPTION_BATCH_ITEMS` | 一个消费批次最多 256 项；每一项关闭其需求时留下六条常驻终态记录，批次本身再留两条 |
 | 完成租约 | 每个生命周期 16 条终态凭证（`MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE`）；每个权限主体 16 个、全局 1,024 个待处理申请；始终未激活的授权在 8 个边界后过期（`PREACTIVATION_LEASE_TTL_BOUNDARIES`）；已应用的一步式完成租约占用 `2 + 16` 个归档候选名额和 `1 + 16` 个热操作结果名额，被拒绝的只占它结果的名额 |
 | 受保护存量底线 | 一条资源记录最多 4,096 个政策版本，预先编写的和按内容寻址的合计（`MAX_PROTECTED_FLOOR_POLICY_REVISIONS`）；按内容寻址的版本最多 16 个覆盖类别，每个 1 到 160 字节 |

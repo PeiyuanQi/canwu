@@ -163,6 +163,11 @@ with a machine-validated payload and declared core/component access.
   moves that copy onto the original; finish the save before the next
   boundary when that matters, or seal, since a sealed run copies only its
   tail.
+- After a seal or a continuation restore, list your still-pending commands
+  with `pending_ingress()` (0.19.0, on `Canwu`, `CompactedCanwu`, and
+  `CanwuRun`; `ingress_log` then holds only the retained tail) and keep only
+  your own, such as those with `cause == None` or your request IDs, since it
+  lists every source's payloads unfiltered.
 - Production at scale (0.18.0): install one `ProductionState` per scope
   with `scope` set (`production_scope_runtime_reference`) beside the
   primary root, give each its `limits` (`ProductionLimitsV1`, canonical
@@ -246,6 +251,16 @@ with a machine-validated payload and declared core/component access.
   `enqueue_resource_completion_expiry_tick`: a host `Expire` is refused at
   enqueue. A finished lease leaves the root, so `resource_completion_status`
   no longer finds it.
+- Resource transit and inflow (0.19.0): record a part lost on the way with
+  `RecordTransferLoss` (the transfer stays open, and acceptance credits the
+  demand with what arrives), advance a multi-leg carriage leg by leg and read
+  its `ResourceTransfer::link_history` (at most 16 links; `exact_evidence` is
+  empty while the transfer is open), move an account with the host-only
+  `enqueue_resource_account_rescope` citing the current record of the move,
+  and let a custodian book an external inflow as a tracked `Credit` only
+  under a single-step lease whose envelope the host bound to that credit
+  (`EligibilityEnvelopeV1::bound_to(CompletionOperationBindingV1::new(
+  ResourceOperationKind::Credit, quantity))`).
 - Routing at scale (0.18.0): compile a `PlanningSnapshot` once per network
   revision into a `RoutingIndex`, move it to a new read cut with
   `reobserve`, plan with `plan_route` or `plan_route_with_conditions`
@@ -255,6 +270,14 @@ with a machine-validated payload and declared core/component access.
   pattern, not a slot per sailing. Validate connection payloads before
   publishing them as knowledge: `plan_route` now refuses a network
   `RoutingNetwork::new` refuses.
+- Movement (0.19.0): hold a departed leg with `MovementOperation::DelayLeg {
+  execution, leg, until, reason }` from its owner, its operator, or an
+  incident citing the current version of its evidence (incident evidence and
+  an order's `delivery_attempt` must now be current, so resubmit an order
+  whose delivery-attempt record was revised before it settled), where `until`
+  is absolute and no earlier than the boundary or the leg's scheduled arrival,
+  so later delays lengthen, shorten, or lift the hold, and `Reroute` stays
+  refused while the leg is departed.
 - Society (0.18.0): author intergroup relations with
   `IntergroupRelations::into_record` beside the root, revise many per
   packet with `intergroup_relation_revision_v1` (each change names the edge

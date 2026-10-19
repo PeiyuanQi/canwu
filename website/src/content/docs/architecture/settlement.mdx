@@ -140,7 +140,7 @@ B 和 C 优先级相同，由平局决胜键决定先后；这里 B 的键排在
 />
 
 <Steps>
-1. **登记。** 协调插件在第 7、10 或 12 阶段的某个系统声明写入 `StateKey::core_transitions()`，并提出 `BoundaryDirective::RegisterTransitionManifest`。`TransitionManifest` 包含 `lineage_id`、尝试序号 `attempt`、就绪边界 `ready_at`，以及每个参与插件的一项条目。每项条目列出该参与者在转移前（`expected_pre`）和转移后（`expected_post`）预期的记录版本。清单身份是 `TransitionManifestId { coordinator, lineage_id, attempt }`，其中协调者由内核按登记插件填写。第 7 阶段登记的清单可以在同一边界就绪；第 10 或第 12 阶段登记的清单必须指定之后的边界。就绪边界最多只能在 1,024 个边界之后。
+1. **登记。** 协调插件在第 7、10 或 12 阶段的某个系统声明写入 `StateKey::core_transitions()`，并提出 `BoundaryDirective::RegisterTransitionManifest`。`TransitionManifest` 包含 `lineage_id`、尝试序号 `attempt`、就绪边界 `ready_at`，以及每个参与插件的一项条目。每项条目列出该参与者在转移前（`expected_pre`）和转移后（`expected_post`）预期的记录版本。清单身份是 `TransitionManifestId { coordinator, lineage_id, attempt }`，其中协调者由内核按登记插件填写。第 7 阶段登记的清单可以在同一边界就绪；第 10 或第 12 阶段登记的清单必须指定之后的边界。就绪边界最多只能在 1,024 个边界之后。`ready_at` 由协调者选择，不由引擎决定；它是边界 ID，不是日期。暂存和提交从不跨越两个边界：参与者在就绪边界暂存，写入也在同一个边界提交，不会推迟到下一个边界。
 2. **暂存。** 在就绪边界的第 10 阶段，清单所列的每个参与者用声明了同一写入的第 10 阶段系统提出 `StageTransitionWrite { manifest_id, writes }`。暂存的写入就是普通指令，所以该系统声明的写入、所有权、阶段规则和可见性照常适用。`writes` 为空表示参与者到场但不写入。未列入清单的插件尝试暂存时，边界以 `InvalidAuthority` 失败。
 3. **审计。** 第 11 阶段提交之前，内核检查本边界就绪的每份清单。所有参与者都已暂存、所有预期版本都相符时，结果为 `Committed`。没有任何参与者暂存时，结果为 `Expired`，不为这份清单写入任何内容。只有部分参与者暂存时，整个边界以 `TransitionParticipantMissing` 失败；预期版本不符时，以 `TransitionVersionMismatch` 失败。
 4. **读取。** 内核保存一条 `TransitionAuditRecord`，记录结果和每个参与者暂存的写入数量，出现在 `BoundaryRecord::transition_audits` 和 `BoundaryReceipt::transition_audits` 中。协调者和参与者在第 11 阶段及之后运行的系统，通过 `SimulationView::transition_audits` 读取它。

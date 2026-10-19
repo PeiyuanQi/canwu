@@ -952,8 +952,13 @@ the pooled path retains its existing account scan.
 
 The policy can be amended with an expected revision only before any allocation
 or fulfillment. The reservation-by-demand index retains consumed reservations
-while transfers are in flight, even when fulfillment is zero. Reservations become
-archive candidates only with terminal demand closure; terminal demands cannot be
+while transfers are in flight, even when fulfillment is zero. Escrow of open
+transfers counts as drawn: an allocation pass does not allocate it again or
+reject its demand for the minimum while it is in flight, and a loss or a
+return gives back exactly what it takes (a returning transfer is not in
+flight for its demand). Reservations become archive candidates only with
+terminal demand closure, and since 0.19.0 an ended demand's closure waits
+until no open transfer draws on its legs; terminal demands cannot be
 amended. The policy participates in request digests, snapshot identity, replay
 and terminal demand archives. Retained reservations must match the policy while
 their demand is retained; active reservations require that demand. Archive
@@ -1097,7 +1102,12 @@ applied result does not fit is skipped with `archive_backlog` or
 boundary. The four-step path remains for a lease that needs a grant owned by
 another plugin or that another plugin coordinates; a tracked `Acquire` must
 be eligible at the instant it is admitted and cite current evidence. Operation
-keys under `resource:completion:` are reserved for completion operations.
+keys under `resource:completion:` are reserved for completion operations. A
+lease's eligibility envelope may bind the one operation it authorizes
+(`CompletionOperationBindingV1`: kind and quantity), which every redemption
+checks; a tracked command never redeems a lease whose expected participants
+or grants name another plugin, and a tracked external-inflow `Credit` requires
+a bound lease.
 
 A protected floor is an immutable `ProtectedFloorPolicyRevision` of one of two
 kinds. An authored revision has an identity its author chose; the scenario
@@ -1142,6 +1152,23 @@ canonical adapter ingress may cite the cause record as its provider source.
 Holder observation heads, reports, and witnesses carry
 `ResourceLossObservationV1` entries gated like transfer details.
 
+`ResourceOperationRequestV1::RecordTransferLoss(ResourceTransferLossRequestV1)`
+takes part of an open transfer's escrow: the transfer keeps its state and the
+rest of its escrow, `lost` grows by the quantity, the revision advances, and a
+`ResourceLoss` naming the transfer counts as admitted loss. The quantity is
+above zero and below the escrow; a whole loss stays `CompleteTransfer` with
+`Lose`, which loses what is left. It comes from the transfer's controller, or
+through adapter ingress with the cause as provider source, under its own
+lease; acceptance credits the demand with what is accepted, so a loss reopens
+that much of it. `AdvanceTransfer` also admits an intermediate `InTransit`
+link of the same execution (a new leg not lower than the current one, or a
+new handoff), and each advance appends its link and evidence to
+`ResourceTransfer::link_history`, at most 16 entries (14 in transit), kept
+into the archive. A custodian may book `Credit` with
+`ResourceCreditSourceV1::ExternalInflow`, a record version, by tracked command
+under the host's single step, the counterpart of `ExternalOutflow`; every
+credit outcome keeps its evidence.
+
 `ResourceOperationRequestV1::BeginExchange(ResourceExchangeStartRequestV1)`
 starts two `ResourceTransferStartRequestV1` legs atomically: both transfers are
 created or neither is, and the single `BeginExchange` outcome cites both
@@ -1161,9 +1188,17 @@ accounts declare the same `ResourceAccount::place_scope`; the terminal
 certificate locks the exact `handover_evidence` record. A missing or mismatched
 scope rejects as `invalid_definition` and an attached transport as
 `invalid_lifecycle`. The scope is host-declared when the scenario installs an
-account, immutable, and defaults to `None`; a tracked `CreateAccount` that sets
-it fails with `InvalidAuthority`. A tracked command must come from the
-destination custodian. None of these operations grants access to another
+account, is changed only by the host application's `RescopeAccount`
+(`enqueue_resource_account_rescope`, citing the current version of the record
+of the move; refused while a transfer that is not terminal names the account
+or a lease locks its current revision), and defaults to `None`; a tracked
+`CreateAccount` that sets it, or a tracked `RescopeAccount`, fails with
+`InvalidAuthority`. A tracked command must come from the destination
+custodian. Two local acceptances that share one handover record cannot settle
+in one boundary, since the first terminal certificate locks the record's exact
+version from its activation to its completion: the host settles the second in
+a further boundary at the same simulated instant, or gives each leg its own
+handover record. None of these operations grants access to another
 custodian's stock; only an access grant does. The resource plugin semantic hash
 and holder-report knowledge schema cover these operations, and fields left at
 their defaults are omitted from the canonical encoding.
@@ -1219,7 +1254,10 @@ holder-bound read for the grantor or grantee. Who may grant whom stays
 application authority.
 
 `AmendDemand` cannot change a demand's lifecycle status, rejection reason, or
-requester; such an amendment becomes a durable rejection. A live production
+requester; such an amendment becomes a durable rejection. Since 0.19.0 an
+amendment that asks for less than the demand's fulfilled, actively reserved,
+and in-flight quantities together (returning escrow excluded) is a recorded
+`invalid_lifecycle` rejection. A live production
 completion settles its output credit: the credit cites the production runtime
 version pinned as the execution's `output_source`, and the resource runtime
 accepts the locked record at or after its locked version while requiring the
@@ -2046,6 +2084,19 @@ viewer's, and rejects a paginated result. The caller does not pass a read cut:
 the engine derives it. The view read is system access, so callers must derive
 `holder` from admitted authority, not from an unvalidated payload.
 
+To show a dispatch's planned route in a trusted tool, a host adapter reads the
+legs the plugin planned, which are ground truth, with
+`typed_domain_record(&run, &correspondence_operation_ref(key))`, decoding the
+payload with `decode_payload::<CorrespondenceOperationRecord>()`: its
+`route_plan.legs` hold each leg's connection, nodes, mode, and planned
+departure and arrival, beside the execution's legs and itinerary revisions.
+Dispatch publishes nothing to the sender or the carrier, so this read must not
+reach an actor as it is, and `CanwuViewer` has no domain-record read. The
+actor-relative way is to plan again from the actor's own knowledge
+(`planning_snapshot_from_knowledge_result` over `planning_knowledge_query()`,
+then `plan_route`), which matches the plugin's plan only while the actor's
+knowledge is what the carrier planned with.
+
 `MovementSubjectRole::PersonsGroup` moves an aggregate of people as one subject,
 normally identified by an application domain record; like `Cargo`, it requires a
 positive quantity, here a head count, and
@@ -2088,20 +2139,29 @@ keeps every admitted order and execution in one `MovementState` record
 (`canwu.movement:runtime`) and advances executions only through the transport
 transition methods. The tracked command `apply_movement_operation_v1` carries a
 `MovementCommandV1` from the issuer's own holder with an `Order`, `StartLeg`,
-`CompleteLeg`, `FailLeg`, `Reroute`, `RecordHandoff`, `RequestBooking`,
-`Cancel`, or `OfferPool` operation. Moving anyone but the owner needs an
-`authority_basis`: the current version of a declared application record whose
-references name the owner as `movement_grantee` and every other subject as
-`movement_subject`. Seizures and reconciliations are accepted only from
-application systems through the `movement_incident_v1` ingress with an exact
-evidence record of a declared kind. Operation keys are unique per holder, or
-per evidence kind for incidents, and each has one durable outcome.
+`CompleteLeg`, `FailLeg`, `DelayLeg`, `Reroute`, `RecordHandoff`,
+`RequestBooking`, `Cancel`, or `OfferPool` operation. Moving anyone but the
+owner needs an `authority_basis`: the current version of a declared
+application record whose references name the owner as `movement_grantee` and
+every other subject as `movement_subject`. Seizures and reconciliations are
+accepted only from application systems through the `movement_incident_v1`
+ingress with the current version of an evidence record of a declared kind.
+Operation keys are unique per holder, or per evidence kind for incidents, and
+each has one durable outcome.
 
 The phase-7 system `movement_lifecycle_apply_v1` applies admitted operations
 and incidents in admission order, runs one allocation pass per pool, applies
 due legs from the internal `movement_leg_due_v1` ingress, and retires closed
 executions; phase 8 validates the candidate runtime, and phase 13 publishes
-`canwu.movement/movement_report` knowledge. Pools are allocated in phase 7
+`canwu.movement/movement_report` knowledge. `DelayLeg` holds a departed leg:
+it replaces the leg's arrival due with an absolute `until` no earlier than
+the boundary or the arrival scheduled at departure, so a hold can be
+lengthened, shortened, or lifted but never makes the leg faster; the owner
+and operator see the hold in their reports, and a delayed remote observer
+learns of it only from the arrival. Each delay leaves the due packet it
+replaces queued until that packet's own due time, when it wakes a boundary
+and is skipped, so on a long run with many holds such packets accumulate and
+`pending_ingress` lists them. Pools are allocated in phase 7
 rather than through kernel phase-6 reservations, which must name fixed
 identities at registration, may grant partial quantities, and cannot order by
 window start or admission sequence. A departing leg consumes its confirmed
@@ -2424,7 +2484,8 @@ be supplied again. Segment gaps, tampering, and checkpoint mismatches
 therefore reach the same validator as a flat snapshot. `CompactedCanwu` has
 every host read and ingress entry point of `Canwu` whose meaning does not need
 full history (the archive-provider attach, viewers, `fork`, exact-version and
-evidence reads, and the retained-tail journal reads); the methods that promise
+evidence reads, the retained-tail journal reads, and `pending_ingress`, every
+record still queued, the pinned ones included); the methods that promise
 full history (`snapshot`, `replay_journal`, the checkpoint journal) stay on
 `Canwu`. `canwu_api::CanwuRun`, implemented by both, is the read-and-ingress
 contract that extension host helpers take.
@@ -2440,25 +2501,28 @@ target plugin, packet type, and status, or that no boundary did), the command
 or event records that cause pending ingress and scheduled actions, every
 `PayloadRequired` dependency a current record declares, and the identity facts
 of every `IdentityOnly` dependency (the membership of a non-current record
-version, the provenance of an ingress record). A boundary that replaces,
-retires, or deletes a version whose establishing boundary is sealed pins the
-version it replaces at commit, so a dependency declared on it can still be
-kept. Before removal, the runtime derives a sorted `EvidenceDependency` set
-and requires every declared dependency to resolve: a `PayloadRequired` item
-from a retained or pinned record, a record-version membership from the
-current index, a pin, or a fact, and an ordinal reference from the journal
-counters, which prove that every ID at or below the archived cut existed. A
-declared dependency that no longer resolves, including an ingress record
-first declared after its seal and no longer held, fails the seal with
-`ArchiveNotReady` and changes nothing; a plugin that declares an ingress
+version, the provenance of an ingress record). A host lists the queued
+records, pinned ones included, in queue order with `pending_ingress` (on
+`Canwu`, `CompactedCanwu`, and `CanwuRun`); it is a trusted-host read of every
+source and is never on `SimulationView` or `CanwuViewer`. A boundary that
+replaces, retires, or deletes a version whose establishing boundary is sealed
+pins the version it replaces at commit, so a dependency declared on it can
+still be kept. Before removal, the runtime derives a sorted
+`EvidenceDependency` set and requires every declared dependency to resolve: a
+`PayloadRequired` item from a retained or pinned record, a record-version
+membership from the current index, a pin, or a fact, and an ordinal reference
+from the journal counters, which prove that every ID at or below the archived
+cut existed. A declared dependency that no longer resolves, including an
+ingress record first declared after its seal and no longer held, fails the seal
+with `ArchiveNotReady` and changes nothing; a plugin that declares an ingress
 record a host cites checks it with `SimulationView::ingress_is_declarable`
 first. A plugin must not declare an initial-scenario record version as
-payload-required: it stays readable after any seal, and the engine refuses
-the declaration; since 0.18.0 an initial-scenario record whose
-payload-required or identity dependencies name an initial-scenario version,
-its own version, or are malformed is refused when the plugin registers
-(`InvalidDomainRecord`) and when a save restores (`InvalidSnapshot`), by the
-same checks the seal applies, instead of starting a run that can never seal.
+payload-required: it stays readable after any seal, and the engine refuses the
+declaration; since 0.18.0 an initial-scenario record whose payload-required or
+identity dependencies name an initial-scenario version, its own version, or are
+malformed is refused when the plugin registers (`InvalidDomainRecord`) and when
+a save restores (`InvalidSnapshot`), by the same checks the seal applies,
+instead of starting a run that can never seal.
 Two-phase sealing prepares immutable, content-addressed
 segments, lets the host store them idempotently, then commits only the exact
 prepared token; its commit accepts a pinned `PayloadRequired` item in place of
@@ -2505,7 +2569,7 @@ disappears implicitly. Checkpoint-journal format 6 wraps the current snapshot
 format 9 contract. Older checkpoint-journal envelopes are rejected rather than
 reinterpreted or migrated in place.
 
-A **continuation checkpoint** (`ContinuationCheckpoint`, format 2, hash
+A **continuation checkpoint** (`ContinuationCheckpoint`, format 3, hash
 domain `canwu.continuation-checkpoint.v1`) is the save from which a run
 continues without its evidence history: the current state with its checkpoint
 hash and commitment roots, the journal end and settled cut, the boundary-chain
@@ -2792,10 +2856,13 @@ a `lineage_id`, an `attempt`, a `ready_at` boundary, and one
 coordinator, so the identity is `TransitionManifestId { coordinator,
 lineage_id, attempt }`. A phase-7 registration may be ready in the same
 boundary; phase-10 and phase-12 registrations must name a later boundary, at
-most `MAX_TRANSITION_READY_HORIZON` (1,024) boundaries ahead. Every participant
-must be a registered plugin with a phase-10 system declaring the same write,
-and every expected record must be of a registered kind. A coordinator may hold
-one pending manifest per lineage and
+most `MAX_TRANSITION_READY_HORIZON` (1,024) boundaries ahead. The coordinator,
+not the engine, chooses `ready_at`, a boundary ID rather than a day. Staging
+and commit never span two boundaries: participants stage, and the writes
+commit, in the ready boundary itself, never one boundary later. Every
+participant must be a registered plugin with a phase-10 system declaring the
+same write, and every expected record must be of a registered kind. A
+coordinator may hold one pending manifest per lineage and
 `MAX_PENDING_TRANSITION_MANIFESTS_PER_COORDINATOR` (32) manifests, within
 `MAX_PENDING_TRANSITION_MANIFESTS` (128) overall; a manifest lists at most
 `MAX_TRANSITION_PARTICIPANTS` (16) participants and

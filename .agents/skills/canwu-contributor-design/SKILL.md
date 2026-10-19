@@ -125,7 +125,17 @@ not imply belief, capability, or use.
   retained and `EvidenceContentUnavailable` once a seal removed it, which a
   sealed run and its unsealed twin would decide differently. Never declare
   an initial-scenario record version as payload-required; registration and
-  restore refuse it.
+  restore refuse it. A boundary decision that checks a cited record version
+  requires it to be current (`domain_record_version_is_current`) or reads it
+  through `replay_stable_domain_record_version`, never through
+  `domain_record_version_evidence_exists`, whose answer for a superseded
+  version differs between a sealed run and its replay (as the movement
+  plugin's incident evidence and delivery attempt do in 0.19.0).
+- Keep a trusted-host read that lists every source's payloads on the run
+  handles (`Canwu`, `CompactedCanwu`, `CanwuRun`), never on `SimulationView`
+  or `CanwuViewer`, and say in its rustdoc that the host selects its own
+  items before anything reaches an actor (as `pending_ingress` does in
+  0.19.0); a new `CanwuRun` method is required of every implementation.
 - Bound every collection a plugin keeps for the life of a run, and prefer a
   retention window, a fixed ring of slots, a digest chain of folded
   receipts, or an opt-in retention knob (as the request index, the law

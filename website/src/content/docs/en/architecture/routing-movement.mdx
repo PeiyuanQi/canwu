@@ -96,8 +96,8 @@ The movement plugin, in `canwu-movement`:
 | --- | --- |
 | `MovementPlugin` | The simulation plugin. `MovementPlugin::new(evidence_kinds)` declares which application record kinds it may read; that list is its whole read set for evidence. |
 | `MovementState` | The whole movement runtime, stored as one domain record: executions, orders, pools, booking bindings, operation outcomes, and report heads |
-| `MovementCommandV1`, `MovementOperation` | A command payload from one holder, with an operation key and one operation: `Order`, `StartLeg`, `CompleteLeg`, `FailLeg`, `Reroute`, `RecordHandoff`, `RequestBooking`, `Cancel`, or `OfferPool` |
-| `MovementIncidentV1` | An application-reported `FailLeg`, `Reroute`, `RecordHandoff`, or `Reconcile` that cites an exact evidence record |
+| `MovementCommandV1`, `MovementOperation` | A command payload from one holder, with an operation key and one operation: `Order`, `StartLeg`, `CompleteLeg`, `FailLeg`, `DelayLeg`, `Reroute`, `RecordHandoff`, `RequestBooking`, `Cancel`, or `OfferPool` |
+| `MovementIncidentV1` | An application-reported `FailLeg`, `DelayLeg`, `Reroute`, `RecordHandoff`, or `Reconcile` that cites the current version of an evidence record |
 | `MovementOperationOutcomeV1` | The durable result of one operation key: `Applied`, or `Rejected` with a `MovementErrorCode` |
 | `MovementReportV1` | One holder's view of one execution, published as knowledge |
 
@@ -127,9 +127,9 @@ The movement plugin, in `canwu-movement`:
 <Steps>
 1. Plan. Your host or application plugin builds a `PlanningSnapshot`, calls `plan_route`, and puts the resulting `RoutePlan` into a `MovementOrder`.
 2. Submit. Build the domain command `apply_movement_operation_v1` with `movement_command(&MovementCommandV1)` and send it as a `CommandRequest` with `enqueue_command`. The plugin refuses a command applied directly with `submit` (`MixedCommandIngress`). `MovementCommandV1::holder` must be the issuer's own holder: the actor for an actor issuer, and the command subject otherwise. The command handler checks the payload size, the operation key, the holder, and the quotas, then queues the internal ingress `movement_operation_v1`. Only this handler can create that packet.
-3. Report incidents. When an application system decides that a leg failed, a route closed, someone seized custody, or a delivery finished, it sends the public ingress `movement_incident_v1`. The host builds the packet with `movement_incident_ingress`. A boundary system schedules it with `BoundaryDirective::SchedulePluginIngress` after listing `movement_incident_target()` in its `plugin_ingress_targets`.
+3. Report incidents. When an application system decides that a leg failed, a departed leg is delayed, a route closed, someone seized custody, or a delivery finished, it sends the public ingress `movement_incident_v1`. The host builds the packet with `movement_incident_ingress`. A boundary system schedules it with `BoundaryDirective::SchedulePluginIngress` after listing `movement_incident_target()` in its `plugin_ingress_targets`.
 4. Phase 7, `DomainDeltaProposal`, event-driven. `movement_lifecycle_apply_v1` applies admitted operations and incidents in admission order. It then expires confirmed bookings whose window has ended, runs one allocation pass per pool, applies due legs, retires closed executions, and prunes old outcomes. It writes the runtime record and schedules the next `movement_leg_due_v1` packet where an order needs one.
-5. Phase 8, `InvariantValidation`. `movement_lifecycle_validate_v1` checks the staged runtime: order and execution pairing, leg continuity, one active itinerary per execution, booking and pool counters, pending due work, and collection limits. If the check fails, the whole boundary rolls back.
+5. Phase 8, `InvariantValidation`. `movement_lifecycle_validate_v1` checks the staged runtime: order and execution pairing, leg continuity, one active itinerary per execution, booking and pool counters, pending due work and the arrival time of a departed leg, and collection limits. If the check fails, the whole boundary rolls back.
 6. Phase 13, `PerspectiveAndReportMaterialization`. When the boundary admitted any movement ingress, `movement_report_publish_v1` publishes changed reports to their holders and schedules `movement_report_wake_v1` for delayed observers.
 </Steps>
 
@@ -137,7 +137,11 @@ The [settlement system](/en/architecture/settlement/#where-extension-systems-run
 
 ### Leg timing
 
-Legs advance on internal scheduled ingress. An order schedules its first departure at the planned departure time, or at admission if that is later. A departure schedules the arrival after the leg's planned duration, and an arrival schedules the next departure. Each order stores the one packet it expects in `pending_due`. Any other due packet is stale and does nothing, so an explicit `StartLeg`, `FailLeg`, or `Reroute` replaces older timing without withdrawing queued ingress.
+Legs advance on internal scheduled ingress. An order schedules its first departure at the planned departure time, or at admission if that is later. A departure schedules the arrival after the leg's planned duration, and an arrival schedules the next departure. Each order stores the one packet it expects in `pending_due`. Any other due packet is stale and does nothing, so an explicit `StartLeg`, `FailLeg`, `DelayLeg`, or `Reroute` replaces older timing without withdrawing queued ingress.
+
+The order's owner or operator, or an application incident, sends `DelayLeg` to put a **leg hold** on the current leg after it departs. The leg then arrives at `until`, an absolute time no earlier than the settling boundary and no earlier than the leg's **scheduled arrival** (its actual departure plus its planned duration). Send another `DelayLeg` to lengthen or shorten the hold; set `until` to the scheduled arrival to lift it. Only the latest hold is kept. `CompleteLeg` still makes a held leg arrive at once and `FailLeg` still fails it; both clear the hold. `Reroute` stays refused while a leg is departed. Edge cases: a hold settled in the same boundary as the arrival it replaces wins; a `DelayLeg` that fails its checks is refused with a recorded outcome; a later leg whose booking expires during the hold fails with `capacity_unavailable` when it is due to depart.
+
+Each `DelayLeg` leaves the packet it replaces queued until that packet's own due time, when it wakes a boundary and is skipped; on a long run with many holds these accumulate, and `pending_ingress` lists them.
 
 Due work never fails a boundary. When a due departure or arrival cannot apply, the current leg fails with the reason `due_settlement_failed`, and the owner or operator can reroute or cancel. When the final leg arrives, an execution without a delivery attempt settles. An execution with a `delivery_attempt` enters `ArrivalPending` and waits for a `Reconcile` incident that cites that delivery-attempt record.
 
@@ -168,16 +172,18 @@ Planning reads only a snapshot. A `PlanningSnapshot` names its observer and `kno
 - `canwu_correspondence::planning_snapshot_from_holder_knowledge` builds a holder planning snapshot from exactly the endpoints and connections one holder's [knowledge ledger](/en/architecture/knowledge-information/) asserts. It also returns a `KnowledgeReadCutDigest` as evidence of what the planner read. See [Plan from a holder's knowledge](/en/developer/reading-state/#plan-from-a-holders-knowledge).
 - `canwu_reference_world::planning_snapshot_from_world` builds a snapshot from the reference world's full route table, a trusted `WorldSnapshot`. It suits examples and tools; a character's own plan should come from that character's knowledge.
 
+To show a dispatch's planned route in a trusted tool, read the legs `canwu-correspondence` planned; they are ground truth. A trusted host adapter reads them with `typed_domain_record(&run, &correspondence_operation_ref(key))`, decoding the payload with `decode_payload::<CorrespondenceOperationRecord>()`: `route_plan.legs` holds each leg's connection, nodes, mode, and planned departure and arrival. Dispatch publishes nothing to the sender or the carrier, so never show this read to an actor as it is; `CanwuViewer` has no domain-record read. For an actor's view, plan again from that actor's own knowledge (`planning_snapshot_from_knowledge_result` over `planning_knowledge_query()`, then `plan_route`). The result matches the plugin's plan only while the actor knows what the carrier planned with.
+
 Movement reports are holder-relative. Each is a `canwu.movement/movement_report` knowledge record carrying a `MovementReportV1`:
 
 | Holder | Role | What the report shows |
 | --- | --- | --- |
-| The ordering holder, when it is a person | `Owner` | Current phase and legs, plus detail: execution state, revision reasons, failures, handoffs, and bookings |
+| The ordering holder, when it is a person | `Owner` | Current phase and legs, plus detail: execution state, revision reasons, failures, handoffs, bookings, and the hold on a departed leg (`MovementLegHoldV1`: its scheduled arrival, `until`, reason, and when it was set) |
 | The order's `operator` | `Operator` | The same as the owner |
 | Each entry in `remote_observers` | `DelayedRemote` | Phase, legs, and last known endpoint as they stood one grant delay earlier, without detail |
 | Anyone else | none | Nothing |
 
-The plugin publishes a report only when its digest changes, and only to living person holders, so an institution that owns an order receives none. `observed_as_of` is the time of the latest fact the report reflects. Owner and operator reports carry confidence 1,000 per mille and cite the runtime record version. Delayed reports carry 700 and cite no evidence, so their publication reveals nothing about how recently the runtime changed.
+The plugin publishes a report only when its digest changes, and only to living person holders, so an institution that owns an order receives none. `observed_as_of` is the time of the latest fact the report reflects. A delayed remote observer learns of a hold only from the leg's arrival time. Owner and operator reports carry confidence 1,000 per mille and cite the runtime record version. Delayed reports carry 700 and cite no evidence, so their publication reveals nothing about how recently the runtime changed.
 
 A client reads reports through the holder's actor-relative view from `viewer_for_actor`, calling `query_knowledge` with the schema from `movement_report_knowledge_schema_id()`. `movement_state(&canwu)` returns the whole runtime and belongs in trusted host code only.
 
@@ -187,7 +193,7 @@ None of the three crates draws random numbers. A connection's `risk_per_mille` i
 
 What persists:
 
-- `MovementState` is one domain record of kind `canwu.movement/runtime` with ID `canwu.movement:runtime`. `MovementState::into_initial_record` builds it for a scenario, for example to install capacity pools before the run starts. On activation the plugin accepts at most one canonically encoded runtime root.
+- `MovementState` is one domain record of kind `canwu.movement/runtime` with ID `canwu.movement:runtime`. `MovementState::into_initial_record` builds it for a scenario, for example to install capacity pools before the run starts. On activation the plugin accepts at most one canonically encoded runtime root. A departed leg in that root needs its arrival due at its scheduled arrival, or a hold whose `until` is that due; any other root is refused at load, and so is a restored runtime that breaks the rule.
 - Pending leg-due packets and report wakes are queued canonical ingress, so a snapshot carries them and a loaded run continues mid-journey.
 - A closed execution retires from the runtime. Its order and execution identities stay reserved, and its consumed pool capacity stays counted. Published reports remain in holders' knowledge, and the domain-record history keeps earlier runtime versions.
 - Transport values are serde data saved inside their owner's records. `TRANSPORT_SEMANTIC_VERSION` is `canwu-transport.v5`. A `HandoffKind::Planned` handoff omits its kind from JSON, so older handoffs keep their exact encoding.
@@ -247,6 +253,12 @@ Drive the movement plugin through the public API. The test covers pool allocatio
 
 ```shell
 cargo test -p canwu-movement --test gap_g19_movement_lifecycle_plugin
+```
+
+Hold departed legs, shorten and lift a hold, fail a held leg, and check that incident evidence and delivery attempts must be current in sealed and unsealed runs alike:
+
+```shell
+cargo test -p canwu-movement --test gap_g64_movement_delay_leg
 ```
 
 Check the transport records alone: pure pool allocation, persons groups, seizure handoffs, and external conditions:

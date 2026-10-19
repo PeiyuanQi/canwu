@@ -45,6 +45,7 @@ sidebar:
 | [准入](/architecture/events/) | admission | — | 决定哪些待处理输入进入某个边界的过程和切点；它不是 ingress 的同义词。 |
 | [插件输入撤回](/developer/integration/) | plugin ingress cancellation | `cancel_plugin_ingress`, `IngressPayload::PluginCancellation` | 在到期之前终止撤回一项仍在排队的插件输入，并作为独立日志记录保存；被撤回的输入永远不会被准入，也不会发生回滚。 |
 | [撤回权限](/developer/integration/) | cancellation authority | `IngressCancellationAuthority` | 撤回排队插件输入的主体：上层应用撤回自己提交的公开数据包，所属插件以注册许可撤回其内部数据包类型，或由安排该输入的插件的边界系统撤回。只有签发者可以撤回。 |
+| [待处理输入](/developer/persistence/#接续检查点) | pending ingress | `pending_ingress`、`CanwuRun::pending_ingress` | 已排队、尚未被准入也未被撤回的输入记录，按边界将要准入它们的顺序排列，包括封存或接续检查点恢复所固定的记录。受信任的上层应用用 `pending_ingress` 列出它们；这份列表涵盖所有来源，`SimulationView` 和 `CanwuViewer` 上都没有，所以上层应用要先挑出自己的条目，才能展示给角色。 |
 | [调度工作](/architecture/events/) | scheduled work | — | 具有确定模拟到期时间和插入顺序的工作。 |
 | [结算边界](/architecture/settlement/) | boundary | `BoundaryRequest`, `BoundaryRecord` | 一次经过验证、要么全部提交要么整体回滚的结算：准入工作，按固定阶段运行系统，记录证据。 |
 | [结算阶段](/architecture/settlement/) | settlement phase | `BoundaryPhase` | 固定边界执行顺序中的一个位置，不代表一套独立结算算法。 |
@@ -146,9 +147,11 @@ sidebar:
 | [跳过的数据包](/architecture/resources-production/#跳过的数据包与延后结算) | skipped packet | `RESOURCE_INGRESS_SKIPPED_EVENT`、`ResourceIngressSkipV1`、`ResourceIngressSkipReasonV1` | 因为可预期的原因（结果放不进资源记录、操作键已被占用或属于保留前缀、未通过结算检查）而无法结算的资源数据包：它什么也不改变，操作键保持空闲，由一个带稳定原因的 `canwu.resource.ingress_skipped.v1` 事件指明，所在边界照常提交。空间恢复后由发送方重发。可预期的拒绝绝不会让边界失败。 |
 | [延后结算](/architecture/resources-production/#跳过的数据包与延后结算) | deferral | `RESOURCE_DEFERRED_INGRESS`、`ResourceIngressSkipV1::deferred_until` | 资源插件处理其他插件安排的工作（生产产出批次，或以后仍能作为同一步骤结算的完成步骤）的方式：当它放不进资源记录、但一次归档提交或租约释放能腾出空间时，插件把同样的工作排给自己，一分钟后到期，之后每次翻倍，最长 1,024 分钟；跳过事件写明延后到何时。 |
 | [账户损耗](/developer/production-economy/) | account-level loss | `ResourceOperationRequestV1::RecordLoss` | 不经转移、直接从单个账户扣减并引用原因的损耗；计入守恒中的已准入损耗，不动用已预留存量，除非明确允许，否则遵守受保护底线。 |
+| [转移部分损耗](/developer/production-economy/#转移部分损耗) | partial transfer loss | `ResourceOperationRequestV1::RecordTransferLoss`、`ResourceTransferLossRequestV1` | 在途转移一部分托管量的损耗；转移保持原来的状态和其余托管量，这部分损耗计为已准入损耗。之后验收按实际验收的数量为需求记履约，所以损耗多少，需求就重新空出多少。 |
 | [原子交换](/developer/production-economy/) | atomic exchange | `ResourceOperationRequestV1::BeginExchange`, `ResourceExchangeTermsV1` | 两项转移的发起在同一个结果下一起准入或一起拒绝。每条交换腿的完成租约由其来源保管人持有，并绑定到双方约定条款的摘要；之后两项转移独立结算。 |
 | [本地验收](/developer/production-economy/) | local acceptance | `ResourceTransferDispositionV1::AcceptLocal` | 当两个账户声明相同的地点范围时，不经运输执行即可结算尚未发运的转移，并引用精确的交接记录。 |
-| [地点范围](/developer/production-economy/) | place scope | `ResourceAccount::place_scope` | 由上层应用在场景安装账户时声明、不可更改的账户存量地点标识；引擎从不推断它，未声明时不能本地验收。 |
+| [地点范围](/developer/production-economy/) | place scope | `ResourceAccount::place_scope` | 由上层应用在场景安装账户时声明的账户存量地点标识，此后只有上层应用可以更改（`RescopeAccount`）；引擎从不推断它，未声明时不能本地验收。 |
+| [账户改换地点](/developer/production-economy/#本地验收) | account rescope | `ResourceOperationRequestV1::RescopeAccount`、`enqueue_resource_account_rescope` | 上层应用对账户地点范围的更改，须引用记载这次搬迁的那条记录的当前版本；持有人永远不能设置地点范围。 |
 | [动用授权](/developer/production-economy/) | access grant | `ResourceAccessGrantV1`, `ResourceDemandSourcePolicyV1::Granted` | 授权保管人引用精确权限证据作出的记录化同意：被授权方可在有效期内、在上限以内动用授权方某一精确资源与单位版本的存量。每次扣减都由被授权方自己的完成租约授权，不会回退到其他账户。 |
 | [活动根](/architecture/resources-production/#随机性持久化与重放) | live root | `ResourceLiveRootV1`、`resource:runtime:v1` | 持久化资源根时不含分桶记录的那条领域记录：未关闭的需求及其分配、进行中的转移、租约、报告授权、观察头，以及分别计数常驻终态记录和活动记录的两本账。每个结算资源工作的边界都会读它。 |
 | [常驻终态记录](/architecture/resources-production/#归档终态记录) | hot terminal record | `ResourceHotTerminalEntryV1`、`ResourceState::hot_terminal_records` | 还没有通过归档提交离开资源根的终态记录（操作结果、已关闭的需求及其预留、已结算的转移、凭证）。它占用归档候选预算，每次恢复都要校验它。 |
@@ -157,10 +160,14 @@ sidebar:
 | [活动桶](/architecture/resources-production/#随机性持久化与重放) | live bucket | `ResourceLiveBucketV1`、`resource:live:{bucket}`、`ResourceLiveLedgerV1`、`ResourceRootReader::attach_live` | 桶记录之一，数量在资源根的整个生命期内固定，按各自标识的哈希保存账户、动用授权、资源定义、单位版本和保管人索引条目，每桶约四条，由活动根里的活动账计数。边界挂载数据包点名的活动记录，只写它改动过的桶，所以结算一次操作的开销与账户数无关；发布构建会拒绝改写了未挂载活动记录的边界。 |
 | [保管人索引](/architecture/resources-production/#随机性持久化与重放) | custodian index | `ResourceCustodianAccountsV1`、`ResourceRootReader::attach_custodian_accounts`、`ResourceState::refresh_custodian_index` | 活动桶中列出某个保管人名下全部账户的条目。它只在保管人新增账户时改变，所以读取方点名持有人就能挂载它的存量；校验会拒绝不在其保管人索引中的账户。直接向状态插入账户的测试夹具，在应用操作之前要先刷新索引。 |
 | [消费批次](/architecture/resources-production/#消费批次) | consumption batch | `ResourceConsumptionBatchRequestV1`、`ResourceOperationRequestV1::ConsumeBatch`、`resource_consumption_batch_item_key`、`ResourceState::consumption_batch_can_fit`、`ResourceLimitsV1::max_batch_items_per_boundary` | 在同一份完成租约下结算的最多 256 笔精确分配腿消费，经提供方的适配器输入进入，每一项在它预留的键下配一条类型化的消费意图。每一项要么单独被拒绝，要么带自己的结果完成消费；多项可以动用同一个账户；批次结果汇总已消费数量，被拒绝的数量记为余量；租约只完成一次。结果放不进资源根的批次整批跳过、什么也不记录；超出本边界条目上限的批次延后到同一时刻的下一个边界。 |
+| [运输关联历史](/architecture/resources-production/#运行过程) | link history | `ResourceTransfer::link_history`、`ResourceTransferLinkV1`、`MAX_RESOURCE_TRANSFER_LINKS` | 转移在推进中按顺序记下的运输关联，各带其证据，最多 16 条（在途的最多 14 条），归档时也随转移一并保存。转移未结束时，这是它运输证据的唯一副本。 |
+| [中间路段](/developer/production-economy/#生命周期) | intermediate leg | `TransferProgressV1::InTransit` | 同一运输执行中之后的路段或交接，在转移保持在途时，以从 `InTransit` 到 `InTransit` 的推进记录下来；它的路段序号不小于当前路段。 |
+| [外部流入入账](/developer/production-economy/#外部流入入账) | external inflow credit | `ResourceCreditSourceV1::ExternalInflow` | 保管人以证据为依据，把来自模型账户之外的价值入账，与外部流出相对应；作为带请求标识的命令时，只能在恰好绑定这笔入账的租约下进行。它的结果保留所引用的记录版本。 |
+| [租约操作绑定](/developer/production-economy/#租约操作绑定) | lease operation binding | `CompletionOperationBindingV1`、`EligibilityEnvelopeV1::operation_binding`、`EligibilityEnvelopeV1::bound_to` | 可选的记录，写明完成租约所授权的唯一一项不可逆操作（种类、数量，终态转移处置还可以指定是哪一种），由租约的签发方写进资格信封，持有人不能写；把租约用于别的操作会被拒绝。 |
 | [归档查找索引](/architecture/resources-production/#归档终态记录) | archive lookup index | `ResourceArchiveLookupPageV1`, `ResourceArchiveIndexDirectoryV1::lookup_root` | 每次归档提交都会续写的累积索引，按内容寻址。检查某个键是否已归档时，只需读取归档头目录，再沿索引每层读一个经过认证的页，与模拟运行已经做过多少次归档提交无关。资源归档、生产归档、财政归档和参考包归档都使用这种格式的索引，各有自己的命名空间。恢复、精确重放或派生分支需要沿途每个归档头的索引页。 |
 | [在制品](/tutorials/cases/production-economy/) | work in progress | `WorkInProgress` | 已进入尚未完成的生产执行，并绑定精确工艺、设施、资源和证据的投入；既不是可用库存，也不是已结算产出。 |
 | [实际产出](/developer/production-economy/) | realized output | `realized_output_per_mille`, `realization_evidence` | 生产执行完成时以工艺名义产出的千分比表示的产出，按向下取整缩放后进入产出结算；任何非名义比例都需要工艺版本声明种类的精确证据记录。 |
-| [移动生命周期扩展](/tutorials/routing-transport/) | movement lifecycle extension | `canwu-movement`, `MovementPlugin` | 负责运输记录生命周期的可选扩展：准入移动命令、在到期时结算路段、分配运力池，并发布持有人相对的移动报告。事故、危险及其随机抽样仍属于应用系统。 |
+| [移动生命周期扩展](/tutorials/routing-transport/) | movement lifecycle extension | `canwu-movement`, `MovementPlugin` | 负责运输记录生命周期的可选扩展：准入移动命令、在到期时结算路段、让已出发的路段滞留、分配运力池，并发布持有人相对的移动报告。事故、危险及其随机抽样仍属于应用系统。 |
 | [军事模拟扩展](/tutorials/military-domain/) | military simulation extension | `canwu-military` | 可选的军事领域扩展，负责部队、行动、战斗、占领、军事知识，以及由其他领域结算并确认的待处理效果；不是通用战斗模型。 |
 | [军事补给参考消费者](/tutorials/cases/production-economy/) | force-supply reference consumer | `canwu-force-supply-reference` | 可替换的整合包，证明军事后勤可以消费公共资源 API，同时只拥有军队本地需求、战备、短缺后果和征发 saga；不是通用战斗模型。 |
 | [本地稀缺度投影](/tutorials/cases/production-economy/) | local scarcity projection | `LocalScarcityProjection` | 脱离式、持有人绑定的读取模型，解释可观察供给、需求、缓冲、路线可达性、安全与政策；不声称存在价格。 |
@@ -195,7 +202,7 @@ sidebar:
 | 接续闭包 | continuation closure | `PinnedEvidenceRecords`、`UnadmittedEvidence` | 仍在进行中的工作可能还要读取载荷的证据：待处理输入及其有依据事实、待处理工作的原因、需要保留载荷的依赖，以及尚未准入的尾部。它只取决于当前状态和切点，与运行何时封存无关；封存把它作为**固定证据**（pinned evidence）保留在封存切点之下。 |
 | 有依据事实 | provenance fact | `PluginIngressProvenanceFact` | 封存为一条待处理或已声明的输入记录保留的、ID 之外的信息：产生它的边界及其签发者、目标插件、数据包类型和状态（待处理、已准入或已撤回），或者“不是任何边界产生的”。记录封存之后，`plugin_ingress_matches` 和撤回读取这条事实，所以封存过的运行与未封存的运行回答一致。 |
 | 最新日志 | journal frontier | `JournalFrontiers`、`JournalFrontier` | 一条日志的可续写 BLAKE3 承诺可导出的状态：条目数、字节长度、链接值和未完成的分块，最多约 2.8 KB。接续检查点带着五条，所以恢复后的运行续写同样的承诺流，之后每个边界都得到相同的检查点哈希。 |
-| [运行句柄契约](/developer/persistence/#接续检查点) | run handle contract | `canwu_api::CanwuRun`、`typed_domain_record` | `Canwu` 和 `CompactedCanwu` 都实现的上层应用 trait：当前状态读取、不受封存影响的记录版本、日志计数器、边界账和规范化输入。扩展的上层应用辅助函数接受任何 `CanwuRun`，所以带归档的运行或从接续检查点恢复的运行与完整历史的运行用同样的调用驱动。它不结算任何内容。 |
+| [运行句柄契约](/developer/persistence/#接续检查点) | run handle contract | `canwu_api::CanwuRun`、`typed_domain_record` | `Canwu` 和 `CompactedCanwu` 都实现的上层应用 trait：当前状态读取、不受封存影响的记录版本、日志计数器、边界账、待处理输入和规范化输入。扩展的上层应用辅助函数接受任何 `CanwuRun`，所以带归档的运行或从接续检查点恢复的运行与完整历史的运行用同样的调用驱动。它不结算任何内容。 |
 | [精确重放](/developer/persistence/) | exact replay | `replay_from_journal()` | 从已记录输入与证据重建并验证同一次运行，不重新调用外部选择。 |
 | [平行现实](/developer/persistence/) | alternative reality | — | 从共同的先前状态选择不同的输入形成新的平行现实，不是精确重放。 |
 | [派生分支](/developer/persistence/) | fork | `fork()` | 从现有时点复制出的独立模拟，可接收新输入；指 API 时保留 `fork`。 |
@@ -243,6 +250,8 @@ sidebar:
 | [扣押交接](/tutorials/routing-transport/) | seizure handoff | `HandoffKind::Seizure` | 行程之外的主体夺取保管权时形成的交接，记录夺取方身份。终态扣押以失败路段同时作为起止路段，保管权离开行程，此后运输执行只能由其所有者关闭。背后的事件和权限仍属于应用系统；其余交接均为计划交接。 |
 | [运力池](/tutorials/routing-transport/) | capacity pool | `TransportCapacityPoolV1` | 由一个持有人提供、在时间窗口内可以互换的运输能力数量，例如渡船班次或驿马。已确认和已消耗的预订占用它；每次变化都会推进其修订号，便于分配证据引用。 |
 | [预订分配](/tutorials/routing-transport/) | booking allocation | `allocate_capacity_bookings`, `CapacityBookingAllocationEvidenceV1` | 针对某一运力池修订、结果与输入顺序无关的纯函数分配：按优先级、窗口开始时间、平局决胜键、准入序号和预订标识依次处理请求，每项预订要么全额确认，要么记录原因后失败。它从不抢占已确认的运力。 |
+| [路段滞留](/architecture/routing-movement/#路段计时) | leg hold | `MovementOperation::DelayLeg`、`MovementLegHoldV1`、`MovementOrderRecordV1::hold` | 对已出发路段的滞留：由移动命令的所有者或操作者用 `DelayLeg` 设置，或由引用当前版本证据的事故设置，把该路段的到达推迟到一个不早于排定到达时刻的绝对时刻。之后的滞留可以延长、缩短或解除它，只保留最新的一次；路段到达之前，只有所有者和操作者能看到它。不要单用“延误”，它在正文中泛指任何迟到。 |
+| [排定到达时刻](/architecture/routing-movement/#路段计时) | scheduled arrival | `MovementLegHoldV1::scheduled_arrival_at` | 已出发路段在出发时排定的到达时刻：实际出发时间加计划时长。滞留不会在它之前结束，解除滞留就是把 `until` 设回这个时刻。 |
 | [投影](/developer/reading-state/) | projection | — | 不暴露权威领域状态而生成的角色范围物化表示。 |
 | [权限](/developer/integration/) | authority | `CommandAuthority` | 发出命令或执行动作的已验证权利；`authoritative state` 应译为“权威状态”。 |
 | [签发者](/developer/integration/) | issuer | `Issuer` | 命令声明的来源身份；权限验证决定该身份是否可以行动。 |

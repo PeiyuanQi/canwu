@@ -8,7 +8,7 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.18.0`. A live `SimulationSnapshot` has:
+The workspace version is `0.19.0`. A live `SimulationSnapshot` has:
 
 - snapshot format `9`;
 - commitment format `6`;
@@ -25,6 +25,493 @@ The workspace version is `0.18.0`. A live `SimulationSnapshot` has:
 Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
+
+Version 0.19.0 is a pre-1.0 minor release. Its changes come from the
+packages that close the downstream gaps and engine findings filed against
+0.18.0, each with its own proposal:
+
+- [movement leg delay and current incident evidence](proposals/movement-delay-leg.md)
+  (`canwu-movement`: downstream gap G-64, engine finding E-44);
+- [pending ingress read](proposals/pending-ingress-read.md)
+  (`canwu-sim`, `canwu-api`: downstream gap G-62);
+- [resource transit, account place, and external inflow](proposals/resource-transit-place-and-inflow.md)
+  (`canwu-resource`: downstream gaps G-63, G-65, G-67, and G-68 and engine
+  finding E-45; downstream gap G-66 is closed by documentation only).
+
+What changed, in one list:
+
+- Movement gains a **leg hold**: the operation `DelayLeg { execution, leg,
+  until, reason }` holds a departed current leg until an absolute instant
+  no earlier than the settling boundary or the leg's **scheduled arrival**
+  (its departure plus its planned duration), so later delays lengthen,
+  shorten, or lift the hold but never make the leg faster. The owner, the
+  operator, or an incident with current evidence requests it; only the
+  latest hold is kept; owner and operator reports show it, and a delayed
+  remote observer learns of it only from the arrival. `Reroute` stays
+  refused while a leg is departed.
+- Incident evidence and an order's delivery attempt must now be the current
+  version of their record (a superseded version is refused even while
+  retained), so a sealed run and its replay decide alike; an order whose
+  delivery-attempt record is revised before it settles is refused, and the
+  host resubmits it with the new version.
+- `pending_ingress()` on `Canwu`, `CompactedCanwu`, and `CanwuRun` lists
+  every queued `IngressRecord` in queue order, including the records a seal
+  or a continuation restore pinned, so a host can list its pending commands
+  after a load. A trusted-host read: it holds every source's payloads
+  unfiltered. `CanwuRun` gains a required method.
+- A resource transfer can lose part of its escrow and stay open (a **partial
+  transfer loss**, `RecordTransferLoss`), and acceptance credits the demand
+  with what is accepted, so a loss reopens that much of it; an allocation
+  pass counts escrow in flight as drawn.
+- A transfer carried by a multi-leg execution records each leg and handoff
+  in order in its **link history** (`ResourceTransfer::link_history`, at most
+  16 entries, 14 in transit), kept through completion and into the archive.
+- The host application moves an account to another place with the host-only
+  **account rescope** (`RescopeAccount`, queued with
+  `enqueue_resource_account_rescope`), citing the current version of the
+  record of the move.
+- A custodian books value from outside the modelled accounts as a tracked
+  **external inflow credit** (`Credit` with `ExternalInflow`), the
+  counterpart of `ExternalOutflow`, under a host-issued single-step lease
+  bound to exactly that credit: a lease's issuer can bind it to the one
+  operation it authorizes (a **lease operation binding**,
+  `CompletionOperationBindingV1`), and every redemption checks the binding.
+  Every inflow credit's outcome keeps its evidence (E-45).
+  `RESOURCE_STATE_FORMAT_VERSION` 5.
+
+**Same version only.** Canwu crates depend only on the exact same version of
+each other: every first-party crate requires `=0.19.0` of every other
+first-party crate it uses, and a host pins `canwu-api = "=0.19.0"` and the
+same version of every extension. Nothing written by 0.18.0 is read by
+0.19.0. There is no migration and no decoding of an old shape: the exact
+engine-version check refuses every 0.18.0 snapshot, checkpoint journal, paged
+checkpoint, continuation checkpoint, replay journal, evidence segment, and
+scenario that records its engine version, and a run with the movement or
+resource plugin would also be refused by its semantic hash, a resource root by
+its state format 5 as well. The engine's persistence formats
+(snapshot 9, commitment 6, checkpoint/journal 6, paged checkpoint 7,
+continuation checkpoint 3) are unchanged, so an old save is refused by its
+engine version alone. A scenario built with 0.18.0 types is rebuilt with the
+0.19.0 types: a movement runtime root installed with a departed leg gives
+that leg its scheduled arrival as its arrival due, or a hold, and a resource
+root installed with `ResourceState::into_records` encodes at state format 5
+(an `ExternalInflow` credit source is a record version). Retain the 0.18.0
+engine to read 0.18.0 data.
+
+Formats and schemas that change, each deliberately versioned:
+
+| Item | 0.18.0 | 0.19.0 | What changed |
+| --- | --- | --- | --- |
+| Snapshot, commitment, checkpoint/evidence-journal, paged-checkpoint, and continuation-checkpoint formats | 9, 6, 6, 7, 3 | 9, 6, 6, 7, 3 | shape unchanged; the engine version in every checkpoint hash changes; `pending_ingress` reads current state and changes no persisted field, journal, hash, or replay input |
+| `MovementOperation` (command and incident payloads) | 10 variants | 11 variants | adds `delay_leg { execution, leg, until, reason }` |
+| `MovementOrderRecordV1` (in the runtime record `canwu.movement:runtime`) | — | — | `hold: Option<MovementLegHoldV1>` (`leg`, `scheduled_arrival_at`, `until`, `reason`, `held_at`), omitted when `None`, so a runtime with no hold encodes as before |
+| `MovementState::validate` | a departed leg has an arrival due | the arrival due time is checked | a departed leg's arrival due equals its scheduled arrival, or the hold's `until` when a hold exists; a hold names the departed leg, keeps the derived scheduled arrival, ends no earlier than it, was set between the departure and `until`, and has a bounded reason; no hold exists without a pending arrival. Applied at activation, at each load of the runtime, and to every candidate |
+| `MovementReportDetailV1` (report payload) | — | — | `hold: Option<MovementLegHoldV1>`, omitted when `None`; a report without a hold, its digest included, is byte-identical |
+| `MOVEMENT_SEMANTIC_HASH` | `2d3c7d8e…a383` | `6cf78f1f…550e` | BLAKE3 of the string recorded in the proposal |
+| `movement_report` knowledge schema hash | `31cf5c80…1e3a` | `81cf8978…4f11` | BLAKE3 of the string recorded in the proposal; the schema id stays at version 1 |
+| `movement_incident_v1` descriptor description | "…leg failure, reroute, or handoff" | "…leg failure, delay, reroute, or handoff" | part of the plugin descriptor |
+| `RESOURCE_STATE_FORMAT_VERSION` | 4 | 5 | `ResourceTransfer` gains `link_history: Vec<ResourceTransferLinkV1>` (`progress`, `transport`, `evidence`), omitted while empty; an open transfer keeps its transport evidence in `link_history` only, its `exact_evidence` empty until its terminal disposition, and the payload-required continuation declares the history's evidence; `ResourceOperationRequestV1` gains `record_transfer_loss` and `rescope_account`, `ResourceOperationKind` gains `rescope_account`, and `ResourceCreditSourceV1::ExternalInflow` encodes a record version (was an evidence reference). Validation refuses a link history its advances could not have recorded (more than 16 entries or 14 in transit, a transition `advance_transfer` does not admit, a `transport` that is not the last link, an open transfer in a state its history does not leave or with `exact_evidence`, an accepted transfer accepted neither after an arrival nor locally before any link) and an applied `Credit` or `RescopeAccount` outcome without exactly one piece of evidence. An ended demand whose consumed leg an open transfer draws on stays in the live root, with its reservation and leg, until that transfer's terminal disposition; validation refuses an ended demand that is neither an archive candidate nor held back by the same rule the closure waits on (an active reservation, a reserved leg, or an open transfer drawn on its legs): a leaked closure |
+| `EligibilityEnvelopeV1` (completion lease envelopes) | — | — | gains `operation_binding: Option<CompletionOperationBindingV1>` (`kind`, `quantity`, and an optional `disposition`, omitted while `None`), omitted while `None`, so an unbound envelope, its digest, and every 0.18.0 lease record encode as before; a bound envelope digests its binding. Lease book validation (restore and `validate`) also requires each certificate's `eligibility_envelope_digest` to equal its acquisition's envelope digest |
+| Resource archive | blob format 1 | blob format 1 | an archived transfer carries its `link_history`; archive validation also refuses a terminal transfer whose accepted, lost, returned, and let-out quantities do not add up to its quantity, or whose link history is not valid. A loss of an open transfer is a hot terminal record from the moment it is recorded and may be archived before its transfer |
+| Resource ingress | — | — | new internal ingress `resource_account_rescope_v1` (`RESOURCE_ACCOUNT_RESCOPE_INGRESS`); tracked commands admit an external-inflow `Credit` and `RecordTransferLoss`; adapter ingress admits `RecordTransferLoss` |
+| `RESOURCE_SEMANTIC_HASH` | `56b1daef…6778` | `3a1e04cb…32ac` | BLAKE3 of the string recorded in the proposal |
+
+Semantic identities that differ from 0.18.0: `canwu-movement` and
+`canwu-resource`.
+The other first-party plugins keep their semantic hash constants. As with any
+version change, the engine version in every checkpoint hash changes and
+first-party plugins that take their plugin version from the crate version
+report a new one.
+
+New and changed public contracts, by crate:
+
+- `canwu-movement`:
+  - `MovementOperation::DelayLeg { execution, leg, until, reason }`, a new
+    variant (`MovementOperation::execution` returns its execution). A
+    command from the order's owner or operator, or a `movement_incident_v1`
+    incident (the incident allow-list gains it). Its checks, each a recorded
+    rejection on the operation's outcome, in order: for an incident, the
+    operation is on the allow-list (`Unauthorized`) and its evidence is the
+    current version of its record (`Evidence`); the execution is known
+    (`NotFound`) and the command holder is its owner or operator
+    (`Unauthorized`); the reason is a non-empty, trimmed label of at most 256
+    bytes (`InvalidOperation`); `leg` is the current leg and is `Departed`
+    (`InvalidState`); `until` is no earlier than the settling boundary and no
+    earlier than the scheduled arrival (`InvalidOperation`); `until` is
+    within `MovementLimitsV1::time_bound_minutes` (`LimitExceeded`); the
+    candidate runtime validates (`InvalidState`).
+  - `MovementLegHoldV1 { leg, scheduled_arrival_at, until, reason, held_at
+    }`, re-exported from the crate root, kept as `MovementOrderRecordV1::hold`
+    (one per order) and shown as `MovementReportDetailV1::hold`. Each
+    accepted delay replaces it; lifting a hold is `until ==
+    scheduled_arrival_at`, and the lifted hold stays, with its reason and
+    time, until the leg arrives. It clears when the leg arrives (by its due
+    or by `CompleteLeg`), fails, or the execution closes. Re-stating a hold
+    with the same `until` is accepted and updates the reason and time.
+  - `MOVEMENT_SEMANTIC_HASH` has a new value.
+  - `MovementIncidentV1::evidence` and `MovementOrderRequestV1::delivery_attempt`
+    must be the current version of their record when the operation settles,
+    refused otherwise as a recorded `Evidence` rejection ("incident evidence
+    must be the current version of its record", "the delivery attempt must
+    be the current version of its record").
+  - New variant and new public fields: source-incompatible for exhaustive
+    matches of `MovementOperation` and for struct literals of
+    `MovementOrderRecordV1` and `MovementReportDetailV1`.
+- `canwu-sim`: `Simulation::pending_ingress` and
+  `CompactedSimulation::pending_ingress`, each `impl Iterator<Item =
+  &IngressRecord>` over the scheduler's queue in queue order (due time,
+  ingress class, priority from the highest, issue time, and ID), each key
+  resolved to the retained record or the pinned one. A record leaves when a
+  boundary admits it or a cancellation withdraws it; a record still queued
+  at or before `now` (zero-delay work for the next boundary at the same
+  instant) is listed; a `PluginCancellation` record is never queued, so it is
+  never listed. Additive.
+- `canwu-api`:
+  - `Canwu::pending_ingress` and `CompactedCanwu::pending_ingress` (`impl
+    Iterator<Item = &IngressRecord>`) and the required trait method
+    `CanwuRun::pending_ingress` (`Box<dyn Iterator<Item = &IngressRecord> +
+    '_>`, so the trait stays usable as `dyn CanwuRun`). Never on
+    `SimulationView` or `CanwuViewer`; there is no lookup by ID. A type
+    outside the workspace that implements `CanwuRun` adds it.
+    Source-incompatible for such implementations only.
+  - `CompactedCanwu::ingress_log` still returns the retained tail only; its
+    documentation points to `pending_ingress`.
+- `canwu-resource`:
+  - `ResourceOperationRequestV1::RecordTransferLoss(ResourceTransferLossRequestV1
+    { operation_key, loss_id, transfer, expected_transfer_revision, quantity,
+    cause, at, completion_certificate })`: in every state that is not
+    terminal, any number of times, the transfer keeps its state, `escrow`
+    falls and `lost` grows by `quantity`, its revision advances, and a
+    `ResourceLoss` with `account: None` and `transfer: Some(..)` counts as
+    admitted loss; the outcome is of kind `Loss` (shared with `RecordLoss`).
+    The quantity is above zero (`invalid_definition`) and below the escrow
+    (`invalid_lifecycle`). The certificate locks the transfer at the expected
+    revision and, for a domain-record cause, that record version, and the
+    loss completes only its own lease. A tracked command comes from the
+    transfer's controller (the source custodian, or the grantee of a
+    transfer started under an access grant); adapter ingress carries it with
+    the cause as provider source.
+  - `AdvanceTransfer` admits `InTransit → InTransit` when the new
+    `TransportExecutionLink` names the execution of the current link and a
+    new leg not lower than the current one or a handoff the transfer has not
+    recorded (`invalid_lifecycle` otherwise); each advance appends a
+    `ResourceTransferLinkV1 { progress, transport, evidence }` to
+    `ResourceTransfer::link_history`, at most `MAX_RESOURCE_TRANSFER_LINKS`
+    (16) entries, 14 in transit, so an intermediate advance past that is a
+    recorded `limit_exceeded` rejection, while an arrival, a return, and a
+    terminal disposition are always admitted. `transport` stays the last
+    link.
+  - `ResourceOperationRequestV1::RescopeAccount(ResourceRescopeAccountRequestV1
+    { operation_key, account, expected_account_revision, place_scope,
+    evidence })` and `ResourceOperationKind::RescopeAccount`, queued only by
+    the host with `enqueue_resource_account_rescope(run, due_at, &request)` on
+    `RESOURCE_ACCOUNT_RESCOPE_INGRESS` (`resource_account_rescope_v1`). It
+    needs no completion lease, advances the account revision, and keeps
+    `evidence` in its outcome. Refusals, each recorded: the account is missing
+    (`not_found`), the revision is stale (`version_conflict`), a transfer that
+    is not terminal names the account (`invalid_lifecycle`), a local
+    completion lease or an external participant grant locks its current
+    revision (`invalid_lifecycle`), the evidence is not its record's current
+    version (`version_conflict`; the helper also refuses it when queuing) or
+    not of one of the plugin's adapter evidence kinds (`invalid_authority`). A
+    tracked command carrying it is refused at admission (`InvalidAuthority`),
+    adapter ingress refuses it, and a packet another plugin schedules on the
+    ingress is skipped with `failed_settlement_checks`.
+  - `ResourceCreditSourceV1::ExternalInflow` holds a `DomainRecordVersionRef`
+    (was an `EvidenceRef`). A `Credit` with it is admitted as a tracked command
+    from the account's custodian under a single-step lease bound to exactly
+    that credit; adapter ingress keeps its 0.18.0 path. Every applied credit
+    outcome keeps exactly one piece of evidence (the inflow's record, a
+    production credit's source). A tracked production `Credit` is refused with
+    a message naming the production output batch ingress.
+  - `CompletionOperationBindingV1 { kind, quantity, disposition }` with `new`,
+    `with_disposition`, and `admits`; `ResourceTransferDispositionKindV1`
+    (`Accept`, `AcceptLocal`, `Lose`, `Return`, `ExternalOutflow`) and
+    `ResourceTransferDispositionV1::kind`;
+    `EligibilityEnvelopeV1::operation_binding` and
+    `EligibilityEnvelopeV1::bound_to`. The issuer (the host through the
+    completion ingress, or a coordinating plugin) binds a lease; a holder's
+    tracked `Acquire` whose envelope carries a binding is a recorded
+    `invalid_authority` rejection. Every redemption checks the binding: the
+    same kind, the same disposition when the binding names one, and the
+    quantity the operation moves (the credit, outflow, or loss quantity; the
+    allocation leg's quantity for `Consume` and `BeginTransfer`, each leg's
+    own for `BeginExchange`; the items' legs together for `ConsumeBatch`;
+    the escrow a `CompleteTransfer` disposition settles); a mismatch is a
+    recorded `invalid_authority` rejection.
+  - `ResourceOperationRequestV1::completion_certificates` and
+    `ResourceOperationRequestV1::loss_identity`. Additive.
+  - New variants of the exhaustive enums `ResourceOperationRequestV1` and
+    `ResourceOperationKind`, and new fields of `ResourceTransfer` and
+    `EligibilityEnvelopeV1`: source-incompatible for exhaustive matches and
+    struct literals.
+- `canwu-economy-reference` (not published) builds its harvest credit's
+  `ExternalInflow` from the record version directly, and that credit's
+  outcome now keeps the harvest record as its evidence.
+
+The source-incompatible changes are the new enum variant
+(`MovementOperation::DelayLeg`), the new struct fields
+(`MovementOrderRecordV1::hold`, `MovementReportDetailV1::hold`), and the
+required `CanwuRun` method, the new resource variants
+(`ResourceOperationRequestV1::RecordTransferLoss` and `RescopeAccount`,
+`ResourceOperationKind::RescopeAccount`), the new resource fields
+(`ResourceTransfer::link_history`, `EligibilityEnvelopeV1::operation_binding`),
+and `ResourceCreditSourceV1::ExternalInflow` holding a
+`DomainRecordVersionRef`. The release is therefore a minor version.
+
+Version 0.19.0 also changes these behaviours, which are visible to existing
+code and runs:
+
+- **Current evidence in movement (E-44).** An incident's `evidence` and an
+  order's `delivery_attempt` must be the current version of their record
+  when they settle. 0.18.0 checked both with
+  `domain_record_version_evidence_exists`, whose answer for a superseded
+  version depends on retained evidence: an unsealed run and exact replay
+  found it, a sealed run did not, so a boundary could decide differently in
+  a sealed run and its replay. Now a superseded version is refused in every
+  run, even while it is retained. An application that revises its evidence
+  record between reporting an incident and its settlement cites the new
+  version, or reports after the revision; an order whose delivery-attempt
+  record is revised between the order's submission and its settlement is
+  refused, and the host resubmits it with the new version. The order's
+  authority basis already had to be current, and a reroute's
+  `ExternalCondition` reads only the record's current version number, so no
+  movement decision reads retained evidence.
+- **A departed leg's arrival due is checked.** A movement runtime whose
+  departed leg's arrival due is not its departure plus its planned duration,
+  and that holds no `MovementLegHoldV1`, is now invalid: a scenario-installed
+  runtime root (`MovementState::into_initial_record`) with such a leg is
+  refused at load, and so is any restored runtime. Every runtime the plugin
+  writes satisfies the rule, since a departure always schedules its arrival
+  at the departure plus the planned duration.
+- **Held legs.** A delay replaces the order's `pending_due`. Operations
+  settle before due packets in one boundary, so a delay settled in the
+  boundary of the arrival it replaces wins and the replaced arrival packet
+  is skipped as stale; the stale packet of an earlier hold is skipped the
+  same way at its time. `CompleteLeg` still arrives a held leg at once and
+  `FailLeg` still fails it; both clear the hold. A later leg whose booking
+  expires while an earlier leg is held fails with `capacity_unavailable`
+  when it is due to depart, through the existing recorded leg failure. A
+  delay creates no itinerary revision and no leg, so a resource transfer's
+  `TransportExecutionLink` to the execution and leg stays valid.
+- **Movement reports.** Owner and operator reports carry the hold, and its
+  `held_at` is an event time of detailed reports only, so a delayed remote
+  observer's report never changes for a hold. A report without a hold is
+  byte-identical to 0.18.0's, so nothing is republished because of the
+  change.
+- **Pending ingress.** `pending_ingress` reads only current state; a sealed
+  run, a continuation-restored run, and their unsealed twin list the same
+  records in the same order.
+- **Resource demands are credited with what is accepted.** Acceptance credits
+  the transfer's demand with the escrow accepted, not with the allocation
+  leg; without a partial loss the two are equal. A transfer lost whole,
+  returned, or let out credits its demand nothing, as before.
+- **Escrow in flight counts as drawn.** An allocation pass counts the escrow
+  of the open transfers drawn on a demand beside its active reservations, in
+  the quantity it still needs, in what remains of its minimum useful
+  quantity, and in the guard that rejects it for its minimum, so it never
+  allocates escrow in flight again (0.18.0 did, a transfer start having
+  consumed the reservation) and never rejects a demand for its minimum while
+  a transfer for it is in flight. A returning transfer (`ReturnPending`) is
+  not in flight for its demand: it is never accepted, so its escrow is needed
+  again as soon as it turns back. A loss or a return gives back exactly what
+  it takes, which the next pass may supply.
+- **A demand that ends in flight.** A demand cancelled, expired, or rejected
+  for its minimum while a transfer drawn on it is open keeps its terminal
+  status when the transfer is accepted: `fulfilled` counts what was delivered,
+  a fulfillment record names it, and the demand rejoins no due, expiry, or
+  dirty index. Its closure (the demand, its reservations, and its consumed
+  legs) is held in the live root until no open transfer draws on its legs and
+  becomes an archive candidate at that transfer's terminal disposition, so an
+  acceptance never finds its allocation leg archived.
+- **Amendments cannot undercut what is committed.** An `AmendDemand` that
+  asks for less than the demand's fulfilled, actively reserved, and in-flight
+  quantities together (returning escrow excluded) is a recorded
+  `invalid_lifecycle` rejection. 0.18.0 compared `requested` with `fulfilled`
+  only, so a later acceptance could fulfil the demand while a reservation was
+  still active, or exceed it.
+- **`Lose` adds to `lost`.** A `CompleteTransfer` with `Lose` adds the escrow
+  left to `lost` (0.18.0 set it), so a transfer's partial losses and its
+  final loss add up.
+- **Tracked commands and leases.** A tracked command is refused at admission
+  (`InvalidAuthority`), so it settles nothing and takes no operation key,
+  when it redeems any lease whose expected participants or participant
+  grants name another plugin (not only for an inflow), when its lease's
+  binding does not admit it, and, for an external-inflow `Credit`, when its
+  lease is unbound; the operation the lease was issued for then settles
+  under its key. Another plugin's lease that appears only at settlement is a
+  `failed_settlement_checks` skip, which takes no key. A holder's tracked
+  `Acquire` cannot write a binding. A bound lease is redeemed only by its
+  operation, on every path.
+- **Held closures need room.** A terminal transfer disposition whose demand
+  closure does not fit the archive candidates is a no-room skip, sent again
+  when room returns, not a recorded `limit_exceeded` rejection.
+- **Loss identities across the archive.** An account loss, a partial loss,
+  or a `Lose` disposition whose loss identity an archived loss used is a
+  recorded `idempotency_conflict` rejection, found by an archive lookup as
+  for a lease identity.
+- **Open transfer evidence.** While a transfer is open its transport
+  evidence is in `link_history` only and `exact_evidence` is empty; a
+  terminal disposition writes the evidence it cites to `exact_evidence`, as
+  in 0.18.0, so readers of the acceptance evidence are unchanged.
+
+Upgrading from 0.18.0, for hosts and plugin authors:
+
+- **Pin `=0.19.0`** for `canwu-api` and every extension. Nothing earlier
+  loads.
+- **A movement host** adds a `DelayLeg` arm to exhaustive matches of
+  `MovementOperation` and `hold` (`None`) to struct literals of
+  `MovementOrderRecordV1` and `MovementReportDetailV1`; holds a leg under
+  way with `DelayLeg` instead of failing and rerouting it; cites the current
+  version of every incident evidence record and delivery-attempt record,
+  and resubmits with the new version an order refused because its
+  delivery-attempt record was revised before it settled; and gives a
+  departed leg in a scenario-installed runtime root its scheduled arrival
+  as its arrival due.
+- **A host that shows its own pending commands** (a "sent, not yet
+  applied" line) or deduplicates its adapters by payload reads
+  `pending_ingress()` after a seal or a continuation restore, where
+  `ingress_log` holds only the retained tail, and keeps only its own items
+  (for example those with `cause == None`, which the boundary ledger counts
+  as host ingress, or its own request IDs) before it shows anything to a
+  player or an agent. A type of the host's own that implements `CanwuRun`
+  adds `pending_ingress`.
+- **A resource host that settles both legs of an exchange locally**
+  (downstream gap G-66): two `AcceptLocal` completions that share one
+  handover record cannot hold its lock at once, since a completion lease
+  holds it from activation to completion. Settle the second in a further
+  boundary at the same simulated instant (a host may settle several
+  boundaries at one instant; take the second leg's lease once the first
+  acceptance has settled, as each holder's lease cooldown allows), or give
+  each leg its own handover record, since the lock is keyed by the exact
+  record version. The engine is unchanged, by owner decision.
+- **A resource host that lets a custodian book an inflow** queues the single
+  step (`enqueue_resource_completion_operation` with
+  `ResourceCompletionOperationV1::SingleStepLease`, `expected_participants`
+  exactly `{"canwu-resource"}`) whose targets lock the account revision and
+  the inflow's evidence record version and whose eligibility envelope is
+  bound to that credit:
+  `envelope.bound_to(CompletionOperationBindingV1::new(ResourceOperationKind::Credit,
+  quantity))`. The custodian then sends the tracked `Credit` with
+  `ResourceCreditSourceV1::ExternalInflow(record_version)` and that quantity;
+  an unbound lease, or one bound to another kind or quantity, is refused at
+  admission. A host that issues leases whose targets could serve another
+  operation (an outflow, an inflow, and an account loss with a record cause
+  lock the same targets) binds them too, with `with_disposition` for a
+  `CompleteTransfer` lease.
+- **A resource host that moves an account** finishes or returns the
+  transfers that name the account and releases the leases that lock its
+  current revision, then calls `enqueue_resource_account_rescope(&mut run,
+  due_at, &ResourceRescopeAccountRequestV1 { operation_key, account,
+  expected_account_revision, place_scope, evidence })` with the new scope
+  (or `None`) and the current version of the record of the move, of a kind
+  passed to `ResourcePlugin::new` as adapter evidence; the call refuses
+  evidence that is not current. Reservations, demands, and access grants that
+  name the account carry over.
+- **A resource host or provider that follows a transfer** reads its legs
+  and handoffs from `ResourceTransfer::link_history` (in order; `transport`
+  is the last link), not from `exact_evidence`, which is empty while the
+  transfer is open; an archived transfer carries its history. A provider
+  sends an intermediate `AdvanceTransfer` for each later leg or handoff, and
+  a part lost on the way as `RecordTransferLoss` under its own lease instead
+  of booking the cargo as several transfers; a lease that locks the
+  transfer's current revision for a terminal disposition blocks the loss's
+  lease, so the host releases it and takes a new one for the revision the
+  loss leaves.
+- **Resource code to update.** `ResourceCreditSourceV1::ExternalInflow` takes
+  a `DomainRecordVersionRef`; exhaustive matches of
+  `ResourceOperationRequestV1` and `ResourceOperationKind` add the new
+  variants; struct literals of `ResourceTransfer` and
+  `EligibilityEnvelopeV1` name the new fields; code that assumed a demand is
+  credited with its whole allocation leg reads the fulfillment; a requester
+  that lowers a demand asks for no less than its fulfilled, actively
+  reserved, and in-flight quantities together.
+- **Saves.** Write a fresh continuation checkpoint, snapshot, or checkpoint
+  journal with 0.19.0; nothing from 0.18.0 loads.
+
+Known limits carried by this release, each stated in its proposal:
+
+- Movement: `CompleteLeg` arrives a held leg at once, before its scheduled
+  arrival if the owner or operator says so, as in 0.18.0. Each `DelayLeg`
+  schedules one due packet and leaves the packet it supersedes queued until
+  that packet's own due time, which can be as late as the time bound
+  (`MovementLimitsV1::time_bound_minutes`); until then the stale packet is
+  pending ingress like any other (a seal and a continuation checkpoint pin
+  it, and `pending_ingress()` lists it), and at its time it wakes a
+  boundary, one that would otherwise be empty, where it is skipped without
+  a trace. Stale packets are bounded per live execution by its operation
+  outcomes (1,024 per command holder and 16,384 per runtime, which also
+  bound "any number" of delays), but they accumulate over a long run with
+  many holds. Only the latest hold is kept; the reports already published
+  keep each earlier one in the owner's and operator's knowledge. A booking
+  expiry republishes a detailed report without moving `observed_as_of`. An
+  incident whose evidence record, or an order whose delivery-attempt
+  record, is revised before it settles is refused; the application cites
+  the revision, and the host resubmits the order with it. A movement runtime
+  root whose departed leg's arrival due is not its departure plus its
+  planned duration, and that holds no hold, is refused at load, so a
+  scenario installs a late leg only with its hold
+  ([known limits](proposals/movement-delay-leg.md#known-limits)).
+- Pending ingress: a trusted-host read of every source (host commands and
+  packets, decision ingress, other plugins' internal packets,
+  boundary-generated work, calendar and maintenance requests) with its
+  payloads, unfiltered, so it must not reach an actor as it is; the host
+  selects its own items. There is no lookup by ID or filter by source, so a
+  host that needs one record filters the iterator, `O(queue)`, at one
+  lookup per record in the retained journal or the pinned map. `CanwuRun`
+  gains a required method, so a host type that implements it adds
+  `pending_ingress`
+  ([known limits](proposals/pending-ingress-read.md#known-limits)).
+- Resource: every open transfer lives in the live root, which each boundary
+  that settles a resource packet re-encodes. Measured once (JSON encoding of
+  `ResourceTransfer`, identities of 20 to 30 characters; not a committed
+  benchmark), an open transfer takes 506 bytes with no link, 895 with one,
+  and 5,219 with the full sixteen, about 286 bytes a link, so 8,192 open
+  transfers (the canonical `max_transfers`) with full histories take about
+  43 MB of the live root (4.1 MB without links), inside the 256 MiB state
+  cap but re-encoded at every settling boundary; longer identities grow it in
+  proportion, and each open transfer also declares up to sixteen
+  payload-required versions, up to 131,072 for the root. An allocation pass
+  reads every open transfer to count escrow in flight, once a pass. An
+  operation key can be taken before its lease exists: a tracked command that
+  names a key no lease in the root carries yet is admitted, and its refusal
+  at settlement takes the key, so an issuer that expects front-runs chooses
+  keys a holder cannot predict or takes the lease before announcing its key.
+  A redemption refused when it settles (an adapter packet, a disposition whose
+  escrow differs from its binding, a tracked command whose lease changed
+  after admission) takes its operation key, and the lease stays active until
+  the host releases it. Binding is the issuer's choice except for a tracked
+  inflow: an unbound lease for any other operation authorizes whatever its
+  targets allow, as in 0.18.0. A transfer does not list its losses; each
+  loss names its transfer and `lost` totals them. Partial losses per
+  transfer are not capped beyond the escrow, and each takes its own lease
+  and leaves five hot terminal records. A demand's closure (each leg, its
+  reservation, and the demand: `2 × legs + 1` records) becomes archive
+  candidates in one step, so a demand with more than
+  `(max_archive_candidates − 1) / 2` legs (127 at the canonical 256, 8,191 at
+  the 16,384 maximum) can never close: the operation that ends it is a
+  permanent no-room skip (an acceptance, loss, return, or outflow of its last
+  transfer, or a consumption in a batch) or a recorded `limit_exceeded` (a
+  single consumption, a cancellation, or an expiry); nothing bounds a
+  demand's legs below that, and each allocation pass adds at most one per
+  source account.
+  The link history keeps fourteen in-transit links, so a longer execution's
+  later intermediate links are refused and stay in the movement root only;
+  the engine checks only "not lower" leg order and does not compare an
+  arrival's or a return's link with the current one. A rescope checks its
+  evidence's currency and kind, not that the record shows the stock at the
+  new place, and a detached `ResourceState::apply_operation` does not read
+  rescope evidence. The engine sets no cap on inflow, and conservation
+  totals stay global across resources and units (engine finding E-46). Two
+  local acceptances on one handover record still cannot settle in one
+  boundary (downstream gap G-66, declined)
+  ([known limits](proposals/resource-transit-place-and-inflow.md#known-limits)).
+- Every limit of the 0.18.0 entry stands; this release fixes none of them.
+
+The hash algorithms are unchanged. The engine version in every checkpoint
+hash changes, first-party plugins that take their plugin version from the
+crate version report a new one, and the exact engine-version check rejects
+0.18.0 saves; retain the 0.18.0 engine to read them.
 
 Version 0.18.0 is a pre-1.0 minor release. Its changes come from the
 packages that close the remaining downstream gaps and engine findings of the

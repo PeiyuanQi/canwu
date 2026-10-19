@@ -1,10 +1,9 @@
 # Pending Ingress Read
 
-Status: implemented on branch `pkg/movement-sim-0190` for the release after
-0.18.0; not released. It closes downstream gap G-62: after a seal or a
-continuation restore a host cannot list the ingress it queued before and that
-is still pending. It changes `canwu-sim` and `canwu-api` only. Same version
-only: no compatibility work with 0.18.0 bytes or hashes.
+Status: implemented in 0.19.0. It closes downstream gap G-62: after a seal or
+a continuation restore a host cannot list the ingress it queued before and
+that is still pending. It changes `canwu-sim` and `canwu-api` only. Same
+version only: no compatibility work with 0.18.0 bytes or hashes.
 
 ## Problem
 
@@ -161,3 +160,13 @@ languages each):
 
 ## Review record
 
+
+The code was reviewed with the movement package by one independent reviewer,
+and the fix once in a delta review; neither found a blocking issue. The one
+finding on this read was optional and accepted: `pending_ingress` dropped a
+queued key that did not resolve without any signal, so a `debug_assert!` now
+checks that every queued key resolves (release behaviour unchanged). The
+reviewer confirmed that the assertion cannot fire in a legitimate state: the
+queue and the journals change together, a failed boundary rolls both back,
+and a seal or a continuation restore refuses rather than drop a pending
+record.

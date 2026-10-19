@@ -64,7 +64,7 @@ A **tracked command** is a command sent with a `CommandRequest` (request ID and 
 1. **Demand.** The requester submits `SubmitDemand` (and later `AmendDemand` or `CancelDemand`) as a tracked resource command. Adapter ingress cannot submit or amend demands.
 2. **Allocation.** The host queues an allocation pass for one requester with `enqueue_resource_allocation`. `canwu-resource` allocates deterministically, using protected floors, minimum useful amounts, partial-fulfillment policies, due times, priorities, and stable tie-break keys, and records reservations and allocation legs.
 3. **Debit.** A consumer plugin consumes an allocation through adapter ingress (`Consume`), or the source custodian (the grantee, for a granted allocation) starts a transfer (`BeginTransfer`) that moves the quantity into escrow.
-4. **Transport.** `canwu-transport` and `canwu-movement` carry the cargo. Transfer progress (`AdvanceTransfer`) arrives through adapter ingress and cites transport evidence.
+4. **Transport.** `canwu-transport` and `canwu-movement` carry the cargo. Transfer progress (`AdvanceTransfer`) arrives through adapter ingress and cites transport evidence. For a multi-leg execution the provider sends another `AdvanceTransfer` for each later leg or handoff, an intermediate leg; the transfer records each in order in its link history (`link_history`, at most 16 entries, 14 in transit).
 5. **Arrival.** `CompleteTransfer` settles the transfer: `Accept` through adapter ingress credits the destination; `AcceptLocal` handles a same-place handover; `Lose` and `Return` end it otherwise.
 6. **Use.** Production, force supply, and other consumers use the credited stock in a later boundary. They cite exact allocation and fulfillment evidence and write only their own records.
 
@@ -86,7 +86,7 @@ For a runnable fourteen-month grain loop, run `cargo run -p canwu-economy-refere
 
 ## Completion leases
 
-Every irreversible request (a consumption, a transfer start, a terminal transfer disposition, a credit, an external outflow, an account-level loss) carries the activation certificate of a completion lease. Queue lease operations with `enqueue_resource_completion_operation`.
+Every irreversible request (a consumption, a transfer start, a terminal transfer disposition, a credit, an external outflow, an account-level loss, a partial transfer loss) carries the activation certificate of a completion lease. Queue lease operations with `enqueue_resource_completion_operation`.
 
 A lease can have several participants, each of which grants and prepares on its own, so the general path takes four operations: `Acquire`, `Grant`, `Prepare`, and `Activate`. Each leaves an operation outcome and a lease receipt. Use it when the lease needs a grant owned by another plugin, as an adapter operation does, or when another plugin coordinates the lease, as `canwu-production` and the force-supply reference do.
 
@@ -101,7 +101,7 @@ ResourceCompletionOperationV1::SingleStepLease(SingleStepCompletionLeaseV1 {
 })
 ```
 
-- **When it applies.** "Only participant" means exactly that `lease.expected_participants` is `{"canwu-resource"}`. That is the lease behind a tracked `BeginTransfer`, an exchange leg, `CompleteTransfer` with `AcceptLocal`, `Lose`, or `Return`, `ExternalOutflow`, and `RecordLoss`. A single-step request that names any other participant set is refused with `invalid_lifecycle`.
+- **When it applies.** "Only participant" means exactly that `lease.expected_participants` is `{"canwu-resource"}`. That is the lease behind a tracked `BeginTransfer`, an exchange leg, `CompleteTransfer` with `AcceptLocal`, `Lose`, or `Return`, `ExternalOutflow`, external-inflow `Credit`, `RecordLoss`, and `RecordTransferLoss`. A single-step request that names any other participant set is refused with `invalid_lifecycle`.
 - **Same checks, same certificate.** The operation runs the four steps in order with the checks each has on its own. Its certificate equals the one the four steps produce for the same acquisition, grant, and targets at the same boundary, so the request that carries the certificate is unchanged.
 - **Fewer records.** It leaves one `CompletionLease` outcome, keyed `resource:completion:lease:{acquisition}`, and one receipt, where the four steps leave four of each. In the committed fixture, a same-place transfer leaves 15 terminal records and makes 9 archive lookups instead of 27 and 15.
 - **How it enters.** A tracked holder command cannot carry it, because an active lease does not expire and holds its target locks. Your host queues it, or a plugin that declares the resource completion ingress schedules it.
@@ -115,6 +115,19 @@ Two things to watch:
 - A holder may still send a tracked `Acquire`. It must be eligible at the instant it is admitted and cite current evidence, and while that acquisition waits for its first grant, every single-step request that sorts after it in the fairness order is refused with `invalid_lifecycle`. A host that uses only single-step leases watches for such acquisitions and aborts them. If the holder's own rejected `Abort` has already used the abort key, grant the stray acquisition and release that grant instead.
 
 An ordinary request cannot use an operation key under the reserved `resource:completion:` prefix; one that does is skipped with `reserved_operation_key`. A holder can still take a completion key with the two completion operations it may send as tracked commands: an `Acquire`, and an `Abort` of a lease it holds. A packet whose key a different request already holds settles nothing on any ingress, and its boundary commits; the skip event names it with `operation_key_taken`, and the outcome under the key is the other request's.
+
+### Lease bindings
+
+A completion lease's targets say what its operation may touch, not which operation it is: an outflow, an inflow, and an account loss with a record cause all lock an account revision and one record version. The lease's issuer (your host, or the plugin that coordinates the lease) can bind it to one operation: `EligibilityEnvelopeV1::bound_to` sets the envelope's `operation_binding` (`CompletionOperationBindingV1::new(kind, quantity)`, and for a `CompleteTransfer` lease optionally `with_disposition`). The acquisition stores the envelope's digest and the activation certificate carries it, so a binding cannot change after the lease is requested. An unbound envelope encodes and digests as in 0.18.0.
+
+- **Only the issuer binds.** A holder's tracked `Acquire` whose envelope carries a binding is a recorded `invalid_authority` rejection.
+- **Every redemption is checked.** Redeeming a bound lease for another kind, another disposition (when the binding names one), or another quantity is a recorded `invalid_authority` rejection. The bound quantity is the credit, outflow, or loss quantity; the allocation leg's quantity for a consumption or a transfer start (each leg's own for an exchange); the items' legs together for a consumption batch; and the escrow a terminal transfer disposition settles.
+- **Tracked commands are refused early.** A tracked command is refused at admission, settling nothing and taking no operation key, when:
+  - its lease includes another plugin's participant grant or names another plugin as an expected participant (such a lease authorizes that plugin's operation, which arrives through adapter ingress);
+  - the request itself shows that the lease's binding does not admit it; or
+  - it is an external-inflow `Credit` with an unbound lease.
+
+  The operation the lease was issued for can still settle under its own key. Settlement checks again: another plugin's lease that appeared since admission is skipped with `failed_settlement_checks` and takes no key; a lease whose binding changed, a disposition whose escrow differs from its binding, and an adapter redemption the binding does not admit are recorded `invalid_authority` rejections, which take their key.
 
 ## Protected floors
 
@@ -164,7 +177,7 @@ Rules:
 - `ExactAccounts` and `Granted` lists hold 1 to 256 accounts (`MAX_DEMAND_SOURCE_ACCOUNTS`), in strictly increasing ID order with no duplicates. An invalid list rejects the command before any stock changes, and allocation checks the list again.
 - Allocation computes available supply, minimum useful quantity, and partial fulfillment from the selected accounts alone. If the listed accounts cannot cover the demand, the demand gets only what they hold. Protected floors and later transfer and consumption checks still apply.
 - You can change the policy with the expected demand revision until the demand's first allocation. After it has any reservation (including a consumed one that backs an in-flight transfer) or any fulfillment, the policy is fixed; cancel the demand and submit a new one. Cancelling a demand leaves transfers it already started in place.
-- `AmendDemand` cannot change a demand's status, rejection reason, or requester; such an amendment is recorded as a rejection. Terminal demands cannot be amended.
+- `AmendDemand` cannot change a demand's status, rejection reason, or requester; such an amendment is recorded as a rejection. It also cannot ask for less than what the demand already holds: fulfilled, actively reserved, and in flight together (a returning transfer does not count). Such an amendment is a recorded `invalid_lifecycle` rejection. Terminal demands cannot be amended.
 
 Authority: `Pooled` and `ExactAccounts` choose where supply comes from; they give no right to spend another custodian's stock. Your application controls who may submit pooled demands and under which requester. To let one custodian draw on another's stock, with a cap and a time window, use an access grant and a `Granted` policy. Appointments, purposes, and who may grant to whom stay with your application.
 
@@ -220,7 +233,7 @@ Transfers: a transfer started from a granted allocation records its `access_gran
 
 Revocation: the grantor submits `RevokeAccessGrant` with the expected grant revision. Once anything has been reserved or debited under the grant, revocation is refused, so choose the cap and window to fit the delegation.
 
-Limits and reads: grants, including revoked ones, stay in hot state, up to 4,096 per resource state (`MAX_RESOURCE_ACCESS_GRANTS`). Control who may issue them as you control account creation. `resource_access_grant_status(canwu, holder, grant_id)` returns a grant and its accounting to its grantor or grantee.
+Limits and reads: grants, including revoked ones, stay in the resource root for its life, in live buckets, up to 16,384 per resource state (`MAX_RESOURCE_ACCESS_GRANTS`); they are not archived. Control who may issue them as you control account creation. `resource_access_grant_status(canwu, holder, grant_id)` returns a grant and its accounting to its grantor or grantee.
 
 For example, a requisition flow in your application could first record the population owner's acceptance. The owner then issues a grant citing that record, the army submits a `Granted` demand, and the army's own lease debits the allocation. The [access-grant test](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-resource/tests/gap_g05_resource_access_grant.rs) issues grants, allocates under them, debits by transfer, and revokes them through the public API.
 
@@ -232,6 +245,18 @@ For example, a requisition flow in your application could first record the popul
 - The debit leaves reserved stock untouched and respects the protected floor unless `allow_protected` is set. A stale account revision is rejected.
 - As a tracked command it must come from the account's custodian. Through adapter ingress, the cause must be the provider's exact source record.
 - Holder reports include `ResourceLossObservationV1` entries, visible under the same rules as transfer details.
+
+## Partial transfer loss
+
+`ResourceOperationRequestV1::RecordTransferLoss(ResourceTransferLossRequestV1)` records the loss of part of an open transfer's escrow, such as grain that spoils on the way. The request carries a `loss_id`, the transfer, its expected revision, a quantity, a `cause`, a time, and a completion certificate.
+
+- The transfer keeps its state and the rest of its escrow: the quantity moves from `escrow` to `lost`, the transfer revision advances, and a `ResourceLoss` with `transfer: Some(..)` counts as admitted loss. It is allowed in every state that is not terminal, any number of times.
+- The quantity must be above zero (`invalid_definition` otherwise) and below the escrow (`invalid_lifecycle`). To lose everything that is left, end the transfer with `CompleteTransfer` and `Lose`, which loses whatever the partial losses left.
+- The certificate locks the transfer at the expected revision and, for a record cause, that record version. The loss completes only its own lease; the lease the transfer was started under stays until its terminal disposition. A lease that already locks the transfer's current revision for a terminal disposition keeps the loss's lease from locking it: release that lease, and take a new one for the revision the loss leaves.
+- Because the transfer revision advances, a queued advance or cancellation that expects the earlier revision is rejected with `version_conflict`.
+- As a tracked command it must come from the transfer's controller, as for `Lose`: the source custodian, or the grantee of a transfer started under an access grant. Through adapter ingress, the cause must be the provider's exact source record.
+- Acceptance credits the demand with what is accepted, not with the allocation: a transfer of 100 that lost 30 and is accepted records a fulfillment of 70, so the demand keeps 30 of remainder, which the next allocation pass may supply. An allocation pass counts what open transfers carry toward a demand as drawn, so escrow in flight is never allocated twice; a returning transfer is never accepted, so its escrow is needed again as soon as it turns back. A demand that ends while a transfer for it is in flight keeps its terminal status when the transfer is accepted, and its records stay in the live root until the transfer ends.
+- The transfer does not list its losses; each loss names the transfer, and `lost` totals them. A loss identity is used once for the run, even after its loss is archived.
 
 ## Atomic exchange
 
@@ -248,9 +273,19 @@ The exchange has no certificate of its own. After the start, the two transfers s
 
 `ResourceTransferDispositionV1::AcceptLocal { destination, expected_destination_revision, handover_evidence }` settles a transfer without a transport execution, for example a handover inside one warehouse or town. It applies only while the transfer is `PendingDispatch` with no transport link, and only when both accounts declare the same `ResourceAccount::place_scope`.
 
-- The scenario declares `place_scope` when it installs an account, and the value stays fixed. Canwu does not infer it. The default is `None`, which leaves local acceptance unavailable for that account. A tracked `CreateAccount` command cannot set it.
+- The scenario declares `place_scope` when it installs an account; afterwards only the host application changes it, with `enqueue_resource_account_rescope`, citing the current version of the record of the move. Canwu does not infer it. The default is `None`, which leaves local acceptance unavailable for that account. A tracked `CreateAccount` command cannot set it.
+- A rescope (`ResourceRescopeAccountRequestV1 { operation_key, account, expected_account_revision, place_scope, evidence }`) needs no completion lease and advances the account revision. Its evidence must be the current version of a record of a kind passed to `ResourcePlugin::new`; the engine checks only that the evidence is current and of an allowed kind, not that it shows the stock at the new place. It is refused while a transfer that is not terminal names the account or a lease locks the account's current revision. Reservations, demands, and access grants that name the account carry over.
 - A missing or mismatched scope is rejected as `invalid_definition`; a transfer with a transport link, as `invalid_lifecycle`.
 - The terminal certificate locks the exact handover record. As a tracked command, `AcceptLocal` must come from the destination custodian; through adapter ingress, the handover record must be the provider's source.
+- Both legs of an exchange may be accepted locally against one handover record, but not in one boundary: the first leg's terminal certificate locks the record's exact version from its activation until its completion. Settle the second leg in a further boundary at the same simulated instant (a host may settle several boundaries at one instant; take the second leg's lease once the first acceptance has settled, as each holder's lease cooldown allows), or give each leg its own handover record.
+
+## External inflow
+
+`Credit` with `ResourceCreditSourceV1::ExternalInflow(DomainRecordVersionRef)` books value from outside the modelled accounts, such as tribute or a purchase from abroad, the counterpart of `ExternalOutflow`. It counts in `ConservationTotalsV1::external_inflow`, and its applied outcome keeps the cited record version as evidence.
+
+- **As a tracked command** from the account's custodian, it needs a single-step lease that locks the account revision and the inflow's record version and is bound to exactly that credit: build the lease's eligibility envelope with `bound_to(CompletionOperationBindingV1::new(ResourceOperationKind::Credit, quantity))` and queue the lease with `enqueue_resource_completion_operation`. A tracked inflow whose lease is unbound, or bound to another kind or quantity, is refused at admission, so a custodian books only the quantity your host bound, once.
+- **Through adapter ingress**, a provider plugin may carry it with the record as its provider source, under its own participant grant. No binding is needed there, and a bound lease is checked as any other.
+- The engine sets no cap on inflow: what bounds a holder's inflow is the leases your host issues. A production credit stays refused as a tracked command and on adapter ingress; it settles only through the production output batch.
 
 ## Production output
 
