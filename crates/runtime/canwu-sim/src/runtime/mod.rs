@@ -1927,6 +1927,38 @@ impl Simulation {
         &self.state.evidence.ingress
     }
 
+    /// Every ingress record still queued, in queue order: the order in which
+    /// boundaries admit them (due time, class, priority from the highest,
+    /// issue time, and ID). It lists the records the retained journal holds
+    /// and those a seal or a continuation restore keeps as pinned evidence, so
+    /// a sealed or restored run answers as its unsealed twin does, whereas
+    /// [`Self::ingress_log`] holds only the retained tail. A record leaves the
+    /// list when a boundary admits it or a cancellation withdraws it.
+    ///
+    /// This is a trusted-host read of the whole queue, unfiltered: host
+    /// commands and packets, decision ingress, other plugins' internal
+    /// packets, boundary-generated work, and calendar and maintenance
+    /// requests, with their payloads. Never show it to an actor as it is.
+    /// Select the items the host issued (for example those with no `cause`,
+    /// which the boundary ledger counts as host ingress) and project them. It
+    /// reads current state only and changes no persisted state, hash, or
+    /// journal. The queue has no engine cap, so this is an iterator.
+    pub fn pending_ingress(&self) -> impl Iterator<Item = &IngressRecord> + '_ {
+        let evidence = &self.state.evidence;
+        // Every queued key resolves: the retained journal holds its record,
+        // or a seal or a continuation restore pinned it (a continuation
+        // checkpoint that does not pin a pending record is refused).
+        self.state
+            .scheduler
+            .pending_ingress
+            .iter()
+            .filter_map(move |key| {
+                let record = evidence.ingress_record(key.id);
+                debug_assert!(record.is_some(), "queued ingress {} has no record", key.id);
+                record
+            })
+    }
+
     #[must_use]
     pub fn domain_record(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
         self.state.current.domain_records.get(reference)

@@ -22,20 +22,20 @@
 
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryId, BoundaryPhase, BoundaryProposal,
-    BoundaryReceipt, BoundaryRequest, BoundarySystemContract, Canwu, CanwuError, CauseRef, Command,
-    CommandContext, CommandEnvelope, CommandRequest, CommandRequestId, CompactedCanwu,
-    ContinuationCheckpoint, DomainRecordClass, DomainRecordDraft, DomainRecordKind,
+    BoundaryReceipt, BoundaryRequest, BoundarySystemContract, Canwu, CanwuError, CanwuRun,
+    CauseRef, Command, CommandContext, CommandEnvelope, CommandRequest, CommandRequestId,
+    CompactedCanwu, ContinuationCheckpoint, DomainRecordClass, DomainRecordDraft, DomainRecordKind,
     DomainRecordMutation, DomainRecordRef, DomainRecordSchema, EntityRef, ErrorCode, EvidenceRef,
     IDENTITY_EVIDENCE_DEPENDENCIES_FIELD, IdentityEvidenceDependenciesV1, IngressClass, IngressId,
-    IngressPayload, Issuer, KnowledgeHolderRef, KnowledgeOrigin, KnowledgeRecordDraft,
-    KnowledgeRecordKind, KnowledgeSchemaId, KnowledgeSubject, KnowledgeSubjectSchema,
-    KnowledgeSubjectTarget, KnowledgeSubjectTargetKind, KnowledgeWriteGrant, OrganizationId,
-    PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD, PayloadRequiredEvidenceContinuationV1,
-    PayloadSchema, PersonId, PluginActionDescriptor, PluginIngressDescriptor, PluginIngressRequest,
-    PluginIngressTarget, PluginKnowledgeSchema, PluginRegistrar, RandomOperationTarget,
-    RandomStreamKey, Scenario, SimDuration, SimTime, SimulationPlugin, SimulationView, StateKey,
-    StateVisibility, SystemCadence, SystemDirective, identity_evidence_dependencies_property_v1,
-    payload_required_evidence_continuation_property_v1,
+    IngressPayload, IngressRecord, Issuer, KnowledgeHolderRef, KnowledgeOrigin,
+    KnowledgeRecordDraft, KnowledgeRecordKind, KnowledgeSchemaId, KnowledgeSubject,
+    KnowledgeSubjectSchema, KnowledgeSubjectTarget, KnowledgeSubjectTargetKind,
+    KnowledgeWriteGrant, OrganizationId, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
+    PayloadRequiredEvidenceContinuationV1, PayloadSchema, PersonId, PluginActionDescriptor,
+    PluginIngressDescriptor, PluginIngressRequest, PluginIngressTarget, PluginKnowledgeSchema,
+    PluginRegistrar, RandomOperationTarget, RandomStreamKey, Scenario, SimDuration, SimTime,
+    SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence, SystemDirective,
+    identity_evidence_dependencies_property_v1, payload_required_evidence_continuation_property_v1,
 };
 use serde_json::{Value, json};
 
@@ -740,6 +740,21 @@ impl Run {
         }
         .expect("the continuation checkpoint builds")
     }
+
+    /// The run's handle contract, as a host helper would take it.
+    fn handle(&self) -> &dyn CanwuRun {
+        match self {
+            Self::Unsealed(run) => run,
+            Self::Compact(run) => run,
+        }
+    }
+
+    fn ingress_log(&self) -> &[IngressRecord] {
+        match self {
+            Self::Unsealed(run) => run.ingress_log(),
+            Self::Compact(run) => run.ingress_log(),
+        }
+    }
 }
 
 struct EmptyArchive;
@@ -1069,6 +1084,111 @@ fn lockstep() {
     let replayed = Canwu::replay_from_journal(&plugins, &unsealed.replay_journal())
         .expect("the unsealed run replays");
     assert_eq!(replayed.checkpoint_hash(), unsealed.checkpoint_hash());
+}
+
+/// A host lists the ingress still queued with `pending_ingress`, whatever its
+/// run has sealed or was restored from: an unsealed run, a run that seals
+/// every five boundaries, and a run restored from a continuation checkpoint
+/// list the same records in the same queue order every day, including those
+/// a seal or the restore pinned out of the retained `ingress_log`, and a
+/// record leaves the list in the boundary that admits it.
+#[test]
+fn pending_ingress_lists_the_same_queue_in_every_run() {
+    const RESTORE_AT: i64 = 7;
+    let plugins = plugins();
+    let unsealed = Canwu::new_with_plugins(1602, scenario(), &plugins).expect("fixture starts");
+    let sealed = unsealed.fork().into_compacted().expect("compact copy");
+    let mut runs = vec![Run::Unsealed(unsealed), Run::Compact(sealed)];
+    let mut pinned_listed = false;
+    let mut admitted_left = false;
+    let mut previous: Vec<IngressRecord> = Vec::new();
+    for d in 1..=RESTORE_AT + 13 {
+        let at = day(d);
+        let revision = runs[0].revision();
+        let request = dispatch_on(d).map(|(id, n)| command(id, revision, n));
+        for run in &mut runs {
+            run.step(at, request.clone());
+        }
+        if d % 5 == 0 {
+            for run in &mut runs[1..] {
+                if let Run::Compact(compact) = run {
+                    compact
+                        .seal_evidence()
+                        .expect("a run with work in flight seals")
+                        .expect("the settled tail seals");
+                }
+            }
+        }
+        if d == RESTORE_AT {
+            let (checkpoint, hash) = runs[0].continuation();
+            runs.push(Run::Compact(
+                CompactedCanwu::from_continuation_checkpoint_verified(checkpoint, &hash, &plugins)
+                    .expect("the restore"),
+            ));
+        }
+
+        let pending: Vec<IngressRecord> = runs[0].handle().pending_ingress().cloned().collect();
+        assert!(!pending.is_empty(), "work is queued at day {d}");
+        for run in &runs[1..] {
+            assert_eq!(
+                run.handle().pending_ingress().cloned().collect::<Vec<_>>(),
+                pending,
+                "pending ingress differs at day {d}"
+            );
+        }
+        // Queue order: the order boundaries admit the records in.
+        let order = |record: &IngressRecord| {
+            (
+                record.due_at,
+                record.class,
+                std::cmp::Reverse(record.priority),
+                record.issued_at,
+                record.id,
+            )
+        };
+        assert!(
+            pending
+                .windows(2)
+                .all(|pair| order(&pair[0]) < order(&pair[1])),
+            "pending ingress is in queue order at day {d}"
+        );
+        // The unsealed run retains every record it lists; a sealed or
+        // restored run lists records its retained tail no longer holds.
+        assert!(
+            pending
+                .iter()
+                .all(|record| runs[0].ingress_log().contains(record))
+        );
+        pinned_listed |= runs[1..].iter().any(|run| {
+            pending
+                .iter()
+                .any(|record| !run.ingress_log().contains(record))
+        });
+        // What the boundary admitted has left the queue.
+        let Run::Unsealed(unsealed) = &runs[0] else {
+            unreachable!("the first run is unsealed");
+        };
+        let admitted = &unsealed
+            .boundaries()
+            .last()
+            .expect("a settled boundary")
+            .admitted_ingress;
+        assert!(
+            pending.iter().all(|record| !admitted.contains(&record.id)),
+            "admitted ingress is still listed at day {d}"
+        );
+        admitted_left |= previous.iter().any(|record| admitted.contains(&record.id));
+        previous = pending;
+    }
+    assert_eq!(runs.len(), 3, "the restored run joined");
+    assert!(
+        pinned_listed,
+        "a sealed or restored run listed pinned ingress"
+    );
+    assert!(
+        admitted_left,
+        "a listed record was admitted and left the list"
+    );
 }
 
 /// Changes the first leaf of a JSON subtree, if it has one.

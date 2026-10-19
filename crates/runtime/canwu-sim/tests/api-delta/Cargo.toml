@@ -10,6 +10,7 @@ publish = false
 viewer-admin-leak = []
 viewer-boundary-leak = []
 viewer-domain-leak = []
+viewer-ingress-leak = []
 viewer-journal-leak = []
 
 [dependencies]

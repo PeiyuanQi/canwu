@@ -2579,6 +2579,13 @@ impl CompactedSimulation {
         self.simulation.ingress_log()
     }
 
+    /// Every ingress record still queued, in queue order, including those a
+    /// seal or the continuation restore pinned; see
+    /// [`Simulation::pending_ingress`].
+    pub fn pending_ingress(&self) -> impl Iterator<Item = &IngressRecord> + '_ {
+        self.simulation.pending_ingress()
+    }
+
     /// The retained draw tail, after the last seal.
     #[must_use]
     pub fn random_draws(&self) -> &[RandomDrawRecord] {

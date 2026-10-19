@@ -297,6 +297,11 @@ pub trait CanwuRun {
     fn boundaries_between(&self, from: SimTime, to: SimTime) -> Result<BoundaryWindow, CanwuError>;
     /// How far back the run keeps settled boundaries.
     fn boundary_schedule_horizon(&self) -> SimDuration;
+    /// Every ingress record still queued, in queue order, including those a
+    /// seal or a continuation restore pinned; see [`Canwu::pending_ingress`].
+    /// It lists every source's payloads unfiltered: select the host's own
+    /// items before showing anything to an actor.
+    fn pending_ingress(&self) -> Box<dyn Iterator<Item = &IngressRecord> + '_>;
     /// Queues a public plugin packet.
     fn enqueue_plugin_ingress(
         &mut self,
@@ -373,6 +378,9 @@ macro_rules! impl_canwu_run {
             }
             fn boundary_schedule_horizon(&self) -> SimDuration {
                 Self::boundary_schedule_horizon(self)
+            }
+            fn pending_ingress(&self) -> Box<dyn Iterator<Item = &IngressRecord> + '_> {
+                Box::new(Self::pending_ingress(self))
             }
             fn enqueue_plugin_ingress(
                 &mut self,
@@ -647,6 +655,25 @@ impl Canwu {
     #[must_use]
     pub fn ingress_log(&self) -> &[IngressRecord] {
         self.simulation.ingress_log()
+    }
+
+    /// Every ingress record still queued, in queue order: the order in which
+    /// boundaries admit them (due time, class, priority from the highest,
+    /// issue time, and ID). A record leaves the list when a boundary admits
+    /// it or a cancellation withdraws it. [`CompactedCanwu::pending_ingress`]
+    /// answers alike after a seal or a continuation restore.
+    ///
+    /// This is a trusted-host read of the whole queue, unfiltered: host
+    /// commands and packets, decision ingress, other plugins' internal
+    /// packets, boundary-generated work, and calendar and maintenance
+    /// requests, with their payloads. Never show it to an actor as it is, and
+    /// never pass it to a [`CanwuViewer`]. Select the items the host issued
+    /// (for example those with no `cause`, which the boundary ledger counts
+    /// as host ingress) and project them. It reads current state only and
+    /// changes no persisted state, hash, or journal. The queue has no engine
+    /// cap, so this is an iterator.
+    pub fn pending_ingress(&self) -> impl Iterator<Item = &IngressRecord> {
+        self.simulation.pending_ingress()
     }
 
     #[must_use]
@@ -1985,10 +2012,22 @@ impl CompactedCanwu {
         self.simulation.command_attempts()
     }
 
-    /// The retained ingress tail, after the last seal.
+    /// The retained ingress tail, after the last seal. Queued ingress from
+    /// before the seal or the restore is listed by
+    /// [`Self::pending_ingress`].
     #[must_use]
     pub fn ingress_log(&self) -> &[IngressRecord] {
         self.simulation.ingress_log()
+    }
+
+    /// Every ingress record still queued, in queue order, as
+    /// [`Canwu::pending_ingress`] lists it: the records of the retained tail
+    /// and those a seal or a continuation restore pinned, so a sealed or
+    /// restored run lists the same records in the same order as its unsealed
+    /// twin. The same trusted-host caution applies: it holds every source's
+    /// payloads, unfiltered, and must not be shown to an actor as it is.
+    pub fn pending_ingress(&self) -> impl Iterator<Item = &IngressRecord> {
+        self.simulation.pending_ingress()
     }
 
     /// The retained random-draw tail, after the last seal.

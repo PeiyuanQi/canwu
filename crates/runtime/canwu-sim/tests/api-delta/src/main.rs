@@ -197,6 +197,14 @@ fn leak_admin_boundaries(canwu: &canwu_api::Canwu) {
     let _ = viewer.boundaries();
 }
 
+#[cfg(feature = "viewer-ingress-leak")]
+fn leak_pending_ingress(canwu: &canwu_api::Canwu) {
+    let viewer = canwu
+        .viewer()
+        .expect("fixture only checks the public type surface");
+    let _ = viewer.pending_ingress();
+}
+
 fn main() {
     let record = construct_record();
     assert_eq!(record.upper_exclusive, 10);
@@ -222,5 +230,9 @@ fn main() {
     #[cfg(feature = "viewer-boundary-leak")]
     {
         let _ = leak_admin_boundaries;
+    }
+    #[cfg(feature = "viewer-ingress-leak")]
+    {
+        let _ = leak_pending_ingress;
     }
 }
