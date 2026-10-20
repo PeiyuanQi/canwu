@@ -1,54 +1,39 @@
 # Opus progress — downstream engine gaps / Opus 进度记录
 
-> Updated 2026-10-19. The published release is Canwu **0.18.0** (tag `v0.18.0`, commit `ea85ca7` on `main`).
-> **0.19.0 is merged to `main`** (release commit `89ac2a9`) and the website deploys from it; the tag, the crates.io
-> publication, the GitHub release, and the yank of 0.18.0 are the owner's to finish (§5). This file is the to-do list of engine gaps that a downstream
-> application has filed against the published crates. The application is Celestial Mandate (CM); its gap ledger
-> (implementation document `59`, in the CM repository) gives each row its id (`G-nn`) and the full evidence.
-> Priorities are the ledger's severities: High, Medium, Low.
+> Updated 2026-10-19 at Canwu **0.19.0** (tag `v0.19.0`, release commit `89ac2a9` on `main`), published the same day.
+> This file is the to-do list of engine gaps that a downstream application has filed against the published crates.
+> The application is Celestial Mandate (CM); its gap ledger (implementation document `59`, in the CM repository) gives
+> each row its id (`G-nn`) and the full evidence. Priorities are the ledger's severities: High, Medium, Low.
 >
 > This file holds the current state only. When a release closes a row, delete the row and record the change in its
 > proposal and in `docs/versioning.md`.
 >
-> 0.19.0 closes every row the downstream filed after adopting 0.18.0 (G-62 to G-68; G-66 by documentation, as the
-> owner decided) and engine findings E-44 and E-45 (§3). Delete those rows when 0.19.0 is published. Open: one new
-> downstream row, G-69 (filed 2026-10-19, Low; §4), one recorded design question (G-38), the known limits the 0.18.0
-> and 0.19.0 packages left on purpose (§4.2, with E-46 to E-48), and two limits the downstream met and worked around
-> (§4.3). The two engine facts the downstream design loop asked to confirm are answered (§4.4).
+> 0.19.0 closed every row the downstream filed after adopting 0.18.0 (G-62 to G-68; G-66 by documentation) and engine
+> findings E-44 and E-45. Open: one downstream row, G-69 (Low; §4), one recorded design question (G-38), the known
+> limits the 0.18.0 and 0.19.0 packages left on purpose (§4.2), and two limits the downstream met and worked around
+> (§4.3). The two engine facts the downstream design loop asked to confirm are answered (§4.4) and carried in the
+> 0.19.0 release notes.
 
 ## 1. Where things are
 
 | Item | State |
 | --- | --- |
-| Release | 0.18.0 is published: all 24 library crates on crates.io, tag `v0.18.0`, GitHub release, website deployed (canwu.org shows 0.18.0 in both languages). 0.18.0 is the only live version: 0.17.0 was yanked on 2026-10-17 (0.14.0 to 0.16.0 earlier). Downstream pins `=0.18.0` since 2026-10-17 (its release 0.77.0) and has adopted G-44, G-47 to G-54, and G-56 to G-61 (G-46 is superseded by G-61); the other released rows wait for the downstream slices that consume them. 0.19.0 (workspace version `0.19.0`, every pin `=0.19.0`) is on `main` since 2026-10-19 (release commit `89ac2a9`, CI green on Windows, macOS, and Linux), and the website deploys from `main`; not yet tagged or on crates.io. The downstream pins 0.19.0 as the first change set of its next build wave. |
+| Release | 0.19.0 is published (2026-10-19): all 24 library crates on crates.io, the annotated tag `v0.19.0` on the release commit `89ac2a9`, the GitHub release (with the §4.4 answers), and the website deployed from `main`. 0.19.0 is the only live version: 0.18.0 was yanked on 2026-10-19 (0.14.0 to 0.17.0 earlier). A registry-only consumer of `canwu-api` and `canwu-resource` `=0.19.0` builds and runs. Downstream still pins `=0.18.0` (its locked build keeps resolving the yanked version) and moves to `=0.19.0` as the first change set of its next build wave; it has adopted G-44, G-47 to G-54, and G-56 to G-61 (G-46 is superseded by G-61), and the rows 0.19.0 closed are adopted at that pin. |
 | Policy | **Same version only** (owner, 2026-10-14): Canwu crates depend only on the exact same version of each other (`=0.19.0` once released); nothing written by an earlier release is read; no migration. |
 | Proposals of 0.19.0 (all "implemented in 0.19.0") | `docs/proposals/`: `movement-delay-leg.md` (G-64, E-44), `pending-ingress-read.md` (G-62), `resource-transit-place-and-inflow.md` (G-63, G-65, G-67, G-68, E-45; G-66 documented). The 0.18.0 proposals are listed in the 0.18.0 entry of `docs/versioning.md`. |
-| Branches and worktrees | `main` (0.19.0: `034e558` movement, `8e07403` pending ingress, `2d68fb0` resource, `89ac2a9` release). The merged session branch `claude/sweet-bell-yqcrl9` is still on the remote: the session's git proxy refused branch deletion and tag pushes, so the owner deletes it (§5). No worktrees. |
-| Release procedure | `.agents/skills/canwu-contributor-release/SKILL.md` and `docs/releasing.md`. The full list and the pre-release tests ran once on the 0.19.0 release tree (2026-10-19, Linux, without debug info): fmt, clippy, workspace tests (841 passed, 0 failed, 3 ignored), `canwu-debug` check, rustdoc with `-Dwarnings`, the four examples, `+1.88.0` check, the performance harness (fmt, clippy, tests 4 and 6 with allocation counting), the continuation gate (clippy, and tests 841 passed, 0 failed, the expected panic included), and the release-only `--ignored` tests: the 65,537-action fiscal boundary and the persisted law boundary probe passed; the million-candidate law probe (`production_runtime_archive_prepare_scales_to_one_million_candidates`) could not run on this 15 GB machine, killed by the kernel at about 13.3 GB resident, and 0.18.0 is killed the same way at about 13.6 GB, so it is the machine, not the release. **Run that probe on the release machine before tagging** (`cargo test --release --locked -p canwu-law --test law_contract -- --ignored`). Dependencies did not change, so the third-party notices were not regenerated. Every package had an independent code review (two for resource) and delta reviews until no blocking finding remained; the website copy had an independent readability review. |
+| Branches and worktrees | Only `main`, locally and on the remote; no worktrees. |
+| Release procedure | `.agents/skills/canwu-contributor-release/SKILL.md` and `docs/releasing.md`. 0.19.0's pre-release tests ran on the release tree (workspace 841 passed, 0 failed, 3 ignored; the continuation gate 841 passed; the release-only scale tests, the million-candidate law probe on a 31 GB machine in 234 s). The publish order in `docs/releasing.md` and `crates/README.md` was corrected after this release: `canwu-fiscal` depends on `canwu-resource` since 0.19.0, so it and `canwu-ming-fiscal` publish a group later. |
 | What the adopter must know first | (1) Pin every Canwu crate at `=0.19.0`; nothing earlier loads. (2) Read the "Upgrading from 0.18.0" notes of the 0.19.0 entry of `docs/versioning.md` and its "Known limits": `DelayLeg`; incident evidence and an order's delivery attempt must be the current version (resubmit an order whose attempt record changed); a scenario-installed departed leg needs the arrival due at departure plus planned duration; `pending_ingress()` after a seal or load (trusted host only; keep your own items); resource state format 5; `RecordTransferLoss`; the link history; `enqueue_resource_account_rescope`; a tracked inflow needs a lease the host bound with `CompletionOperationBindingV1`; a tracked command whose lease belongs to another plugin is refused at admission; demands are credited with what is accepted, allocation passes count escrow in flight, and `AmendDemand` cannot go below fulfilled + reserved + in flight; for G-66, settle the second leg one boundary later at the same instant or give each leg its own handover record. (3) The 0.18.0 notes still apply. |
 
 ## 2. High
 
 No row filed by the downstream ledger is open.
 
-## 3. Closed by 0.19.0 (prepared, not yet published)
+## 3. Medium
 
-Each row was filed 2026-10-17 or 2026-10-18 and verified in the published 0.18.0 source; the owner decided each fix
-on 2026-10-19 (§6). Delete this section when 0.19.0 is published; the downstream ledger records each adoption.
+No row filed by the downstream ledger is open.
 
-| Id | Sev. | Crate | Gap at 0.18.0 | 0.19.0 |
-| --- | --- | --- | --- | --- |
-| G-64 | Medium | `canwu-movement` | No operation delays the arrival of a departed leg. | `DelayLeg { execution, leg, until, reason }` holds the current departed leg; `until` is absolute and never before the boundary or the arrival scheduled at departure. |
-| G-65 | Medium | `canwu-resource` | A transfer cannot lose part of its escrow. | `RecordTransferLoss` takes part of the escrow and keeps the transfer open; the demand is credited with what is accepted. |
-| G-67 | Medium | `canwu-resource` | An account's `place_scope` cannot change. | Host-only `RescopeAccount` (`enqueue_resource_account_rescope`) with current evidence. |
-| G-68 | Medium | `canwu-resource` | Value from outside the modelled accounts cannot be credited. | Tracked `Credit { ExternalInflow(evidence) }` under a lease the host bound to exactly that credit (`CompletionOperationBindingV1`). |
-| G-62 | Low | `canwu-api`, `canwu-sim` | After a seal or a continuation restore a host cannot read its pending ingress. | `pending_ingress()` on `CanwuRun`, `Canwu`, and `CompactedCanwu`. |
-| G-63 | Low | `canwu-resource` | A multi-leg transfer cannot record its intermediate legs. | `InTransit → InTransit` advances and an ordered link history (16 entries) kept into the archive. |
-| G-66 | Low | `canwu-sim`, `canwu-resource` | Two completion leases cannot lock one external record at once. | Declined by the owner; documented: settle the second leg one boundary later at the same instant, or give each leg its own handover record. The "a day later" came from settling one boundary per day. |
-| E-44 | Medium | `canwu-movement` | Incident evidence was read through a retained-evidence check. | Incident evidence and an order's delivery attempt must be the current version. |
-| E-45 | Low | `canwu-resource` | An `ExternalInflow` outcome kept no evidence. | The outcome keeps its evidence. |
-
-## 4. Medium and Low
+## 4. Low
 
 Filed 2026-10-19 (after 0.19.0's scope was fixed); verified in the 0.19.0 source on `main`. Nothing is built around
 it downstream.
@@ -110,15 +95,10 @@ own leases) and E-37's publication-budget overshoot (the application's publisher
 
 ## 5. Next steps
 
-1. **Owner: finish publishing 0.19.0** from a machine with crates.io and tag-push access, on the release commit
-   `89ac2a9`: run the million-candidate law probe (§1), push the annotated tag `v0.19.0`, publish the 24 crates in the
-   order of `docs/releasing.md`, run a registry-only consumer smoke test, publish the GitHub release (send the §4.4
-   answers with its notes), yank 0.18.0, and delete the remote branch `claude/sweet-bell-yqcrl9`. Then delete §3 and
-   record the release here.
-2. **G-69** for the release after 0.19.0 (the downstream needs it before its campaigns reach 1648; Low). Then the §4.2
+1. **G-69** for the next release (the downstream needs it before its campaigns reach 1648; Low). Then the §4.2
    limits and E-46 to E-48 by downstream need; E-41's force-supply deferral first if a host runs the reference economy
    near its byte cap; §4.3 if the downstream asks.
-3. Each change set follows the 0.18.0 pattern: one worktree and branch per package under `.worktrees/`, a proposal, durable tests that bite, an independent code review (two for persistence-heavy packages) and a delta review of the fixes, integration on a release branch, the pre-release tests of the release skill (the continuation gate included), then one release commit with the shared docs, the website (with its accuracy and copy reviews), and the skills.
+2. Each change set follows the 0.18.0 pattern: one worktree and branch per package under `.worktrees/`, a proposal, durable tests that bite, an independent code review (two for persistence-heavy packages) and a delta review of the fixes, integration on a release branch, the pre-release tests of the release skill (the continuation gate included), then one release commit with the shared docs, the website (with its accuracy and copy reviews), and the skills.
 
 ## 6. Open decisions (owner)
 

@@ -77,11 +77,15 @@ crates.io can resolve every completed group before continuing:
 3. `canwu-routing`, `canwu-sim`
 4. `canwu-transport`
 5. `canwu-api`
-6. `canwu-information`, `canwu-society`, `canwu-technology`, `canwu-fiscal`,
-   `canwu-resource`, `canwu-law`, `canwu-military`, `canwu-movement`
-7. `canwu-culture`, `canwu-correspondence`, `canwu-history-research`,
-   `canwu-production`, `canwu-ming-fiscal`, `canwu-military-reference-content`
-8. `canwu-economy-reference-content`
+6. `canwu-information`, `canwu-society`, `canwu-technology`, `canwu-resource`,
+   `canwu-law`, `canwu-military`, `canwu-movement`
+7. `canwu-fiscal`, `canwu-culture`, `canwu-correspondence`,
+   `canwu-history-research`, `canwu-production`, `canwu-military-reference-content`
+8. `canwu-ming-fiscal`, `canwu-economy-reference-content`
+
+No crate in a group may depend on another crate of the same group. Check it before
+each release against `cargo metadata --no-deps` (`canwu-fiscal` depends on
+`canwu-resource` since 0.19.0).
 
 Every workspace crate that is not marked `publish = false` belongs to exactly
 one group and is published with every release, including crates that no

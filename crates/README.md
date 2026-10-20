@@ -197,9 +197,9 @@ each completed group to become resolvable before continuing:
 3. `canwu-routing`, `canwu-sim`
 4. `canwu-transport`
 5. `canwu-api`
-6. `canwu-information`, `canwu-society`, `canwu-technology`, `canwu-fiscal`, `canwu-resource`, `canwu-law`, `canwu-military`, `canwu-movement`
-7. `canwu-culture`, `canwu-correspondence`, `canwu-history-research`, `canwu-production`, `canwu-ming-fiscal`, `canwu-military-reference-content`
-8. `canwu-economy-reference-content`
+6. `canwu-information`, `canwu-society`, `canwu-technology`, `canwu-resource`, `canwu-law`, `canwu-military`, `canwu-movement`
+7. `canwu-fiscal`, `canwu-culture`, `canwu-correspondence`, `canwu-history-research`, `canwu-production`, `canwu-military-reference-content`
+8. `canwu-ming-fiscal`, `canwu-economy-reference-content`
 
 See [the architecture](../docs/architecture.md), [versioning](../docs/versioning.md),
 and [the release procedure](../docs/releasing.md) for the behavioral and
