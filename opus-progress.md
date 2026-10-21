@@ -9,7 +9,7 @@
 > proposal and in `docs/versioning.md`.
 >
 > 0.19.0 closed every row the downstream filed after adopting 0.18.0 (G-62 to G-68; G-66 by documentation) and engine
-> findings E-44 and E-45. Open: one downstream row, G-69 (Low; §4), one recorded design question (G-38), the known
+> findings E-44 and E-45. Open: two downstream rows, G-69 and G-70 (Low; §4), one recorded design question (G-38), the known
 > limits the 0.18.0 and 0.19.0 packages left on purpose (§4.2), and two limits the downstream met and worked around
 > (§4.3). The two engine facts the downstream design loop asked to confirm are answered (§4.4) and carried in the
 > 0.19.0 release notes.
@@ -41,6 +41,7 @@ it downstream.
 | Id | Sev. | Crate | Gap at 0.19.0 | Proposed fix | Downstream effect |
 | --- | --- | --- | --- | --- | --- |
 | G-69 | Low | `canwu-sim` (calendar ingress) | A calendar boundary carries only the fixed cadences (`schedule_calendar_boundary(at, cadences: Vec<SystemCadence>)`: `SubDaily`, `Daily`, `Monthly`, `Seasonal`, `Annual`, `EraScheduled`). A host that runs two calendars whose month or term starts sometimes differ cannot mark which calendar a `Monthly`, `Seasonal`, or `Annual` boundary belongs to, so every system registered on that cadence wakes at each calendar's starts and must decide from the time whether the boundary is its own. | Host-defined calendar marks on a calendar boundary (for example `(cadence, calendar key)`), readable on the view, and an optional calendar key on a system's cadence registration so the system wakes only on its own calendar's boundaries. | Correct results today: each system filters itself and exits early on the other calendar's boundaries, at a small cost and with the same filter repeated in every plugin. The downstream's two calendars first diverge in its campaign year 1648. |
+| G-70 | Low | `canwu-decision` (utility stage) | `WeightedUtilityEvaluator::evaluate` scores an option as `Σ weight × utility_inputs[factor]` only, and `GuardedUtilityPolicy::new(identity, version, guards, WeightedUtilityEvaluator::new(UtilityProfile { weights }), near_equivalence_margin, random_tie_break)` takes no per-option term, so an application cannot declare a per-option bias (a doctrine's preference for one option, "a bias, never another factor"), and `DecisionOptionEvaluation` / `DecisionTrace` have no line that shows a bias apart from the factor lines. | An optional per-option bias on the utility stage (a bias map on `UtilityProfile` or a field on `DecisionOption`), added to the score and recorded on `DecisionOptionEvaluation` apart from `factors`. | The downstream runs its threshold rule as a guard (`RuleChoice::Exclude` below the threshold) and declares no doctrine bias; an AI's preference cannot be stated or traced as a bias. |
 
 ### 4.1 Recorded, not proposed
 
@@ -95,7 +96,7 @@ own leases) and E-37's publication-budget overshoot (the application's publisher
 
 ## 5. Next steps
 
-1. **G-69** for the next release (the downstream needs it before its campaigns reach 1648; Low). Then the §4.2
+1. **G-69** and **G-70** (filed 2026-10-21 by the downstream's diplomacy slice) for the next release (the downstream needs it before its campaigns reach 1648; Low). Then the §4.2
    limits and E-46 to E-48 by downstream need; E-41's force-supply deferral first if a host runs the reference economy
    near its byte cap; §4.3 if the downstream asks.
 2. Each change set follows the 0.18.0 pattern: one worktree and branch per package under `.worktrees/`, a proposal, durable tests that bite, an independent code review (two for persistence-heavy packages) and a delta review of the fixes, integration on a release branch, the pre-release tests of the release skill (the continuation gate included), then one release commit with the shared docs, the website (with its accuracy and copy reviews), and the skills.
