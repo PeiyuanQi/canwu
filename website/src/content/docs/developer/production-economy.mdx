@@ -86,7 +86,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 ## 完成租约
 
-每个不可逆请求（消费、发起转移、转移的终态处置、入账、对外流出、账户损耗、转移部分损耗）都要携带一份完成租约的激活凭证。租约操作用 `enqueue_resource_completion_operation` 排入队列。
+每个不可逆请求（消费、发起转移、转移的终态处置、入账、对外流出、账户损耗、转移部分损耗）都要携带一份完成租约的激活凭证。租约操作用 `enqueue_resource_completion_operation` 排入队列。租约的配方可以为持有人预留一份完成报告：为引擎不接受知识的持有人预留报告的 `Acquire`、`SingleStepLease` 或 `GrantExternalParticipant` 记为 `invalid_authority` 拒绝；预留的报告在授权没有观察头，或持有人到期时被引擎拒绝时放弃，参与者不带报告归档，也不会再唤醒报告系统。要拿到这份强制报告，提供方在完成的修订号或之后记录持有人的观察头，观察头引用的来源必须是其记录的当前版本。
 
 一份租约可以有多个参与方，各自授权、各自准备，所以通用路径要四个操作：`Acquire`、`Grant`、`Prepare` 和 `Activate`，每个操作都留下一条操作结果和一条租约凭证。租约需要其他插件拥有的授权时（例如适配器操作），或者租约由其他插件协调时（例如 `canwu-production` 和军事补给参考消费者），走这条路径。
 
@@ -318,6 +318,6 @@ canwu.enqueue_command(
 
 ## 版本与存档
 
-请从同一发布线精确固定 `canwu-api`、`canwu-resource`、`canwu-production` 的版本和插件语义哈希。加载时恢复存档中的参伍快照，并按你传入的插件重新验证扩展记录。另见[存档兼容性](/developer/persistence/#版本与存档兼容)。
+请从同一发布线精确固定 `canwu-api`、`canwu-resource`、`canwu-production` 的版本和插件语义哈希。加载时恢复存档中的参伍快照，并按你传入的插件重新验证扩展记录。0.20.0 的资源状态格式为 6、两类资源桶的格式为 2；在完成租约进行中写出的接续检查点或封存可以加载。另见[存档兼容性](/developer/persistence/#版本与存档兼容)。
 
 继续阅读[粮食、生产与军事补给案例](/tutorials/cases/production-economy/)与[机制决议](/proposals/production-economy-mechanism/)。

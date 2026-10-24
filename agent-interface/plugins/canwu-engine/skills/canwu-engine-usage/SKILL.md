@@ -120,7 +120,30 @@ with a machine-validated payload and declared core/component access.
   a command ingress record (`plugin_ingress_matches`) declares it as an
   identity-only dependency, as the evidence rule already requires.
 
-## Save, seal, and continue (0.16.0 contract; 0.18.0 writes continuation format 3)
+## Decision tickets (0.20.0)
+
+- Hold a ticket back with `DecisionMutation::ExtendDeadline { ticket_id,
+  expected_version, deadline }` (later only, under the same ticket ID)
+  instead of cancelling and reopening it; delegate an open ticket with
+  `Reassign { ticket_id, expected_version, controller_id }` to another
+  registered controller, which alone may then resolve it (the decision maker
+  and lineage stay; a seat successor's ticket moves only to a controller of
+  the same seat). Both advance the version, so a response prepared for the
+  old version is stale; every refusal is a recorded decision attempt.
+- Find a boundary's new tickets from a boundary system that declares
+  `StateKey::core_decisions()` with `SimulationView::decision_tickets_opened`
+  (in admission order), and a desk's open tickets with
+  `open_decision_tickets_of_controller(&controller_id)` or a decision
+  maker's with `open_decision_tickets_of(&entity)`; the host has the same
+  three on `Canwu` and `CompactedCanwu`, where `decision_tickets_opened`
+  lists the latest settled boundary's.
+- Declare a doctrine's standing preference for an option as a bias, not a
+  factor: `WeightedUtilityEvaluator::new(profile).with_option_bias(option_id,
+  bias)`; the trace records it apart from the factors as
+  `DecisionOptionEvaluation::bias`, and the policy's semantic hash changes,
+  so register the binding with the biased policy.
+
+## Save, seal, and continue (0.16.0 contract; 0.20.0 writes continuation format 4)
 
 - Save a run the player will continue with
   `canwu.continuation_checkpoint()`, which returns the checkpoint and its
@@ -206,6 +229,20 @@ with a machine-validated payload and declared core/component access.
 
 ## Choose the extension knobs
 
+- Calendars and keyed draws (0.20.0): a host with more
+  than one calendar schedules each calendar's period starts with
+  `schedule_calendar_marks(due_at, vec![CalendarMark::new(cadence,
+  "<calendar>")])` and sets `contract.calendar = Some("<calendar>".into())`
+  on a boundary system that should wake only on that calendar's periods; a
+  system without a key wakes on every boundary of its cadence, and an
+  unmarked `schedule_calendar_boundary` wakes only unkeyed systems.
+  `SimulationView::calendar_marks` reads the marks of the boundary being
+  settled. A plugin whose stream draws for records it soon discards bounds
+  the keyed-draw ledger with `contract.keyed_draw_retirement.push(
+  KeyedDrawRetirement::new(stream, after))`, `after` no shorter than anything
+  that retries the address or cites the draw; a retry after that draws
+  afresh under a new draw ID. Both are plugin descriptor fields, so a run is
+  restored and replayed only with the same declaration.
 - Society transfers: `SocietyPlugin::with_transfer_settlement`. Keep the
   default `TransferSettlement::Batch` when many issuers move cohort shares in
   one period (a market, a migration wave, a levy): every due transfer is
@@ -261,6 +298,22 @@ with a machine-validated payload and declared core/component access.
   under a single-step lease whose envelope the host bound to that credit
   (`EligibilityEnvelopeV1::bound_to(CompletionOperationBindingV1::new(
   ResourceOperationKind::Credit, quantity))`).
+- Resource and production continuation (0.20.0): a continuation checkpoint
+  or seal taken while a completion lease's outcomes are hot now loads
+  (resource state format 6, bucket formats 2: each hot terminal bucket and
+  the live root declare the versions their records cite identity-only, and
+  the production root its pending output sources). Give every report grant a
+  holder that can hold knowledge (`install_report_grant` refuses a core
+  organization, resource, route, or territory, or a person given as an
+  entity), reserve holder reports only for holders the engine accepts (a
+  lease, single-step lease, or participant grant for another is a recorded
+  `invalid_authority` rejection), and record the provider's observation head
+  at or after the completion's revision when you want the mandatory report;
+  otherwise the participant archives without it and nothing re-wakes. A
+  `RecordObservation` head cites only current versions of kinds the resource
+  plugin reads. Production may now cite technology asset bindings and
+  application specs, and technology records name a domain-entity holder or
+  site as its record.
 - Routing at scale (0.18.0): compile a `PlanningSnapshot` once per network
   revision into a `RoutingIndex`, move it to a new read cut with
   `reobserve`, plan with `plan_route` or `plan_route_with_conditions`
@@ -270,14 +323,57 @@ with a machine-validated payload and declared core/component access.
   pattern, not a slot per sailing. Validate connection payloads before
   publishing them as knowledge: `plan_route` now refuses a network
   `RoutingNetwork::new` refuses.
-- Movement (0.19.0): hold a departed leg with `MovementOperation::DelayLeg {
-  execution, leg, until, reason }` from its owner, its operator, or an
-  incident citing the current version of its evidence (incident evidence and
-  an order's `delivery_attempt` must now be current, so resubmit an order
-  whose delivery-attempt record was revised before it settled), where `until`
-  is absolute and no earlier than the boundary or the leg's scheduled arrival,
-  so later delays lengthen, shorten, or lift the hold, and `Reroute` stays
-  refused while the leg is departed.
+- Movement (0.19.0, widened in 0.20.0): hold the current leg with
+  `MovementOperation::DelayLeg { execution, leg, until, reason,
+  retime_later_legs }` from its owner, its operator, or an incident citing
+  the current version of its evidence (incident evidence and an order's
+  `delivery_attempt` must be current, so resubmit an order whose
+  delivery-attempt record was revised before it settled). The hold moves a
+  departed leg's arrival, or the departure of a leg that has not departed,
+  to the absolute `until`, no earlier than the boundary or the due it
+  replaces (`MovementLegHoldV1::scheduled_at`), without spending an
+  itinerary revision; later delays lengthen, shorten, or lift it. Pass
+  `retime_later_legs: true` to move the later legs' planned departures and
+  booking windows by the part of the hold that elapsed
+  (`MovementOrderRecordV1::schedule_shift`, reset by a reroute); without it
+  the later legs keep their planned times. `Reroute` stays refused while the
+  leg is departed. A pool's custodian, or an incident, revokes a confirmed
+  booking with `RevokeBooking { pool, booking, reason }`
+  (`CapacityBookingStatus::Revoked`); the owner replaces a failed, expired,
+  or revoked booking with a `RequestBooking` whose `replaces` names it, or
+  the leg fails at departure with `capacity_unavailable`. Superseded leg-due
+  packets are withdrawn, so `pending_ingress()` no longer lists them.
+- Correspondence (0.20.0): any knowledge holder, a domain entity included,
+  can be a sender, recipient, carrier, or seed holder (name a domain-entity
+  sender in the prepared dispatch by its domain record and issue its
+  commands under `DecisionOrigin::Institution`); a carrier the engine
+  refuses as a knowledge holder (dead, retired, deleted, ineligible) is
+  refused for a correspondence, retry, or delegation with `InvalidAuthority`.
+  A seed receipt no longer means "published": check
+  `KnowledgeSeedReceipt::refusal` (`KnowledgeSeedRefusal::HolderUnavailable`,
+  `TooLarge`, or `InvalidConnection`) and resend a corrected seed under a new
+  key; `published_at` is now `settled_at`. A seizure report to a carrier the
+  engine refuses is withheld (`canwu.correspondence.attempt_report_withheld.v1`)
+  instead of failing the boundary.
+- Military (0.20.0): `canwu-military` is the engagement engine. Install a
+  `CombatRulebookV1` (by scenario or `InstallRulebook` from an issuer in its
+  `trusted_issuers`; `canwu-military-reference-content::synthetic_rulebook_v1()`
+  is a synthetic one), register
+  `MilitaryPlugin::<ParametricStepResolver>::new()` (or your own
+  `StepResolver` type), which steps on the `Daily` wake cadence by default
+  (`with_step_cadence(Some(cadence))` chooses another; `None` hands stepping
+  to the trusted `Step { up_to }` command), and optionally
+  `with_outcome_signal(target_plugin, packet_type)`; register forces with `RegisterForce`,
+  place them on arrival with `PlaceForce`, open fights with
+  `OpenEngagement`, `InvestSite`, and `OrderCrossing`, supply `SupplyInput`
+  per engaged side and environment each engagement-day, and apply the
+  `engagement_summary` record or the outcome signal yourself (the plugin
+  writes no occupation or control). Every host command on an existing record
+  names its `expected_host_revision`; refusals are
+  `canwu.military.command_rejected.v1` events, and a step the rulebook
+  cannot resolve holds the engagement (`canwu.military.engagement_held.v1`).
+  Start from `cargo run -p canwu-military-reference --example
+  military_starter`.
 - Society (0.18.0): author intergroup relations with
   `IntergroupRelations::into_record` beside the root, revise many per
   packet with `intergroup_relation_revision_v1` (each change names the edge

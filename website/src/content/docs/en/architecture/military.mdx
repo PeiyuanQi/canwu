@@ -20,15 +20,15 @@ import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
   <a href="/architecture/military/">中文版</a>
 </nav>
 
-The [military simulation extension](/en/reference/terminology/), `canwu-military`, is an **engagement engine**: it resolves fights between typed forces at a place your world owns, under a **combat rulebook** your game installs and a **step resolver**, and writes records and signals your game applies. It owns no doctrine, unit catalogue, terrain table, weather, control or occupation state, store, or report text. Read this page when you decide whether to drive your combat with it, or how to fit your own combat model into it.
+The [military simulation extension](/en/reference/terminology/), `canwu-military`, is an **engagement engine**. It resolves fights between typed forces at a place your world owns, under a **combat rulebook** your game installs and a **step resolver**; what it writes is records and signals that your game applies. It owns no doctrine, unit catalogue, terrain table, weather, control or occupation state, store, or report text. Read this page when you decide whether to drive your combat with it, or how to fit your own combat model into it.
 
-In brief: every number that decides a fight is a parameter of your rulebook; your game places forces and supplies their condition each day; the engine steps the fight, records every per-step quantity, and closes it into a summary; a fallen place is a fact in that summary, never an occupation the engine creates.
+In brief: every number that decides a fight is a parameter of your rulebook. Your game places forces and supplies their condition each day. The engine steps the fight, records every per-step quantity, and closes it into an `engagement_summary` record; a fallen place is a fact in that summary, never an occupation the engine creates.
 
 ## Crates and ownership
 
 | Crate | What it owns | Published |
 | --- | --- | --- |
-| `canwu-military` | `MilitaryPlugin<R>`, the `StepResolver` trait and `ParametricStepResolver`, eight record kinds under `canwu.military`, the `MilitaryCommandV1` command, and the `engagement_report` and `engagement_outcome` knowledge schemas | Published on crates.io |
+| `canwu-military` | `MilitaryPlugin<R>`, the `StepResolver` trait and `ParametricStepResolver`, eight record kinds under `canwu.military` (`rulebook`, `registry`, `force`, `engagement`, `engagement_steps`, `siege`, `crossing`, `engagement_summary`), the `MilitaryCommandV1` command, and the `engagement_report` and `engagement_outcome` knowledge schemas | Published on crates.io |
 | `canwu-military-reference-content` | `synthetic_rulebook_v1()`, one explicitly synthetic rulebook | Published on crates.io |
 | `canwu-military-reference` | `demo_engagement_scenario()`, which installs that rulebook and six forces on the reference world, and the `military_starter` example | Repository only |
 
@@ -73,14 +73,14 @@ In brief: every number that decides a fight is a parameter of your rulebook; you
 1. Your game sends a command; admission checks its shape and its report holders and queues an apply packet for the next boundary at the same instant.
 2. A fight steps only in a boundary that admits the engine's step packet. With `with_step_cadence(Some(cadence))` (daily by default) the wake system schedules one whenever work is due; with `with_step_cadence(None)` your game sends `Step { up_to }` after its inputs, which adds no boundary of its own.
 3. In phase 7 the settle system applies the boundary's commands in admission order, then steps every engagement, siege day, and crossing wave due by `up_to`.
-4. Each step builds the resolver's input from the sides' components, their latest inputs, the environment, the kind's rule, and the site; calls the resolver; splits casualties over components by largest remainder; applies the break rule and pursuit; and appends the step.
-5. A side that withdraws or routs closes the engagement; a kind's `max_minutes` without a break closes it `Stalled`. The close writes a create-only summary and, if you asked for one, sends the outcome signal.
+4. Each step builds the resolver's input from the sides' components, their latest inputs, the environment, the kind's rule, and the site; calls the resolver; splits casualties over components by largest remainder (each component takes the whole part of its proportional share, and the places left over go to the largest fractional remainders); applies the break rule and pursuit; and appends the step.
+5. A side that withdraws or routs closes the engagement; a kind's `max_minutes` without a break closes it `Stalled`. The close writes a create-only `engagement_summary` record and, if you asked for one, sends the outcome signal.
 6. In phase 13 the report system publishes each side's holder-relative report within the knowledge budget.
 </Steps>
 
 ### The step and the resolver
 
-The resolver is a type: `MilitaryPlugin<R: StepResolver>`. `ParametricStepResolver` computes four lines per side (fire, shock, melee, defense) from the components, terrain, night, fortification, and supply, and a per-step rate each side inflicts; every per-step quantity (inflicted share, cohesion loss, morale shock) scales that rate by the profile's `step_scale_bp` once, so a daily profile can compress many short steps into one. A game with its own formula implements `StepResolver` once and may ask for keyed draws through `StepDraws`. Activation refuses a rulebook that names another resolver than the plugin runs.
+The resolver is a type: `MilitaryPlugin<R: StepResolver>`. `ParametricStepResolver` computes four lines per side (fire, shock, melee, and defense: one integer term each) from the components, terrain, night, fortification, and supply, and a per-step rate each side inflicts; every per-step quantity (inflicted share, cohesion loss, morale shock) scales that rate once by the profile's `step_scale_bp` (in basis points, hundredths of a percent), so a daily profile can compress many short steps into one. A game with its own formula implements `StepResolver` once and may ask for keyed draws through `StepDraws`. Activation refuses a rulebook that names another resolver than the plugin runs.
 
 The engine owns everything around the call: it clamps the outcome to the rulebook's ranges, applies the break rule (a defender behind closed walls of the rulebook's grade never breaks), applies pursuit on a rout, and decides whether the fight continues. Step profiles let one fight run on a daily step while another is promoted to half-hour steps (`ReviseStepProfile`).
 

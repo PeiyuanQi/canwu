@@ -382,7 +382,7 @@ impl Simulation {
 /// Version of the continuation checkpoint. Version 2 embeds snapshot format
 /// 9; version 3 keeps retired command requests as ranges in the request
 /// index.
-pub const CONTINUATION_CHECKPOINT_FORMAT_VERSION: u32 = 3;
+pub const CONTINUATION_CHECKPOINT_FORMAT_VERSION: u32 = 4;
 /// Hash domain of the continuation checkpoint's own identity.
 const CONTINUATION_CHECKPOINT_DOMAIN: &str = "canwu.continuation-checkpoint.v1";
 

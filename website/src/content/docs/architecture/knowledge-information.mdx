@@ -137,7 +137,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 1. 输入到达。上层应用提交 `apply_information_operation_v1` 命令，每条命令带一个 `InformationOperationEnvelope`。命令处理器检查幂等性，然后排入 `information_operation_v1` [规范化输入](/reference/terminology/)；命令本身不写任何记录。信息提供方也可以直接排入这条输入。通信通过 `initiate_correspondence_v1`、`delegate_carrier_v1` 和 `resolve_correspondence_v1` 三条命令，以及 `install_correspondence_knowledge_v1`、`communication_opportunity_v1` 和 `correspondence_incident_v1` 三种输入进入。
 2. 第 7 阶段运行信息生命周期。事件驱动的系统 `information_lifecycle_v1` 让每个已准入的操作依次进入 `Accepted`、`ApplyingDomainChanges`，最后应用变更，每个边界前进一步。应用之前，它检查解读权限；如果带有真伪判定，还要检查判定引用的是某个带自称来源的表现形式的当前版本。检查失败时，操作保存为 `Rejected`，错误码为 `invalid_authority` 或 `invalid_lifecycle`。`InformationLifecycle::plan` 返回记录变更，以及这次变更引出的知识发布。操作按先后顺序规划，最早的在前；计划会改动同一轮中更早的操作已经改动的记录的操作，等到下一个边界再规划。无法解码的数据包，以及对另一个数据包或已持久化的操作已占用的操作 ID 带来不同输入的数据包，以 `canwu.information.ingress_rejected.v1` 事件被跳过，绝不会让边界失败。同一个系统还为每个命令授权维护一条带版本的 `DelegatedAuthority` 记录，即[委托账](/reference/terminology/)：按命令 ID 存放该授权下仍然有效的委托，并带一个到期索引。之后的 `InterpretationAuthority::Delegated` 按这本账而不是按命令检查，所以命令封存之后判断不变。系统在它运行的每个边界都会移除 `expires_at` 已到的委托，准入时就已经过期的委托声明不会记入；`expires_at` 已到的委托即使还没被移除也不再授权任何事，所以解读必须在委托仍然有效时准入，就算它的日期落在委托窗口之内也一样（否则为 `invalid_authority`）。没有 `expires_at` 的委托声明在整个运行期内保留。
 3. 第 7 阶段同时运行通信。`correspondence-lifecycle-v1` 结算启动、推进、意外事件、通信机会、恢复和委托。处理启动时，它读取承运人当前的规划知识，从中解析收件人地址，调用 `plan_route`，保存 `CorrespondenceOperation`，并为 `canwu-information` 安排信息操作。之后的 `progress_correspondence_v1` 输入等待这些操作结束，再开始和完成各段路程。
-4. 第 13 阶段发布知识。`information_publication_v1` 把一个操作要发布的知识转为 `PublishKnowledge` 指令，每条指令一个单持有人的组，每个操作在一个边界内最多发布 64 条，并且绝不超过边界的[发布预算](#发布预算)（第一条记录就放不下的一批整批推迟，同一时刻的下一个边界重试）；每个持有人、种类和主体集合在一个边界内最多发布一次，引擎不接受的持有人（已死亡的人物、不存在的军队或政府、已退休的实体）留着不发布，操作带着其余部分完成。下一个边界，内部输入 `information_operation_finalize_v1` 记录已发布的 ID（通过 `knowledge_heads` 查到，而不是从保留的证据里找），并放出下一批。`correspondence-knowledge-ingress-v1` 发布知识种子和承运人的尝试报告。
+4. 第 13 阶段发布知识。`information_publication_v1` 把一个操作要发布的知识转为 `PublishKnowledge` 指令，每条指令一个单持有人的组，每个操作在一个边界内最多发布 64 条，并且绝不超过边界的[发布预算](#发布预算)（第一条记录就放不下的一批整批推迟，同一时刻的下一个边界重试）；每个持有人、种类和主体集合在一个边界内最多发布一次，引擎不接受的持有人（已死亡的人物、不存在的军队或政府、已退休的实体）留着不发布，操作带着其余部分完成。下一个边界，内部输入 `information_operation_finalize_v1` 记录已发布的 ID（通过 `knowledge_heads` 查到，而不是从保留的证据里找），并放出下一批。`correspondence-knowledge-ingress-v1` 发布知识种子和承运人的尝试报告：持有人被引擎拒绝、一次发布装不下，或陈述了规划网络不接受的连接的种子什么也不发布，其回执记下原因（`KnowledgeSeedRefusal`，[知识种子拒收](/reference/terminology/)）；发给引擎拒绝的承运人（例如扣押后死亡的人物）的尝试报告不发布，改为发出 `canwu.correspondence.attempt_report_withheld.v1`，边界照常提交。
 5. 模拟内核校验并提交。内核只接受满足以下全部条件的 `PublishKnowledge` 指令：
    - 来自第 4 或第 13 阶段的系统，且该系统在 `knowledge_writes` 中以相应的可见性声明了这个 schema；
    - schema 可写，并由同一个插件注册；
@@ -235,7 +235,7 @@ draft.supersedes = heads.records;
 | `canwu.information` `interpretation_recorded` | 解读所服务的持有人 | 记录一次解读 |
 | `canwu.information` `release_available` | 受众中的每个成员 | 面向受众的发布变为 `Active` |
 | `canwu.correspondence` `routing_endpoint`、`routing_connection`、`address` | 种子中指定的持有人 | 准入一个 `NetworkKnowledgeSeed` |
-| `canwu.correspondence` `attempt_report` | 承运人 | 承运人扣押结束了一次投递尝试 |
+| `canwu.correspondence` `attempt_report` | 承运人 | 承运人扣押结束了一次投递尝试，除非承运人此时已不接受知识 |
 
 信息 schema 的载荷只有 `record_version`，主体字段指明是哪些记录。持有人得知某条记录存在之后，要展示哪些内容由上层应用决定。每条事实只发给一个持有人，所以经手人私下的阅读不会传给别人，受托承运人的路线知识不会进入发件人的账本，扣押报告也不写出扣押者。
 

@@ -347,7 +347,12 @@ authority-basis record that names the owner and every subject. Seizures,
 failures caused by hazards, and delivery reconciliation arrive only as
 application incidents that cite the current version of an evidence record; the
 plugin never draws randomness. Since 0.19.0 an owner, operator, or incident can
-hold a departed leg (`DelayLeg`). Capacity pools offer windowed transport
+hold a departed leg (`DelayLeg`). Since 0.20.0 a hold can also keep a leg that
+has not departed at its stop without spending an itinerary revision, and with
+`retime_later_legs` it moves the later legs' departures and booking windows by
+the part of the hold that elapsed. A pool's custodian, or an application
+incident, can revoke a confirmed booking, and the owner replaces it with a new
+request that names it. Capacity pools offer windowed transport
 capacity, and one deterministic, all-or-nothing allocation pass per pool orders
 requests by priority, window start, tie-break key, admission sequence, and
 booking identity without preempting confirmed capacity. After a terminal

@@ -96,8 +96,8 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | --- | --- |
 | `MovementPlugin` | 模拟插件本身。`MovementPlugin::new(evidence_kinds)` 声明它可以读取哪些应用记录种类，这份列表就是它读取证据的全部范围。 |
 | `MovementState` | 整个移动运行时，保存为一条领域记录：运输执行、移动命令、运力池、预订绑定、操作结果和报告头 |
-| `MovementCommandV1`、`MovementOperation` | 来自某个持有人的命令载荷，带操作键和一个操作：`Order`、`StartLeg`、`CompleteLeg`、`FailLeg`、`DelayLeg`、`Reroute`、`RecordHandoff`、`RequestBooking`、`Cancel` 或 `OfferPool` |
-| `MovementIncidentV1` | 应用报告的 `FailLeg`、`DelayLeg`、`Reroute`、`RecordHandoff` 或 `Reconcile`，引用一条证据记录的当前版本 |
+| `MovementCommandV1`、`MovementOperation` | 来自某个持有人的命令载荷，带操作键和一个操作：`Order`、`StartLeg`、`CompleteLeg`、`FailLeg`、`DelayLeg`、`Reroute`、`RecordHandoff`、`RequestBooking`、`RevokeBooking`、`Cancel` 或 `OfferPool` |
+| `MovementIncidentV1` | 应用报告的 `FailLeg`、`DelayLeg`、`Reroute`、`RecordHandoff`、`RevokeBooking` 或 `Reconcile`，引用一条证据记录的当前版本 |
 | `MovementOperationOutcomeV1` | 某个操作键的持久结果：`Applied`，或带 `MovementErrorCode` 的 `Rejected` |
 | `MovementReportV1` | 某个持有人看到的一次运输执行，以知识形式发布 |
 
@@ -137,19 +137,19 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 ### 路段计时
 
-路段靠内部调度输入推进。移动命令在计划出发时间安排第一次出发；准入时如果已经过了这个时间，就在准入时出发。出发后，按路段的计划时长安排到达；到达后，再安排下一段出发。每条移动命令在 `pending_due` 中只记下自己等待的那一条输入，其他到期输入都已过时，不起作用。所以显式的 `StartLeg`、`FailLeg`、`DelayLeg` 或 `Reroute` 会取代旧的计时，无需撤回已排队的输入。
+路段靠内部调度输入推进。移动命令在计划出发时间安排第一次出发；准入时如果已经过了这个时间，就在准入时出发。出发后，按路段的计划时长安排到达；到达后，再安排下一段出发。每条移动命令在 `pending_due` 中只记下自己等待的那一条输入，其他到期输入都已过时，不起作用。所以显式的 `StartLeg`、`FailLeg`、`DelayLeg` 或 `Reroute` 会取代旧的计时；被取代而尚未到期的输入由插件撤回（见下）。
 
-移动命令的所有者或操作者，或者应用报告的事故，可以在当前路段出发之后发送 `DelayLeg`，为它设置**路段滞留**（leg hold）。路段随后在 `until` 到达；`until` 是一个绝对时刻，不早于结算它的边界，也不早于该路段的**排定到达时刻**（scheduled arrival，即实际出发时间加计划时长）。要延长或缩短滞留，再发送一次 `DelayLeg`；把 `until` 设为排定到达时刻，就解除了滞留。只保留最新的一次滞留。`CompleteLeg` 仍会让滞留中的路段立即到达，`FailLeg` 仍会让它失败，两者都会清除滞留。路段已出发时，`Reroute` 仍会被拒绝。几种边界情况：滞留与它所取代的那次到达在同一个边界中结算时，以滞留为准；未通过检查的 `DelayLeg` 会被拒绝，并记下一条结果；滞留期间预订过期的后续路段，到出发时以 `capacity_unavailable` 失败。
+移动命令的所有者或操作者，或者应用报告的事故，可以对当前路段发送 `DelayLeg`，为它设置**路段滞留**（leg hold）：路段已出发时滞留它的到达，尚未出发（`Planned`、`Booked` 或 `Waiting`，带待处理的出发到期）时滞留它的出发，都不产生行程修订。`until` 是一个绝对时刻，不早于结算它的边界，也不早于该路段的**排定时刻**（scheduled due）：已出发的路段是实际出发时间加计划时长，尚未出发的路段是它首次被滞留时待处理的出发时刻，所以反复滞留不会让路段比首次滞留时更早出发。要延长或缩短滞留，再发送一次 `DelayLeg`；把 `until` 设为排定时刻，就解除了滞留。只保留最新的一次滞留。带 `retime_later_legs` 的滞留在结束时把实际经过的部分（最多为滞留的延长量）加到移动命令的**行程顺延量**（schedule shift，`schedule_shift`）上，后续路段的计划出发和预订窗口随之顺延，保持原有间隔；不带它时后续路段保持计划时间，紧随到达出发。改道会把顺延量清零。滞留在它的到期结算、`StartLeg` 或 `CompleteLeg` 显式作用于该路段、路段失败，或修订被改道或取消关闭时结束：`CompleteLeg` 仍会让滞留中的路段立即到达，`FailLeg` 仍会让它失败。路段已出发时，`Reroute` 仍会被拒绝。几种边界情况：滞留与它所取代的到期在同一个边界中结算时，以滞留为准；未通过检查的 `DelayLeg` 会被拒绝，并记下一条结果；滞留期间预订过期的后续路段，到出发时以 `capacity_unavailable` 失败，除非先被替换。
 
-每次 `DelayLeg` 都会让被它取代的那条输入继续排队，直到那条输入自己的到期时间，届时它唤醒一个边界，然后被跳过。在滞留很多的长期运行中，这类输入会不断累积，`pending_ingress` 也会列出它们。
+一次操作或滞留取代的到期输入如果尚未到期，插件会在同一边界里用 `CancelPluginIngress` 撤回它（撤回是该边界的一条 `PluginCancellation` 输入记录），所以被取代的输入不会累积，不会唤醒本来为空的边界，`pending_ingress` 也不再列出它们；在到期当刻被取代的输入照旧作为过时输入被跳过。
 
 到期工作从不让边界失败。到期的出发或到达无法应用时，当前路段以 `due_settlement_failed` 为原因失败，所有者或操作者可以改道或取消。最后一段到达时，没有投递尝试的运输执行直接结算；带有 `delivery_attempt` 的运输执行进入 `ArrivalPending`，等待一条引用该投递尝试记录的 `Reconcile` 事故。
 
 ### 运力池
 
-插件在第 7 阶段用 `allocate_capacity_bookings` 分配运力池，与内核第 6 阶段的[资源分配](/architecture/settlement/#资源分配)相互独立。`OfferPool` 操作提供运力池，`RequestBooking` 为一个尚未出发的路段申请运力，预订窗口必须落在该路段的计划窗口内。本边界申请的每项预订要么全额确认，要么失败，结果记录为 `CapacityBookingAllocationEvidenceV1`。分配时依次按优先级（从高到低）、窗口开始时间、平局决胜键、准入序号和预订标识排序。已经确认的运力始终归属原预订，后来的申请拿不走。
+插件在第 7 阶段用 `allocate_capacity_bookings` 分配运力池，与内核第 6 阶段的[资源分配](/architecture/settlement/#资源分配)相互独立。`OfferPool` 操作提供运力池，`RequestBooking` 为一个尚未出发的路段申请运力，预订窗口必须落在该路段按[行程顺延量](/reference/terminology/)（以及正在生效、会顺延它的滞留）顺延后的计划窗口内；申请可以用 `replaces` 指名要替换的同一路段的一项更早预订（[预订替换](/reference/terminology/)，每项预订只能被替换一次），待处理的原预订随即被取消，已确认的被释放。本边界申请的每项预订要么全额确认，要么失败，结果记录为 `CapacityBookingAllocationEvidenceV1`。分配时依次按优先级（从高到低）、窗口开始时间、平局决胜键、准入序号和预订标识排序。已经确认的运力始终归属原预订，后来的申请拿不走。
 
-出发的路段消耗自己已确认的预订。预订失败或过期的路段以 `capacity_unavailable` 失败，等待改道。已确认但窗口尚未开始的预订会把出发推迟到窗口开始。
+出发的路段消耗自己已确认的预订。运力池的保管人，或引用当前证据的应用事故，可以用 `RevokeBooking` 撤销一项已确认的预订（[预订撤销](/reference/terminology/)）：预订变为 `Revoked`，记下时间和原因，运力回到运力池，供之后的申请使用或由 `OfferPool` 收回。预订失败、过期或被撤销且未被替换的路段以 `capacity_unavailable` 失败，等待改道。已确认但窗口尚未开始的预订会把出发推迟到窗口开始。
 
 ### 操作键
 
@@ -178,12 +178,12 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 | 持有人 | 角色 | 报告内容 |
 | --- | --- | --- |
-| 下令的持有人（须为人物） | `Owner` | 当前阶段和各路段，外加详情：运输执行状态、修订原因、失败、交接、预订，以及已出发路段上的滞留（`MovementLegHoldV1`：排定到达时刻、`until`、原因和设置时间） |
+| 下令的持有人（须为人物） | `Owner` | 当前阶段和各路段，外加详情：运输执行状态、修订原因、失败、交接、预订，当前路段上的滞留（`MovementLegHoldV1`：种类、排定时刻、`until`、原因、设置时间和是否顺延后续路段）、行程顺延量，以及各预订的撤销时间和原因 |
 | 移动命令中的 `operator` | `Operator` | 与所有者相同 |
 | `remote_observers` 中的每一项 | `DelayedRemote` | 按授权延迟回溯后的阶段、路段和最后已知端点，不含详情 |
 | 其他人 | 无 | 收不到任何报告 |
 
-插件只在报告摘要变化时发布，而且只发给在世的人物持有人，所以作为所有者的机构收不到报告。`observed_as_of` 是报告所反映的最新事实的时间。延迟的远方观察者只能从路段的到达时间得知滞留。所有者和操作者的报告置信度按千分制记为 1,000，并引用运行时记录的版本；延迟报告的置信度记为 700，不引用任何证据，因此发布时间不会透露运行时最近何时变化。
+插件只在报告摘要变化时发布，而且只发给在世的人物持有人，所以作为所有者的机构收不到报告。`observed_as_of` 是报告所反映的最新事实的时间。延迟的远方观察者只能从路段的出发或到达时间得知滞留。所有者和操作者的报告置信度按千分制记为 1,000，并引用运行时记录的版本；延迟报告的置信度记为 700，不引用任何证据，因此发布时间不会透露运行时最近何时变化。
 
 客户端通过 `viewer_for_actor` 得到持有人的角色相对视图，再用 `query_knowledge` 读取报告，schema 取自 `movement_report_knowledge_schema_id()`。`movement_state(&canwu)` 返回整个运行时，只应在受信任的上层应用代码中使用。
 
@@ -193,7 +193,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 持久化的内容：
 
-- `MovementState` 是一条领域记录，种类为 `canwu.movement/runtime`，ID 为 `canwu.movement:runtime`。`MovementState::into_initial_record` 可以为场景生成这条记录，例如在运行开始前装好运力池。激活时，插件最多接受一个规范编码的运行时根记录。根记录中已出发的路段，到达的到期时间必须是它的排定到达时刻，或者带一个 `until` 等于该到期时间的滞留；不满足这一点的根记录在载入时被拒绝，违反这条规则的恢复后运行时也一样。
+- `MovementState` 是一条领域记录，种类为 `canwu.movement/runtime`，ID 为 `canwu.movement:runtime`。`MovementState::into_initial_record` 可以为场景生成这条记录，例如在运行开始前装好运力池。激活时，插件最多接受一个规范编码的运行时根记录。根记录中已出发的路段，到达的到期时间必须是它的排定时刻（出发时间加计划时长），或者带一个 `until` 等于该到期时间的滞留；尚未出发而被滞留的路段按同样的方式检查：待处理的出发到期必须等于滞留的 `until`，`until` 不早于滞留记下的排定时刻。不满足这一点的根记录在载入时被拒绝，违反这条规则的恢复后运行时也一样。
 - 待处理的路段到期输入和报告唤醒都是排队中的规范化输入，所以快照会带上它们，载入后的运行可以从行程中途继续。
 - 已关闭的运输执行会从运行时退休。它的移动命令和运输执行标识仍然保留、不会复用，已消耗的运力也仍计入运力池。已发布的报告留在持有人的知识中，领域记录历史保留运行时的旧版本。
 - 运输值是 serde 数据，保存在其所有者的记录中。`TRANSPORT_SEMANTIC_VERSION` 为 `canwu-transport.v5`。`HandoffKind::Planned` 类型的交接在 JSON 中省略类型字段，所以旧的交接记录保持原有编码。

@@ -53,7 +53,9 @@ sidebar:
 | [回滚](/architecture/settlement/) | rollback | — | 边界失败时同时恢复状态、证据、计数器和随机位置。 |
 | [转移清单](/architecture/settlement/) | transition manifest | `TransitionManifest`, `BoundaryDirective::RegisterTransitionManifest` | 协调插件为一次多所有者转移作出的声明，列出参与插件、预期记录版本和唯一的就绪边界。参与者在该边界第 10 阶段用 `StageTransitionWrite` 暂存写入；清单之外的第 10 阶段指令不受影响。 |
 | [转移审计](/architecture/settlement/) | transition audit | `TransitionAuditRecord` | 内核在第 11 阶段对本边界就绪的每份清单所做的检查。清单仅被部分参与者暂存，或预期版本不符，都会使整个边界失败；没有任何参与者暂存的清单则过期。提交或过期的结果作为只读边界证据，供第 12 阶段系统读取。 |
-| [边界账](/architecture/settlement/#统计一段时间内的边界) | boundary ledger | `SimulationView::boundaries_between`、`BoundaryWindow`、`BoundarySummary`、`BoundaryIngressOrigin`、`boundary_schedule_horizon` | 一段模拟时间内的边界：其中已经结算的、正在结算的和仍在排队的边界，每个都带有时间、节奏，以及按类别、种类和来源计数的输入。只有分阶段的边界系统可以在声明 `canwu.core.boundary_schedule` 读取后读它，在把工作带到另一个边界之前先数清这段时间的边界；它用 `boundary_schedule_horizon` 声明要往回读多远。已结算的边界在实时、封存、恢复和重放的运行中完全相同；排队列表只是下限。 |
+| [边界账](/architecture/settlement/#统计一段时间内的边界) | boundary ledger | `SimulationView::boundaries_between`、`BoundaryWindow`、`BoundarySummary`、`BoundaryIngressOrigin`、`boundary_schedule_horizon` | 一段模拟时间内的边界：其中已经结算的、正在结算的和仍在排队的边界，每个都带有时间、节奏、历法标记，以及按类别、种类和来源计数的输入。只有分阶段的边界系统可以在声明 `canwu.core.boundary_schedule` 读取后读它，在把工作带到另一个边界之前先数清这段时间的边界；它用 `boundary_schedule_horizon` 声明要往回读多远。已结算的边界在实时、封存、恢复和重放的运行中完全相同；排队列表只是下限。 |
+| [历法标记](/architecture/settlement/#统计一段时间内的边界) | calendar mark | `CalendarMark`、`schedule_calendar_marks`、`SimulationView::calendar_marks` | 上层应用的某个历法在日历边界上的标记：该边界是这个历法某个节奏的周期起点。带历法键的系统只在自己历法、自己节奏的标记上唤醒；没有历法键的系统在该节奏的每个边界上唤醒，不论有没有标记。引擎仍不内置历法。 |
+| [历法键](/architecture/settlement/#统计一段时间内的边界) | calendar key | `BoundarySystemContract::calendar`、`MAX_CALENDAR_KEY_BYTES` | 上层应用给自己某个历法起的名字（规范化标签，最长 64 字节），写在标记上和边界系统的注册上；注册上的历法键属于插件描述。 |
 | [边界耗时明细](/architecture/settlement/#边界耗时明细) | boundary profile | `BoundaryProfile`、`set_boundary_profiling`、`take_boundary_profiles`、`replay_from_journal_with_boundary_profiles` | 上层应用按需开启的诊断数据：一个已结算边界的现实耗时，它运行的每个插件处理器的现实耗时（按种类、阶段、插件和名称列出），以及每个引擎阶段的耗时。它不属于权威状态、证据、快照或重放，插件也读不到它。精确重放可以逐个边界计时。 |
 | [引擎阶段](/architecture/settlement/#边界耗时明细) | engine phase | `BoundaryEnginePhase`、`BoundaryEngineTiming`、`BoundaryProfile::engine` | 边界耗时明细中模拟内核自身工作的一个类别：准入、系统调度、暂存、提交、知识、日志和哈希。引擎阶段与插件处理器一起分完一个边界的现实耗时。它是计时类别，不是结算阶段。 |
 | [请求结果保留期](/developer/persistence/#版本与存档兼容) | request outcome retention | `RunConfiguration::request_outcome_retention`、`with_request_outcome_retention`、`DEFAULT_REQUEST_OUTCOME_RETENTION`、`MAX_REQUEST_OUTCOME_RETENTION` | 带请求标识的命令请求结算之后，其精确结果和排队回执还保留多久模拟时间，用来回答完全相同的重试：默认 30 天，可取 0 到 366 天，在创建模拟运行时定下。规则只看模拟时间，所以现实时间的暂停不会让任何结果退役，模拟速度越快、按现实时间算退役得越早，而未封存、封存过、恢复后和重放的运行回答一致。 |
@@ -167,7 +169,7 @@ sidebar:
 | [归档查找索引](/architecture/resources-production/#归档终态记录) | archive lookup index | `ResourceArchiveLookupPageV1`, `ResourceArchiveIndexDirectoryV1::lookup_root` | 每次归档提交都会续写的累积索引，按内容寻址。检查某个键是否已归档时，只需读取归档头目录，再沿索引每层读一个经过认证的页，与模拟运行已经做过多少次归档提交无关。资源归档、生产归档、财政归档和参考包归档都使用这种格式的索引，各有自己的命名空间。恢复、精确重放或派生分支需要沿途每个归档头的索引页。 |
 | [在制品](/tutorials/cases/production-economy/) | work in progress | `WorkInProgress` | 已进入尚未完成的生产执行，并绑定精确工艺、设施、资源和证据的投入；既不是可用库存，也不是已结算产出。 |
 | [实际产出](/developer/production-economy/) | realized output | `realized_output_per_mille`, `realization_evidence` | 生产执行完成时以工艺名义产出的千分比表示的产出，按向下取整缩放后进入产出结算；任何非名义比例都需要工艺版本声明种类的精确证据记录。 |
-| [移动生命周期扩展](/tutorials/routing-transport/) | movement lifecycle extension | `canwu-movement`, `MovementPlugin` | 负责运输记录生命周期的可选扩展：准入移动命令、在到期时结算路段、让已出发的路段滞留、分配运力池，并发布持有人相对的移动报告。事故、危险及其随机抽样仍属于应用系统。 |
+| [移动生命周期扩展](/tutorials/routing-transport/) | movement lifecycle extension | `canwu-movement`, `MovementPlugin` | 负责运输记录生命周期的可选扩展：准入移动命令、在到期时结算路段、让路段在出发前和途中滞留、分配运力池，并发布持有人相对的移动报告。事故、危险及其随机抽样仍属于应用系统。 |
 | [军事模拟扩展](/tutorials/military-domain/) | military simulation extension | `canwu-military` | 可选的交战引擎：在宿主安装的战斗规则册上负责部队、按战斗步推进的交战、围城、渡河作战和交战报告；不是通用战斗模型，也不拥有控制或占领。 |
 | [交战](/architecture/military/) | engagement | `EngagementStateV1`, `OpenEngagement` | 宿主地点上双方之间按战斗步推进的一场战斗，由命令开启，结束时收束为一份总结。 |
 | [战斗步](/architecture/military/) | engagement step | `StepV1`, `EngagementStepsV1` | 战斗步公式的一次结算；每个战斗步的证据。 |
@@ -193,7 +195,9 @@ sidebar:
 | [随机决策策略](/tutorials/cases/uncertainty-resolution/) | random decision policy | `DecisionPolicyKind::Random` | 由声明过的边界系统使用可重放抽样证据结算的有界票据选择器，不是通用世界事件生成器。 |
 | [决策选项权重](/tutorials/cases/uncertainty-resolution/) | decision option weight | `DecisionOptionWeight` | 将一个有界抽样映射到票据既有选项的规范 option ID 与非负整数权重。 |
 | [操作定址随机抽样](/architecture/randomness/) | operation-keyed random draw | `random_sample_for_operation`, `random_draw_for_operation`, `RandomOperationDraw` | 按稳定 cause、operation ID、目标、occurrence、purpose 和随机流身份定址的抽样，使重试与重放不会消费另一份结果。`random_draw_for_operation` 还会返回这次抽样的证据 ID；完全相同的重试由操作定址抽样明细回答，不论当初引用的证据是否仍被保留。首次抽样引用的操作证据必须不受封存影响：同一边界内的证据、日志计数器能证明的序号证据，或记录的当前版本或初始场景版本。 |
-| [操作定址抽样明细](/architecture/randomness/#抽样之后还有哪些开销) | keyed-draw ledger | `KeyedDrawEntry`、`ContinuationCheckpoint::keyed_draws` | 模拟运行抽过的每个操作地址的持久记录，无论其抽样证据仍保留还是已封存，记有抽样 ID、证据、上界、用途和值。边界提交时续写，边界失败时恢复，封存和派生分支共享它，每次恢复只重建一次；在整个运行期内每个地址保留一个条目。 |
+| [操作定址抽样明细](/architecture/randomness/#抽样之后还有哪些开销) | keyed-draw ledger | `KeyedDrawEntry`、`ContinuationCheckpoint::keyed_draws` | 模拟运行抽过的每个操作地址的持久记录，无论其抽样证据仍保留还是已封存，记有抽样 ID、证据、上界、用途和值。边界提交时续写，边界失败时恢复，封存和派生分支共享它，每次恢复只重建一次；每个地址保留一个条目直到该抽样退役，随机流未声明定址抽样退役期时保留到运行结束。 |
+| 定址抽样退役期 | keyed-draw retirement | `KeyedDrawRetirement`、`BoundarySystemContract::keyed_draw_retirement` | 某个随机流的操作定址抽样在抽样所在边界之后，在操作定址抽样明细中保留多久：由拥有该随机流的边界系统声明的正时长，属于插件描述。抽样时间加这个时长之后的第一个边界，在任何系统运行之前把它丢弃。不是已退役请求结果（命令请求），也不是已清退条目（知识条目）。 |
+| 已退役定址抽样 | retired keyed draw | — | 过了退役期的定址抽样：不再被回答；同一地址的请求是一次新的抽样，用新的抽样 ID（上界和用途相同时值也相同），原抽样记录作为证据留在抽样日志里。 |
 | [评估轨迹](/architecture/settlement/) | evaluation trace | `EvaluationTraceRecord`, `BoundaryDirective::RecordEvaluationTrace` | 有界的边界证据，逐项说明某条应用规则如何为一个对象得出一个整数结果。它不属于状态；持有人只能通过 `CanwuViewer::evaluation_traces` 读取关于自身实体的轨迹，或者在轨迹评估之前其账本就已得知的对象的轨迹。 |
 | [资源预留](/tutorials/phased-boundary/) | reservation | `ReservationRequest` | 分配前对守恒资源池提出的声明式申请。 |
 | 需求来源策略 | demand source policy | `ResourceDemandSourcePolicyV1` | 在稀缺资源分配前选择合格供给账户：匹配资源池中的账户、由申请者保管的有界精确账户列表，或在动用授权下列出的授权方账户。只有 `Granted` 形式带有跨保管人的权限，且仅限于该授权。 |
@@ -245,7 +249,8 @@ sidebar:
 | [持有人规划快照](/developer/reading-state/) | holder planning snapshot | `planning_snapshot_from_holder_knowledge`, `KnowledgeReadCutDigest` | 只用某个持有人账本在读取切面上声明的端点和连接构建的路由 `PlanningSnapshot`，同时返回读取集摘要，证明规划读取了什么。 |
 | [通信](/tutorials/cases/routed-correspondence/) | correspondence | `CorrespondenceOperation` | 把定向通信需求与信息投递，以及必要的物理或信号运输组合起来的流程。 |
 | [受托承运人](/tutorials/cases/routed-correspondence/) | delegated carrier | `delegate_carrier_v1`, `InitiateCorrespondenceRequest::carrier_delegation` | 发送者以外、以自己的委托命令接受承运的承运人；其声明指明发送者，并覆盖每次派发。规划读取承运人的账本，引擎不会把承运人的任何知识发布给发送者。 |
-| [承运人扣押](/tutorials/cases/routed-correspondence/) | carrier seizure | `CorrespondenceIncidentKind::CarrierSeized` | 承运人连同信件被他人夺走的事故。与截取不同，它会终止投递尝试：终态扣押交接之后，运输执行只能由其所有者关闭，只有承运持有人会收到尝试报告。 |
+| [承运人扣押](/tutorials/cases/routed-correspondence/) | carrier seizure | `CorrespondenceIncidentKind::CarrierSeized` | 承运人连同信件被他人夺走的事故。与截取不同，它会终止投递尝试：终态扣押交接之后，运输执行只能由其所有者关闭，只有承运持有人会收到尝试报告；报告发布时承运人已不接受知识的，报告不发布。 |
+| [知识种子拒收](/tutorials/cases/routed-correspondence/) | seed refusal | `KnowledgeSeedRefusal`、`KnowledgeSeedReceipt::refusal` | 知识种子未发布任何内容的原因：持有人不接受知识、一次发布装不下，或它陈述了规划网络不接受的连接。记在种子的回执上；种子键已被占用。 |
 | [真伪判定](/tutorials/cases/encoded-interception/) | authenticity finding | `AuthenticityFinding` | 解读信息的持有人作出的判断，绑定到所解读 representation 的精确版本，说明是否接受其声称的来源，并附依据和置信度。伪造被识破的概率仍由应用抽样决定。 |
 | [改道](/tutorials/cases/routed-correspondence/) | reroute | `ItineraryRevision` | 因灾害或路线知识变化，为同一个投递尝试建立后继行程。 |
 | [外部条件](/tutorials/routing-transport/) | external condition | `ItineraryRevisionReason::ExternalCondition` | 引用应用所有的条件记录精确正数版本及应用标签的改道原因；运输只记录引用，不解释条件本身。 |
@@ -258,8 +263,11 @@ sidebar:
 | [扣押交接](/tutorials/routing-transport/) | seizure handoff | `HandoffKind::Seizure` | 行程之外的主体夺取保管权时形成的交接，记录夺取方身份。终态扣押以失败路段同时作为起止路段，保管权离开行程，此后运输执行只能由其所有者关闭。背后的事件和权限仍属于应用系统；其余交接均为计划交接。 |
 | [运力池](/tutorials/routing-transport/) | capacity pool | `TransportCapacityPoolV1` | 由一个持有人提供、在时间窗口内可以互换的运输能力数量，例如渡船班次或驿马。已确认和已消耗的预订占用它；每次变化都会推进其修订号，便于分配证据引用。 |
 | [预订分配](/tutorials/routing-transport/) | booking allocation | `allocate_capacity_bookings`, `CapacityBookingAllocationEvidenceV1` | 针对某一运力池修订、结果与输入顺序无关的纯函数分配：按优先级、窗口开始时间、平局决胜键、准入序号和预订标识依次处理请求，每项预订要么全额确认，要么记录原因后失败。它从不抢占已确认的运力。 |
-| [路段滞留](/architecture/routing-movement/#路段计时) | leg hold | `MovementOperation::DelayLeg`、`MovementLegHoldV1`、`MovementOrderRecordV1::hold` | 对已出发路段的滞留：由移动命令的所有者或操作者用 `DelayLeg` 设置，或由引用当前版本证据的事故设置，把该路段的到达推迟到一个不早于排定到达时刻的绝对时刻。之后的滞留可以延长、缩短或解除它，只保留最新的一次；路段到达之前，只有所有者和操作者能看到它。不要单用“延误”，它在正文中泛指任何迟到。 |
-| [排定到达时刻](/architecture/routing-movement/#路段计时) | scheduled arrival | `MovementLegHoldV1::scheduled_arrival_at` | 已出发路段在出发时排定的到达时刻：实际出发时间加计划时长。滞留不会在它之前结束，解除滞留就是把 `until` 设回这个时刻。 |
+| [路段滞留](/architecture/routing-movement/#路段计时) | leg hold | `MovementOperation::DelayLeg`、`MovementLegHoldV1`、`MovementOrderRecordV1::hold` | 对当前路段的滞留：由移动命令的所有者或操作者用 `DelayLeg` 设置，或由引用当前版本证据的事故设置，把尚未出发路段的出发、或已出发路段的到达，推迟到一个不早于被取代的排定时刻的绝对时刻，不产生行程修订。之后的滞留可以延长、缩短或解除它，只保留最新的一次；到期结算之前，只有所有者和操作者能看到它。不要单用“延误”，它在正文中泛指任何迟到。 |
+| [排定时刻](/architecture/routing-movement/#路段计时) | scheduled due | `MovementLegHoldV1::scheduled_at` | 滞留所取代、且滞留不会早于它结束的到期时刻：已出发路段的实际出发时间加计划时长，或路段首次被滞留时待处理的出发时刻。解除滞留就是把 `until` 设回这个时刻。 |
+| [行程顺延量](/architecture/routing-movement/#路段计时) | schedule shift | `MovementOrderRecordV1::schedule_shift`、`MovementReportDetailV1::schedule_shift`、`DelayLeg::retime_later_legs` | 生效行程中尚未出发的各路段因重新排时的滞留（`retime_later_legs`）而落后于计划时间的量；它顺延这些路段的计划出发和预订窗口，只在重新排时的滞留结束时增长，改道会把它清零。 |
+| [预订撤销](/architecture/routing-movement/#运力池) | booking revocation | `MovementOperation::RevokeBooking`、`CapacityBookingStatus::Revoked`、`CapacityBooking::revocation` | 运力池保管人（或应用事故）撤回一项已确认的预订，记下时间和原因；运力回到运力池，预订未被先行替换时，路段出发时失败。 |
+| [预订替换](/architecture/routing-movement/#运力池) | booking replacement | `MovementBookingRequestV1::replaces` | 同一路段的一项新预订取代一项更早的预订，只能替换一次；待处理或已确认的原预订被取消或释放，已失去的原预订出发时不再计入。 |
 | [投影](/developer/reading-state/) | projection | — | 不暴露权威领域状态而生成的角色范围物化表示。 |
 | [权限](/developer/integration/) | authority | `CommandAuthority` | 发出命令或执行动作的已验证权利；`authoritative state` 应译为“权威状态”。 |
 | [签发者](/developer/integration/) | issuer | `Issuer` | 命令声明的来源身份；权限验证决定该身份是否可以行动。 |
@@ -273,7 +281,11 @@ sidebar:
 | [前序票据](/tutorials/cases/warlord-aid-decision/) | parent ticket | `DecisionTicket::parent_ticket` | 新票据所接续的终态票据：可以是同一决策者的票据（例如为另一控制者重新开启的已取消票据），也可以是经席位继任接续的票据。该关联会复制到新票据的决策轨迹上。 |
 | [席位继任](/tutorials/cases/warlord-aid-decision/) | seat succession | `DecisionControllerBinding::seat_id`, `DecisionTicket::parent_ticket` | 从终态票据到新票据的接续关系：新票据的指定控制者与原票据的控制者绑定同一个非空席位，因此继任者可以接续前任的决策，而不必是同一决策者。 |
 | [决策选项](/tutorials/cases/warlord-aid-decision/) | decision option | `DecisionOption` | 决策票据提供的一个候选选择。 |
-| [决策尝试](/tutorials/cases/warlord-aid-decision/) | decision attempt | `DecisionAttemptRecord` | 一条已准入决策请求的权威记录，写明该请求被接受还是被拒绝。请求可以是注册控制者，也可以是开启票据、替换票据选项、解决票据或取消票据。 |
+| [决策尝试](/tutorials/cases/warlord-aid-decision/) | decision attempt | `DecisionAttemptRecord` | 一条已准入决策请求的权威记录，写明该请求被接受还是被拒绝。请求可以是注册控制者，也可以是开启票据、替换票据选项、为票据展期、改派票据、解决票据或取消票据。 |
+| [展期](/architecture/decisions/) | deadline extension | `DecisionMutation::ExtendDeadline` | 在票据 ID 不变的前提下把开启票据的截止时间推后，按票据版本校验。 |
+| [改派](/architecture/decisions/) | ticket reassignment | `DecisionMutation::Reassign` | 把开启的票据改派给另一个已注册的控制者，此后只有它能结算该票据；决策者和前序关系不变。 |
+| [选项偏置](/architecture/decisions/) | option bias | `WeightedUtilityEvaluator::with_option_bias`、`DecisionOptionEvaluation::bias` | 策略对某个选项的固定整数偏好，加到该选项的加权得分上，并与各因子行分开记录。 |
+| [准入批次](/architecture/decisions/) | admission batch | `DecisionState::tickets_opened_in_batch`、`SimulationView::decision_tickets_opened` | 最近一个边界准入的决策 `Open` 所创建的票据，按准入顺序排列；属于持久化的决策状态，纳入决策根的承诺。 |
 | [决策轨迹](/tutorials/cases/warlord-aid-decision/) | decision trace | `DecisionTrace` | 用于解释和重放的评分、证据、策略身份、所选选项与结果。 |
 
 ## 统一写法
@@ -291,6 +303,7 @@ sidebar:
 | [无定位人物](/architecture/settlement/#人物与输入指令) / unplaced person | 未落位人物 | 已弃用：0.16.0 更改了中文写法；英文写法和 `PersonDraft::placement` 不变。 |
 | [当前知识记录](/architecture/knowledge-information/#取代先前的记录) / current knowledge records | 知识头记录 / knowledge heads | 已弃用（指文字写法）：统一使用 **当前知识记录** 与 **current knowledge records**；代码标识仍是 `knowledge_heads` 和 `KnowledgeHeads`。 |
 | [边界耗时明细](/architecture/settlement/#边界耗时明细) / boundary profile | 边界耗时剖面 | 已弃用：0.16.0 更改了中文写法；`BoundaryProfile` 不变。 |
+| [排定时刻](/architecture/routing-movement/#路段计时) / scheduled due | 排定到达时刻 / scheduled arrival | 已弃用：0.20.0 把路段滞留扩展到尚未出发的路段，滞留取代的到期时刻可以是出发；`MovementLegHoldV1::scheduled_at` 取代 `scheduled_arrival_at`。 |
 | [一步式完成租约](/developer/production-economy/#完成租约) / single-step completion lease | 单步完成租约 | 已弃用：0.16.0 更改了中文写法；`SingleStepLease` 不变。 |
 | [已清退条目](/architecture/knowledge-information/#留存) / cleared entry | 退役知识记录 / retired knowledge record；退休记录 | 已弃用：留存策略从持有人那里移除的条目统一使用 **已清退条目** 与 **cleared entry**；**退休目标 / retired target** 仍是文化术语，`RetireWhenSuperseded` 仍是代码标识。 |
 | 报告份额 / report share | 报告预算 / report budget | 受限：财政在发布预算中的份额，文字中统一使用 **报告份额** 与 **report share**；`FiscalReportBudget` 和 `with_report_budget` 保留 budget。 |

@@ -112,7 +112,7 @@ connection_departure(
 ),
 ```
 
-种子里还有一条 `KnownAddress`，把收件人对应到 `beijing/delivery/recipient`（本地运行时为 `wuxi/delivery/recipient`）。`run` 以 `KNOWLEDGE_INGRESS` 为 `KnowledgeHolderRef::Person(sender)` 提交这份种子，插件把每个端点、连接和地址作为知识记录写入发送者的账本。
+种子里还有一条 `KnownAddress`，把收件人对应到 `beijing/delivery/recipient`（本地运行时为 `wuxi/delivery/recipient`）。`run` 以 `KNOWLEDGE_INGRESS` 为 `KnowledgeHolderRef::Person(sender)` 提交这份种子，插件把每个端点、连接和地址作为知识记录写入发送者的账本。每个种子键结算为一份 `KnowledgeSeedReceipt`；持有人不接受知识、一次发布装不下，或某条连接是规划网络不接受的（例如周期性班次的偏移落在周期之外）时，种子什么也不发布，回执的 `refusal` 记下原因（[知识种子拒收](/reference/terminology/)），种子键已被占用，改正后的种子要用新键发送。任何知识持有人（领域实体也在内）都可以是发送者、收件人、承运人或种子持有人。
 
 ### 3. 提供通信机会
 
@@ -217,7 +217,7 @@ let status = if context.at <= operation.current_due_at {
 - **事故。** 应用通过 `INCIDENT_INGRESS` 提交带 `probability_per_mille` 的 `CorrespondenceIncidentRequest`。插件用操作定址随机抽样判定是否发生，并把事故记在操作上；在不适用的状态下到达的事故作为已抑制的证据保留。
   - `Disaster` 让当前路段失败，去掉被阻断的连接后从当前站点重新规划，结果是[改道](/reference/terminology/)：同一次投递尝试的后继 `ItineraryRevision`。没有已知路线时，操作以 `WaitingForRoute` 等待。
   - `Interception` 为截取者写入一条 `Access` 记录，投递继续。
-  - `CarrierSeized { seized_by, custody_handoff }` 即[承运人扣押](/reference/terminology/)。当前路段失败，记录一次终态的 `HandoffKind::Seizure` 交接，投递尝试及其运输执行都以失败关闭。只有承运人会收到一条 `attempt_report` 知识记录，其中不写扣押者。
+  - `CarrierSeized { seized_by, custody_handoff }` 即[承运人扣押](/reference/terminology/)。当前路段失败，记录一次终态的 `HandoffKind::Seizure` 交接，投递尝试及其运输执行都以失败关闭。只有承运人会收到一条 `attempt_report` 知识记录，其中不写扣押者；报告发布时承运人已不接受知识（例如已死亡）的，报告不发布，插件改为发出 `canwu.correspondence.attempt_report_withheld.v1`。
 - **恢复。** 发送者的决策命令 `resolve_correspondence_v1` 带一个 `CorrespondenceRecoveryAction`。`ReplanCurrentAttempt` 在承运人得知新连接后，让处于 `WaitingForRoute` 的投递尝试继续。`RetryDelivery` 发起[投递重试](/reference/terminology/)：新建一次投递尝试，以 `DomainReference` 角色 `"previous_attempt"` 指向旧尝试，并使用新的截止时间和 `TransportExecution`。`FinalizeDispatch` 完成发送记录，操作以 `Failed` 或 `DeadlineMissed` 结束。在此之前，投递尝试失败后发送记录保持 `Active`。
 - **受托承运人。** [受托承运人](/reference/terminology/)先以自己的命令权限签发 `delegate_carrier_v1`，其中的 `DelegationClaimV1` 把承运人写为 `performed_by`、发送者写为 `performed_for`，并列出 `carry_correspondence` 能力。从下一个边界起，发送者在 `InitiateCorrespondenceRequest::carrier_delegation` 中引用这条命令。此后规划读取承运人的账本，引擎不向发送者发布其中任何内容。声明必须覆盖每次发送，包括重试；同一承运人为同一发送者签发的新委托会取代旧委托。
 - **运力。** `CorrespondenceCapacityAdmission` 只有 `Unconstrained` 一个变体，规划和投递都忽略运力。运力池属于 `canwu-movement`，参见[路线规划与运输](/tutorials/routing-transport/)。

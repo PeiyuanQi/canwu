@@ -151,7 +151,13 @@ The seed also holds a `KnownAddress` that maps the recipient to
 `beijing/delivery/recipient` (or `wuxi/delivery/recipient`). `run` submits the
 seed as `KNOWLEDGE_INGRESS` for `KnowledgeHolderRef::Person(sender)`, and the
 plugin publishes each endpoint, connection, and address as a knowledge record
-in the sender's ledger.
+in the sender's ledger. Each seed key settles to one `KnowledgeSeedReceipt`:
+when the holder accepts no knowledge, one publication cannot carry the seed,
+or a connection is one no planning network admits (a recurring departure whose
+offset lies outside its period, say), nothing is published and the receipt's
+`refusal` records why (a [seed refusal](/en/reference/terminology/)); the seed
+key is spent, so a corrected seed goes under a new key. Any knowledge holder,
+a domain entity included, can be a sender, recipient, carrier, or seed holder.
 
 ### 3. Offer a communication opportunity
 
@@ -313,7 +319,10 @@ rebuilding the run with `Canwu::replay_from_journal`
     [carrier seizure](/en/reference/terminology/). The leg fails, a terminal
     `HandoffKind::Seizure` handoff is recorded, and the attempt and its
     transport execution close as failed. Only the carrier receives an
-    `attempt_report` knowledge record, and it omits the seizer.
+    `attempt_report` knowledge record, and it omits the seizer; when the
+    carrier accepts no knowledge by the time the report is published (a
+    carrier who died, say), the report is withheld and the plugin emits
+    `canwu.correspondence.attempt_report_withheld.v1` instead.
 - **Recovery.** The sender's decision-backed `resolve_correspondence_v1`
   command takes one `CorrespondenceRecoveryAction`. `ReplanCurrentAttempt`
   continues a `WaitingForRoute` attempt after the carrier learns new

@@ -8,12 +8,12 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.19.0`. A live `SimulationSnapshot` has:
+The workspace version is `0.20.0`. A live `SimulationSnapshot` has:
 
 - snapshot format `9`;
-- commitment format `6`;
+- commitment format `7`;
 - checkpoint/evidence-journal format `6`;
-- paged-checkpoint envelope format `7` and continuation checkpoint format `3`;
+- paged-checkpoint envelope format `7` and continuation checkpoint format `4`;
 - state revision format `3`;
 - admission cursor format `3`;
 - exact replay revision format `3`;
@@ -25,6 +25,688 @@ The workspace version is `0.19.0`. A live `SimulationSnapshot` has:
 Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
+
+Version 0.20.0 is a pre-1.0 minor release. Its changes come from the
+packages that close every downstream gap and engine finding filed against
+0.19.0, each with its own proposal:
+
+- [correspondence domain-entity parties, withheld reports, and refused seeds](proposals/correspondence-domain-parties.md)
+  (`canwu-correspondence`: downstream gaps G-72 and G-78, and the
+  correspondence half of engine finding E-41);
+- [movement holds before departure, re-timed later legs, and booking revocation](proposals/movement-holds-and-revocation.md)
+  (`canwu-movement`, `canwu-transport`: downstream gaps G-73, G-79, and
+  G-80, engine finding E-48);
+- [decision deadlines, reassignment, and reads](proposals/decision-deadlines-reassignment-and-reads.md)
+  (`canwu-decision`, `canwu-sim`, `canwu-api`: downstream gaps G-70, G-81,
+  and G-82);
+- [military engagements](proposals/military-engagements.md)
+  (`canwu-military`, `canwu-military-reference-content`,
+  `canwu-military-reference`: downstream gap G-38; it supersedes
+  [military domain design](proposals/military-domain-design.md));
+- [resource continuation evidence and completion reports](proposals/resource-continuation-and-completion-reports.md)
+  (`canwu-resource`, `canwu-production`, `canwu-technology`: downstream
+  gaps G-74, G-75, G-76, and G-77);
+- [calendar marks and keyed-draw retirement](proposals/calendar-marks-and-draw-retirement.md)
+  (`canwu-sim`, `canwu-api`: downstream gaps G-69 and G-71).
+
+What changed, in one list:
+
+- **Correspondence parties.** `canwu-correspondence` names a domain-entity
+  sender, recipient, carrier, opportunity candidate, interceptor, or seed
+  holder by its domain record, in its operation, opportunity, and seed
+  records and in the delivery-attempt and access bindings it hands to
+  `canwu-information`; the prepared dispatch's sender is matched in either
+  form. Its party roles admit a retired entity, so a correspondence record
+  never stops a party's owner from retiring it. A carrier the engine refuses
+  as a knowledge holder (retired, deleted, dead, or ineligible) takes no new
+  correspondence, retry, or delegation: `InvalidAuthority` at admission, and
+  a start whose carrier became so before it settled is skipped with
+  `canwu.correspondence.start_skipped.v1` (a retry is recorded without an
+  attempt).
+- **Withheld reports and refused seeds.** An attempt report to a carrier the
+  engine refuses is withheld with
+  `canwu.correspondence.attempt_report_withheld.v1`. A knowledge seed whose
+  holder the engine refuses, that one publication directive cannot carry, or
+  that states a connection no planning network admits publishes nothing and
+  records a **seed refusal** (`KnowledgeSeedRefusal`: `HolderUnavailable`,
+  `TooLarge`, or `InvalidConnection`) on its `KnowledgeSeedReceipt`, whose
+  `published_at` is now `settled_at`. Each of these was a failed boundary.
+  The plugin semantic hash changes.
+- **Holds before departure and re-timed later legs.**
+  `MovementOperation::DelayLeg { execution, leg, until, reason,
+  retime_later_legs }` holds the current leg whether it has departed (its
+  arrival, as in 0.19.0) or not (its departure, bounded by the departure
+  that was pending when the leg was first held), without an itinerary
+  revision. `MovementLegHoldV1` is reshaped (`kind`, `scheduled_at`,
+  `retime_later_legs`). With `retime_later_legs`, the part of the hold that
+  elapsed is added to the order's **schedule shift**
+  (`MovementOrderRecordV1::schedule_shift`), which moves the planned
+  departures and booking windows of the later legs so they keep their
+  planned spacing; a reroute resets it.
+- **Booking revocation and replacement.** A pool's custodian, or an
+  application incident, revokes a confirmed booking with
+  `MovementOperation::RevokeBooking { pool, booking, reason }`
+  (`canwu-transport`: `CapacityBookingStatus::Revoked`,
+  `CapacityBooking::revoke`, `CapacityBookingRevocationV1`); the capacity
+  returns to the pool. The owner replaces a lost booking with a new request
+  that names it (`MovementBookingRequestV1::replaces`), and a replaced
+  booking no longer counts at departure.
+- **Superseded dues are withdrawn.** When an operation or a hold replaces a
+  leg due that is not yet due, the movement plugin withdraws the queued
+  `movement_leg_due_v1` packet with `CancelPluginIngress`, so superseded
+  packets neither accumulate nor wake a boundary (E-48).
+  `TRANSPORT_SEMANTIC_VERSION` is `canwu-transport.v6`; the movement
+  semantic hash and the `movement_report` schema hash change.
+- **Option bias.** `WeightedUtilityEvaluator::with_option_bias(option_id,
+  bias)` adds a policy's standing integer preference for one option to its
+  weighted score, recorded apart from the factor lines as
+  `DecisionOptionEvaluation::bias`; a `GuardedUtilityPolicy` that declares a
+  bias has a new semantic hash, one without keeps its 0.19.0 hash.
+- **Deadline extension and reassignment.**
+  `DecisionMutation::ExtendDeadline { ticket_id, expected_version, deadline }`
+  moves an open ticket's deadline later under the same ticket ID;
+  `DecisionMutation::Reassign { ticket_id, expected_version, controller_id }`
+  moves an open ticket to another registered controller, which alone may then
+  resolve it; the decision maker and lineage stay. Both are checked at
+  admission against the ticket version, advance it, and are journalled like
+  every non-resolving mutation; every refusal is a recorded rejection.
+- **Ticket reads and the admission batch.**
+  `SimulationView::decision_tickets_opened` (the tickets the current
+  boundary's admitted `Open`s created, in admission order),
+  `open_decision_tickets_of(&EntityRef)`, and
+  `open_decision_tickets_of_controller(&str)`, behind the
+  `canwu.core.decisions` read, with the same three on `Simulation`,
+  `CompactedSimulation`, `Canwu`, and `CompactedCanwu` for the trusted host.
+  The **admission batch** is persisted decision state committed in
+  `canwu.commitment.decisions.v3`; `COMMITMENT_FORMAT_VERSION` is 7.
+- **The engagement engine.** `canwu-military` is rewritten as an engagement
+  engine: typed forces in the host's world, stepped engagements on a
+  host-installed `CombatRulebookV1` and a `StepResolver`
+  (`ParametricStepResolver` or the host's own type), sieges and contested
+  crossings, holder-relative `engagement_report` and `engagement_outcome`
+  knowledge, and an optional outcome signal; it owns no doctrine, catalogue,
+  control, or store. `canwu-military-reference-content` becomes the
+  synthetic rulebook (`synthetic_rulebook_v1`) and `canwu-military-reference`
+  the engagement starter (`demo_engagement_scenario`, example
+  `military_starter`).
+- **Resource continuation evidence.** Each hot terminal bucket declares the
+  exact evidence of its records identity-only, and the live root the
+  versions its held completion state and observation heads cite
+  (`canwu_identity_evidence_dependencies`), so a seal or a continuation
+  checkpoint taken while a completion lease's outcomes are hot keeps proof of
+  every version they cite, and the run restores, validates, and continues
+  exactly (G-77). The production root declares the pending output source of
+  every execution that has no output outcomes yet.
+  `RESOURCE_STATE_FORMAT_VERSION` 6, `RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION`
+  2, and `RESOURCE_LIVE_BUCKET_FORMAT_VERSION` 2.
+- **Completion reports given up.** A completion's reserved holder report
+  whose grant has no observation head, or whose holder the engine refuses,
+  is given up when it falls due: the participant archives without it and no
+  report wake is queued (G-75). A completion operation that reserves reports
+  for a holder the engine refuses is a recorded `invalid_authority`
+  rejection, `install_report_grant` refuses a holder kind that can hold no
+  knowledge, and a `RecordObservation` head's sources must be current.
+- **Declared technology reads and domain-entity technology references.**
+  Production declares the `AssetBinding` and `ApplicationSpec` reads and
+  refuses a cited record of the wrong kind before reading it (G-74);
+  `TechnologyRecordPayload::references` names a domain-entity holder,
+  operator, owner, adopter, sponsor, authorizer (`authorized_by`), observer,
+  asserter (`asserted_by`), assessor, or site as its domain record (G-76).
+  The resource, production, and technology semantic hashes change.
+- **Calendar marks.** A host that runs more than one
+  calendar marks a calendar boundary with the calendars whose period starts
+  there: `schedule_calendar_marks(due_at, marks)` with
+  `CalendarMark { cadence, calendar }`. A boundary system registered with a
+  calendar key (`BoundarySystemContract::calendar`) is due only in a boundary
+  that carries its own mark of its cadence; a system without a key is due in
+  every boundary of its cadence, as before. `SimulationView::calendar_marks`
+  reads the marks of the boundary being settled, and `BoundaryRecord` and
+  `BoundarySummary` carry them. A calendar key is non-empty, free of surrounding whitespace,
+  at most `MAX_CALENDAR_KEY_BYTES` (64) bytes, and has no control characters;
+  marks on a boundary with no admitted calendar ingress are refused. The core
+  still keeps no calendar.
+- **Keyed-draw retirement.** A boundary system may
+  declare, for a stream it owns, how long its operation-keyed draws stay in
+  the keyed-draw ledger (`BoundarySystemContract::keyed_draw_retirement`,
+  `KeyedDrawRetirement { stream, after }`). The first boundary at or after a
+  draw's boundary time plus `after` drops it before any system runs; a later
+  request with the same address draws afresh under a new draw ID (the same
+  value for the same bound and purpose) and is no longer checked against the
+  retired draw. Draw records stay as evidence. Every restore and exact replay
+  retire alike, and a continuation checkpoint carries only the draws not
+  retired at its time and refuses one that lists a retired draw:
+  `CONTINUATION_CHECKPOINT_FORMAT_VERSION` 4.
+
+**Same version only.** Canwu crates depend only on the exact same version of
+each other: every first-party crate requires `=0.20.0` of every other
+first-party crate it uses, and a host pins `canwu-api = "=0.20.0"` and the
+same version of every extension. Nothing written by 0.19.0 is read by
+0.20.0. There is no migration and no decoding of an old shape: the exact
+engine-version check refuses every 0.19.0 snapshot, checkpoint journal, paged
+checkpoint, continuation checkpoint, replay journal, evidence segment, and
+scenario that records its engine version; a commitment at format 6 and a
+continuation checkpoint at format 3 are refused by their format as well; a
+run with the correspondence, movement, resource, production, technology, or
+military plugin would also be refused by its semantic hash, and a resource
+root by its state format 6 and bucket formats 2. A scenario built with
+0.19.0 types is rebuilt with the 0.20.0 types: a `DelayLeg` carries
+`retime_later_legs`, a `KnowledgeSeedReceipt` has `settled_at` and
+`refusal`, a resource root installed with `ResourceState::into_records`
+encodes at state format 6 with bucket format 2 and its identity-only
+declaration, and no 0.19.0 military record loads. Retain the 0.19.0 engine
+to read 0.19.0 data.
+
+Formats and schemas that change, each deliberately versioned:
+
+| Item | 0.19.0 | 0.20.0 | What changed |
+| --- | --- | --- | --- |
+| Snapshot, commitment, checkpoint/evidence-journal, paged-checkpoint, and continuation-checkpoint formats | 9, 6, 6, 7, 3 | 9, 7, 6, 7, 4 | commitment 7 commits to decision state through `canwu.commitment.decisions.v3` (the admission batch); continuation checkpoint 4 lists in `keyed_draws` only the draws not retired at `now` and a restore refuses one that lists a retired draw; the other three keep their shape; the engine version in every checkpoint hash changes |
+| Decision commitment | `canwu.commitment.decisions.v2` | `canwu.commitment.decisions.v3` | over the controllers, the hot-history root, the archive receipt root, and the admission batch; every checkpoint hash and `v1:` state commitment of a run with decision state differs |
+| `DecisionState` (snapshot, compact and paged checkpoint hot state, continuation checkpoint) | — | — | `opened_in_batch: [DecisionTicketId]`, omitted while empty; the open-ticket indexes by decision maker and by controller are derived and not encoded |
+| `DecisionMutation` (decision ingress, replay journal) | 5 variants | 7 variants | adds `extend_deadline { ticket_id, expected_version, deadline }` and `reassign { ticket_id, expected_version, controller_id }` |
+| `DecisionOptionEvaluation` (in `PolicyDecision` and `DecisionTrace`, hot history and archive blobs) | — | — | `bias: i64`, omitted when zero; decision archive blob format stays 1 |
+| `WeightedUtilityEvaluator` | — | — | `option_biases`, omitted while empty |
+| `GuardedUtilityPolicy` semantic hash | — | — | unchanged without biases; a tagged, length-prefixed option-bias section is appended when any is declared, so such a policy is refused by a binding of the same ID and version (`PolicyMismatch`) |
+| `DecisionState::validate` | deadline index | every open-ticket index and the batch | also refuses an inconsistent decision-maker or controller index and a batch that repeats a ticket or names one outside hot history; snapshot validation reconstructs the batch per boundary from admitted ingress |
+| `IngressPayload::Calendar` (snapshot, journals, replay journal, pinned continuation ingress) | `cadences` | `cadences`, `calendar_marks` | `calendar_marks: Vec<CalendarMark>`, omitted while empty; canonical (sorted, unique, each mark's cadence among `cadences`), checked at load |
+| `BoundaryRecord` and its hash material `canwu.boundary-record.v1` | — | — | `calendar_marks`, omitted while empty, so an unmarked run hashes as before; must equal the admitted calendar ingress's marks |
+| `BoundarySummary` (boundary ledger, continuation `settled_boundaries`) | — | — | `calendar_marks`, omitted while empty |
+| Plugin descriptor `BoundarySystemContract` | — | — | `calendar: Option<String>` (omitted while `None`) and `keyed_draw_retirement: Vec<KeyedDrawRetirement>` (omitted while empty, sorted by stream, each stream once with a positive duration); both part of the descriptor and so of the run's identity; a key on an `EventDriven` system, a malformed key, or a retirement naming an undeclared stream is `InvalidPluginRegistration` and `InvalidSnapshot` at load |
+| `MovementOperation` (command and incident payloads) | 11 variants | 12 variants | `delay_leg` adds the required `retime_later_legs`; adds `revoke_booking { pool, booking, reason }`; the incident allow-list gains `RevokeBooking` |
+| `MovementLegHoldV1` (in `MovementOrderRecordV1::hold` and `MovementReportDetailV1::hold`) | `leg, scheduled_arrival_at, until, reason, held_at` | `leg, kind, scheduled_at, until, reason, held_at, retime_later_legs` | `kind` is `Departure` or `Arrival`; `scheduled_at` is the due the hold replaced (a departed leg's departure plus its planned duration, or the departure pending when the leg was first held) |
+| `MovementOrderRecordV1` (runtime) | — | — | `schedule_shift`, omitted when zero |
+| `MovementBookingRequestV1` (command payload) and `MovementBookingBindingV1` (runtime) | — | — | `replaces: Option<CapacityBookingId>`, omitted when `None` |
+| `CapacityBooking` (`canwu-transport`, in the movement runtime and reports) | — | — | `revocation: Option<CapacityBookingRevocationV1>` (`at`, `reason`), omitted when `None`, present exactly when the status is `revoked` |
+| `CapacityBookingStatus` | 7 values | 8 values | adds `revoked`; `Confirmed → Revoked` returns the quantity from the pool's `booked` |
+| `MovementReportDetailV1` (report payload) | — | — | `schedule_shift`, omitted when zero; `hold` carries the reshaped `MovementLegHoldV1` |
+| `MovementState::validate` | a booking window inside its leg's planned window; a hold on a departed leg only | a booking window starts no earlier than the leg's planned departure and lasts no longer than the leg; a hold of either kind; replacement and revocation invariants; a non-negative, bounded shift | applied at activation, at each load of the runtime, and to every candidate |
+| `TRANSPORT_SEMANTIC_VERSION` | `canwu-transport.v5` | `canwu-transport.v6` | the revocation transition and status |
+| `MOVEMENT_SEMANTIC_HASH` | `6cf78f1f…550e` | `b211c92a…abbc` | BLAKE3 of the string recorded in the proposal |
+| `movement_report` knowledge schema hash | `81cf8978…4f11` | `33d6f3ab…ed28` | BLAKE3 of the string recorded in the proposal; the schema id stays at version 1 |
+| `movement_incident_v1` descriptor description | "…delay, reroute, or handoff" | "…delay, reroute, handoff, or booking revocation" | part of the plugin descriptor |
+| `KnowledgeSeedReceipt` (record `canwu.correspondence.knowledge_seed`) | `seed_key`, `canonical_input_hash`, `holder`, `published_at` | `seed_key`, `canonical_input_hash`, `holder`, `settled_at`, `refusal` | `published_at` renamed `settled_at` (the boundary time the seed settled, published or refused); `refusal: Option<KnowledgeSeedRefusal>`, omitted when `None`; `holder` is referenced only when the holder accepts knowledge |
+| `KnowledgeSeedRefusal` | — | new | internally tagged (`type`: `holder_unavailable`; `too_large` with `records` and `largest_record_bytes`; `invalid_connection` with `connection` and `reason`), unknown fields refused |
+| Correspondence party references and record schemas | `Core` targets; party roles `allow_retired: false`; seed `holder` required | a domain-entity party is a `Domain` target; the party roles of the operation, opportunity, and seed receipt `allow_retired: true`; the seed receipt's `holder` reference role is optional in the schema | 0.19.0 could write no domain target, so no 0.19.0 run held one |
+| `correspondence-lifecycle-v1` contract | no `emits` | `emits: ["canwu.correspondence.start_skipped.v1"]` | part of the plugin descriptor |
+| `correspondence-knowledge-ingress-v1` contract | no `emits` | `emits: ["canwu.correspondence.attempt_report_withheld.v1"]` | part of the plugin descriptor |
+| `canwu-correspondence` semantic hash | `a197a514…5685` | `c26226b9…cfcf` | BLAKE3 of the string recorded in the proposal; the knowledge schema hashes are unchanged |
+| `RESOURCE_STATE_FORMAT_VERSION` | 5 | 6 | the live root gains `canwu_identity_evidence_dependencies` (`IdentityEvidenceDependenciesV1`: sorted, unique, no initial-scenario version), the versions its completion lease grants lock, each held, prepared, consumed, or report-waiting external participant's coordinator source and locked external versions, and the source versions of every observation head; counted in `max_state_bytes`; validation refuses a live root whose declaration differs from `computed_identity_evidence`, and a report grant whose holder kind can hold no knowledge |
+| `RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION` | 1 | 2 | a bucket has `format_version`, `bucket`, `entries`, and `canwu_identity_evidence_dependencies`, the union of its entries' exact evidence (`ResourceTerminalArchivePayloadV1::exact_evidence`); a whole-root read and `ResourceState::from_records` refuse a bucket whose declaration is not the one its entries make; a partial read checks the field's shape and rewrites the declaration whenever it writes the bucket |
+| `RESOURCE_LIVE_BUCKET_FORMAT_VERSION` | 1 | 2 | the same field, always empty; any read refuses a live bucket that declares evidence |
+| Resource record schemas | `runtime` declares the payload-required continuation | `runtime` declares both reserved properties; `bucket` declares the identity-only one, required on both bucket families | — |
+| Production runtime record (`canwu.production:runtime`, scope roots) | — | — | the payload gains `canwu_identity_evidence_dependencies`, the pending output sources of executions without output outcomes yet; its schema declares the property; the canonical-encoding check of restore and activation covers it; the production state formats are otherwise unchanged |
+| Resource archive | blob format 1 | blob format 1 | an archived entry carries the same `exact_evidence` as before, now built from `ResourceTerminalArchivePayloadV1::exact_evidence` |
+| `RESOURCE_SEMANTIC_HASH` | `3a1e04cb…32ac` | `6fbe0308…159a` | BLAKE3 of the string recorded in the proposal |
+| `PRODUCTION_SEMANTIC_HASH` | `7b39f2f5…8ed0` | `eded5044…6d9e` | BLAKE3 of the string recorded in the proposal |
+| `canwu-technology` plugin semantic hash | `63f9af9a…23ed` | `8b4703e2…ce3a` | BLAKE3 of the string recorded in the proposal; its record references name a domain entity as a `Domain` target |
+| `canwu-military` record kinds | `catalog`, `force`, `operation`, `combat`, `occupation`, `knowledge`, `provider_outcome`, `ledger` | `rulebook` (create-only), `registry`, `force`, `engagement`, `engagement_steps`, `siege`, `crossing` (versioned), `engagement_summary` (create-only) | all schema version 1 of the new shapes; no 0.19.0 payload loads |
+| `canwu-military` knowledge schemas | `canwu.military:military_report` v1, payload `Any` | `canwu.military:engagement_report` v1 (`RetireWhenSuperseded`) and `canwu.military:engagement_outcome` v1 (`Keep`) | typed `EngagementReportV1` payloads, new schema hashes |
+| `canwu-military` random streams | `military-operation` | `crossing-interception`, `step-contingency` | each draw cites the admitted step packet |
+| `canwu-military` ingress | the host command action `military_command_v1`; internal ingress for the command's settlement; the public acknowledgement ingress `military_provider_ack_v1` | the host command action `military_command_v1` (unchanged name, new payload `MilitaryCommandV1`); internal ingress `military_apply_v1` and `military_step_v1` | the acknowledgement ingress is removed; the internal packet types are new |
+| `canwu-military` plugin descriptor | version `0.1.0`, semantic hash `f07c44f9…3810` | version `0.20.0`; semantic hash BLAKE3 of `canwu-military plugin semantic hash 0.20.0: engagements <resolver name>@<resolver version>` | a `String` held by the plugin, so a host resolver type gives the plugin its own identity; the wake cadence, the outcome-signal target, and the publication reservation are descriptor-recorded |
+| `canwu-military` scenario records | a `MilitaryCatalog` record `root` | a `rulebook` record and `force` records (`record_from`), or by command | — |
+
+Semantic identities that differ from 0.19.0: `canwu-correspondence`,
+`canwu-movement` (with `canwu-transport`'s semantic version),
+`canwu-resource`, `canwu-production`, `canwu-technology`, and
+`canwu-military`. The other first-party plugins keep their semantic hash
+constants, and a `GuardedUtilityPolicy` keeps its hash unless it declares an
+option bias. As with any version change, the engine version in every
+checkpoint hash changes and first-party plugins that take their plugin
+version from the crate version report a new one.
+
+New and changed public contracts, by crate:
+
+- `canwu-correspondence`: `KnowledgeSeedRefusal` (new enum, re-exported from
+  the crate root), `KnowledgeSeedReceipt::refusal` (new field), and
+  `KnowledgeSeedReceipt::settled_at` (renamed from `published_at`);
+  `ATTEMPT_REPORT_WITHHELD_EVENT` and `START_SKIPPED_EVENT` (new constants).
+  Behaviour: domain-entity parties are admitted everywhere, the dispatch
+  sender is matched in either form, a carrier the engine refuses as a
+  knowledge holder is refused for a correspondence, a retry, or a
+  delegation, and seeds and reports are refused as above. No `canwu-api` or
+  `canwu-sim` change.
+- `canwu-transport` (re-exported by `canwu-api`):
+  `CapacityBookingStatus::Revoked`, `CapacityBookingRevocationV1` (new),
+  `CapacityBooking::revocation` (new field), `CapacityBooking::revoke(at,
+  reason)` (new method; `transition` refuses `Revoked`),
+  `TRANSPORT_SEMANTIC_VERSION` (new value).
+- `canwu-movement`: `MovementOperation::DelayLeg::retime_later_legs`,
+  `MovementOperation::RevokeBooking` (new variant;
+  `MovementOperation::execution` returns `None` for it, like `OfferPool`),
+  `MovementBookingRequestV1::replaces`, `MovementBookingBindingV1::replaces`,
+  `MovementOrderRecordV1::schedule_shift`,
+  `MovementReportDetailV1::schedule_shift`, `MovementLegHoldV1` reshaped
+  (`kind`, `scheduled_at`, `retime_later_legs`) with
+  `MovementLegHoldV1::extension`, `MOVEMENT_SEMANTIC_HASH`. Behaviour:
+  `DelayLeg` on a leg that has not departed is applied (it was an
+  `InvalidState` rejection); a superseded due is withdrawn; the runtime
+  validation of booking windows is relaxed as above. Refusals, each a
+  recorded rejection: `DelayLeg` needs a known execution (`NotFound`) from
+  its owner or operator (`Unauthorized`), a bounded reason
+  (`InvalidOperation`), the current leg departed or `Planned`, `Booked`, or
+  `Waiting` with a pending departure due (`InvalidState`), `until` no earlier
+  than the boundary and the due it holds (`InvalidOperation`) and within
+  `time_bound_minutes` (`LimitExceeded`), and a valid candidate runtime
+  (`InvalidState`); `RevokeBooking` needs a known pool (`NotFound`), the
+  pool's custodian or an incident (`Unauthorized`), a bounded reason
+  (`InvalidOperation`), a booking bound to that pool (`NotFound`) and
+  `Confirmed` (`InvalidState`); `RequestBooking` needs a window inside the
+  leg's planned window moved by the booking shift (`InvalidOperation`, or
+  `LimitExceeded` past the time bound) and a `replaces` that names a booking
+  of the same execution and leg (`InvalidOperation`), not yet replaced
+  (`Conflict`), and requested, confirmed, failed, expired, or revoked
+  (`InvalidState`).
+- `canwu-decision`: `DecisionMutation::ExtendDeadline` and
+  `DecisionMutation::Reassign` (new variants);
+  `DecisionOptionEvaluation::bias` (new field);
+  `WeightedUtilityEvaluator::option_biases` and `with_option_bias`
+  (zero removes the entry); `DecisionState::open_tickets_of_decision_maker`,
+  `open_tickets_of_controller`, `begin_admission_batch`,
+  `tickets_opened_in_batch`, and `ticket_ids_opened_in_batch`. Refusals,
+  each a recorded rejection with an existing code: `ExtendDeadline` on a
+  ticket that is not hot (`TicketNotFound`), not open or past its deadline
+  (`ClosedTicket`), at another version (`VersionConflict`), without a
+  deadline, or with a deadline not later than the current one
+  (`InvalidDecision`); `Reassign` to a controller whose authority person is
+  unavailable (`IssuerUnavailable`), to an unregistered controller or the
+  one assigned (`InvalidController`), or breaking the lineage link to a hot
+  parent (`InvalidDecision`); a `Resolve` from the old controller
+  (`InvalidController`).
+- `canwu-sim`: `SimulationView::decision_tickets_opened`,
+  `open_decision_tickets_of`, and `open_decision_tickets_of_controller`
+  (each behind a declared `StateKey::core_decisions()` read, otherwise
+  `UndeclaredStateRead`), and the same three on `Simulation` and
+  `CompactedSimulation`, where `decision_tickets_opened` lists the latest
+  settled boundary's tickets. `CalendarMark` (with `new`),
+  `MAX_CALENDAR_KEY_BYTES` (64), `KeyedDrawRetirement` (with `new`),
+  `schedule_calendar_marks(due_at, marks)` on `Simulation` and
+  `CompactedSimulation` (`InvalidBoundary` for an empty list, an
+  `EventDriven` mark, or a non-canonical or over-long key, before anything
+  is queued), `SimulationView::calendar_marks` (no read declaration; empty
+  outside a boundary system), `BoundarySystemContract::calendar` and
+  `keyed_draw_retirement` (`BoundarySystemContract::new` sets `None` and
+  empty), `BoundaryRecord::calendar_marks`, `BoundarySummary::calendar_marks`,
+  `IngressPayload::Calendar::calendar_marks`.
+- `canwu-api`: `decision_tickets_opened`, `open_decision_tickets_of`, and
+  `open_decision_tickets_of_controller` on `Canwu` and `CompactedCanwu`
+  (inherent, not on `CanwuRun`; trusted-host reads of ground truth);
+  `schedule_calendar_marks` on `Canwu` (through `gated!`) and
+  `CompactedCanwu`; `CalendarMark`, `KeyedDrawRetirement`, and
+  `MAX_CALENDAR_KEY_BYTES` re-exported. Every decision type was already
+  re-exported.
+- `canwu-military`: the public surface is new. `MilitaryPlugin<R:
+  StepResolver = ParametricStepResolver>` with `new`,
+  `with_step_cadence(Option<SystemCadence>)`, and `with_outcome_signal`;
+  `StepResolver` (with `const IDENTITY`) and `ParametricStepResolver`;
+  `CombatRulebookV1`; the command `MilitaryCommandV1` (`InstallRulebook`,
+  `RegisterForce`, `ReviseForce`, `PlaceForce`, `RetireForce`,
+  `OpenEngagement`, `JoinEngagement`, `SupplyInput`, `OrderAction`,
+  `ReviseStepProfile`, `InvestSite`, `ReviseSiege`, `LiftSiege`,
+  `OrderCrossing`, `ReviseCrossing`, `CancelCrossing`, `Step`), each command
+  on an existing record naming an `expected_host_revision` that steps never
+  advance; the records `EngagementStateV1`, `EngagementStepsV1` (`StepV1`),
+  `SiegeStateV1`, `CrossingStateV1`, and the engagement summary;
+  `ConditionInputV1`, `ForecastV1`, `EngagementReportV1`; the constants
+  `MILITARY_APPLY_INGRESS`, `MILITARY_STEP_INGRESS`,
+  `MILITARY_REJECTION_EVENT` (`canwu.military.command_rejected.v1`),
+  `ENGAGEMENT_HELD_EVENT` (`canwu.military.engagement_held.v1`),
+  `ENGAGEMENT_REPORT_KNOWLEDGE`, and `ENGAGEMENT_OUTCOME_KNOWLEDGE`. The
+  0.19.0 types listed under "Upgrading" are gone. Issuers are matched
+  against a force's `controllers` (any `Issuer` kind) or the rulebook's
+  `trusted_issuers`. Every refusal the proposal lists is a recorded
+  rejection; a step the rulebook cannot resolve holds the engagement
+  (`engagement_held`) rather than failing the boundary.
+- `canwu-military-reference-content`: `synthetic_rulebook_v1()` and
+  `SYNTHETIC_RULEBOOK_ID` (`canwu:military:rulebook:synthetic:v1`); the
+  `riverine_preindustrial` and `industrial_front` profiles are deleted.
+  `canwu-military-reference` (not published): `demo_engagement_scenario()`
+  and the `military_starter` example.
+- `canwu-resource`: `ResourceState::identity_evidence` (field, serde
+  `canwu_identity_evidence_dependencies`) and
+  `ResourceState::computed_identity_evidence`;
+  `ResourceHotTerminalBucketV1::evidence` and `ResourceLiveBucketV1::evidence`
+  (serde `canwu_identity_evidence_dependencies`);
+  `ResourceTerminalArchivePayloadV1::exact_evidence`;
+  `holder_kind_can_hold_knowledge`; `install_report_grant` refuses a holder
+  kind that can hold no knowledge (`InvalidDefinition`);
+  `RESOURCE_STATE_FORMAT_VERSION` 6,
+  `RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION` 2,
+  `RESOURCE_LIVE_BUCKET_FORMAT_VERSION` 2, a new `RESOURCE_SEMANTIC_HASH`.
+  Refusals, each recorded: an `Acquire`, `SingleStepLease`, or
+  `GrantExternalParticipant` that reserves holder reports for a holder the
+  engine refuses (`invalid_authority`, which takes its operation key); a
+  `RecordObservation` head whose source is not its record's current version
+  (`version_conflict`) or of a kind the plugin does not read
+  (`invalid_authority`).
+- `canwu-production`: a new `PRODUCTION_SEMANTIC_HASH`; the runtime record's
+  identity-only declaration; the command handlers' and lifecycle system's
+  declared external reads add the technology `AssetBinding` and
+  `ApplicationSpec` state keys (part of the plugin descriptor); a production
+  evidence binding, technology binding, adoption application, or
+  observation attempt of the wrong record kind is a recorded
+  `invalid_domain_record` rejection before anything is read; a site report
+  to a holder the engine refuses is skipped.
+- `canwu-technology`: a new semantic hash; `TechnologyRecordPayload::references`
+  names a domain-entity holder, operator, owner, adopter, sponsor,
+  `authorized_by`, observer, `asserted_by`, assessor, or site as a `Domain`
+  target under the `core` role.
+
+The source-incompatible changes are the new enum variants
+(`DecisionMutation::ExtendDeadline` and `Reassign`,
+`MovementOperation::RevokeBooking`, `CapacityBookingStatus::Revoked`), the
+new and renamed fields (`DecisionOptionEvaluation::bias`,
+`MovementOperation::DelayLeg::retime_later_legs`, `MovementLegHoldV1`'s
+`kind`, `scheduled_at`, and `retime_later_legs` for `scheduled_arrival_at`,
+`MovementOrderRecordV1::schedule_shift`, `MovementReportDetailV1::schedule_shift`,
+`MovementBookingRequestV1::replaces`, `MovementBookingBindingV1::replaces`,
+`CapacityBooking::revocation`, `KnowledgeSeedReceipt::refusal` and
+`settled_at`, `ResourceState::identity_evidence`,
+`ResourceHotTerminalBucketV1::evidence`, `ResourceLiveBucketV1::evidence`,
+`BoundarySystemContract::calendar` and `keyed_draw_retirement`,
+`BoundaryRecord::calendar_marks`, `BoundarySummary::calendar_marks`, and
+`IngressPayload::Calendar::calendar_marks`), and the rewritten
+`canwu-military` surface. No `&mut self` method on `Canwu` is added outside
+`gated!`. The release is therefore a minor version.
+
+Version 0.20.0 also changes these behaviours, which are visible to existing
+code and runs:
+
+- **A dead person cannot carry.** A correspondence, retry, or delegation
+  naming as carrier a person who is not alive, or a domain entity the engine
+  would not publish knowledge to, is rejected (`InvalidAuthority`); 0.19.0
+  admitted a dead person. A carrier that becomes so after admission skips the
+  start or the retry; an attempt already in flight continues, and only a
+  seizure report to it is withheld.
+- **A seed receipt no longer means "published".** Every admitted seed key
+  settles to one receipt; a refused seed publishes nothing, spends its key,
+  and references its holder only when the holder accepts knowledge.
+- **Held legs.** A `DelayLeg` on a leg that has not departed holds its
+  departure instead of being refused. A repeated hold of one due keeps the
+  bound of the first hold. A hold ends when its due settles, when `StartLeg`
+  or `CompleteLeg` acts on the leg, when the leg fails, or when a reroute or
+  cancellation closes the revision; with `retime_later_legs` the elapsed part
+  of the hold (at most its extension) is added to the schedule shift when it
+  ends, so later legs depart at `later(at, planned_departure_at +
+  schedule_shift)`. Without it the later legs keep their planned times, as
+  in 0.19.0.
+- **Booking windows.** A booking must lie inside its leg's planned window
+  moved by the order's schedule shift plus the pending re-timing hold's
+  extension; a held departure moves its own leg's window to open at the
+  hold's `until`. A booking requested before a re-timing hold keeps its
+  window and expires if the re-timed departure passes it, unless replaced. A
+  revoked booking fails its leg at departure (operations settle before dues)
+  unless replaced; a replacement cancels a `Requested` original and releases
+  a `Confirmed` one.
+- **Superseded dues leave the queue.** `pending_ingress()` no longer lists
+  the leg-due packet an operation or hold replaced, no boundary wakes for it,
+  and each withdrawal is a `PluginCancellation` ingress record of the
+  boundary that withdrew it. Each order's final due is scheduled once, and
+  not again when the packet queued earlier already carries it (re-stating a
+  hold with the same `until` queues no second packet). A due replaced in the
+  boundary of its own time is skipped as stale, as before.
+- **Option biases apply before the near-equivalence margin**, so a bias can
+  make or break a tie-break; blocked and excluded options are not scored and
+  carry no bias.
+- **A ticket's deadline and controller may move.** An extended ticket
+  survives its old deadline and expires at the new one; after a `Reassign`
+  only the new controller resolves, and a host response or pending tie-break
+  computed for the old version is refused as stale.
+- **Decision state is committed differently.** The admission batch is part
+  of the decision commitment, so every checkpoint hash and state commitment
+  of a run with decision state differs from 0.19.0 even without a new
+  mutation; a boundary that opens nothing empties the batch.
+- **Completion reports.** A dirty report grant with no observation head, or
+  with a holder the engine refuses, leaves the dirty set at once, whatever
+  the publication capacity, and every ready lease that reserved it gives its
+  report up (0.19.0 re-woke the report system every boundary and rewrote the
+  live root). Several completions of one holder that reserved one grant are
+  all served, or all given up, by the boundary that takes the grant (0.19.0
+  released one and left the others waiting). A lease completed after the
+  head's revision waits for a newer head, with nothing waking for it.
+- **Resource roots near their byte cap** reach no room (`NoRoom` skips, or
+  `limit_exceeded` where a limit is measured) a little earlier, since the
+  live root's identity declaration counts toward `max_state_bytes`.
+- **A seal or a continuation checkpoint is refused with `ArchiveNotReady`**,
+  the run unchanged, when a declared version does not exist at its cut. A
+  run's own boundaries never cite such a version (every citation is proven
+  when it is first persisted); a scenario that installs hot records or heads
+  citing boundary versions the run never established still does, until the
+  citing record is archived or replaced. In 0.19.0 the same states sealed
+  and then failed on load.
+- **Production refuses a wrong record kind before reading it**, as a
+  recorded `invalid_domain_record` rejection, where 0.19.0 failed the
+  boundary with `UndeclaredStateRead`.
+- **Calendar boundaries.** A keyed system is not woken
+  by an unmarked boundary of its cadence; calendar ingress due at one
+  instant is still merged into one boundary, marks included; knowledge
+  reservations count a keyed publisher as due only on its marks. A system
+  without a key, and a host that never marks, behave exactly as in 0.19.0.
+- **Retired keyed draws.** A request with a retired
+  address is a fresh draw: it needs fresh operation evidence, records a new
+  draw record under a new ID, returns the same value for the same bound and
+  purpose, and is no longer refused as `RandomOperationConflict` for other
+  evidence, bound, or purpose. A journal restore drops what retires before
+  each draw it rebuilds, so a journal may draw one address again after it
+  retired, and drawing it again before is still refused.
+
+Upgrading from 0.19.0, for hosts and plugin authors:
+
+- **Pin `=0.20.0`** for `canwu-api` and every extension. Nothing earlier
+  loads.
+- **A correspondence host** that worked around downstream gap G-72 by using
+  persons as parties may now name a domain entity (holder policy `Allowed`)
+  as sender, recipient, carrier, or seed holder; its prepared dispatch names
+  a domain-entity sender by its domain record, and its commands for that
+  entity use `DecisionOrigin::Institution`. A dead person can no longer
+  carry. A host that withheld seeds or seizure reports for dead holders may
+  keep doing so; the engine now refuses them itself. Check
+  `KnowledgeSeedReceipt::refusal` wherever a receipt meant "seed installed",
+  and send a corrected seed under a new key. `published_at` is now
+  `settled_at`, and struct literals add `refusal`.
+- **A movement host** adds `retime_later_legs` to every `DelayLeg` (a
+  `DelayLeg` without it is an unknown shape: refused at admission as a
+  command with `InvalidPayload`, ignored as an incident, with no movement
+  outcome recorded), passes `retime_later_legs: true` to keep later legs on
+  their planned spacing (in 0.19.0 they departed at the held arrival), holds
+  a leg that has not departed with `DelayLeg` instead of a `Reroute`, reads
+  `MovementLegHoldV1::scheduled_at` and `kind` for `scheduled_arrival_at`,
+  adds `RevokeBooking` and `Revoked` arms to exhaustive matches of
+  `MovementOperation` and `CapacityBookingStatus`, adds `replaces` (`None`),
+  `schedule_shift`, and `revocation` to struct literals, lets a pool's
+  custodian or an incident revoke a confirmed booking and the owner replace
+  it with a request naming it, and no longer expects superseded leg-due
+  packets in `pending_ingress()`.
+- **A decision host** holds a ticket back with `ExtendDeadline` instead of
+  cancelling and reopening it under a new ID, delegates an open ticket with
+  `Reassign` (to a registered controller of the same decision maker, or of
+  the same seat where the parent's lineage requires it), finds a boundary's
+  new tickets with `decision_tickets_opened` from a boundary system that
+  declares `StateKey::core_decisions()` (or the latest settled boundary's
+  from `Canwu`) and a desk's with `open_decision_tickets_of_controller`,
+  declares a doctrine's preference with `with_option_bias` rather than a
+  factor (its `GuardedUtilityPolicy` then has a new semantic hash, so
+  re-register the binding), adds `ExtendDeadline` and `Reassign` arms to
+  exhaustive matches of `DecisionMutation`, sets `bias` in struct literals
+  of `DecisionOptionEvaluation`, and names the public field `option_biases`
+  in any struct literal of `WeightedUtilityEvaluator` (or builds it with
+  `new` and `with_option_bias`).
+- **`canwu-military` is rewritten.** The catalog, operation, combat,
+  occupation, knowledge, provider-outcome, and ledger records, the
+  `military-operation` stream, the `military_report` schema, the
+  acknowledgement ingress, and the commands `OrderMarch`, `PlanOperation`,
+  `Recruit`, `TrainAndEquip`, `Recon`, `PrepareAmbush`,
+  `ExecuteSpecialOperation`, `EstablishOccupation`, `SetOccupationPolicy`,
+  and `MilitaryAdministrationAction` are gone. A host installs a
+  `CombatRulebookV1` (by scenario or `InstallRulebook` from an issuer the
+  rulebook trusts), constructs `MilitaryPlugin::<R>::new()` with
+  `ParametricStepResolver` or its own `StepResolver` type, chooses
+  `with_step_cadence(Some(cadence))` or drives stepping with the trusted
+  `Step { up_to }` command, registers forces with `RegisterForce`, places
+  them on arrival with `PlaceForce`, opens engagements, sieges, and crossings
+  by command, supplies condition and environment inputs per engagement-day,
+  and applies the `engagement_summary` or the optional outcome signal.
+  Commands name an `expected_host_revision` that steps never advance.
+  Issuers are matched against a force's `controllers` (any `Issuer` kind) or
+  the rulebook's `trusted_issuers`. A host that reads
+  `canwu-military-reference-content` takes `synthetic_rulebook_v1()`; the
+  two synthetic profiles are gone. No 0.19.0 military record loads.
+- **A resource or production host** rebuilds its scenario roots with the
+  0.20.0 types (`ResourceState::into_records` writes state format 6 and
+  bucket format 2 with their declarations; a hand-built root whose
+  declaration is not the computed one is refused at installation), gives
+  every report grant a holder that can hold knowledge (a core organization,
+  resource, route, or territory, or a person given as an entity, is refused
+  at `install_report_grant`), reserves holder reports only for holders the
+  engine accepts (a lease, single-step lease, or participant grant for
+  another is a recorded `invalid_authority` rejection), records a provider's
+  observation head at or after the completion's revision when it wants the
+  mandatory report (otherwise the participant archives without one), cites
+  only current versions of kinds the resource plugin reads in a
+  `RecordObservation` head, may now cite technology asset bindings and
+  application specs from production, and installs technology records that
+  name a domain-entity holder or site as its record. A continuation
+  checkpoint or seal taken mid-lease now loads.
+- **A host with several calendars** sets
+  `contract.calendar = Some("<calendar>".into())` on a system that should
+  wake only on one calendar's periods and schedules that calendar's period
+  starts with `schedule_calendar_marks`; it marks every calendar a keyed
+  system should see, because an unmarked `schedule_calendar_boundary` wakes
+  only unkeyed systems. Code that builds `BoundaryRecord` or
+  `BoundarySummary` with a struct literal, or matches
+  `IngressPayload::Calendar { cadences }`, adds `calendar_marks` (or `..`);
+  `BoundarySystemContract::new` fills the two new contract fields.
+- **A plugin that bounds its keyed-draw ledger** adds
+  `KeyedDrawRetirement::new(stream, after)` to its contract's
+  `keyed_draw_retirement`, with `after` no shorter than the time anything
+  retries the address or cites the draw, and expects a retry after that to
+  draw afresh. Declaring either feature changes the plugin descriptor, so a
+  run is restored and replayed only with the same declaration. Nothing
+  changes for a host or plugin that uses neither.
+- **Saves.** Write a fresh continuation checkpoint, snapshot, or checkpoint
+  journal with 0.20.0; nothing from 0.19.0 loads.
+
+Known limits carried by this release, each stated in its proposal:
+
+- Correspondence: `canwu-information` still pins a party: its dispatch
+  `sender` and `intended_recipient`, delivery-attempt `recipient`, and
+  access `holder` roles refuse a retired target, so a domain entity that sent
+  or received a dispatch cannot be retired while those records exist; only a
+  party that appears in correspondence records alone (a carrier, a seed
+  holder, an opportunity candidate) is retirable. Every change to a party's
+  entity record re-validates each correspondence record that references it,
+  and a change whose referencing records pass the runtime's affected-record
+  closure (16,384) fails its owner's boundary. Planning-time failures still
+  fail the boundary (a carrier ledger whose network does not build, a
+  missing recipient address, a ledger past the bounded query, a start with
+  no route); the seed check covers only what one fact states. Correspondence
+  plans with plain `plan_route` and keeps no `RoutingIndex` across planning
+  reads. A refused seed spends its key. A delegating sender still learns of
+  a seizure only from the application, and a withheld report is not
+  redirected. An attempt in flight keeps its carrier. Many command-handler
+  refusals of `initiate_correspondence_v1` and `resolve_correspondence_v1`
+  are still raised as `InvalidDomainRecord`, which the engine does not count
+  as an expected command rejection, so they fail the command's boundary as
+  in 0.19.0 (a malformed key or profile, a zero execution or dispatch
+  version, a deadline before admission, a prepared dispatch that is missing,
+  stale, not prepared, not single-recipient, or of another channel profile,
+  a sender that does not match it; a missing operation, an overlapping
+  information operation, a recovery the state does not allow, a non-terminal
+  attempt or inactive dispatch): engine finding E-49, pre-existing. Seeds
+  that fit one directive but together pass the boundary's publication budget
+  still fail the boundary, as do a domain-entity carrier deleted in the
+  boundary its start or retry settles, an opportunity naming a missing or
+  deleted party, and an interceptor the access `holder` role refuses
+  ([known limits](proposals/correspondence-domain-parties.md#known-limits)).
+- Movement: one schedule shift per order, so a re-timing hold moves every
+  later leg of the revision by the same amount (a host that wants only some
+  moved reroutes, and a reroute resets the shift); lateness no re-timing
+  hold caused is absorbed as in 0.19.0; repeated holds of one due keep the
+  first bound and the latest hold's `retime_later_legs` decides whether the
+  whole time since that bound is re-timed; a booking requested before a
+  re-timing hold keeps its window; a revocation settled in the boundary of
+  the leg's departure due fails the leg (hold the departure in the same
+  boundary to make it wait); only a confirmed booking can be revoked; pool
+  custodians receive no movement report (E-43), so the host reads the
+  runtime to name the bookings it revokes; replacements count against
+  `bookings_per_execution` (16); a boundary that replaces a future due reads
+  the plugin's cancellable ingress once (a walk of the run's pending ingress
+  queue) and each withdrawal adds one cancellation record; holds still count
+  against the outcome quotas (1,024 per command holder and 16,384 per
+  runtime); `CompleteLeg` still arrives a held leg at once
+  ([known limits](proposals/movement-holds-and-revocation.md#known-limits)).
+- Decisions: a ticket without a deadline cannot gain one, and no mutation
+  shortens or removes a deadline; `Reassign` re-checks lineage only against
+  a hot parent and does not compare the two controllers' policies; the
+  host's `decision_tickets_opened` shows only the latest settled boundary's
+  tickets, so a host that settles several boundaries before reading keeps
+  its own list or reads from a boundary system; there is no list by seat,
+  definition, or deadline window, and the end-of-boundary sweep of tickets
+  whose person became unavailable still scans the hot tickets; option biases
+  are keyed by option ID, so a policy shared by ticket definitions that
+  reuse an option ID applies the same bias to both
+  ([known limits](proposals/decision-deadlines-reassignment-and-reads.md#known-limits)).
+- Military: no failure-mode model (a host builds bounded contingency in its
+  resolver); two sides per engagement, a third party fighting as a separate
+  engagement at the same site; no automatic contact, hostility, detection,
+  or surprise; vessels are components, with no boarding, wind, or current
+  channel beyond what the host folds into component values; one wave size
+  per crossing; reports are bands from `band_cuts`; retired records stay in
+  the store and are validated at every load (about 2 KB per closed fight for
+  the run's life); its keyed draws stay indexed for the run unless the host
+  declares a retirement; an outcome signal whose target
+  ingress no plugin registered fails the first closing boundary; a host
+  resolver that panics is host code; and no second independent host has
+  adopted the crate yet: together engine finding E-51
+  ([known limits](proposals/military-engagements.md#known-limits)).
+- Resource and production: the bucket declarations are not counted in
+  `max_state_bytes` (each repeats evidence its entries already carry), the
+  live root's declaration is; a version a hot record cites is kept as
+  membership for as long as the record is hot, so a run that never archives
+  keeps it until the candidate budget forces a commit; a reserved report
+  whose grant has an older head waits for a newer one, the completed
+  participant staying in the live root within the participant budget; a
+  holder that becomes ineligible after its report was reserved has the
+  report given up when it falls due, and one that becomes eligible again
+  gets reports only once its grant is dirtied again; a host-supplied version
+  of a kind the plugin does not read in a lease's or participant's locked
+  target, an acquisition's envelope evidence, or a prepare's targets is
+  still a skip with a trace or an admission refusal that leaves the
+  operation key free; technology checks other than references (authority
+  subjects, knowledge holders) are unchanged, and whether every technology
+  operation accepts a domain-entity holder end to end is not covered by a
+  test. External completion participants that end `Released`, `Expired`, or
+  `Rejected` stay in `ExternalCompletionParticipantBookV1::grants` for the
+  run, because each coordinator acknowledges a participant's end by reading
+  it from the resource root's current version and the resource plugin learns
+  of no acknowledgement; after 1,024 have accumulated
+  (`MAX_PENDING_LEASE_ACQUISITIONS_GLOBAL`), `grant` refuses every new
+  participant for the run as a recorded `limit_exceeded`. The fix is a
+  retirement the coordinator triggers once it has acknowledged, a change to
+  the production and force-supply coordinator protocols: engine finding E-50,
+  pre-existing; they declare no evidence meanwhile
+  ([known limits](proposals/resource-continuation-and-completion-reports.md#known-limits)).
+- Calendar marks and keyed-draw retirement: a mark says
+  that a period starts, not which one, so a system that needs the month's
+  number computes it from the time and its own calendar; the number of marks
+  a calendar ingress carries is not capped (the host is trusted); a boundary
+  the host settles directly through `BoundaryRequest` has no marks and queues
+  them as calendar ingress at the same instant instead. A conflict across a
+  retirement is not detected (after `after`, reusing an address with other
+  evidence, bound, or purpose draws instead of failing); retirement is by
+  simulated time only, not by whether a record still cites the draw; each
+  retiring draw adds one small entry to the retirement map while it is live,
+  and memory falls only for streams that declare a retirement
+  ([known limits](proposals/calendar-marks-and-draw-retirement.md#known-limits)).
+- Every limit of the 0.19.0 entry stands except the stale leg-due packets
+  of `DelayLeg` (engine finding E-48) and the correspondence half of the
+  malformed connection knowledge (engine finding E-41), which this release
+  fixes.
+
+The hash algorithms are unchanged. The engine version in every checkpoint
+hash changes, first-party plugins that take their plugin version from the
+crate version report a new one, and the exact engine-version check rejects
+0.19.0 saves; retain the 0.19.0 engine to read them.
 
 Version 0.19.0 is a pre-1.0 minor release. Its changes come from the
 packages that close the downstream gaps and engine findings filed against

@@ -63,7 +63,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `DecisionTicketState` | `Open`、`Resolved`（记下选中的选项和决策轨迹 ID）、`Cancelled`（带原因）或 `Expired`。 |
 | `DecisionOption` | [决策选项](/reference/terminology/)：ID、标签、说明、动作（`DecisionAction::None` 或一条序列化的 `Command`）、效用输入、阻碍项 `blockers` 和元数据。阻碍项非空的选项不可选。 |
 | `DecisionContext` | 票据上下文：一个 schema 名加一段 JSON 载荷，内容由应用定义。 |
-| `DecisionMutation` | 五种决策变更：`RegisterController`、`Open`、`ReplaceOptions`、`Resolve` 和 `Cancel`。 |
+| `DecisionMutation` | 七种决策变更：`RegisterController`、`Open`、`ReplaceOptions`、`ExtendDeadline`（[展期](/reference/terminology/)）、`Reassign`（[改派](/reference/terminology/)）、`Resolve` 和 `Cancel`。 |
 | `DecisionIngressRequest` | 一条决策输入：请求 ID、预期修订版本、一项变更，以及可选的嵌套命令请求。 |
 | `PolicyDecision`、`DecisionOutcome` | 策略的答复：`Selected`、`Deferred`、`Pending` 或 `PendingRandom`，附带逐项评估、外部证据、抽样证据、决策阶段和触发的前置规则。 |
 | `DecisionAttemptRecord` | [决策尝试](/reference/terminology/)：每条被准入的决策输入都留下一条，结果为 `Accepted`，或带 `DecisionAttemptErrorCode` 的 `Rejected`。 |
@@ -77,14 +77,14 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | 种类 | SDK 类型 | 怎样作答 |
 | --- | --- | --- |
 | `Utility` | `WeightedUtilityPolicy` | 用 `UtilityProfile` 的权重乘以各选项的 `utility_inputs` 并求和，最高分胜出，同分取选项 ID 最小的选项；所有选项都被阻碍时推迟。 |
-| `Utility` | `GuardedUtilityPolicy`（[前置规则效用策略](/reference/terminology/)） | 先按顺序运行前置规则（`DecisionRule` 返回 `RuleChoice` 的 `Select`、`Defer`、`Exclude` 或 `NoMatch`），再为剩下的选项打分。开启 `random_tie_break` 且至少两个选项与最高分相差不超过 `near_equivalence_margin` 时，返回 `PendingRandom`。 |
+| `Utility` | `GuardedUtilityPolicy`（[前置规则效用策略](/reference/terminology/)） | 先按顺序运行前置规则（`DecisionRule` 返回 `RuleChoice` 的 `Select`、`Defer`、`Exclude` 或 `NoMatch`），再为剩下的选项打分。开启 `random_tie_break` 且至少两个选项与最高分相差不超过 `near_equivalence_margin` 时，返回 `PendingRandom`。得分是加权因子之和加上该选项的[选项偏置](/reference/terminology/)（`WeightedUtilityEvaluator::with_option_bias`，策略对某个选项的固定整数偏好）；偏置与各因子分开记录在 `DecisionOptionEvaluation::bias` 中，在容差之前生效。 |
 | `Rule` | `OrderedRulePolicy` | 按顺序运行规则，遇到第一条 `Select` 或 `Defer` 即结束；没有规则命中时推迟。 |
 | `Random` | 无 | 由边界系统抽样结算，见下文。 |
 | `Human` | `QueuedHumanPolicy` | 提交 `HumanDecisionResponse` 之前返回 `Pending`。 |
 | `External` | `QueuedExternalPolicy` | 提交 `ExternalDecisionResponse` 之前返回 `Pending`。 |
 | `Llm` | `QueuedLlmPolicy` | 同上；回答中的 `provider` 还必须与 `LlmModelIdentity` 一致。 |
 
-人类、外部服务和 LLM 的答复都写明针对哪个票据版本。针对旧版本的答复返回 `VersionConflict`，同一版本重复提交返回 `DuplicateResponse`，针对更新版本的答复会替换旧答复。`GuardedUtilityPolicy` 的 `semantic_hash` 覆盖前置规则策略的身份、规则 ID、效用权重、容差和平局决胜开关；规则的具体行为属于应用代码，行为变化时要改规则 ID 或策略版本。
+人类、外部服务和 LLM 的答复都写明针对哪个票据版本。针对旧版本的答复返回 `VersionConflict`，同一版本重复提交返回 `DuplicateResponse`，针对更新版本的答复会替换旧答复。`GuardedUtilityPolicy` 的 `semantic_hash` 覆盖前置规则策略的身份、规则 ID、效用权重、选项偏置（没有偏置时哈希不变）、容差和平局决胜开关；规则的具体行为属于应用代码，行为变化时要改规则 ID 或策略版本。
 
 `Deferred` 也会写入决策轨迹并提升票据版本，票据保持开启，推迟不会延长截止时间。如果到那时仍未选定选项，票据会在截止时间之后的第一个结算边界到期（见第 8 步）；持续运行、从快照恢复和重放的运行都是如此。`Pending` 和 `PendingRandom` 只是中间结果，不能作为 `Resolve` 提交。
 
@@ -114,7 +114,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 <Steps>
 1. 注册控制者。上层应用用 `enqueue_decision` 排入 `RegisterController`。决策输入属于规范化输入的 `Decision` 类，到期时间相同时排在命令、通信、确认和信息之后，调度工作之前。控制者 ID 只能注册一次；权限和命令主体引用的实体必须存在。
 2. 开启票据。`Open` 携带一份 `DecisionTicketDraft`。准入时，票据 ID 必须非零且未被使用，至少有一个选项且选项 ID 互不相同，指派的控制者已经注册，截止时间不早于准入时间，决策者存在且可用，控制者的权限人物也可用，前序票据（如有）符合接续规则。票据以版本 1、`Open` 状态保存，选项按 ID 排序。
-3. 更新票据。局势变化时排入 `ReplaceOptions`，带上 `expected_version`，替换上下文和选项。版本号加一，为旧版本准备的答复随之作废。`Cancel` 带一个原因关闭票据。
+3. 更新票据。局势变化时排入 `ReplaceOptions`，带上 `expected_version`，替换上下文和选项。版本号加一，为旧版本准备的答复随之作废。`ExtendDeadline` 带 `expected_version` 把开启票据的截止时间推后（只能推后，票据 ID 不变），`Reassign` 把开启的票据改派给另一个已注册的控制者；两者同样让版本号加一，被拒绝的请求记为决策尝试。`Cancel` 带一个原因关闭票据。
 4. 求值。上层应用调用 `prepare_decision`，把策略对象交给引擎。引擎确认票据开启、未过截止时间、决策者和权限人物可用、策略身份与绑定一致，然后调用 `DecisionController::evaluate`。结果为 `Pending` 时不入队任何内容；结果为权威答复时，返回一条 `Resolve` 请求。选中的选项带命令时，调用方必须给出 `CommandRequestId`，引擎用控制者绑定生成嵌套命令。`drive_decision` 把求值和入队合成一步。
 5. 准入。下一个边界的第 1 阶段 `EventIngress` 准入到期的决策输入。引擎依次检查预期修订版本、嵌套命令的请求 ID 是否唯一、引用的实体是否存在、人物是否可用，再交给 `DecisionState::apply` 检查票据版本、票据是否关闭、提交者是否为指派的控制者、策略身份和选项。预期内的失败都记为 `Rejected` 决策尝试，队列接着处理后面的输入。
 6. 写入。`Resolve` 通过后，引擎分配 `DecisionTraceId` 并写入决策轨迹。`Selected` 把票据改为 `Resolved`；`Deferred` 只提升版本。决策尝试记为 `Accepted`。
@@ -124,7 +124,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 决策输入带着预期修订版本。入队时它必须等于当前修订版本；如果准入之前修订版本已经变化，例如又有别的边界提交，请求会以 `SimulationRevisionConflict` 记为被拒绝的尝试。同一请求 ID 再次入队时，内容、到期时间和优先级都相同就返回原来的回执，否则返回 `IdempotencyConflict`。声明为只读交互的运行拒绝新的决策输入（`InteractionReadOnly`）。
 
-决策系统本身不注册边界系统，也不发出事件。插件的边界系统在读取中声明 `StateKey::core_decisions()` 后，可以用 `SimulationView::decision_ticket`、`decision_controller` 和 `decision_attempt` 读取决策状态。只有第 7、10、12、13 阶段接受普通指令（第 4 阶段只接受知识发布），所以提出 `ResolveDecisionRandomly` 的系统必须位于其中之一，仓库示例放在第 12 阶段 `StrategicAggregation`。名字里带“决策”的第 5 阶段 `DecisionAndAcceptedEffectIntake` 不处理决策输入。
+决策系统本身不注册边界系统，也不发出事件。插件的边界系统在读取中声明 `StateKey::core_decisions()` 后，可以用 `SimulationView::decision_ticket`、`decision_controller` 和 `decision_attempt` 读取决策状态，并用 `decision_tickets_opened`（本边界准入的 `Open` 所创建的票据，即[准入批次](/reference/terminology/)，按准入顺序）、`open_decision_tickets_of`（某个决策者的开启票据）和 `open_decision_tickets_of_controller`（某个控制者的开启票据）列出票据，不必扫描决策历史。只有第 7、10、12、13 阶段接受普通指令（第 4 阶段只接受知识发布），所以提出 `ResolveDecisionRandomly` 的系统必须位于其中之一，仓库示例放在第 12 阶段 `StrategicAggregation`。名字里带“决策”的第 5 阶段 `DecisionAndAcceptedEffectIntake` 不处理决策输入。
 
 边界记录（`BoundaryRecord`）列出本边界准入和生成的输入、随机抽样，以及人物可用性变化导致取消的票据；嵌套命令照常产生自己的事件。阶段顺序见[结算系统](/architecture/settlement/#十四个阶段)。
 
@@ -144,7 +144,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 - 策略只看到 `&DecisionTicket`，看不到可变的模拟状态，也拿不到权限。票据上下文就是它掌握的全部信息，因此上下文应当取自决策者的[持有人相对知识](/architecture/knowledge-information/)。
 - 外部服务和 LLM 收到的 `ExternalDecisionRequest` 更窄：票据 ID 与版本、定义名、摘要、上下文，以及可用选项的 ID、标签、说明和元数据。命令载荷、效用输入和阻碍项都不在其中。
-- 上层应用通过 `Canwu::decision_ticket`、`decision_controller`、`decision_attempt`、`decision_trace` 和 `decision_hot_state` 读取决策状态。这些是受信任读取，能读到全部内容；`CanwuViewer` 不提供决策读取，给玩家展示哪些票据和多少细节由上层应用决定。
+- 上层应用通过 `Canwu::decision_ticket`、`decision_controller`、`decision_attempt`、`decision_trace` 和 `decision_hot_state` 读取决策状态，并用 `decision_tickets_opened`（最近一个已结算边界的准入批次）、`open_decision_tickets_of` 和 `open_decision_tickets_of_controller` 列出票据。这些是受信任读取，能读到全部内容；`CanwuViewer` 不提供决策读取，给玩家展示哪些票据和多少细节由上层应用决定。
 - 边界系统只能读取已声明的内容：决策状态需要 `StateKey::core_decisions()`，人物可用性需要 `StateKey::core_person_availability()`。
 
 ## 随机性、持久化与重放

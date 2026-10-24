@@ -31,6 +31,8 @@ coding agents.
 - [Runtime state copies](proposals/runtime-state-copies.md)
 - [Paged restore budget and seal cost](proposals/paged-restore-budget-and-seal-cost.md)
 - [Pending ingress read](proposals/pending-ingress-read.md)
+- [Decision deadlines, reassignment, and reads](proposals/decision-deadlines-reassignment-and-reads.md)
+- [Calendar marks and keyed-draw retirement](proposals/calendar-marks-and-draw-retirement.md)
 - [End-state design](end-state.md)
 - [Reusable-engine conformance](engine-conformance.md)
 - [Versioning and compatibility](versioning.md)
@@ -53,7 +55,8 @@ current published **social diffusion simulation module**
 - [Legal institutionalization framework](proposals/legal-institutionalization-framework.md)
 - [Legal storage sharding, COW, delta persistence, and cold archive](proposals/legal-storage-sharding-compaction.md)
 - [Legal institutionalization consensus review](proposals/legal-institutionalization-review.md)
-- [Military domain extension design](proposals/military-domain-design.md)
+- [Military engagements](proposals/military-engagements.md) (supersedes the
+  [military domain extension design](proposals/military-domain-design.md))
 - [Resource archive lookup and volume](proposals/resource-archive-lookup-and-volume.md)
 - [Single-step completion lease and runtime protected-floor install](proposals/resource-single-step-lease-and-floor-install.md)
 - [Fiscal throughput and authority](proposals/fiscal-throughput-and-authority.md)
@@ -72,6 +75,9 @@ current published **social diffusion simulation module**
 - [Production at series scale](proposals/production-series-scale.md)
 - [Movement leg delay and current incident evidence](proposals/movement-delay-leg.md)
 - [Resource transit, account place, and external inflow](proposals/resource-transit-place-and-inflow.md)
+- [Correspondence domain-entity parties, withheld reports, and refused seeds](proposals/correspondence-domain-parties.md)
+- [Movement holds before departure, re-timed later legs, and booking revocation](proposals/movement-holds-and-revocation.md)
+- [Resource continuation evidence and completion reports](proposals/resource-continuation-and-completion-reports.md)
 - [Downstream grand-strategy gap set](proposals/downstream-grand-strategy-gap-set.md)
 
 ## Runnable cases, reference content, and starter kits

@@ -86,7 +86,7 @@ For a runnable fourteen-month grain loop, run `cargo run -p canwu-economy-refere
 
 ## Completion leases
 
-Every irreversible request (a consumption, a transfer start, a terminal transfer disposition, a credit, an external outflow, an account-level loss, a partial transfer loss) carries the activation certificate of a completion lease. Queue lease operations with `enqueue_resource_completion_operation`.
+Every irreversible request (a consumption, a transfer start, a terminal transfer disposition, a credit, an external outflow, an account-level loss, a partial transfer loss) carries the activation certificate of a completion lease. Queue lease operations with `enqueue_resource_completion_operation`. A lease's recipe may reserve a completion report for a holder: an `Acquire`, `SingleStepLease`, or `GrantExternalParticipant` that reserves one for a holder the engine refuses knowledge is a recorded `invalid_authority` rejection, and a reserved report is given up when its grant has no observation head, or the engine refuses the holder when the report falls due, so the participant archives without it and nothing wakes the report system again. To receive the mandatory report, the provider records the holder's observation head at or after the completion's revision, citing only current versions as its sources.
 
 A lease can have several participants, each of which grants and prepares on its own, so the general path takes four operations: `Acquire`, `Grant`, `Prepare`, and `Activate`. Each leaves an operation outcome and a lease receipt. Use it when the lease needs a grant owned by another plugin, as an adapter operation does, or when another plugin coordinates the lease, as `canwu-production` and the force-supply reference do.
 
@@ -318,6 +318,6 @@ Your plugin owns authorizing and retiring intents and any local consequences aft
 
 ## Versions and saves
 
-Pin exact versions of `canwu-api`, `canwu-resource`, `canwu-production`, and the plugin semantic hashes from one release line. Loading restores the saved Canwu snapshot and revalidates extension records against the plugins you pass. See [save compatibility](/en/developer/persistence/#version-and-save-compatibility).
+Pin exact versions of `canwu-api`, `canwu-resource`, `canwu-production`, and the plugin semantic hashes from one release line. Loading restores the saved Canwu snapshot and revalidates extension records against the plugins you pass. In 0.20.0 the resource state format is 6 and both resource bucket formats are 2; a continuation checkpoint or seal taken while a completion lease is in progress loads. See [save compatibility](/en/developer/persistence/#version-and-save-compatibility).
 
 Continue with the [grain, production, and military supply case](/en/tutorials/cases/production-economy/) and the [mechanism decision](/en/proposals/production-economy-mechanism/).
