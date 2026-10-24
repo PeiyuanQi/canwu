@@ -259,9 +259,13 @@ pub const ADMISSION_CURSOR_FORMAT_VERSION: u32 = 3;
 /// local IDs; a root per holder over its next local ID and chunk roots; and a
 /// root over every holder. A publication or a retirement rehashes only the
 /// chunks it touches and the holder roots. A boundary record's hash covers
-/// its knowledge changes with each body as its ID and digest. Format 5 is
-/// refused.
-pub const COMMITMENT_FORMAT_VERSION: u32 = 6;
+/// its knowledge changes with each body as its ID and digest.
+///
+/// Format 7 commits to decision state through `canwu.commitment.decisions.v3`,
+/// which adds the latest boundary's decision admission batch (the tickets its
+/// admitted `Open`s created) to the controllers, hot-history root, and
+/// archive receipt root. Format 6 is refused.
+pub const COMMITMENT_FORMAT_VERSION: u32 = 7;
 /// Maximum nested depth of the compatibility synchronous event-reactor path.
 ///
 /// New plugin mechanics should use phased boundary systems instead of relying

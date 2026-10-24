@@ -37,11 +37,12 @@ pub const DECISION_MAKER_UNAVAILABLE_REASON: &str = "decision_maker_unavailable"
 /// ticket whose decision maker became unavailable in the same boundary is
 /// cancelled with [`DECISION_MAKER_UNAVAILABLE_REASON`] instead.
 ///
-/// A ticket cannot be reassigned to another controller, and decision ingress
-/// refuses to open a ticket for a controller whose authority person is
-/// unavailable ([`ErrorCode::IssuerUnavailable`]). To continue the decision,
-/// open a successor ticket for a different, available controller with
-/// `parent_ticket` naming the cancelled ticket.
+/// Decision ingress refuses to open a ticket for, or reassign one to, a
+/// controller whose authority person is unavailable
+/// ([`ErrorCode::IssuerUnavailable`]). The host may move an open ticket to an
+/// available controller with `Reassign` before the cancellation; a cancelled
+/// ticket stays cancelled, and the decision continues as a successor ticket
+/// for a different, available controller with `parent_ticket` naming it.
 pub const CONTROLLER_AUTHORITY_UNAVAILABLE_REASON: &str = "controller_authority_unavailable";
 
 const MAX_PERSON_CORRELATION_BYTES: usize = 256;
@@ -621,8 +622,10 @@ fn controller_authority_availability_error<A: AvailabilityLookup + ?Sized>(
 ///
 /// `Open` refuses an unavailable person decision maker first, then an
 /// assigned controller whose authority person is unavailable, so a ticket is
-/// never opened for a controller that could not resolve it. `Resolve` refuses
-/// a controller whose authority person is unavailable.
+/// never opened for a controller that could not resolve it. `Reassign`
+/// refuses, for the same reason, a new controller whose authority person is
+/// unavailable. `Resolve` refuses a controller whose authority person is
+/// unavailable.
 pub(super) fn decision_mutation_availability_error<A: AvailabilityLookup + ?Sized>(
     mutation: &DecisionMutation,
     decisions: &DecisionState,
@@ -640,11 +643,13 @@ pub(super) fn decision_mutation_availability_error<A: AvailabilityLookup + ?Size
                 availability,
             ),
         },
-        DecisionMutation::Resolve { controller_id, .. } => {
+        DecisionMutation::Resolve { controller_id, .. }
+        | DecisionMutation::Reassign { controller_id, .. } => {
             controller_authority_availability_error(decisions, controller_id, availability)
         }
         DecisionMutation::RegisterController { .. }
         | DecisionMutation::ReplaceOptions { .. }
+        | DecisionMutation::ExtendDeadline { .. }
         | DecisionMutation::Cancel { .. } => None,
     }
 }

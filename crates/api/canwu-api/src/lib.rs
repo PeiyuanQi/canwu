@@ -797,6 +797,41 @@ impl Canwu {
         self.simulation.decision_hot_state()
     }
 
+    /// The tickets the latest settled boundary's admitted decision `Open`s
+    /// created, in admission order, at their current version; empty after a
+    /// boundary that opened none. A boundary system reads its own boundary's
+    /// through [`SimulationView::decision_tickets_opened`]. It is persisted
+    /// decision state, so a sealed, restored, or replayed run gives the same
+    /// list.
+    ///
+    /// A trusted-host read of ground truth: project it before anything
+    /// reaches a player, agent, observer, or remote client.
+    pub fn decision_tickets_opened(&self) -> impl Iterator<Item = &DecisionTicket> {
+        self.simulation.decision_tickets_opened()
+    }
+
+    /// The open tickets whose decision maker is `decision_maker`, in
+    /// ticket-ID order, from an index of the open tickets (one lookup plus
+    /// the tickets listed). A trusted-host read of ground truth, as
+    /// [`SimulationView::open_decision_tickets_of`] is for a boundary system.
+    pub fn open_decision_tickets_of<'a>(
+        &'a self,
+        decision_maker: &EntityRef,
+    ) -> impl Iterator<Item = &'a DecisionTicket> + use<'a> {
+        self.simulation.open_decision_tickets_of(decision_maker)
+    }
+
+    /// The open tickets assigned to the controller `controller_id`, in
+    /// ticket-ID order, from an index of the open tickets. A trusted-host
+    /// read of ground truth.
+    pub fn open_decision_tickets_of_controller<'a>(
+        &'a self,
+        controller_id: &str,
+    ) -> impl Iterator<Item = &'a DecisionTicket> + use<'a> {
+        self.simulation
+            .open_decision_tickets_of_controller(controller_id)
+    }
+
     #[must_use]
     pub fn decision_history_location(&self, key: &DecisionHistoryKey) -> DecisionHistoryLocation {
         self.simulation.decision_history_location(key)
@@ -2292,6 +2327,41 @@ impl CompactedCanwu {
     #[must_use]
     pub fn decision_hot_state(&self) -> DecisionHotState {
         self.simulation.decision_hot_state()
+    }
+
+    /// The tickets the latest settled boundary's admitted decision `Open`s
+    /// created, in admission order, at their current version; empty after a
+    /// boundary that opened none. A boundary system reads its own boundary's
+    /// through [`SimulationView::decision_tickets_opened`]. It is persisted
+    /// decision state, so a sealed, restored, or replayed run gives the same
+    /// list.
+    ///
+    /// A trusted-host read of ground truth: project it before anything
+    /// reaches a player, agent, observer, or remote client.
+    pub fn decision_tickets_opened(&self) -> impl Iterator<Item = &DecisionTicket> {
+        self.simulation.decision_tickets_opened()
+    }
+
+    /// The open tickets whose decision maker is `decision_maker`, in
+    /// ticket-ID order, from an index of the open tickets (one lookup plus
+    /// the tickets listed). A trusted-host read of ground truth, as
+    /// [`SimulationView::open_decision_tickets_of`] is for a boundary system.
+    pub fn open_decision_tickets_of<'a>(
+        &'a self,
+        decision_maker: &EntityRef,
+    ) -> impl Iterator<Item = &'a DecisionTicket> + use<'a> {
+        self.simulation.open_decision_tickets_of(decision_maker)
+    }
+
+    /// The open tickets assigned to the controller `controller_id`, in
+    /// ticket-ID order, from an index of the open tickets. A trusted-host
+    /// read of ground truth.
+    pub fn open_decision_tickets_of_controller<'a>(
+        &'a self,
+        controller_id: &str,
+    ) -> impl Iterator<Item = &'a DecisionTicket> + use<'a> {
+        self.simulation
+            .open_decision_tickets_of_controller(controller_id)
     }
 
     #[must_use]

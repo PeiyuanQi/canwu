@@ -1675,6 +1675,8 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
     let mut persons = super::persons::PersonReplayCut::new(snapshot);
     for boundary in &snapshot.boundaries {
         let mut maintenance_change_index = 0_usize;
+        // As settlement does, before the boundary admits anything.
+        reconstructed.begin_admission_batch();
         for ingress_id in &boundary.admitted_ingress {
             let index = usize::try_from(ingress_id.get().saturating_sub(1)).map_err(|_| {
                 invalid_snapshot_error("decision ingress ID exceeds platform range")
@@ -1785,7 +1787,11 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
         .decisions
         .hot_history_commitment()
         .map_err(super::decision::decision_error)?;
-    let state_matches = controllers_match && reconstructed_hot_root == persisted_hot_root;
+    let batch_matches = reconstructed
+        .ticket_ids_opened_in_batch()
+        .eq(snapshot.decisions.ticket_ids_opened_in_batch());
+    let state_matches =
+        controllers_match && reconstructed_hot_root == persisted_hot_root && batch_matches;
     let reconstructed_archive_root = reconstructed
         .archive_receipt_commitment()
         .map_err(super::decision::decision_error)?;
@@ -1801,8 +1807,9 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
         return invalid_snapshot(format!(
             "decision ingress history does not reconstruct the persisted decision state \
              (state={state_matches}, archive_root={}, trace_counter={trace_counter_matches}, \
-             reconstructed_archived={}, persisted_archived={}, reconstructed_root={}, \
-             persisted_root={}, controllers={}, reconstructed_hot={}, persisted_hot={}, \
+             admission_batch={batch_matches}, reconstructed_archived={}, persisted_archived={}, \
+             reconstructed_root={}, persisted_root={}, controllers={}, reconstructed_hot={}, \
+             persisted_hot={}, \
              applied_archive_commits={}, rejected_archive_commits={})",
             reconstructed_archive_root == persisted_archive_root,
             reconstructed.archived_history_count(),
@@ -2143,6 +2150,8 @@ fn snapshot_decision_entity_error(
         }
         DecisionMutation::Open { .. }
         | DecisionMutation::ReplaceOptions { .. }
+        | DecisionMutation::ExtendDeadline { .. }
+        | DecisionMutation::Reassign { .. }
         | DecisionMutation::Resolve { .. }
         | DecisionMutation::Cancel { .. } => None,
     }

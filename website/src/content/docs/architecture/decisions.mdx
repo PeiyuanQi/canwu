@@ -130,7 +130,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 ## 谁可以结算票据
 
-- 每张票据指派给一个控制者（`assigned_controller`），之后不能改派。只接受这个控制者的 `Resolve`，其他控制者的请求记为 `InvalidController`。
+- 每张票据指派给一个控制者（`assigned_controller`）。`Reassign` 可以把开启的票据改派给另一个已注册的控制者。只接受当前指派控制者的 `Resolve`，其他控制者的请求记为 `InvalidController`。
 - `Resolve` 带的策略身份必须与控制者注册时的绑定完全一致，包括 `semantic_hash`，否则记为 `PolicyMismatch`。
 - 选中的选项必须存在于当前票据版本，并且没有阻碍项。
 - 抽样证据只能来自边界的 `ResolveDecisionRandomly`，而且只有 `Random` 控制者和用 `with_random_tie_break` 开启许可的 `Utility` 控制者接受它。因此 `Random` 票据只能由边界系统结算。

@@ -456,7 +456,12 @@ or defer decides at the `Guard` stage, while `Exclude` removes one option,
 records `excluded by <guard>: <reason>` as its blocker, and continues. A later
 rule that selects an excluded option is an error, including in
 `OrderedRulePolicy`. The remaining options are scored by the weighted utility
-evaluator. When `random_tie_break` is set and at least two options score within
+evaluator: the weighted sum of an option's factors plus the option's bias when
+the evaluator declares one (`WeightedUtilityEvaluator::with_option_bias`, keyed
+by option ID). A bias is the policy's own standing preference for an option,
+such as a doctrine's, not a factor of the option; each evaluation records it as
+`bias` apart from its factor lines, so a trace shows it as a bias. When
+`random_tie_break` is set and at least two options score within
 the `u64` near-equivalence margin of the best score, the policy returns
 `DecisionOutcome::PendingRandom` with exactly those candidates, weight 1 each in
 option-ID order; otherwise the best score wins and equal scores fall back to the
@@ -468,7 +473,7 @@ covers only those candidates. The controller binding must opt in with
 record the `DecisionStage` (`Guard`, `Utility`, or `Random`) and the guard IDs
 that fired. The policy identity reuses `DecisionPolicyKind::Utility` and carries
 a BLAKE3 `semantic_hash` over the guard policy identity, guard IDs, utility
-weights, margin, and tie-break flag, so a binding rejects a reconfigured policy
+weights, option biases, margin, and tie-break flag, so a binding rejects a reconfigured policy
 that keeps its ID and version with `PolicyMismatch`. Guard behavior itself is
 application code outside that hash; change a guard ID or the guard policy
 version when it changes.
@@ -486,7 +491,8 @@ commits, the end-of-boundary sweep cancels the ticket, and the generated
 resolution is rejected at admission. Tie-break and random-policy systems should
 therefore skip such tickets, read through `SimulationView::person_availability`.
 
-Registration, opening, option replacement, resolution, and cancellation enter
+Registration, opening, option replacement, deadline extension, reassignment,
+resolution, and cancellation enter
 the runtime through `DecisionIngressRequest`. They use request IDs, revision
 guards, deterministic queue order, atomic boundary settlement, and exact-retry
 semantics. A selected command option carries a serialized existing Canwu
@@ -511,16 +517,46 @@ parent must be a terminal ticket in hot decision history with exactly the same
 `DecisionControllerBinding::seat_id` as the new ticket's controller (a seat
 succession); an archived or absent parent is rejected as `TicketNotFound`,
 and an open parent or another maker and seat as `InvalidDecision`. The parent is copied
-onto `DecisionTicket` and `DecisionTrace`. A ticket cannot be reassigned to
-another controller, so a decision whose controller can no longer act continues
-as a new ticket for an available controller that names the cancelled ticket as
-its parent.
+onto `DecisionTicket` and `DecisionTrace`. A ticket that the engine cancelled
+because its controller can no longer act continues as a new ticket for an
+available controller that names the cancelled ticket as its parent.
+
+An open ticket keeps its ID while its deadline or controller changes.
+`ExtendDeadline { ticket_id, expected_version, deadline }` moves a ticket's
+deadline later: the ticket must have a deadline, and the new one must be later
+than it and no earlier than the admission time. `Reassign { ticket_id,
+expected_version, controller_id }` moves a ticket to another registered
+controller, which alone may then resolve it; admission refuses a new
+controller whose authority person is unavailable (`IssuerUnavailable`), an
+unregistered controller and the controller already assigned
+(`InvalidController`), and, when the parent is in hot history, a controller
+that would break the lineage link (`InvalidDecision`). Both apply only to an open
+ticket not past its deadline at the expected version, advance the version
+(so a response computed before them is stale), move the deadline or controller
+index entry, and are journalled like every non-resolving mutation: the
+admitted ingress record and its decision attempt, with no trace. Expected
+refusals are rejected attempts.
+
+Reads find tickets without scanning decision history. Behind a declared
+`canwu.core.decisions` read, `SimulationView::decision_tickets_opened` lists
+the tickets the current boundary's admitted `Open`s created, in admission
+order (the boundary admits its decision ingress before any system runs), and
+`open_decision_tickets_of` and `open_decision_tickets_of_controller` list one
+decision maker's or one controller's open tickets in ticket-ID order. `Canwu`,
+`CompactedCanwu`, and `Simulation` have the same three reads for the trusted
+host, where the first lists the latest settled boundary's tickets. The open
+tickets are indexed by deadline, decision maker, and assigned controller; the
+indexes are derived, rebuilt on load, and checked by validation. Which tickets
+a boundary opened (its admission batch) is persisted decision state, committed
+in the decision root and reconstructed from admitted ingress on load, so every
+run answers alike.
 
 Decision state is authoritative persisted state. Snapshots retain controller
-bindings, tickets, deadlines, versions, admission attempts, and traces; loading
+bindings, tickets, deadlines, versions, admission attempts, traces, and the
+latest boundary's admission batch; loading
 validates entity identities and reconstructs accepted and rejected outcomes from
 admitted decision ingress. A `Deferred` resolution records a trace and bumps the
-ticket version but leaves the ticket open under its original deadline, so live,
+ticket version but leaves the ticket open under its current deadline, so live,
 restored, and replayed runs expire it at the same boundary. Revision,
 ticket-version, closed-ticket, and similar expected conflicts become persisted
 rejected attempts, so one bad request cannot poison the canonical ingress queue.
@@ -1915,7 +1951,7 @@ root of the knowledge is `canwu.commitment.knowledge.v3` over the actor
 projection root and a chunked ledger root: a 32-byte leaf hash per entry,
 cached and recomputed only where an entry changed; chunk roots over 256
 local IDs; a holder root over its chunks; the ledger root over the holder
-roots (commitment format 6), so an entry can leave and a touched entry
+roots (since commitment format 6), so an entry can leave and a touched entry
 rehashes one chunk. The boundary record hash covers every field of the
 boundary's knowledge changes, bodies by digest. A restore rebuilds the
 ledger boundary by boundary from the journal, recomputes every
@@ -2712,7 +2748,7 @@ the dedicated private `canwu-sim` state module. This is an implementation
 ownership boundary only: public snapshots and replay journals remain flat and
 unchanged.
 
-Every current snapshot stores commitment format 6 roots for world, knowledge,
+Every current snapshot stores commitment format 7 roots for world, knowledge,
 plugin components, generic records, scheduler state, commands and attempts,
 events, ingress, random state/evidence, the boundary chain, run/plugin identity,
 and runtime control counters. Unordered collections are canonicalized by stable

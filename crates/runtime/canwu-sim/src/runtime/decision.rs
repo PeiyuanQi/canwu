@@ -94,6 +94,41 @@ impl Simulation {
         self.state.current.decisions.decision_hot_state()
     }
 
+    /// The tickets the latest settled boundary's admitted `Open`s created, in
+    /// admission order, at their current version. Empty before the first
+    /// boundary and after a boundary that opened none. Persisted with the
+    /// decision state, so a restored, sealed, or replayed run answers alike.
+    /// Trusted-host read of ground truth.
+    pub fn decision_tickets_opened(&self) -> impl Iterator<Item = &DecisionTicket> {
+        self.state.current.decisions.tickets_opened_in_batch()
+    }
+
+    /// The open tickets whose decision maker is `decision_maker`, in
+    /// ticket-ID order, from an index of the open tickets. Trusted-host read
+    /// of ground truth.
+    pub fn open_decision_tickets_of<'a>(
+        &'a self,
+        decision_maker: &EntityRef,
+    ) -> impl Iterator<Item = &'a DecisionTicket> + use<'a> {
+        self.state
+            .current
+            .decisions
+            .open_tickets_of_decision_maker(decision_maker)
+    }
+
+    /// The open tickets assigned to the controller `controller_id`, in
+    /// ticket-ID order, from an index of the open tickets. Trusted-host read
+    /// of ground truth.
+    pub fn open_decision_tickets_of_controller<'a>(
+        &'a self,
+        controller_id: &str,
+    ) -> impl Iterator<Item = &'a DecisionTicket> + use<'a> {
+        self.state
+            .current
+            .decisions
+            .open_tickets_of_controller(controller_id)
+    }
+
     #[must_use]
     pub fn decision_history_location(
         &self,
@@ -944,6 +979,8 @@ impl Simulation {
             }
             DecisionMutation::Open { .. }
             | DecisionMutation::ReplaceOptions { .. }
+            | DecisionMutation::ExtendDeadline { .. }
+            | DecisionMutation::Reassign { .. }
             | DecisionMutation::Resolve { .. }
             | DecisionMutation::Cancel { .. } => {}
         }

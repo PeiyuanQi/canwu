@@ -107,6 +107,12 @@ impl Simulation {
     ) -> Result<BoundaryReceipt, CanwuError> {
         self.advance_to_before_boundary(request.at)?;
 
+        // The tickets this boundary's admitted `Open`s create, and only
+        // those, are the decision admission batch its systems and the host
+        // read (`decision_tickets_opened`).
+        if self.state.current.decisions.begin_admission_batch() {
+            self.invalidate_commitments(CommitmentDomains::DECISIONS);
+        }
         let admitted_ingress = self.take_due_ingress(request.at);
         for id in &admitted_ingress {
             self.state

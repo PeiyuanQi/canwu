@@ -868,6 +868,58 @@ impl SimulationView<'_> {
         Ok(self.state.current().decisions.ticket(id))
     }
 
+    /// The tickets the current boundary's admitted decision `Open`s created,
+    /// in admission order, at their current version (a ticket the same
+    /// boundary also resolved or cancelled is listed in that state), after
+    /// an explicit [`StateKey::core_decisions`] read.
+    ///
+    /// A boundary system reads the boundary it settles: the boundary admits
+    /// its decision ingress before any system runs. A plugin command handler
+    /// admitted in the same boundary sees the `Open`s admitted before its
+    /// command; a view outside a boundary sees the latest settled boundary's.
+    /// It is decision state, persisted and committed, so a sealed, restored,
+    /// or replayed run gives the same answer; it costs the tickets listed.
+    pub fn decision_tickets_opened(
+        &self,
+    ) -> Result<impl Iterator<Item = &DecisionTicket>, CanwuError> {
+        self.require_read(&StateKey::core_decisions())?;
+        Ok(self.state.current().decisions.tickets_opened_in_batch())
+    }
+
+    /// The open tickets whose decision maker is `decision_maker`, in
+    /// ticket-ID order, after an explicit [`StateKey::core_decisions`] read.
+    ///
+    /// Served by an index of the open tickets that every ticket mutation
+    /// keeps and a load rebuilds, so it costs one lookup plus the tickets
+    /// listed, not the decision history. A boundary system sees the
+    /// boundary's admitted decision ingress and expirations applied.
+    pub fn open_decision_tickets_of<'s>(
+        &'s self,
+        decision_maker: &EntityRef,
+    ) -> Result<impl Iterator<Item = &'s DecisionTicket> + use<'s>, CanwuError> {
+        self.require_read(&StateKey::core_decisions())?;
+        Ok(self
+            .state
+            .current()
+            .decisions
+            .open_tickets_of_decision_maker(decision_maker))
+    }
+
+    /// The open tickets assigned to the controller `controller_id`, in
+    /// ticket-ID order, after an explicit [`StateKey::core_decisions`] read;
+    /// indexed like [`Self::open_decision_tickets_of`].
+    pub fn open_decision_tickets_of_controller<'s>(
+        &'s self,
+        controller_id: &str,
+    ) -> Result<impl Iterator<Item = &'s DecisionTicket> + use<'s>, CanwuError> {
+        self.require_read(&StateKey::core_decisions())?;
+        Ok(self
+            .state
+            .current()
+            .decisions
+            .open_tickets_of_controller(controller_id))
+    }
+
     pub fn domain_record(
         &self,
         reference: &DomainRecordRef,

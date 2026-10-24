@@ -422,12 +422,16 @@ pub struct DecisionTicket {
     pub id: DecisionTicketId,
     pub definition: String,
     pub decision_maker: EntityRef,
+    /// The only controller that may resolve the ticket. Set at `Open`;
+    /// [`DecisionMutation::Reassign`] moves an open ticket to another one.
     pub assigned_controller: String,
     pub summary: String,
     pub context: DecisionContext,
     pub options: Vec<DecisionOption>,
     pub opened_at: SimTime,
     pub updated_at: SimTime,
+    /// An open ticket expires at the first boundary after this instant. Set
+    /// at `Open`; [`DecisionMutation::ExtendDeadline`] moves it later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<SimTime>,
     pub version: u64,
@@ -509,8 +513,20 @@ pub struct DecisionOptionEvaluation {
     pub score: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub factors: Vec<DecisionFactorContribution>,
+    /// The utility stage's per-option bias for this option, kept apart from
+    /// the factor lines: a scored option's `score` is the sum of its factor
+    /// contributions plus this bias. Zero, and omitted from the encoding,
+    /// when the evaluator declares no bias for the option or the option was
+    /// not scored (see [`crate::WeightedUtilityEvaluator::with_option_bias`]).
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub bias: i64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<String>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero_i64(value: &i64) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -879,6 +895,13 @@ pub struct DecisionAttemptRecord {
     pub outcome: DecisionAttemptOutcome,
 }
 
+/// One change to decision state. Each enters a runtime as decision ingress,
+/// is checked at admission, and is journalled as the admitted ingress record
+/// and its [`DecisionAttemptRecord`]; an expected refusal is a rejected
+/// attempt. Only `Resolve` also records a [`DecisionTrace`]. Every mutation
+/// of an existing ticket names the ticket version it was computed against,
+/// and each accepted one advances that version, so a response or a second
+/// mutation computed before it is refused as `VersionConflict`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DecisionMutation {
@@ -893,6 +916,32 @@ pub enum DecisionMutation {
         expected_version: u64,
         context: DecisionContext,
         options: Vec<DecisionOption>,
+    },
+    /// Moves an open ticket's deadline later. The ticket must be open, not
+    /// past its deadline, and at `expected_version`; it must have a deadline
+    /// (a ticket without one never expires, so there is nothing to extend);
+    /// and `deadline` must be later than the current deadline and no earlier
+    /// than the admission time. The ticket keeps its ID, options, controller,
+    /// and lineage; its deadline index entry moves and its version advances.
+    ExtendDeadline {
+        ticket_id: DecisionTicketId,
+        expected_version: u64,
+        deadline: SimTime,
+    },
+    /// Moves an open ticket to another registered controller, which then
+    /// alone may resolve it. The ticket must be open, not past its deadline,
+    /// and at `expected_version`; `controller_id` must be registered and not
+    /// the controller already assigned; and when the ticket's parent is in
+    /// hot decision history, the new controller must keep the lineage link
+    /// (the same decision maker, or the parent's controller and the new one
+    /// bound to the same seat). The decision maker, options, deadline, and
+    /// lineage are unchanged; the version advances. In a runtime the new
+    /// controller's authority person must be available
+    /// (`IssuerUnavailable`), as for `Open`.
+    Reassign {
+        ticket_id: DecisionTicketId,
+        expected_version: u64,
+        controller_id: String,
     },
     Resolve {
         ticket_id: DecisionTicketId,

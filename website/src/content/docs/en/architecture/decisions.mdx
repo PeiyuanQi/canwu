@@ -130,7 +130,7 @@ The boundary record (`BoundaryRecord`) lists the ingress the boundary admitted a
 
 ## Who may resolve a ticket
 
-- Each ticket is assigned to one controller (`assigned_controller`) and cannot be reassigned. Only that controller's `Resolve` is accepted; a request from another controller is recorded as `InvalidController`.
+- Each ticket is assigned to one controller (`assigned_controller`). `Reassign` can move an open ticket to another registered controller. Only the assigned controller's `Resolve` is accepted; a request from another controller is recorded as `InvalidController`.
 - The policy identity on a `Resolve` must equal the controller's registered binding exactly, including `semantic_hash`, or the request is recorded as `PolicyMismatch`.
 - The selected option must exist in the current ticket version and have no blockers.
 - Draw evidence can come only from a boundary's `ResolveDecisionRandomly`, and only `Random` controllers and `Utility` controllers opted in with `with_random_tie_break` accept it. A `Random` ticket can therefore be resolved only by a boundary system.

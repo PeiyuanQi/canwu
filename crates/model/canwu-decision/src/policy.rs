@@ -30,15 +30,46 @@ pub struct UtilityProfile {
     pub weights: BTreeMap<String, i64>,
 }
 
+/// Scores an available option as `Σ weight × utility_inputs[factor]` over
+/// its factors, plus the option's bias when the evaluator declares one.
+///
+/// A bias is the policy's own standing preference for one option, such as a
+/// doctrine's, kept apart from the factors: it is not a factor of the
+/// option, so it is keyed by option ID rather than carried by the ticket,
+/// and the evaluation records it in [`DecisionOptionEvaluation::bias`]
+/// beside the factor lines, so a trace shows it as a bias. Options that the
+/// map does not name have no bias; blocked options are not scored.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WeightedUtilityEvaluator {
     pub profile: UtilityProfile,
+    /// Per-option biases by option ID, added to the weighted factor sum.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub option_biases: BTreeMap<String, i64>,
 }
 
 impl WeightedUtilityEvaluator {
     #[must_use]
     pub const fn new(profile: UtilityProfile) -> Self {
-        Self { profile }
+        Self {
+            profile,
+            option_biases: BTreeMap::new(),
+        }
+    }
+
+    /// Declares a bias for the option with this ID: an integer added to the
+    /// option's weighted factor sum and recorded on its evaluation as
+    /// `bias`. A later call for the same option replaces its bias, and a
+    /// zero bias removes it, so the map holds only biases that change a
+    /// score. Part of a [`GuardedUtilityPolicy`]'s semantic hash.
+    #[must_use]
+    pub fn with_option_bias(mut self, option_id: impl Into<String>, bias: i64) -> Self {
+        let option_id = option_id.into();
+        if bias == 0 {
+            self.option_biases.remove(&option_id);
+        } else {
+            self.option_biases.insert(option_id, bias);
+        }
+        self
     }
 }
 
@@ -54,6 +85,7 @@ impl UtilityEvaluator for WeightedUtilityEvaluator {
                 available: false,
                 score: None,
                 factors: Vec::new(),
+                bias: 0,
                 blockers: option.blockers.clone(),
             });
         }
@@ -85,11 +117,26 @@ impl UtilityEvaluator for WeightedUtilityEvaluator {
                 contribution,
             });
         }
+        let bias = self
+            .option_biases
+            .get(&option.id)
+            .copied()
+            .unwrap_or_default();
+        score = score.checked_add(bias).ok_or_else(|| {
+            DecisionError::new(
+                DecisionErrorCode::InvalidDecision,
+                format!(
+                    "utility score with the bias of option {} exceeds the i64 range",
+                    option.id
+                ),
+            )
+        })?;
         Ok(DecisionOptionEvaluation {
             option_id: option.id.clone(),
             available: true,
             score: Some(score),
             factors,
+            bias,
             blockers: Vec::new(),
         })
     }
@@ -280,6 +327,7 @@ fn excluded_evaluation(option_id: &str, blocker: &str) -> DecisionOptionEvaluati
         available: false,
         score: None,
         factors: Vec::new(),
+        bias: 0,
         blockers: vec![blocker.to_owned()],
     }
 }
@@ -352,10 +400,16 @@ fn run_ordered_rules(
 /// the draw evidence covers only the candidates. Otherwise the best score wins
 /// and equal scores fall back to the lowest option ID.
 ///
+/// Option biases declared on the utility evaluator
+/// ([`WeightedUtilityEvaluator::with_option_bias`]) are added to the scores
+/// before the near-equivalence margin applies, so a bias can make or break a
+/// tie-break, and each evaluation records its bias apart from its factors.
+///
 /// The identity reuses [`DecisionPolicyKind::Utility`]; its
 /// `semantic_hash` commits to the guard policy identity, the ordered guard
-/// IDs, utility weights, margin, and tie-break flag, so a controller binding
-/// rejects a reconfigured policy that keeps the same ID and version. Guard
+/// IDs, utility weights, option biases (when any are declared), margin, and
+/// tie-break flag, so a controller binding rejects a reconfigured policy
+/// that keeps the same ID and version. Guard
 /// behavior is application code outside the hash: change a guard's ID or the
 /// guard policy version when its behavior changes. A controller must also opt
 /// in with `DecisionControllerBinding::with_random_tie_break` before a pending
@@ -452,6 +506,17 @@ fn guarded_utility_semantic_hash(
     }
     hasher.update(&near_equivalence_margin.to_be_bytes());
     hasher.update(&[u8::from(random_tie_break)]);
+    // Option biases follow as a tagged section only when declared, so a
+    // policy without biases keeps the hash it had before biases existed;
+    // the encoding above is length-prefixed, so the two cannot collide.
+    if !utility.option_biases.is_empty() {
+        text(&mut hasher, "option-biases");
+        hasher.update(&(utility.option_biases.len() as u64).to_be_bytes());
+        for (option_id, bias) in &utility.option_biases {
+            text(&mut hasher, option_id);
+            hasher.update(&bias.to_be_bytes());
+        }
+    }
     hasher.finalize().to_hex().to_string()
 }
 

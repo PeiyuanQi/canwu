@@ -1,12 +1,12 @@
-use crate::model::{canonicalize_options, require_text};
+use crate::model::{canonicalize_options, require_identifier, require_text};
 use crate::{
     DecisionAction, DecisionAttemptOutcome, DecisionAttemptRecord, DecisionControllerBinding,
     DecisionError, DecisionErrorCode, DecisionMutation, DecisionOutcome, DecisionPolicy,
     DecisionPolicyIdentity, DecisionTicket, DecisionTicketState, DecisionTrace, PolicyDecision,
 };
-use canwu_core::{CommandRequestId, DecisionTicketId, DecisionTraceId};
+use canwu_core::{CommandRequestId, DecisionTicketId, DecisionTraceId, EntityRef};
 use canwu_time::SimTime;
-use im::{OrdMap, OrdSet};
+use im::{OrdMap, OrdSet, Vector};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeMap as StdBTreeMap;
@@ -773,6 +773,21 @@ pub struct DecisionState {
     attempts_by_request: OrdMap<canwu_core::DecisionRequestId, u64>,
     #[serde(skip)]
     deadline_index: OrdMap<SimTime, OrdSet<DecisionTicketId>>,
+    /// Open tickets by decision maker, in ticket-ID order. A derived index of
+    /// the open tickets: never persisted, rebuilt on load, checked by
+    /// [`Self::validate`].
+    #[serde(skip)]
+    open_by_decision_maker: OrdMap<EntityRef, OrdSet<DecisionTicketId>>,
+    /// Open tickets by assigned controller, in ticket-ID order; derived like
+    /// [`Self::open_by_decision_maker`].
+    #[serde(skip)]
+    open_by_controller: OrdMap<String, OrdSet<DecisionTicketId>>,
+    /// The tickets the current admission batch opened, in admission order:
+    /// in a runtime, those the latest boundary's admitted `Open`s created.
+    /// Persisted and committed, because nothing else records which boundary
+    /// opened a ticket.
+    #[serde(default, skip_serializing_if = "Vector::is_empty")]
+    opened_in_batch: Vector<DecisionTicketId>,
     #[serde(
         default,
         skip_serializing_if = "OrdMap::is_empty",
@@ -797,6 +812,57 @@ const fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
+/// The derived indexes of the open tickets, as a load rebuilds them and
+/// validation recomputes them from the ticket map.
+#[derive(Default, Eq, PartialEq)]
+struct OpenTicketIndexes {
+    deadlines: OrdMap<SimTime, OrdSet<DecisionTicketId>>,
+    decision_makers: OrdMap<EntityRef, OrdSet<DecisionTicketId>>,
+    controllers: OrdMap<String, OrdSet<DecisionTicketId>>,
+}
+
+impl OpenTicketIndexes {
+    fn of(tickets: &OrdMap<DecisionTicketId, Arc<DecisionTicket>>) -> Self {
+        let mut indexes = Self::default();
+        for ticket in tickets.values().filter(|ticket| ticket.is_open()) {
+            if let Some(deadline) = ticket.deadline {
+                indexes
+                    .deadlines
+                    .entry(deadline)
+                    .or_default()
+                    .insert(ticket.id);
+            }
+            indexes
+                .decision_makers
+                .entry(ticket.decision_maker.clone())
+                .or_default()
+                .insert(ticket.id);
+            indexes
+                .controllers
+                .entry(ticket.assigned_controller.clone())
+                .or_default()
+                .insert(ticket.id);
+        }
+        indexes
+    }
+}
+
+/// Removes `ticket_id` from the set under `key`, dropping the key once its
+/// set is empty.
+fn remove_indexed<K: Clone + Ord>(
+    index: &mut OrdMap<K, OrdSet<DecisionTicketId>>,
+    key: &K,
+    ticket_id: DecisionTicketId,
+) {
+    let now_empty = index.get_mut(key).is_some_and(|tickets| {
+        tickets.remove(&ticket_id);
+        tickets.is_empty()
+    });
+    if now_empty {
+        index.remove(key);
+    }
+}
+
 impl<'de> Deserialize<'de> for DecisionState {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -812,6 +878,8 @@ impl<'de> Deserialize<'de> for DecisionState {
             traces: PersistentDecisionLog<DecisionTrace>,
             #[serde(default)]
             attempts: PersistentDecisionLog<DecisionAttemptRecord>,
+            #[serde(default)]
+            opened_in_batch: Vector<DecisionTicketId>,
             #[serde(default, with = "decision_archive_receipts_serde")]
             archive_receipt_buckets: OrdMap<
                 DecisionArchivePageKey,
@@ -830,22 +898,17 @@ impl<'de> Deserialize<'de> for DecisionState {
             .zip(persisted.attempts.iter())
             .map(|(ordinal, attempt)| (attempt.request_id, ordinal))
             .collect();
-        let mut deadline_index = OrdMap::<SimTime, OrdSet<DecisionTicketId>>::new();
-        for ticket in persisted.tickets.values().filter(|ticket| ticket.is_open()) {
-            if let Some(deadline) = ticket.deadline {
-                deadline_index
-                    .entry(deadline)
-                    .or_default()
-                    .insert(ticket.id);
-            }
-        }
+        let open = OpenTicketIndexes::of(&persisted.tickets);
         Self {
             controllers: persisted.controllers,
             tickets: persisted.tickets,
             traces: persisted.traces,
             attempts: persisted.attempts,
             attempts_by_request,
-            deadline_index,
+            deadline_index: open.deadlines,
+            open_by_decision_maker: open.decision_makers,
+            open_by_controller: open.controllers,
+            opened_in_batch: persisted.opened_in_batch,
             archive_receipt_buckets: persisted.archive_receipt_buckets,
             archive_bucket_page_ids: persisted.archive_bucket_page_ids,
             archive_receipt_count: persisted.archive_receipt_count,
@@ -1386,14 +1449,19 @@ impl DecisionState {
     }
 
     /// Returns the authoritative decision-state commitment independently of
-    /// which authenticated archive locator pages are currently resident.
+    /// which authenticated archive locator pages are currently resident. It
+    /// covers the controllers, the hot-history root, the archive receipt
+    /// root, and the current admission batch. The batch stays out of the
+    /// hot-history root, which an archive commit names as its source: a new
+    /// batch must not make a prepared archive commit stale.
     pub fn authoritative_commitment(&self) -> Result<String, DecisionError> {
         decision_archive_hash(
-            "canwu.commitment.decisions.v2",
+            "canwu.commitment.decisions.v3",
             &(
                 &self.controllers,
                 self.hot_history_root()?,
                 self.archive_receipt_root()?,
+                &self.opened_in_batch,
             ),
         )
     }
@@ -1910,6 +1978,11 @@ impl DecisionState {
                 }
             }
         }
+        // Only a terminal ticket archives, and a runtime starts a new batch
+        // before it admits an archive commit, so this drops nothing there; it
+        // keeps the batch naming hot tickets for direct users of the state.
+        next.opened_in_batch
+            .retain(|id| next.tickets.contains_key(id));
         next.archive_receipt_count = next
             .archive_receipt_count
             .checked_add(verified.receipts.len() as u64)
@@ -2061,6 +2134,92 @@ impl DecisionState {
             .filter(|ticket| ticket.is_open())
     }
 
+    /// The open tickets of one decision maker, in ticket-ID order. Served by
+    /// an index of the open tickets, so it costs one lookup plus the tickets
+    /// it lists, however many tickets the state holds.
+    pub fn open_tickets_of_decision_maker<'a>(
+        &'a self,
+        decision_maker: &EntityRef,
+    ) -> impl Iterator<Item = &'a DecisionTicket> + use<'a> {
+        self.indexed_tickets(self.open_by_decision_maker.get(decision_maker))
+    }
+
+    /// The open tickets assigned to one controller, in ticket-ID order, from
+    /// the same kind of index as [`Self::open_tickets_of_decision_maker`].
+    pub fn open_tickets_of_controller<'a>(
+        &'a self,
+        controller_id: &str,
+    ) -> impl Iterator<Item = &'a DecisionTicket> + use<'a> {
+        self.indexed_tickets(self.open_by_controller.get(controller_id))
+    }
+
+    fn indexed_tickets<'a>(
+        &'a self,
+        ids: Option<&'a OrdSet<DecisionTicketId>>,
+    ) -> impl Iterator<Item = &'a DecisionTicket> + use<'a> {
+        ids.into_iter()
+            .flat_map(OrdSet::iter)
+            .filter_map(|id| self.ticket(*id))
+    }
+
+    /// Starts a new admission batch: forgets which tickets the previous one
+    /// opened. A runtime calls it once at the start of every boundary, before
+    /// it admits the boundary's decision ingress; each accepted `Open` then
+    /// adds its ticket. Returns whether the previous batch had opened any.
+    pub fn begin_admission_batch(&mut self) -> bool {
+        let changed = !self.opened_in_batch.is_empty();
+        self.opened_in_batch.clear();
+        changed
+    }
+
+    /// The tickets the current admission batch opened, in admission order,
+    /// at their current version (one may already be resolved, cancelled, or
+    /// expired). In a runtime, during a boundary these are the tickets that
+    /// boundary's admitted `Open`s created so far, and between boundaries
+    /// those of the latest settled boundary.
+    pub fn tickets_opened_in_batch(&self) -> impl Iterator<Item = &DecisionTicket> {
+        self.opened_in_batch
+            .iter()
+            .filter_map(|id| self.ticket(*id))
+    }
+
+    /// The IDs of [`Self::tickets_opened_in_batch`], in admission order.
+    pub fn ticket_ids_opened_in_batch(&self) -> impl ExactSizeIterator<Item = DecisionTicketId> {
+        self.opened_in_batch.iter().copied()
+    }
+
+    fn index_open_ticket(&mut self, ticket: &DecisionTicket) {
+        if let Some(deadline) = ticket.deadline {
+            self.deadline_index
+                .entry(deadline)
+                .or_default()
+                .insert(ticket.id);
+        }
+        self.open_by_decision_maker
+            .entry(ticket.decision_maker.clone())
+            .or_default()
+            .insert(ticket.id);
+        self.open_by_controller
+            .entry(ticket.assigned_controller.clone())
+            .or_default()
+            .insert(ticket.id);
+    }
+
+    /// Drops a ticket that left the open state from every open-ticket index.
+    fn unindex_closed_ticket(&mut self, ticket: &DecisionTicket) {
+        self.remove_deadline(ticket.id, ticket.deadline);
+        remove_indexed(
+            &mut self.open_by_decision_maker,
+            &ticket.decision_maker,
+            ticket.id,
+        );
+        remove_indexed(
+            &mut self.open_by_controller,
+            &ticket.assigned_controller,
+            ticket.id,
+        );
+    }
+
     pub fn validate(&self) -> Result<(), DecisionError> {
         self.validate_archive_directory_shape()?;
         if self.attempts_by_request.len() != self.attempts.len() {
@@ -2069,19 +2228,30 @@ impl DecisionState {
                 "decision attempt request index is inconsistent",
             ));
         }
-        let mut expected_deadlines = OrdMap::<SimTime, OrdSet<DecisionTicketId>>::new();
-        for ticket in self.tickets.values().filter(|ticket| ticket.is_open()) {
-            if let Some(deadline) = ticket.deadline {
-                expected_deadlines
-                    .entry(deadline)
-                    .or_default()
-                    .insert(ticket.id);
-            }
-        }
-        if expected_deadlines != self.deadline_index {
+        let expected = OpenTicketIndexes::of(&self.tickets);
+        if expected.deadlines != self.deadline_index {
             return Err(DecisionError::new(
                 DecisionErrorCode::InvalidDecision,
                 "decision deadline index is inconsistent",
+            ));
+        }
+        if expected.decision_makers != self.open_by_decision_maker
+            || expected.controllers != self.open_by_controller
+        {
+            return Err(DecisionError::new(
+                DecisionErrorCode::InvalidDecision,
+                "decision open-ticket index is inconsistent",
+            ));
+        }
+        let mut batch = std::collections::BTreeSet::new();
+        if self
+            .opened_in_batch
+            .iter()
+            .any(|id| !batch.insert(*id) || !self.tickets.contains_key(id))
+        {
+            return Err(DecisionError::new(
+                DecisionErrorCode::InvalidDecision,
+                "decision admission batch repeats a ticket or names one outside hot decision history",
             ));
         }
         for (id, controller) in &self.controllers {
@@ -2339,15 +2509,11 @@ impl DecisionState {
                     state: DecisionTicketState::Open,
                     parent_ticket: ticket.parent_ticket,
                 };
-                if let Some(deadline) = persisted.deadline {
-                    self.deadline_index
-                        .entry(deadline)
-                        .or_default()
-                        .insert(persisted.id);
-                }
                 self.insert_hot_history_record(&DecisionArchiveRecord::Ticket {
                     ticket: persisted.clone(),
                 })?;
+                self.index_open_ticket(&persisted);
+                self.opened_in_batch.push_back(persisted.id);
                 self.tickets.insert(persisted.id, Arc::new(persisted));
                 PreparedDecision::default()
             }
@@ -2436,14 +2602,115 @@ impl DecisionState {
                 })?;
                 ticket.state = DecisionTicketState::Cancelled { reason };
                 ticket.validate()?;
-                let deadline = ticket.deadline;
                 let updated = ticket.clone();
                 let _ = ticket;
+                self.unindex_closed_ticket(&updated);
                 self.replace_hot_history_record(
                     &DecisionArchiveRecord::Ticket { ticket: previous },
                     &DecisionArchiveRecord::Ticket { ticket: updated },
                 )?;
-                self.remove_deadline(ticket_id, deadline);
+                PreparedDecision::default()
+            }
+            DecisionMutation::ExtendDeadline {
+                ticket_id,
+                expected_version,
+                deadline,
+            } => {
+                let previous = self.hot_ticket(ticket_id)?;
+                ensure_open_at_version(&previous, expected_version, at)?;
+                let Some(current) = previous.deadline else {
+                    return Err(DecisionError::new(
+                        DecisionErrorCode::InvalidDecision,
+                        format!("decision ticket {ticket_id} has no deadline to extend"),
+                    ));
+                };
+                // The open check above refuses a ticket past its deadline, so
+                // the current deadline is no earlier than `at`, and a later
+                // deadline is never before the admission time either.
+                if deadline <= current {
+                    return Err(DecisionError::new(
+                        DecisionErrorCode::InvalidDecision,
+                        format!(
+                            "decision ticket {ticket_id}'s new deadline must be later than its current deadline"
+                        ),
+                    ));
+                }
+                let ticket = self.open_ticket_mut(ticket_id, expected_version, at)?;
+                ticket.deadline = Some(deadline);
+                ticket.updated_at = at;
+                ticket.version = next_ticket_version(ticket.version)?;
+                ticket.validate()?;
+                let updated = ticket.clone();
+                let _ = ticket;
+                self.remove_deadline(ticket_id, Some(current));
+                self.deadline_index
+                    .entry(deadline)
+                    .or_default()
+                    .insert(ticket_id);
+                self.replace_hot_history_record(
+                    &DecisionArchiveRecord::Ticket { ticket: previous },
+                    &DecisionArchiveRecord::Ticket { ticket: updated },
+                )?;
+                PreparedDecision::default()
+            }
+            DecisionMutation::Reassign {
+                ticket_id,
+                expected_version,
+                controller_id,
+            } => {
+                let previous = self.hot_ticket(ticket_id)?;
+                ensure_open_at_version(&previous, expected_version, at)?;
+                require_identifier(&controller_id, "assigned controller")?;
+                if !self.controllers.contains_key(&controller_id) {
+                    return Err(DecisionError::new(
+                        DecisionErrorCode::InvalidController,
+                        format!(
+                            "decision ticket {ticket_id} cannot move to unknown controller {controller_id}"
+                        ),
+                    ));
+                }
+                if previous.assigned_controller == controller_id {
+                    return Err(DecisionError::new(
+                        DecisionErrorCode::InvalidController,
+                        format!(
+                            "decision ticket {ticket_id} is already assigned to controller {controller_id}"
+                        ),
+                    ));
+                }
+                // The lineage rule `validate` re-checks against a hot parent:
+                // a seat succession stays linked only through a controller
+                // bound to the parent controller's seat.
+                if let Some(parent_id) = previous.parent_ticket
+                    && let Some(parent) = self.ticket(parent_id)
+                    && !self.lineage_links(parent, &previous.decision_maker, &controller_id)
+                {
+                    return Err(DecisionError::new(
+                        DecisionErrorCode::InvalidDecision,
+                        format!(
+                            "moving decision ticket {ticket_id} to controller {controller_id} would break its lineage to parent {parent_id}, which belongs to a different decision maker and controller seat"
+                        ),
+                    ));
+                }
+                let ticket = self.open_ticket_mut(ticket_id, expected_version, at)?;
+                ticket.assigned_controller.clone_from(&controller_id);
+                ticket.updated_at = at;
+                ticket.version = next_ticket_version(ticket.version)?;
+                ticket.validate()?;
+                let updated = ticket.clone();
+                let _ = ticket;
+                remove_indexed(
+                    &mut self.open_by_controller,
+                    &previous.assigned_controller,
+                    ticket_id,
+                );
+                self.open_by_controller
+                    .entry(controller_id)
+                    .or_default()
+                    .insert(ticket_id);
+                self.replace_hot_history_record(
+                    &DecisionArchiveRecord::Ticket { ticket: previous },
+                    &DecisionArchiveRecord::Ticket { ticket: updated },
+                )?;
                 PreparedDecision::default()
             }
         };
@@ -2521,23 +2788,18 @@ impl DecisionState {
                 format!("decision ticket {ticket_id} was not found"),
             )
         })?;
-        let ticket = Arc::make_mut(ticket);
-        if !ticket.is_open() || ticket.deadline.is_some_and(|deadline| deadline < at) {
-            return Err(DecisionError::new(
-                DecisionErrorCode::ClosedTicket,
-                format!("decision ticket {ticket_id} is not open"),
-            ));
-        }
-        if ticket.version != expected_version {
-            return Err(DecisionError::new(
-                DecisionErrorCode::VersionConflict,
-                format!(
-                    "decision ticket {ticket_id} is at version {}, expected {expected_version}",
-                    ticket.version
-                ),
-            ));
-        }
-        Ok(ticket)
+        ensure_open_at_version(ticket, expected_version, at)?;
+        Ok(Arc::make_mut(ticket))
+    }
+
+    /// A copy of one hot ticket, or `TicketNotFound`.
+    fn hot_ticket(&self, ticket_id: DecisionTicketId) -> Result<DecisionTicket, DecisionError> {
+        self.ticket(ticket_id).cloned().ok_or_else(|| {
+            DecisionError::new(
+                DecisionErrorCode::TicketNotFound,
+                format!("decision ticket {ticket_id} was not found"),
+            )
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2656,15 +2918,14 @@ impl DecisionState {
             };
         }
         ticket.validate()?;
-        // A deferred ticket stays open and keeps its deadline index entry, so
-        // a live run expires it exactly like a run restored from a snapshot.
-        let released_deadline = if ticket.is_open() {
-            None
-        } else {
-            ticket.deadline
-        };
+        // A deferred ticket stays open and keeps its open-ticket index entries,
+        // so a live run expires it exactly like a run restored from a snapshot.
+        let closed = !ticket.is_open();
         let updated_ticket = ticket.clone();
         let _ = ticket;
+        if closed {
+            self.unindex_closed_ticket(&updated_ticket);
+        }
         self.replace_hot_history_record(
             &DecisionArchiveRecord::Ticket {
                 ticket: previous_ticket,
@@ -2673,7 +2934,6 @@ impl DecisionState {
                 ticket: updated_ticket,
             },
         )?;
-        self.remove_deadline(ticket_id, released_deadline);
         self.insert_hot_history_record(&DecisionArchiveRecord::Trace {
             trace: trace.clone(),
         })?;
@@ -2728,6 +2988,17 @@ impl DecisionState {
                     };
                 let _ = ticket;
                 if let Some(updated) = updated {
+                    // The whole deadline key left the index above.
+                    remove_indexed(
+                        &mut self.open_by_decision_maker,
+                        &updated.decision_maker,
+                        ticket_id,
+                    );
+                    remove_indexed(
+                        &mut self.open_by_controller,
+                        &updated.assigned_controller,
+                        ticket_id,
+                    );
                     self.replace_hot_history_record(
                         &DecisionArchiveRecord::Ticket { ticket: previous },
                         &DecisionArchiveRecord::Ticket { ticket: updated },
@@ -2739,18 +3010,45 @@ impl DecisionState {
     }
 
     fn remove_deadline(&mut self, ticket_id: DecisionTicketId, deadline: Option<SimTime>) {
-        let Some(deadline) = deadline else {
-            return;
-        };
-        if let Some(mut tickets) = self.deadline_index.get(&deadline).cloned() {
-            tickets.remove(&ticket_id);
-            if tickets.is_empty() {
-                self.deadline_index.remove(&deadline);
-            } else {
-                self.deadline_index.insert(deadline, tickets);
-            }
+        if let Some(deadline) = deadline {
+            remove_indexed(&mut self.deadline_index, &deadline, ticket_id);
         }
     }
+}
+
+/// A mutation of an existing ticket applies only to an open ticket not past
+/// its deadline (`ClosedTicket`) at the version it was computed against
+/// (`VersionConflict`).
+fn ensure_open_at_version(
+    ticket: &DecisionTicket,
+    expected_version: u64,
+    at: SimTime,
+) -> Result<(), DecisionError> {
+    if !ticket.is_open() || ticket.deadline.is_some_and(|deadline| deadline < at) {
+        return Err(DecisionError::new(
+            DecisionErrorCode::ClosedTicket,
+            format!("decision ticket {} is not open", ticket.id),
+        ));
+    }
+    if ticket.version != expected_version {
+        return Err(DecisionError::new(
+            DecisionErrorCode::VersionConflict,
+            format!(
+                "decision ticket {} is at version {}, expected {expected_version}",
+                ticket.id, ticket.version
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn next_ticket_version(version: u64) -> Result<u64, DecisionError> {
+    version.checked_add(1).ok_or_else(|| {
+        DecisionError::new(
+            DecisionErrorCode::InvalidDecision,
+            "decision ticket version is exhausted",
+        )
+    })
 }
 
 fn validate_attempt_shape(

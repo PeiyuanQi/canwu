@@ -3,11 +3,12 @@ use canwu_decision::{
     DecisionAction, DecisionArchiveBlob, DecisionArchiveProvider, DecisionArchiveRecord,
     DecisionArchiveStore, DecisionArchiveStoreOutcome, DecisionAttemptOutcome,
     DecisionAttemptRecord, DecisionContext, DecisionError, DecisionErrorCode, DecisionHistoryKey,
-    DecisionHistoryLocation, DecisionHistoryQueryBudget, DecisionOption, DecisionPolicy,
-    DecisionState, DecisionTicket, DecisionTicketState, ExternalDecisionResponse, ExternalPolicy,
-    HumanDecisionResponse, LlmModelIdentity, MAX_DECISION_ARCHIVE_BUCKET_PAGE_BYTES,
-    MAX_DECISION_ARCHIVE_BUCKET_PAGE_ENTRIES, QueuedExternalPolicy, QueuedHumanPolicy,
-    QueuedLlmPolicy, decision_history_page_key,
+    DecisionHistoryLocation, DecisionHistoryQueryBudget, DecisionOption, DecisionOutcome,
+    DecisionPolicy, DecisionState, DecisionTicket, DecisionTicketState, ExternalDecisionResponse,
+    ExternalPolicy, GuardedUtilityPolicy, HumanDecisionResponse, LlmModelIdentity,
+    MAX_DECISION_ARCHIVE_BUCKET_PAGE_BYTES, MAX_DECISION_ARCHIVE_BUCKET_PAGE_ENTRIES,
+    OrderedRulePolicy, PolicyDecision, QueuedExternalPolicy, QueuedHumanPolicy, QueuedLlmPolicy,
+    UtilityProfile, WeightedUtilityEvaluator, decision_history_page_key,
 };
 use canwu_time::SimTime;
 use serde_json::json;
@@ -489,5 +490,94 @@ fn asynchronous_policies_allow_a_newer_response_to_replace_a_stale_one() {
     assert_eq!(
         decision.external.and_then(|evidence| evidence.request_id),
         Some("operator-current".to_owned())
+    );
+}
+
+/// Downstream gap G-70: a utility evaluator's per-option bias is added to the
+/// option's weighted factor sum, recorded on its evaluation apart from the
+/// factor lines, and bound into the guarded policy's semantic hash.
+#[test]
+fn utility_option_bias_moves_the_score_and_is_recorded_apart_from_factors() {
+    let mut ticket = ticket(1);
+    let option = |id: &str, merit: i64| DecisionOption {
+        utility_inputs: BTreeMap::from([("merit".to_owned(), merit)]),
+        ..DecisionOption::new(id, id)
+    };
+    ticket.options = vec![option("accept", 3), option("mediate", 2)];
+    let profile = UtilityProfile {
+        weights: BTreeMap::from([("merit".to_owned(), 10)]),
+    };
+    let policy = |utility: WeightedUtilityEvaluator| {
+        GuardedUtilityPolicy::new(
+            "doctrine-utility",
+            "1",
+            OrderedRulePolicy::new("doctrine-guards", "1", Vec::new()),
+            utility,
+            0,
+            false,
+        )
+    };
+    let unbiased = policy(WeightedUtilityEvaluator::new(profile.clone()));
+    let biased = policy(WeightedUtilityEvaluator::new(profile).with_option_bias("mediate", 15));
+    let evaluation = |decision: &PolicyDecision, id: &str| {
+        decision
+            .evaluations
+            .iter()
+            .find(|evaluation| evaluation.option_id == id)
+            .cloned()
+            .expect("every option is evaluated")
+    };
+
+    let plain = unbiased.decide(&ticket).expect("unbiased decision");
+    assert_eq!(
+        plain.outcome,
+        DecisionOutcome::Selected {
+            option_id: "accept".to_owned()
+        }
+    );
+    let plain_mediate = evaluation(&plain, "mediate");
+    assert_eq!((plain_mediate.score, plain_mediate.bias), (Some(20), 0));
+    assert!(
+        serde_json::to_value(&plain_mediate)
+            .expect("evaluation json")
+            .get("bias")
+            .is_none(),
+        "an unbiased evaluation encodes as before"
+    );
+
+    // The bias, not a factor, turns the choice: 2 x 10 + 15 beats 3 x 10.
+    let decision = biased.decide(&ticket).expect("biased decision");
+    decision
+        .validate(&ticket)
+        .expect("biased decision validates");
+    assert_eq!(
+        decision.outcome,
+        DecisionOutcome::Selected {
+            option_id: "mediate".to_owned()
+        }
+    );
+    let mediate = evaluation(&decision, "mediate");
+    assert_eq!(mediate.factors, plain_mediate.factors);
+    assert_eq!(mediate.bias, 15);
+    let factor_sum: i64 = mediate
+        .factors
+        .iter()
+        .map(|factor| factor.contribution)
+        .sum();
+    assert_eq!(mediate.score, Some(factor_sum + mediate.bias));
+    assert_eq!(
+        evaluation(&decision, "accept"),
+        evaluation(&plain, "accept")
+    );
+    assert_eq!(
+        serde_json::to_value(&mediate).expect("evaluation json")["bias"],
+        json!(15)
+    );
+
+    // The bias is configuration: a binding to the unbiased policy refuses the
+    // biased one under the same ID and version.
+    assert_ne!(
+        unbiased.identity().semantic_hash,
+        biased.identity().semantic_hash
     );
 }

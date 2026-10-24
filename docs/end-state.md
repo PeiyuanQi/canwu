@@ -66,10 +66,11 @@ Open decision tickets are not left waiting on a person who can no longer act.
 At the end of the boundary that makes a person unavailable, the kernel cancels
 every open ticket whose decision maker is that person and every remaining open
 ticket whose assigned controller acts for that person, with stable reasons
-recorded on the boundary evidence. A ticket cannot be reassigned. When only the
-controller's authority person became unavailable, the decision continues as a
-new ticket for an available controller whose `parent_ticket` names the
-cancelled one. When the decision maker is unavailable, no ticket can be opened
+recorded on the boundary evidence. The host may move an open ticket to another
+available controller with `Reassign` before that happens; once the kernel has
+cancelled it, when only the controller's authority person became unavailable,
+the decision continues as a new ticket for an available controller whose
+`parent_ticket` names the cancelled one. When the decision maker is unavailable, no ticket can be opened
 for that decision maker; a successor's decision is a new ticket of the
 successor, which may name the cancelled one as its parent when the successor's
 controller is bound to the same seat.

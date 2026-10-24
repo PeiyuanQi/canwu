@@ -3114,6 +3114,28 @@ impl CompactedSimulation {
         self.simulation.decision_hot_state()
     }
 
+    /// See [`Simulation::decision_tickets_opened`].
+    pub fn decision_tickets_opened(&self) -> impl Iterator<Item = &super::DecisionTicket> {
+        self.simulation.decision_tickets_opened()
+    }
+
+    /// See [`Simulation::open_decision_tickets_of`].
+    pub fn open_decision_tickets_of<'a>(
+        &'a self,
+        decision_maker: &super::EntityRef,
+    ) -> impl Iterator<Item = &'a super::DecisionTicket> + use<'a> {
+        self.simulation.open_decision_tickets_of(decision_maker)
+    }
+
+    /// See [`Simulation::open_decision_tickets_of_controller`].
+    pub fn open_decision_tickets_of_controller<'a>(
+        &'a self,
+        controller_id: &str,
+    ) -> impl Iterator<Item = &'a super::DecisionTicket> + use<'a> {
+        self.simulation
+            .open_decision_tickets_of_controller(controller_id)
+    }
+
     #[must_use]
     pub fn decision_history_location(
         &self,
