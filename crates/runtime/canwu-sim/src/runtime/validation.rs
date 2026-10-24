@@ -28,7 +28,7 @@ use super::{
     RuntimeCurrentState, RuntimeState, STATE_REVISION_FORMAT_VERSION, ScheduleKey, ScheduledAction,
     SimDuration, SimEvent, SimulationSnapshot, StateVisibility, SystemCadence, SystemDirective,
     WorldSnapshot, authoritative_revision_count, base_schema, boundaries_before_attempts,
-    boundary_has_event_ingress, boundary_state_hash_format, boundary_system_due,
+    boundary_has_event_ingress, boundary_record_system_due, boundary_state_hash_format,
     boundary_write_stage, canonical_hash, canonical_text, canonicalize_scenario,
     commitment_roots_are_canonical, component_key, compute_boundary_hash_with,
     domain_record_commit_stage, invalid_snapshot, invalid_snapshot_error, is_canonical_hash,
@@ -1311,7 +1311,12 @@ fn validate_random_evidence(
     let mut max_correlation_id = 0;
     let core_stream = random::core_report_delay_stream();
     let mut report_draws = BTreeMap::new();
-    let keyed_draws = random::keyed_draw_ledger(&snapshot.random_draws).map_err(|error| {
+    let keyed_draws = random::keyed_draw_ledger(
+        &snapshot.random_draws,
+        &plugins.keyed_draw_retirements(),
+        snapshot.now,
+    )
+    .map_err(|error| {
         invalid_snapshot_error(format!("invalid operation-keyed random index: {error}"))
     })?;
     let evidence_context = SnapshotValidationContext::new(snapshot);
@@ -1441,11 +1446,7 @@ fn validate_random_evidence(
                     || draw.cause != CauseRef::Boundary(*boundary)
                     || !outcome_is_valid
                     || !contract.random_streams.contains(&draw.stream)
-                    || !boundary_system_due(
-                        contract,
-                        &record.cadences,
-                        boundary_has_event_ingress(record),
-                    )
+                    || !boundary_record_system_due(contract, record)
                     || plugins.random_stream_owners.get(&draw.stream)
                         != Some(&(plugin.clone(), system.clone()))
                 {
@@ -2199,14 +2200,40 @@ fn validate_plugin_ingress_retention(
         })
 }
 
+/// Whether a calendar ingress record is canonical: scheduled-system class,
+/// priority zero, the engine's calendar cause, at least one cadence, and
+/// canonical cadences and calendar marks.
+fn calendar_ingress_is_canonical(
+    record: &IngressRecord,
+    cadences: &[SystemCadence],
+    calendar_marks: &[super::CalendarMark],
+) -> bool {
+    record.class == IngressClass::ScheduledSystem
+        && record.priority == 0
+        && !cadences.is_empty()
+        && super::calendar_marks_are_canonical(cadences, calendar_marks)
+        && record.cause == Some(CauseRef::System("canwu.core.calendar".to_owned()))
+}
+
 /// Checks a plugin packet a continuation checkpoint pins: its packet type
 /// is declared with its class, its affected entities are canonical and
 /// exist, and its archive retention is well formed and bound to its payload.
+/// A pinned calendar record must be canonical.
 pub(super) fn validate_continuation_ingress(
     snapshot: &SimulationSnapshot,
     plugins: &PluginRegistry,
     record: &IngressRecord,
 ) -> Result<(), CanwuError> {
+    if let IngressPayload::Calendar {
+        cadences,
+        calendar_marks,
+    } = &record.payload
+    {
+        if !calendar_ingress_is_canonical(record, cadences, calendar_marks) {
+            return invalid_snapshot("calendar ingress is not canonical");
+        }
+        return Ok(());
+    }
     let IngressPayload::Plugin {
         plugin,
         packet_type,
@@ -2440,14 +2467,11 @@ fn validate_ingress_records(
                 *authority,
                 reason,
             )?,
-            IngressPayload::Calendar { cadences } => {
-                if record.class != IngressClass::ScheduledSystem
-                    || record.priority != 0
-                    || cadences.is_empty()
-                    || cadences.contains(&SystemCadence::EventDriven)
-                    || cadences.windows(2).any(|pair| pair[0] >= pair[1])
-                    || record.cause != Some(CauseRef::System("canwu.core.calendar".to_owned()))
-                {
+            IngressPayload::Calendar {
+                cadences,
+                calendar_marks,
+            } => {
+                if !calendar_ingress_is_canonical(record, cadences, calendar_marks) {
                     return invalid_snapshot("calendar ingress is not canonical");
                 }
             }
@@ -2578,6 +2602,7 @@ fn validate_ingress_records(
         let mut expected_attempts = Vec::new();
         let mut expected_commands = Vec::new();
         let mut expected_cadences = BTreeSet::new();
+        let mut expected_marks = BTreeSet::new();
         for ingress_id in expected {
             let index = usize::try_from(ingress_id.get().saturating_sub(1)).map_err(|_| {
                 invalid_snapshot_error("admitted ingress ID exceeds the platform index range")
@@ -2645,8 +2670,12 @@ fn validate_ingress_records(
                             }
                         }
                     }
-                    IngressPayload::Calendar { cadences } => {
+                    IngressPayload::Calendar {
+                        cadences,
+                        calendar_marks,
+                    } => {
                         expected_cadences.extend(cadences.iter().cloned());
+                        expected_marks.extend(calendar_marks.iter().cloned());
                     }
                     IngressPayload::Plugin { .. }
                     | IngressPayload::Command { .. }
@@ -2656,12 +2685,16 @@ fn validate_ingress_records(
             }
             pending.remove(&IngressQueueKey::from_record(record));
         }
-        if !snapshot.ingress.is_empty()
-            && (boundary.admitted_attempts != expected_attempts
-                || boundary.admitted_commands != expected_commands
-                || expected_cadences
-                    .iter()
-                    .any(|cadence| !boundary.cadences.contains(cadence)))
+        // Marks come only from admitted calendar ingress, so a boundary of
+        // a journal without ingress carries none.
+        if (snapshot.ingress.is_empty() && !boundary.calendar_marks.is_empty())
+            || (!snapshot.ingress.is_empty()
+                && (boundary.admitted_attempts != expected_attempts
+                    || boundary.admitted_commands != expected_commands
+                    || expected_cadences
+                        .iter()
+                        .any(|cadence| !boundary.cadences.contains(cadence))
+                    || !boundary.calendar_marks.iter().eq(expected_marks.iter())))
         {
             return invalid_snapshot(
                 "boundary command or calendar effects do not match admitted ingress order",
@@ -3126,10 +3159,8 @@ fn validate_boundary_records(
         {
             return invalid_snapshot("boundary time, order, or correlation is invalid");
         }
-        if record.cadences.contains(&SystemCadence::EventDriven)
-            || record.cadences.windows(2).any(|pair| pair[0] >= pair[1])
-        {
-            return invalid_snapshot("boundary cadences are not canonical");
+        if !super::calendar_marks_are_canonical(&record.cadences, &record.calendar_marks) {
+            return invalid_snapshot("boundary cadences or calendar marks are not canonical");
         }
         validate_boundary_admission(
             record,
@@ -3455,11 +3486,7 @@ fn validate_boundary_reservations(
             return invalid_snapshot("reservation offer references an unknown boundary system");
         };
         if contract.phase != BoundaryPhase::ReservationAndAllocation
-            || !boundary_system_due(
-                contract,
-                &record.cadences,
-                boundary_has_event_ingress(record),
-            )
+            || !boundary_record_system_due(contract, record)
             || !contract
                 .reservation_offers
                 .contains(&offered.offer.pool.state)
@@ -3496,11 +3523,7 @@ fn validate_boundary_reservations(
             || requested.request.tie_break != requested.request.tie_break.trim()
             || requested.request.quantity == 0
             || contract.phase != BoundaryPhase::ReservationAndAllocation
-            || !boundary_system_due(
-                contract,
-                &record.cadences,
-                boundary_has_event_ingress(record),
-            )
+            || !boundary_record_system_due(contract, record)
             || !contract
                 .reservation_requests
                 .contains(&requested.request.pool.state)
@@ -3722,11 +3745,7 @@ fn validate_boundary_ingress_generation(
             || generated_delay.is_none_or(SimDuration::is_negative)
             || generated_delay.and_then(|delay| ingress.issued_at.checked_add(delay))
                 != Some(ingress.due_at)
-            || !boundary_system_due(
-                contract,
-                &record.cadences,
-                boundary_has_event_ingress(record),
-            )
+            || !boundary_record_system_due(contract, record)
         {
             return invalid_snapshot(
                 "generated ingress producer, commit stage, or entity provenance is inconsistent",
@@ -3768,11 +3787,7 @@ fn validate_boundary_changes(
                 &change.entity,
             )
             || !contract.writes.contains(&change.state)
-            || !boundary_system_due(
-                contract,
-                &record.cadences,
-                boundary_has_event_ingress(record),
-            )
+            || !boundary_record_system_due(contract, record)
             || contract.visibility != change.visibility
             || plugins.state_owners.get(&change.state) != Some(&change.plugin)
             || plugins.boundary_writers.get(&(stage, change.state.clone()))
@@ -3838,11 +3853,7 @@ fn validate_boundary_record_changes(
             let reference = &change.current.reference;
             let state = records::record_state_key(&reference.kind);
             if !contract.writes.contains(&state)
-                || !boundary_system_due(
-                    contract,
-                    &record.cadences,
-                    boundary_has_event_ingress(record),
-                )
+                || !boundary_record_system_due(contract, record)
                 || contract.visibility != change.visibility
                 || plugins.state_owners.get(&state) != Some(&change.plugin)
                 || plugins.boundary_writers.get(&(write_stage, state.clone()))
@@ -4059,6 +4070,7 @@ fn validate_boundary_knowledge_changes(
     let mut budget = super::knowledge::KnowledgeBudgetLedger::new(
         plugins.knowledge_publication_reservations_due(
             &record.cadences,
+            &record.calendar_marks,
             boundary_has_event_ingress(record),
         ),
     );
@@ -4079,11 +4091,7 @@ fn validate_boundary_knowledge_changes(
                 BoundaryPhase::PerceptionAndAttentionRefresh
                     | BoundaryPhase::PerspectiveAndReportMaterialization
             )
-            || !boundary_system_due(
-                contract,
-                &record.cadences,
-                boundary_has_event_ingress(record),
-            )
+            || !boundary_record_system_due(contract, record)
             || change.records.is_empty()
             || change.records.len() > limits.records_per_batch
             || change.holders.is_empty()
@@ -4352,11 +4360,7 @@ fn validate_boundary_emissions(
             else {
                 return invalid_snapshot("boundary emission references an unknown system");
             };
-            if !boundary_system_due(
-                contract,
-                &record.cadences,
-                boundary_has_event_ingress(record),
-            ) {
+            if !boundary_record_system_due(contract, record) {
                 return invalid_snapshot("boundary emission source system was not due");
             }
             Some(contract)

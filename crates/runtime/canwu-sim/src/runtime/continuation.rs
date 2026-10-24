@@ -566,7 +566,9 @@ pub struct ContinuationCheckpoint {
     /// The provenance of every live record's current version, in record
     /// order.
     pub current_record_versions: Vec<CurrentRecordVersion>,
-    /// Every operation-keyed draw the run has made, in draw-ID order.
+    /// Every operation-keyed draw the run has made and not retired at the
+    /// checkpoint's `now` (see [`super::KeyedDrawRetirement`]), in draw-ID
+    /// order. A restore refuses an entry that retired at or before `now`.
     pub keyed_draws: Vec<KeyedDrawEntry>,
     pub requests: RequestIndex,
     pub history_flags: HistoryFlags,
@@ -989,7 +991,7 @@ impl Simulation {
                     established_at: current.established_at,
                 })
                 .collect(),
-            keyed_draws: evidence.keyed_draws.entries(),
+            keyed_draws: evidence.keyed_draws.entries(self.state.scheduler.now),
             requests,
             history_flags,
             evidence_times,
@@ -1042,6 +1044,12 @@ fn canonical_time_runs(runs: &[EvidenceTimeRun], count: u64, now: SimTime) -> bo
                 && runs.iter().all(|run| run.first <= count && run.at <= now)
         }
     }
+}
+
+/// The time of ordinal `id` in canonical run-length time runs.
+fn time_of_run(runs: &[EvidenceTimeRun], id: u64) -> Option<SimTime> {
+    let index = runs.partition_point(|run| run.first <= id);
+    index.checked_sub(1).map(|index| runs[index].at)
 }
 
 fn import_time_runs(runs: &[EvidenceTimeRun]) -> Vec<(u64, SimTime)> {
@@ -1326,6 +1334,10 @@ impl ContinuationCheckpoint {
                     .boundary_id
                     .is_none_or(|id| id.get() == 0 || id.get() > cut.boundary_count)
                     || summary.at > state.now
+                    || !super::calendar_marks_are_canonical(
+                        &summary.cadences,
+                        &summary.calendar_marks,
+                    )
             })
         {
             return Err(invalid(
@@ -1487,8 +1499,14 @@ impl Simulation {
         for record in &checkpoint.pinned.ingress {
             super::validation::validate_continuation_ingress(state, &plugins, record)?;
         }
-        let keyed_draws =
-            super::random::KeyedDrawLedger::from_entries(state.root_seed, &checkpoint.keyed_draws)?;
+        let draw_times = &checkpoint.evidence_times.random_draws;
+        let keyed_draws = super::random::KeyedDrawLedger::from_entries(
+            state.root_seed,
+            &checkpoint.keyed_draws,
+            &plugins.keyed_draw_retirements(),
+            &|draw| time_of_run(draw_times, draw.get()),
+            state.now,
+        )?;
         let frontiers = &checkpoint.journal_frontiers;
         let journals = [
             import_frontier(&frontiers.commands)?,

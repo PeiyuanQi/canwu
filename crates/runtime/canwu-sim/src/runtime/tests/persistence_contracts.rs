@@ -1582,8 +1582,12 @@ fn repeated_keyed_seals_keep_draws_out_of_the_checkpoint_and_dependencies() {
     let RandomDrawAddress::OperationV1(alpha_address) = &alpha.address else {
         unreachable!("the selected draw is operation-keyed")
     };
-    let keyed = random::keyed_draw_ledger(&restored_snapshot.random_draws)
-        .expect("restored draws should rebuild the keyed ledger");
+    let keyed = random::keyed_draw_ledger(
+        &restored_snapshot.random_draws,
+        &BTreeMap::new(),
+        restored_snapshot.now,
+    )
+    .expect("restored draws should rebuild the keyed ledger");
     let available = restored_snapshot
         .random_streams
         .iter()

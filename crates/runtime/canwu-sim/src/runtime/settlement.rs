@@ -123,6 +123,7 @@ impl Simulation {
         let admitted_ingress_index: HashSet<_> = admitted_ingress.iter().copied().collect();
         let mut maintenance_changes = Vec::new();
         let mut maintenance_record_changes = Vec::new();
+        let mut calendar_marks = Vec::new();
         for ingress_id in &admitted_ingress {
             let record = self
                 .state
@@ -151,7 +152,13 @@ impl Simulation {
                         true,
                     )?;
                 }
-                IngressPayload::Calendar { cadences } => request.cadences.extend(cadences),
+                IngressPayload::Calendar {
+                    cadences,
+                    calendar_marks: marks,
+                } => {
+                    request.cadences.extend(cadences);
+                    calendar_marks.extend(marks);
+                }
                 IngressPayload::Plugin { .. } => {}
                 IngressPayload::PluginCancellation { .. } => {
                     return Err(CanwuError::new(
@@ -178,6 +185,8 @@ impl Simulation {
         self.execute_scheduled_at(request.at)?;
         request.cadences.sort();
         request.cadences.dedup();
+        calendar_marks.sort();
+        calendar_marks.dedup();
 
         let admitted_attempt_count = self
             .state
@@ -294,6 +303,7 @@ impl Simulation {
             boundary_id,
             request.at,
             &request.cadences,
+            &calendar_marks,
             &admitted_ingress,
         )?;
 
@@ -311,10 +321,12 @@ impl Simulation {
         let mut random_overlay = boundary_snapshot.random_streams.clone();
         let mut pending_random_draws = Vec::new();
         // The working copy of the keyed-draw index for this boundary: it
-        // shares structure with the committed index, gains the draws of each
-        // system in turn, and replaces the committed index when the draws
-        // commit.
+        // shares structure with the committed index, first drops every draw
+        // whose retirement time is at or before this boundary, gains the
+        // draws of each system in turn, and replaces the committed index when
+        // the draws commit. A boundary with nothing to retire keeps the tree.
         let mut keyed_random_draws = self.state.evidence.keyed_draws.clone();
+        keyed_random_draws.retire_through(request.at);
         let mut visible_overlay = BTreeMap::new();
         let mut candidate_overlay = BTreeMap::new();
         let mut visible_record_overlay = BTreeMap::new();
@@ -333,6 +345,7 @@ impl Simulation {
         let mut knowledge_budget =
             KnowledgeBudgetLedger::new(self.plugins.knowledge_publication_reservations_due(
                 &request.cadences,
+                &calendar_marks,
                 !admitted_events.is_empty() || !admitted_ingress.is_empty(),
             ));
         let mut knowledge_next_locals = BTreeMap::new();
@@ -434,6 +447,7 @@ impl Simulation {
                     && boundary_system_due(
                         &registered.contract,
                         &request.cadences,
+                        &calendar_marks,
                         !admitted_events.is_empty() || !admitted_ingress.is_empty(),
                     )
             }) {
@@ -459,7 +473,8 @@ impl Simulation {
                     &registered.plugin,
                     &keyed_random_draws,
                 )?
-                .with_first_draw_id(first_draw_id);
+                .with_first_draw_id(first_draw_id)
+                .with_keyed_draw_retirement(request.at, &registered.contract.keyed_draw_retirement);
                 let proposal_evidence = proposal_evidence_refs(boundary_id, &evidence);
                 let view = SimulationView {
                     state: SimulationViewState::Boundary {
@@ -941,6 +956,7 @@ impl Simulation {
             at: request.at,
             correlation_id,
             cadences: request.cadences,
+            calendar_marks,
             admitted_attempts,
             admitted_commands,
             admitted_ingress,
@@ -2320,15 +2336,37 @@ pub(super) struct CommittedBoundaryRandomDraw {
     pub(super) address: RandomDrawAddress,
 }
 
+/// Whether a boundary system is due in a boundary of `cadences` and
+/// `calendar_marks`, in which `has_admitted_events` says whether
+/// event-driven systems are due. A system with a calendar key is due only
+/// when the boundary carries its own `(cadence, calendar)` mark; one without
+/// a key whenever the boundary has its cadence, whichever calendars marked it.
 pub(super) fn boundary_system_due(
     contract: &BoundarySystemContract,
     cadences: &[SystemCadence],
+    calendar_marks: &[super::CalendarMark],
     has_admitted_events: bool,
 ) -> bool {
-    match contract.cadence {
-        SystemCadence::EventDriven => has_admitted_events,
-        _ => cadences.contains(&contract.cadence),
+    match (&contract.cadence, &contract.calendar) {
+        (SystemCadence::EventDriven, _) => has_admitted_events,
+        (cadence, None) => cadences.contains(cadence),
+        (cadence, Some(calendar)) => calendar_marks
+            .iter()
+            .any(|mark| mark.cadence == *cadence && mark.calendar == *calendar),
     }
+}
+
+/// Whether a boundary system was due in the settled boundary `record`.
+pub(super) fn boundary_record_system_due(
+    contract: &BoundarySystemContract,
+    record: &BoundaryRecord,
+) -> bool {
+    boundary_system_due(
+        contract,
+        &record.cadences,
+        &record.calendar_marks,
+        boundary_has_event_ingress(record),
+    )
 }
 
 pub(super) fn boundary_has_event_ingress(record: &BoundaryRecord) -> bool {

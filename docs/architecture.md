@@ -2396,9 +2396,10 @@ read access, a phased boundary system calls
 boundary being settled when its time is in the window, and each distinct due
 time still queued in the window in the canonical ingress and scheduled-work
 queues. Each `BoundarySummary` carries the boundary's time, canonical cadences,
-and admitted or queued ingress counted by class, kind (command, plugin packet
-type, calendar, decision, or maintenance), and origin (`BoundaryIngressOrigin`:
-ordinary host ingress, work a boundary system or command handler scheduled,
+host calendar marks, and admitted or queued ingress counted by class, kind
+(command, plugin packet type, calendar, decision, or maintenance), and origin
+(`BoundaryIngressOrigin`: ordinary host ingress, work a boundary system or
+command handler scheduled,
 work recorded with an event as its cause, or engine and host-labelled work by
 name), without payloads, so a host application can count sources it does not
 own and classify them by its own rules. Grouping by the kind of cause rather
@@ -2665,15 +2666,17 @@ continues without its evidence history: the current state with its checkpoint
 hash and commitment roots, the journal end and settled cut, the boundary-chain
 head, the five journal frontiers, the unadmitted tail, the pinned evidence,
 the pending ingress IDs and provenance facts, the known record-version
-memberships, the current-version provenance index, every keyed draw in
-draw-ID order, the request index, the history flags, the time index, and the
-boundary ledger, under one `continuation_hash`. `continuation_checkpoint()` on
+memberships, the current-version provenance index, every keyed draw not
+retired at the checkpoint's time in draw-ID order, the request index, the
+history flags, the time index, and the boundary ledger, under one
+`continuation_hash`. `continuation_checkpoint()` on
 `Canwu` and `CompactedCanwu` derives every part from the runtime, so an
 unsealed run, a run sealed at any cuts, and a run restored from an earlier
 continuation checkpoint write byte-identical checkpoints at the same cut.
 `CompactedCanwu::from_continuation_checkpoint_verified` compares the
 recomputed hash with the one the host stored, then checks formats, shape,
-state, the keyed draws' values against the root seed, the identity (every
+state, the keyed draws' values against the root seed and that none has
+retired, the identity (every
 state root and the checkpoint hash recomputed from the built runtime), and
 that the closure derived from the restored state equals the carried one,
 before it rehydrates the plugins. Restore yields a `CompactedCanwu`; a
@@ -2804,15 +2807,28 @@ report-dispatch event to have exactly one such draw, so removing both draw and
 stream progress cannot preserve an apparently coherent report history.
 
 Operation-keyed draws are answered from the keyed-draw ledger, the record of
-every drawn address, retained or sealed, that the runtime keeps as a
-persistent ordered map beside the draw journal: a boundary commit extends it,
-a failed boundary restores it, a seal and a fork share it, every restore
-builds it once from the full draw journal, and a continuation checkpoint
-carries it in draw-ID order. It is not hashed or committed, keyed draws are no
-longer evidence dependencies, and neither settling a boundary nor a
-checkpoint, a paged checkpoint, a seal, or a fork does work in proportion to
-the draws a run has made; the ledger keeps one entry per drawn address for
-the life of the run. `random_draw_for_operation` returns the sample
+every drawn address not yet retired, retained or sealed, that the runtime
+keeps as a persistent ordered map beside the draw journal: a boundary first
+drops what retires at or before its time and its commit extends it, a failed
+boundary restores it, a seal and a fork share it, every restore builds it
+once from the full draw journal, and a continuation checkpoint carries the
+draws not retired at its time in draw-ID order. It is not hashed or
+committed, keyed draws are no longer evidence dependencies, and neither
+settling a boundary nor a checkpoint, a paged checkpoint, a seal, or a fork
+does work in proportion to the draws a run has made. The ledger keeps one
+entry per drawn address for the life of the run unless the stream's owning
+boundary system declares a keyed-draw retirement
+(`BoundarySystemContract::keyed_draw_retirement`, a `KeyedDrawRetirement` of
+a stream and a positive duration, part of the plugin descriptor): a draw of
+that stream retires at its boundary time plus the duration, the first
+boundary at or after that instant drops it before any system runs, and a
+later request with the same address is a fresh draw under a new draw ID, its
+evidence checked as a fresh draw's, with the same value for the same bound
+and purpose. A restore from the draw journal applies the same rule draw by
+draw, so a journal may draw one address again after it retired, and a
+continuation restore refuses a checkpoint that lists a retired draw. Draw
+records stay in the draw journal as evidence. `random_draw_for_operation`
+returns the sample
 with the `RandomDrawId` of its draw evidence, so a record can cite the draw it
 was computed from. An exact retry, with the same evidence reference, bound,
 and purpose, is answered from the ledger whatever has become of its evidence,
@@ -2836,7 +2852,16 @@ through `advance_canonical` or `step_canonical`; plugin packets use
 `enqueue_plugin_ingress` and can be withdrawn before they are due with
 `cancel_plugin_ingress` or `cancel_permitted_plugin_ingress`, and explicit
 calendar work uses
-`schedule_calendar_boundary`. Decision hosts use `enqueue_decision` for
+`schedule_calendar_boundary`. A host that runs more than one calendar marks a
+calendar boundary with the calendars whose period starts there
+(`schedule_calendar_marks`, each `CalendarMark` a cadence and a host calendar
+key): a boundary system registered with a calendar key
+(`BoundarySystemContract::calendar`) is due only in a boundary that carries
+its own `(cadence, calendar)` mark, a system without a key in every boundary
+of its cadence, marked or not, and `SimulationView::calendar_marks` reads the
+marks of the boundary being settled. The core still keeps no calendar: the
+host names its calendars and computes their periods. Decision hosts use
+`enqueue_decision` for
 controller/ticket/option lifecycle changes, or `drive_decision` to evaluate a
 bound policy and enqueue an authoritative resolution. Accepted and expected-rejected command attempts are
 persisted, hashed, admitted at a boundary, restored by save/load, and regenerated

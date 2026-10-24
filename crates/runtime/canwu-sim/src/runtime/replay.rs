@@ -678,9 +678,14 @@ fn enqueue_replay_ingress_cut(
                 request.archive_retention.clone_from(archive_retention);
                 simulation.replay_plugin_ingress(request)?
             }
-            IngressPayload::Calendar { cadences } => {
-                simulation.schedule_calendar_boundary(record.due_at, cadences.clone())?
-            }
+            IngressPayload::Calendar {
+                cadences,
+                calendar_marks,
+            } => simulation.schedule_calendar_ingress(
+                record.due_at,
+                cadences.clone(),
+                calendar_marks.clone(),
+            )?,
             IngressPayload::Decision { request } => simulation.enqueue_decision(
                 record.due_at,
                 record.priority,

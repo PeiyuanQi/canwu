@@ -88,8 +88,12 @@ fn exact_ledger(simulation: &Simulation, sealed: &[RandomDrawRecord]) -> random:
         .chain(&evidence.random_draws)
         .cloned()
         .collect::<Vec<_>>();
-    let rebuilt =
-        random::keyed_draw_ledger(&journal).expect("the complete draw journal should index");
+    let rebuilt = random::keyed_draw_ledger(
+        &journal,
+        &simulation.plugins.keyed_draw_retirements(),
+        simulation.state.scheduler.now,
+    )
+    .expect("the complete draw journal should index");
     assert_eq!(evidence.keyed_draws, rebuilt);
     rebuilt
 }

@@ -531,6 +531,7 @@ fn legacy_direct_and_tracked_request_ingress_cannot_mix() {
             0,
             IngressPayload::Calendar {
                 cadences: vec![SystemCadence::Daily],
+                calendar_marks: Vec::new(),
             },
             Some(CauseRef::System("canwu.core.calendar".to_owned())),
             false,

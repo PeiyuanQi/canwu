@@ -1139,11 +1139,7 @@ fn snapshot_core_writer<'a>(
     super::validation::snapshot_boundary_contract(plugins, source.0, source.1).filter(|contract| {
         contract.writes.contains(key)
             && phases.contains(&contract.phase)
-            && super::boundary_system_due(
-                contract,
-                &record.cadences,
-                super::boundary_has_event_ingress(record),
-            )
+            && super::boundary_record_system_due(contract, record)
     })
 }
 

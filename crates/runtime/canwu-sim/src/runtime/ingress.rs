@@ -404,6 +404,10 @@ pub enum IngressPayload {
     },
     Calendar {
         cadences: Vec<SystemCadence>,
+        /// Host calendar marks, in canonical order; each mark's cadence is
+        /// among `cadences`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        calendar_marks: Vec<super::CalendarMark>,
     },
     Decision {
         request: Box<super::DecisionIngressRequest>,
@@ -1171,10 +1175,54 @@ impl Simulation {
     pub fn schedule_calendar_boundary(
         &mut self,
         due_at: SimTime,
+        cadences: Vec<SystemCadence>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.schedule_calendar_ingress(due_at, cadences, Vec::new())
+    }
+
+    /// Queues a calendar boundary that carries host calendar marks: at
+    /// `due_at` the boundary has each mark's cadence and each mark, so a
+    /// system keyed to a mark's calendar and cadence is due, and so is every
+    /// system of that cadence without a calendar key.
+    ///
+    /// Calendar ingress due at one instant is merged into one boundary,
+    /// unmarked cadences from `schedule_calendar_boundary` included.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidBoundary` when `marks` is empty, a mark has the
+    /// `EventDriven` cadence, or a calendar key is empty, has surrounding
+    /// whitespace or a control character, or is longer than
+    /// [`super::MAX_CALENDAR_KEY_BYTES`].
+    pub fn schedule_calendar_marks(
+        &mut self,
+        due_at: SimTime,
+        marks: Vec<super::CalendarMark>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        if marks.is_empty() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                "calendar mark ingress requires at least one mark",
+            ));
+        }
+        self.schedule_calendar_ingress(due_at, Vec::new(), marks)
+    }
+
+    /// Queues calendar ingress with `cadences` and `marks` in canonical
+    /// form: the marks sorted and deduplicated, and the cadences the union of
+    /// `cadences` and the marks' cadences, sorted and deduplicated. Exact
+    /// replay re-queues a recorded calendar record through it unchanged.
+    pub(super) fn schedule_calendar_ingress(
+        &mut self,
+        due_at: SimTime,
         mut cadences: Vec<SystemCadence>,
+        mut calendar_marks: Vec<super::CalendarMark>,
     ) -> Result<IngressReceipt, CanwuError> {
         self.ensure_runtime_ready()?;
         self.ensure_canonical_ingress_can_start()?;
+        calendar_marks.sort();
+        calendar_marks.dedup();
+        cadences.extend(calendar_marks.iter().map(|mark| mark.cadence.clone()));
         if cadences.contains(&SystemCadence::EventDriven) {
             return Err(CanwuError::new(
                 ErrorCode::InvalidBoundary,
@@ -1189,11 +1237,23 @@ impl Simulation {
                 "calendar ingress requires at least one scheduled cadence",
             ));
         }
+        if !super::calendar_marks_are_canonical(&cadences, &calendar_marks) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                format!(
+                    "calendar keys must be non-empty, trimmed labels without control characters of at most {} bytes",
+                    super::MAX_CALENDAR_KEY_BYTES
+                ),
+            ));
+        }
         self.append_ingress(
             due_at,
             IngressClass::ScheduledSystem,
             0,
-            IngressPayload::Calendar { cadences },
+            IngressPayload::Calendar {
+                cadences,
+                calendar_marks,
+            },
             Some(CauseRef::System("canwu.core.calendar".to_owned())),
             false,
         )

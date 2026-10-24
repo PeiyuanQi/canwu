@@ -813,11 +813,7 @@ pub(super) fn validate_snapshot_transitions(
             .filter(|contract| {
                 contract.writes.contains(&key)
                     && REGISTRATION_PHASES.contains(&contract.phase)
-                    && super::boundary_system_due(
-                        contract,
-                        &record.cadences,
-                        super::boundary_has_event_ingress(record),
-                    )
+                    && super::boundary_record_system_due(contract, record)
             }) else {
                 return invalid_snapshot("transition manifest registration has no declared writer");
             };

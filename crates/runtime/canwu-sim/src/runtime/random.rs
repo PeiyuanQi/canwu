@@ -4,7 +4,7 @@ use canwu_core::{
     EvidenceRef, KnowledgeHolderRef, PersonId, RandomDrawId,
 };
 use canwu_event::CauseRef;
-use canwu_time::SimTime;
+use canwu_time::{SimDuration, SimTime};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -40,6 +40,56 @@ impl RandomStreamKey {
             version,
         }
     }
+}
+
+/// How long the operation-keyed draws of one random stream stay in the
+/// keyed-draw ledger, declared by the boundary system that owns the stream
+/// ([`crate::BoundarySystemContract::keyed_draw_retirement`]) and so part of
+/// the plugin descriptor.
+///
+/// A keyed draw made at boundary time `t` **retires** at `t + after`: the
+/// first boundary at or after that instant drops it from the ledger before
+/// any system runs, and no boundary answers from it again. Until then an
+/// exact retry returns the recorded draw. After it, a request with the same
+/// address is a fresh draw: its evidence is checked as a fresh draw's is
+/// (seal-stable evidence only), it records a new draw under a new ID, and it
+/// returns the same value whenever its bound and purpose are the retired
+/// draw's (the value is a function of the root seed, stream, address, bound,
+/// and purpose alone), while a request that differs is no longer refused as
+/// a conflict.
+///
+/// The evidence check is a cliff at the retirement: an exact retry that
+/// cites a record version is answered from the ledger before the
+/// retirement even when that version is no longer current, and refused with
+/// `InvalidRandomOperationEvidence` after it, because a fresh draw may cite
+/// only a record's current or initial-scenario version. Choose `after` no
+/// shorter than the longest time anything retries the address or cites the
+/// draw's ID, for example the retention of the record that cites it, and
+/// cite evidence a fresh draw accepts if a retry may come later.
+///
+/// Retirement is simulated time alone, applied identically in a live run, a
+/// sealed run, a run restored from a snapshot, a journal, a paged checkpoint,
+/// or a continuation checkpoint, and exact replay. Draw records stay in the
+/// draw journal (and its seals) as evidence; only the ledger forgets them.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct KeyedDrawRetirement {
+    /// A stream the declaring system names in its `random_streams`.
+    pub stream: RandomStreamKey,
+    /// A positive duration.
+    pub after: SimDuration,
+}
+
+impl KeyedDrawRetirement {
+    #[must_use]
+    pub const fn new(stream: RandomStreamKey, after: SimDuration) -> Self {
+        Self { stream, after }
+    }
+}
+
+/// When a keyed draw made at `drawn_at` under a retirement of `after`
+/// retires: `drawn_at + after`, saturating at the last representable instant.
+const fn retirement_time(drawn_at: SimTime, after: SimDuration) -> SimTime {
+    SimTime::from_minutes(drawn_at.as_minutes().saturating_add(after.as_minutes()))
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -222,12 +272,17 @@ pub(crate) struct KeyedDrawMemo {
     /// The V1 purpose hash as raw bytes. A keyed reservation persists the
     /// same hash as lowercase hexadecimal; the memo is never persisted.
     pub purpose_hash: [u8; 32],
+    /// When the draw leaves the ledger, for a stream with a keyed-draw
+    /// retirement; `None` keeps it for the life of the run.
+    pub retires_at: Option<SimTime>,
 }
 
 type KeyedDrawKey = (RandomStreamKey, RandomOperationAddressV1);
 
 /// One operation-keyed draw as a continuation checkpoint carries it: the
-/// address, the draw that answered it, and its value.
+/// address, the draw that answered it, and its value. A draw of a stream with
+/// a keyed-draw retirement retires at its draw time (from the checkpoint's
+/// time index) plus the retirement, so the entry needs no time of its own.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct KeyedDrawEntry {
     pub stream: RandomStreamKey,
@@ -265,19 +320,25 @@ fn parse_hash_hex(text: &str) -> Option<[u8; 32]> {
     Some(bytes)
 }
 
-/// The keyed-draw ledger: every operation-keyed address the run has drawn,
-/// with what was drawn.
+/// The keyed-draw ledger: every operation-keyed address the run has drawn
+/// and not retired, with what was drawn.
 ///
-/// It is the record of every keyed draw for the life of the run, whether its
-/// draw record is retained or sealed. A boundary commit extends it, a failed
-/// boundary restores it, a seal leaves it as it is, and a restore builds it
-/// once from the draw journal. A checkpoint, a paged checkpoint, and a seal
-/// never read it. It is a persistent map of shared entries: a copy, such as
-/// a fork or a boundary's working copy, shares structure with its source,
-/// and adding an address copies one path of the tree.
+/// It holds every keyed draw, whether its draw record is retained or
+/// sealed, until the draw retires (see [`KeyedDrawRetirement`]); a draw of a
+/// stream without a retirement stays for the life of the run. A boundary
+/// first drops the draws that retire at or before its time and then extends
+/// it at commit, a failed boundary restores it, a seal leaves it as it is,
+/// and a restore builds it once from the draw journal or the continuation
+/// checkpoint. A checkpoint, a paged checkpoint, and a seal never read it.
+/// It is a persistent map of shared entries: a copy, such as a fork or a
+/// boundary's working copy, shares structure with its source, and adding or
+/// retiring an address copies one path of the tree.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct KeyedDrawLedger {
     entries: im::OrdMap<Arc<KeyedDrawKey>, Arc<KeyedDrawMemo>>,
+    /// The entries that retire, keyed by retirement time and draw ID, the
+    /// order a boundary drops them in.
+    retirements: im::OrdMap<(SimTime, RandomDrawId), Arc<KeyedDrawKey>>,
 }
 
 impl KeyedDrawLedger {
@@ -291,8 +352,30 @@ impl KeyedDrawLedger {
         if self.entries.contains_key(&key) {
             return false;
         }
-        self.entries.insert(Arc::new(key), Arc::new(memo));
+        let key = Arc::new(key);
+        if let Some(retires_at) = memo.retires_at {
+            self.retirements
+                .insert((retires_at, memo.draw_id), Arc::clone(&key));
+        }
+        self.entries.insert(key, Arc::new(memo));
         true
+    }
+
+    /// Drops every draw that retires at or before `at`, earliest first. It
+    /// does work only for the draws it drops, and leaves the tree untouched
+    /// when none retires.
+    pub(crate) fn retire_through(&mut self, at: SimTime) {
+        // `get_min` and forward removal only: never a reverse walk of an
+        // `im` map.
+        while let Some((retirement, key)) = self
+            .retirements
+            .get_min()
+            .filter(|((retires_at, _), _)| *retires_at <= at)
+            .map(|(retirement, key)| (*retirement, Arc::clone(key)))
+        {
+            self.retirements.remove(&retirement);
+            self.entries.remove(key.as_ref());
+        }
     }
 
     #[cfg(test)]
@@ -300,11 +383,14 @@ impl KeyedDrawLedger {
         self.entries.len()
     }
 
-    /// Every keyed draw, in draw-ID order.
-    pub(crate) fn entries(&self) -> Vec<KeyedDrawEntry> {
+    /// Every keyed draw not retired at `now`, in draw-ID order: what a
+    /// continuation checkpoint at `now` carries, the same whether the ledger
+    /// was kept by a live run or built by a restore.
+    pub(crate) fn entries(&self, now: SimTime) -> Vec<KeyedDrawEntry> {
         let mut entries: Vec<_> = self
             .entries
             .iter()
+            .filter(|(_, memo)| memo.retires_at.is_none_or(|retires_at| retires_at > now))
             .map(|(key, memo)| KeyedDrawEntry {
                 stream: key.0.clone(),
                 address: key.1.clone(),
@@ -319,13 +405,19 @@ impl KeyedDrawLedger {
         entries
     }
 
-    /// Rebuilds the ledger from checkpoint entries, refusing an invalid
-    /// address or bound, a malformed purpose hash, a duplicate address or
-    /// draw ID, and a value that differs from the one the root seed, stream,
-    /// address, bound, and purpose hash determine.
+    /// Rebuilds the ledger of a continuation checkpoint at `now` from its
+    /// entries, refusing an invalid address or bound, a malformed purpose
+    /// hash, a duplicate address or draw ID, a value that differs from the
+    /// one the root seed, stream, address, bound, and purpose hash determine,
+    /// and an entry that retired at or before `now`. `draw_time` gives the
+    /// time of a draw ID at or below the checkpoint's cut, and `retirements`
+    /// the keyed-draw retirement of each stream that declares one.
     pub(crate) fn from_entries(
         root_seed: u64,
         entries: &[KeyedDrawEntry],
+        retirements: &BTreeMap<RandomStreamKey, SimDuration>,
+        draw_time: &dyn Fn(RandomDrawId) -> Option<SimTime>,
+        now: SimTime,
     ) -> Result<Self, CanwuError> {
         let invalid = |message: &str| CanwuError::new(ErrorCode::InvalidSnapshot, message);
         let mut ledger = Self::default();
@@ -349,12 +441,27 @@ impl KeyedDrawLedger {
                     "keyed draw value does not match its exact V1 address",
                 ));
             }
+            let retires_at = match retirements.get(&entry.stream) {
+                None => None,
+                Some(after) => {
+                    let drawn_at = draw_time(entry.draw_id)
+                        .ok_or_else(|| invalid("keyed draw has no recorded draw time"))?;
+                    let retires_at = retirement_time(drawn_at, *after);
+                    if retires_at <= now {
+                        return Err(invalid(
+                            "continuation keyed draws must not list a retired draw",
+                        ));
+                    }
+                    Some(retires_at)
+                }
+            };
             let memo = KeyedDrawMemo {
                 draw_id: entry.draw_id,
                 operation_evidence: entry.operation_evidence.clone(),
                 upper_exclusive: entry.upper_exclusive,
                 value: entry.value,
                 purpose_hash,
+                retires_at,
             };
             if !ledger.insert_new((entry.stream.clone(), entry.address.clone()), memo) {
                 return Err(invalid("keyed draw addresses must be unique"));
@@ -393,6 +500,10 @@ pub(crate) struct RandomSession {
     keyed: KeyedDrawLedger,
     /// The ID the boundary gives this session's first draw.
     first_draw_id: u64,
+    /// The boundary time and the keyed-draw retirements of the session's
+    /// streams, for the retirement time of each fresh keyed draw.
+    drawn_at: SimTime,
+    retirements: Vec<KeyedDrawRetirement>,
 }
 
 impl RandomSession {
@@ -424,7 +535,22 @@ impl RandomSession {
             // Shares structure with the caller's index; nothing is copied.
             keyed: keyed.clone(),
             first_draw_id: 1,
+            drawn_at: SimTime::EPOCH,
+            retirements: Vec::new(),
         })
+    }
+
+    /// Sets the boundary time of the session's draws and the keyed-draw
+    /// retirements of its streams, so each fresh keyed draw records when it
+    /// retires. Without it no draw retires.
+    pub(crate) fn with_keyed_draw_retirement(
+        mut self,
+        drawn_at: SimTime,
+        retirements: &[KeyedDrawRetirement],
+    ) -> Self {
+        self.drawn_at = drawn_at;
+        self.retirements = retirements.to_vec();
+        self
     }
 
     /// Sets the ID the boundary gives this session's first draw: its
@@ -594,12 +720,18 @@ impl RandomSession {
         }
         let value = operation_value_v1(self.root_seed, key, &address, upper_exclusive, purpose)?;
         let draw_id = self.next_draw_id()?;
+        let retires_at = self
+            .retirements
+            .iter()
+            .find(|retirement| retirement.stream == *key)
+            .map(|retirement| retirement_time(self.drawn_at, retirement.after));
         let memo = KeyedDrawMemo {
             draw_id,
             operation_evidence: evidence.clone(),
             upper_exclusive,
             value,
             purpose_hash,
+            retires_at,
         };
         self.keyed.insert_new(index_key, memo);
         self.draws.push(PendingRandomDraw {
@@ -631,10 +763,17 @@ impl RandomSession {
     }
 }
 
-/// Builds the keyed-draw ledger of a complete draw journal, refusing a
-/// malformed draw and an address drawn twice. Every restore builds the
+/// Builds the keyed-draw ledger of a complete draw journal at `now`,
+/// refusing a malformed draw and an address drawn again before its earlier
+/// draw retired. Each draw is added after the draws that retired at or
+/// before its time are dropped, as the boundary that made it did, and the
+/// draws that retired by `now` are dropped last. Every restore builds the
 /// ledger with this function exactly once.
-pub(crate) fn keyed_draw_ledger(draws: &[RandomDrawRecord]) -> Result<KeyedDrawLedger, CanwuError> {
+pub(crate) fn keyed_draw_ledger(
+    draws: &[RandomDrawRecord],
+    retirements: &BTreeMap<RandomStreamKey, SimDuration>,
+    now: SimTime,
+) -> Result<KeyedDrawLedger, CanwuError> {
     #[cfg(test)]
     LEDGER_BUILDS.with(|builds| builds.set(builds.get() + 1));
     let mut index = KeyedDrawLedger::default();
@@ -642,6 +781,7 @@ pub(crate) fn keyed_draw_ledger(draws: &[RandomDrawRecord]) -> Result<KeyedDrawL
         let RandomDrawAddress::OperationV1(address) = &draw.address else {
             continue;
         };
+        index.retire_through(draw.at);
         let evidence = draw.operation_evidence.clone().ok_or_else(|| {
             CanwuError::new(
                 ErrorCode::InvalidRandomDraw,
@@ -656,14 +796,18 @@ pub(crate) fn keyed_draw_ledger(draws: &[RandomDrawRecord]) -> Result<KeyedDrawL
             upper_exclusive: draw.upper_exclusive,
             value: draw.value,
             purpose_hash: purpose_hash_v1(&draw.purpose)?,
+            retires_at: retirements
+                .get(&draw.stream)
+                .map(|after| retirement_time(draw.at, *after)),
         };
         if !index.insert_new(key, memo) {
             return Err(CanwuError::new(
                 ErrorCode::RandomOperationConflict,
-                "random journal contains a duplicate operation-keyed address",
+                "random journal contains an operation-keyed address drawn again before it retired",
             ));
         }
     }
+    index.retire_through(now);
     Ok(index)
 }
 

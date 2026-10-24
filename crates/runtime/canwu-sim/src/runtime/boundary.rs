@@ -1,8 +1,8 @@
 use super::{
-    BoundaryPersonAvailabilityChange, BoundaryPersonCreation, CanwuError, CreatedPerson,
-    DecisionOptionWeight, DomainRecordChange, DomainRecordMutation, PersonAvailability,
-    PersonDraft, PolicyDecision, RandomSample, RandomStreamKey, SimulationView, StateKey,
-    StateVisibility, SystemCadence,
+    BoundaryPersonAvailabilityChange, BoundaryPersonCreation, CalendarMark, CanwuError,
+    CreatedPerson, DecisionOptionWeight, DomainRecordChange, DomainRecordMutation,
+    KeyedDrawRetirement, PersonAvailability, PersonDraft, PolicyDecision, RandomSample,
+    RandomStreamKey, SimulationView, StateKey, StateVisibility, SystemCadence,
 };
 use canwu_core::{
     BoundaryId, CommandAttemptId, CommandId, CommandRequestId, DecisionRequestId, DecisionTicketId,
@@ -384,6 +384,15 @@ pub struct BoundarySystemContract {
     pub name: String,
     pub phase: crate::BoundaryPhase,
     pub cadence: SystemCadence,
+    /// The host calendar whose `cadence` boundaries wake this system: with a
+    /// key, the system is due only in a boundary that carries the
+    /// [`crate::CalendarMark`] `(cadence, calendar)`; without one (the
+    /// default) it is due in every boundary of its cadence, marked or not.
+    /// A key requires a scheduled cadence (not `EventDriven`) and is a
+    /// canonical label (no surrounding whitespace or control characters) of
+    /// at most [`crate::MAX_CALENDAR_KEY_BYTES`] bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar: Option<String>,
     pub reads: Vec<StateKey>,
     pub writes: Vec<StateKey>,
     pub emits: Vec<String>,
@@ -392,6 +401,14 @@ pub struct BoundarySystemContract {
     pub reservation_reads: Vec<ReservationRef>,
     #[serde(default)]
     pub random_streams: Vec<RandomStreamKey>,
+    /// The keyed-draw retirement of streams this system declares in
+    /// `random_streams`, at most one per stream: an operation-keyed draw of
+    /// such a stream leaves the keyed-draw ledger at the first boundary at
+    /// or after its own boundary time plus `after` (see
+    /// [`crate::KeyedDrawRetirement`]). A stream without one keeps its draws
+    /// for the life of the run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keyed_draw_retirement: Vec<KeyedDrawRetirement>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub knowledge_writes: Vec<KnowledgeWriteGrant>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -423,6 +440,7 @@ impl BoundarySystemContract {
             name: name.into(),
             phase,
             cadence,
+            calendar: None,
             reads: Vec::new(),
             writes: Vec::new(),
             emits: Vec::new(),
@@ -430,6 +448,7 @@ impl BoundarySystemContract {
             reservation_requests: Vec::new(),
             reservation_reads: Vec::new(),
             random_streams: Vec::new(),
+            keyed_draw_retirement: Vec::new(),
             knowledge_writes: Vec::new(),
             plugin_ingress_targets: Vec::new(),
             visibility: StateVisibility::NextBoundary,
@@ -617,6 +636,10 @@ pub struct BoundaryRecord {
     pub at: SimTime,
     pub correlation_id: u64,
     pub cadences: Vec<SystemCadence>,
+    /// The calendar marks of the calendar ingress the boundary admitted, in
+    /// canonical order; each mark's cadence is among `cadences`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calendar_marks: Vec<CalendarMark>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub admitted_attempts: Vec<CommandAttemptId>,
     pub admitted_commands: Vec<CommandId>,

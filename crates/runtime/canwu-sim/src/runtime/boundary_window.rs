@@ -20,8 +20,8 @@
 //! registration, as they are for `canwu.core.ingress`.
 
 use super::{
-    BoundaryId, BoundaryRecord, CanwuError, CauseRef, ErrorCode, IngressClass, IngressId,
-    IngressPayload, IngressQueueKey, IngressRecord, RuntimeEvidence, RuntimeScheduler,
+    BoundaryId, BoundaryRecord, CalendarMark, CanwuError, CauseRef, ErrorCode, IngressClass,
+    IngressId, IngressPayload, IngressQueueKey, IngressRecord, RuntimeEvidence, RuntimeScheduler,
     RuntimeState, ScheduleKey, SimDuration, SimTime, Simulation, SystemCadence,
 };
 use im::Vector;
@@ -42,8 +42,9 @@ pub enum BoundaryIngressKind {
     Command,
     /// Plugin ingress for `plugin` of `packet_type`.
     Plugin { plugin: String, packet_type: String },
-    /// A calendar request; its cadences are the boundary's
-    /// [`BoundarySummary::cadences`].
+    /// A calendar request; its cadences and calendar marks are the
+    /// boundary's [`BoundarySummary::cadences`] and
+    /// [`BoundarySummary::calendar_marks`].
     Calendar,
     /// Decision ingress.
     Decision,
@@ -105,6 +106,10 @@ pub struct BoundarySummary {
     /// queued boundary, those of its queued calendar ingress.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cadences: Vec<SystemCadence>,
+    /// Host calendar marks, in canonical order, from the same calendar
+    /// ingress as `cadences`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calendar_marks: Vec<CalendarMark>,
     /// Queued items the boundary admitted or will admit, grouped by class,
     /// kind, and origin in the order the queue admits each group's first
     /// item. An empty list on a settled boundary means the host settled it
@@ -129,6 +134,7 @@ impl BoundarySummary {
             boundary_id: None,
             at,
             cadences: Vec::new(),
+            calendar_marks: Vec::new(),
             ingress: Vec::new(),
             scheduled_actions: 0,
         }
@@ -303,17 +309,19 @@ pub(super) fn kept_from(now: SimTime, horizon: SimDuration) -> SimTime {
 }
 
 /// Summarizes a settled or settling boundary from its identity, time,
-/// canonical cadences, and admitted ingress.
+/// canonical cadences and calendar marks, and admitted ingress.
 pub(super) fn summarize_boundary(
     evidence: &RuntimeEvidence,
     boundary_id: BoundaryId,
     at: SimTime,
     cadences: &[SystemCadence],
+    calendar_marks: &[CalendarMark],
     admitted_ingress: &[IngressId],
 ) -> Result<BoundarySummary, CanwuError> {
     let mut summary = BoundarySummary {
         boundary_id: Some(boundary_id),
         cadences: cadences.to_vec(),
+        calendar_marks: calendar_marks.to_vec(),
         ..BoundarySummary::queued(at)
     };
     for id in admitted_ingress {
@@ -337,6 +345,7 @@ fn summarize_record(
         record.id,
         record.at,
         &record.cadences,
+        &record.calendar_marks,
         &record.admitted_ingress,
     )
 }
@@ -409,8 +418,15 @@ fn queued_boundaries(
         let summary = queued
             .entry(key.due_at)
             .or_insert_with(|| BoundarySummary::queued(key.due_at));
-        if let IngressPayload::Calendar { cadences } = &record.payload {
+        if let IngressPayload::Calendar {
+            cadences,
+            calendar_marks,
+        } = &record.payload
+        {
             summary.cadences.extend(cadences.iter().cloned());
+            summary
+                .calendar_marks
+                .extend(calendar_marks.iter().cloned());
         }
         summary.add_ingress(record)?;
     }
@@ -434,6 +450,8 @@ fn queued_boundaries(
         .map(|mut summary| {
             summary.cadences.sort();
             summary.cadences.dedup();
+            summary.calendar_marks.sort();
+            summary.calendar_marks.dedup();
             summary
         })
         .collect())

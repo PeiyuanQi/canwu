@@ -20,9 +20,8 @@ use super::validation::{
 use super::{
     BTreeMap, BoundaryDirective, BoundaryDomainEntityCuts, BoundaryPhase, BoundaryRecord,
     BoundarySystemContract, CanwuError, DomainRecord, DomainRecordClass, DomainRecordRef,
-    EntityRef, ErrorCode, PluginRegistry, SimulationSnapshot, boundary_has_event_ingress,
-    boundary_system_due, canonical_text, domain_record_commit_stage, invalid_snapshot,
-    invalid_snapshot_error,
+    EntityRef, ErrorCode, PluginRegistry, SimulationSnapshot, boundary_record_system_due,
+    canonical_text, domain_record_commit_stage, invalid_snapshot, invalid_snapshot_error,
 };
 use canwu_core::{BoundaryId, EvaluationTraceRecord};
 use serde::{Deserialize, Serialize};
@@ -233,11 +232,7 @@ pub(super) fn validate_snapshot_boundary_traces(
         let order = (entry.phase, entry.plugin.as_str(), entry.system.as_str());
         if entry.phase != contract.phase
             || previous.is_some_and(|previous| previous > order)
-            || !boundary_system_due(
-                contract,
-                &record.cadences,
-                boundary_has_event_ingress(record),
-            )
+            || !boundary_record_system_due(contract, record)
         {
             return invalid_snapshot(
                 "evaluation trace producer, phase, or execution order is inconsistent",

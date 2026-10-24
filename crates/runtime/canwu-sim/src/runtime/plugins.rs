@@ -1876,12 +1876,13 @@ impl PluginRegistry {
     }
 
     /// The reservation of every plugin with a knowledge-writing boundary
-    /// system due in a boundary of `cadences`, in which `has_admitted_events`
-    /// says whether event-driven systems are due: the reservations that
-    /// boundary holds.
+    /// system due in a boundary of `cadences` and `calendar_marks`, in which
+    /// `has_admitted_events` says whether event-driven systems are due: the
+    /// reservations that boundary holds.
     pub(super) fn knowledge_publication_reservations_due(
         &self,
         cadences: &[SystemCadence],
+        calendar_marks: &[super::CalendarMark],
         has_admitted_events: bool,
     ) -> KnowledgePublicationReservations {
         self.descriptors
@@ -1891,10 +1892,27 @@ impl PluginRegistry {
                 descriptor
                     .knowledge_writing_systems()
                     .any(|contract| {
-                        super::boundary_system_due(contract, cadences, has_admitted_events)
+                        super::boundary_system_due(
+                            contract,
+                            cadences,
+                            calendar_marks,
+                            has_admitted_events,
+                        )
                     })
                     .then(|| (plugin.clone(), reservation))
             })
+            .collect()
+    }
+
+    /// The keyed-draw retirement of every random stream that declares one,
+    /// read from the persisted descriptors, so a restored run retires the
+    /// same draws at the same boundaries as the live one.
+    pub(super) fn keyed_draw_retirements(&self) -> BTreeMap<RandomStreamKey, super::SimDuration> {
+        self.descriptors
+            .values()
+            .flat_map(|descriptor| &descriptor.boundary_systems)
+            .flat_map(|contract| &contract.keyed_draw_retirement)
+            .map(|retirement| (retirement.stream.clone(), retirement.after))
             .collect()
     }
 
@@ -2130,12 +2148,44 @@ fn validate_boundary_system_contract(
             "a boundary schedule horizon requires the canwu.core.boundary_schedule read",
         ));
     }
+    if let Some(calendar) = &contract.calendar
+        && (contract.cadence == SystemCadence::EventDriven
+            || !super::calendar_key_is_canonical(calendar))
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            format!(
+                "a boundary system calendar key needs a scheduled cadence and a non-empty, trimmed label without control characters of at most {} bytes",
+                super::MAX_CALENDAR_KEY_BYTES
+            ),
+        ));
+    }
     validate_state_keys(&mut contract.reads)?;
     validate_state_keys(&mut contract.writes)?;
     validate_state_keys(&mut contract.reservation_offers)?;
     validate_state_keys(&mut contract.reservation_requests)?;
     validate_reservation_refs(&mut contract.reservation_reads)?;
     validate_random_stream_keys(&mut contract.random_streams)?;
+    contract
+        .keyed_draw_retirement
+        .sort_by(|left, right| left.stream.cmp(&right.stream));
+    if contract
+        .keyed_draw_retirement
+        .windows(2)
+        .any(|pair| pair[0].stream == pair[1].stream)
+        || contract.keyed_draw_retirement.iter().any(|retirement| {
+            retirement.after <= super::SimDuration::ZERO
+                || contract
+                    .random_streams
+                    .binary_search(&retirement.stream)
+                    .is_err()
+        })
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "a keyed-draw retirement names a random stream the system declares, once, with a positive duration",
+        ));
+    }
     validate_canonical_names(&mut contract.emits, "boundary event type")?;
     for grant in &mut contract.knowledge_writes {
         grant.visibilities.sort();

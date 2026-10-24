@@ -1080,6 +1080,10 @@ pub(super) fn compute_boundary_hash_with(
         at: SimTime,
         correlation_id: u64,
         cadences: &'a [SystemCadence],
+        // Omitted while empty, so the material of a boundary without calendar
+        // marks is unchanged.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        calendar_marks: Option<&'a [super::CalendarMark]>,
         #[serde(skip_serializing_if = "command_attempt_id_slice_is_empty")]
         admitted_attempts: &'a [CommandAttemptId],
         admitted_commands: &'a [CommandId],
@@ -1156,6 +1160,8 @@ pub(super) fn compute_boundary_hash_with(
             at: record.at,
             correlation_id: record.correlation_id,
             cadences: &record.cadences,
+            calendar_marks: (!record.calendar_marks.is_empty())
+                .then_some(record.calendar_marks.as_slice()),
             admitted_attempts: &record.admitted_attempts,
             admitted_commands: &record.admitted_commands,
             admitted_ingress: (!record.admitted_ingress.is_empty())

@@ -3281,6 +3281,16 @@ impl CompactedSimulation {
         self.simulation.schedule_calendar_boundary(due_at, cadences)
     }
 
+    /// Queues a calendar boundary carrying host calendar marks; see
+    /// [`super::Simulation::schedule_calendar_marks`].
+    pub fn schedule_calendar_marks(
+        &mut self,
+        due_at: SimTime,
+        marks: Vec<super::CalendarMark>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.schedule_calendar_marks(due_at, marks)
+    }
+
     pub fn advance(&mut self, duration: SimDuration) -> Result<Vec<SimEvent>, CanwuError> {
         self.simulation.advance(duration)
     }

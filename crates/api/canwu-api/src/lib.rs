@@ -143,6 +143,9 @@ pub use canwu_sim::{
 };
 // An operation-keyed draw with the ID of its draw evidence (gap G-51).
 pub use canwu_sim::RandomOperationDraw;
+// Host calendar marks on calendar boundaries and keyed-draw retirement
+// (downstream gaps G-69 and G-71).
+pub use canwu_sim::{CalendarMark, KeyedDrawRetirement, MAX_CALENDAR_KEY_BYTES};
 // Transition manifests and their audit (gap G-04).
 pub use canwu_sim::{
     MAX_PENDING_TRANSITION_MANIFESTS, MAX_PENDING_TRANSITION_MANIFESTS_PER_COORDINATOR,
@@ -1147,6 +1150,28 @@ impl Canwu {
     ) -> Result<IngressReceipt, CanwuError> {
         gated!(self, "schedule_calendar_boundary", [cadences], |sim| sim
             .schedule_calendar_boundary(due_at, cadences))
+    }
+
+    /// Queues a calendar boundary at `due_at` that carries host calendar
+    /// marks: each mark's cadence, and the mark itself, so a boundary system
+    /// keyed to that calendar and cadence
+    /// ([`BoundarySystemContract::calendar`]) is due, beside every system of
+    /// that cadence without a key. Calendar ingress due at one instant is
+    /// merged into one boundary.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidBoundary` when `marks` is empty, a mark has the
+    /// `EventDriven` cadence, or a calendar key is empty, has surrounding
+    /// whitespace or a control character, or is longer than
+    /// [`MAX_CALENDAR_KEY_BYTES`].
+    pub fn schedule_calendar_marks(
+        &mut self,
+        due_at: SimTime,
+        marks: Vec<CalendarMark>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        gated!(self, "schedule_calendar_marks", [marks], |sim| sim
+            .schedule_calendar_marks(due_at, marks))
     }
 
     pub fn advance_canonical(
@@ -2515,6 +2540,16 @@ impl CompactedCanwu {
         cadences: Vec<SystemCadence>,
     ) -> Result<IngressReceipt, CanwuError> {
         self.simulation.schedule_calendar_boundary(due_at, cadences)
+    }
+
+    /// Queues a calendar boundary carrying host calendar marks; see
+    /// [`Canwu::schedule_calendar_marks`].
+    pub fn schedule_calendar_marks(
+        &mut self,
+        due_at: SimTime,
+        marks: Vec<CalendarMark>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.schedule_calendar_marks(due_at, marks)
     }
 
     pub fn advance(&mut self, duration: SimDuration) -> Result<Vec<SimEvent>, CanwuError> {

@@ -149,9 +149,9 @@ pub use profile::{
     BoundaryProfile, BoundaryProfileBatch, MAX_RETAINED_BOUNDARY_PROFILES,
 };
 pub use random::{
-    KeyedDrawEntry, RandomAlgorithm, RandomDrawAddress, RandomDrawOutcome, RandomDrawProducer,
-    RandomDrawRecord, RandomOperationAddressV1, RandomOperationDraw, RandomOperationTarget,
-    RandomSample, RandomStreamKey, RandomStreamState,
+    KeyedDrawEntry, KeyedDrawRetirement, RandomAlgorithm, RandomDrawAddress, RandomDrawOutcome,
+    RandomDrawProducer, RandomDrawRecord, RandomOperationAddressV1, RandomOperationDraw,
+    RandomOperationTarget, RandomSample, RandomStreamKey, RandomStreamState,
 };
 pub use records::{
     DomainRecord, DomainRecordChange, DomainRecordClass, DomainRecordCommitmentRoots,
@@ -217,7 +217,10 @@ use ingress::IngressQueueKey;
 use revision::{
     PersistedAdmissionCursors, authoritative_revision_count, boundaries_before_attempts,
 };
-use settlement::{PendingBoundaryRandomDraw, boundary_has_event_ingress, boundary_system_due};
+use settlement::{
+    PendingBoundaryRandomDraw, boundary_has_event_ingress, boundary_record_system_due,
+    boundary_system_due,
+};
 use state::{
     CommitmentDomains, CurrentDomainRecordVersion, EvidenceTimeIndex, InitialRecordIndex,
     JournalCommitmentRoots, RuntimeCommitmentCache, RuntimeCommitmentRootUpdates, RuntimeCounters,
@@ -791,6 +794,66 @@ pub enum SystemCadence {
     Seasonal,
     Annual,
     EraScheduled,
+}
+
+/// The longest calendar key, in bytes, that a [`CalendarMark`] or a
+/// [`BoundarySystemContract::calendar`] may carry.
+pub const MAX_CALENDAR_KEY_BYTES: usize = 64;
+
+/// A host calendar's mark on a calendar boundary: the boundary is a
+/// `cadence` boundary (a month start, a term start, a year start) of the
+/// host-defined calendar `calendar`.
+///
+/// The engine keeps no calendar: the host names its calendars and computes
+/// when each one's periods start, and schedules a marked boundary with
+/// `schedule_calendar_marks`. A boundary system registered with a calendar
+/// key ([`BoundarySystemContract::calendar`]) is due only in a boundary that
+/// carries its own `(cadence, calendar)` mark; a system without a key is due
+/// in every boundary of its cadence, whichever calendars marked it. The
+/// marks of the boundary being settled are readable with
+/// [`SimulationView::calendar_marks`], and those of other boundaries on the
+/// boundary ledger ([`BoundarySummary::calendar_marks`]).
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct CalendarMark {
+    /// A scheduled cadence, never `EventDriven`.
+    pub cadence: SystemCadence,
+    /// The host's key for the calendar: non-empty, without surrounding
+    /// whitespace or control characters, and at most
+    /// [`MAX_CALENDAR_KEY_BYTES`] bytes.
+    pub calendar: String,
+}
+
+impl CalendarMark {
+    #[must_use]
+    pub fn new(cadence: SystemCadence, calendar: impl Into<String>) -> Self {
+        Self {
+            cadence,
+            calendar: calendar.into(),
+        }
+    }
+}
+
+/// Whether `key` is a canonical calendar key: non-empty, without
+/// surrounding whitespace or control characters, and at most
+/// [`MAX_CALENDAR_KEY_BYTES`] bytes.
+fn calendar_key_is_canonical(key: &str) -> bool {
+    !key.trim().is_empty()
+        && key == key.trim()
+        && key.len() <= MAX_CALENDAR_KEY_BYTES
+        && !key.chars().any(char::is_control)
+}
+
+/// Whether the cadences and calendar marks of a calendar ingress record or a
+/// boundary are canonical: cadences strictly ascending and scheduled, marks
+/// strictly ascending with canonical keys, and each mark's cadence among the
+/// cadences. A calendar ingress record also needs at least one cadence.
+fn calendar_marks_are_canonical(cadences: &[SystemCadence], marks: &[CalendarMark]) -> bool {
+    !cadences.contains(&SystemCadence::EventDriven)
+        && cadences.windows(2).all(|pair| pair[0] < pair[1])
+        && marks.windows(2).all(|pair| pair[0] < pair[1])
+        && marks.iter().all(|mark| {
+            calendar_key_is_canonical(&mark.calendar) && cadences.contains(&mark.cadence)
+        })
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]

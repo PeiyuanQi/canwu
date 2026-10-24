@@ -103,6 +103,19 @@ impl SimulationView<'_> {
         self.state.now()
     }
 
+    /// The host calendar marks of the boundary being settled, in canonical
+    /// order: which calendars' periods start at this boundary (see
+    /// [`super::CalendarMark`]). Empty in a boundary without marks and in a
+    /// view that is not a boundary system's.
+    ///
+    /// It needs no read declaration: the marks are the host's calendar input
+    /// to this boundary, like its time, and name no other source's work.
+    #[must_use]
+    pub fn calendar_marks(&self) -> &[super::CalendarMark] {
+        self.current_boundary
+            .map_or(&[], |boundary| boundary.calendar_marks.as_slice())
+    }
+
     pub fn army(&self, id: ArmyId) -> Result<Option<&Army>, CanwuError> {
         self.require_read(&StateKey::core_armies())?;
         Ok(self.state.current().armies.get(&id).map(AsRef::as_ref))
@@ -1422,6 +1435,16 @@ impl SimulationView<'_> {
     /// the evidence reference has to be the same: the answer does not depend
     /// on whether the draw's record or its evidence is still retained, so a
     /// run whose evidence was sealed answers as its unsealed replay does.
+    ///
+    /// A draw of a stream with a keyed-draw retirement
+    /// ([`super::KeyedDrawRetirement`]) is answered only until it retires.
+    /// From the first boundary at or after its retirement time the address
+    /// counts as not drawn: a request draws afresh under a new draw ID, with
+    /// the same value when the bound and purpose are the retired draw's, its
+    /// evidence is checked as a fresh draw's, and a request with other
+    /// evidence, bound, or purpose is no longer a conflict. So a retry that
+    /// cites a superseded record version is answered before the retirement
+    /// and refused with `InvalidRandomOperationEvidence` after it.
     ///
     /// An address that has not been drawn is drawn now, and returns the ID
     /// its record has once the boundary being settled commits; see
