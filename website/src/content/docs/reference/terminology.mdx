@@ -168,7 +168,15 @@ sidebar:
 | [在制品](/tutorials/cases/production-economy/) | work in progress | `WorkInProgress` | 已进入尚未完成的生产执行，并绑定精确工艺、设施、资源和证据的投入；既不是可用库存，也不是已结算产出。 |
 | [实际产出](/developer/production-economy/) | realized output | `realized_output_per_mille`, `realization_evidence` | 生产执行完成时以工艺名义产出的千分比表示的产出，按向下取整缩放后进入产出结算；任何非名义比例都需要工艺版本声明种类的精确证据记录。 |
 | [移动生命周期扩展](/tutorials/routing-transport/) | movement lifecycle extension | `canwu-movement`, `MovementPlugin` | 负责运输记录生命周期的可选扩展：准入移动命令、在到期时结算路段、让已出发的路段滞留、分配运力池，并发布持有人相对的移动报告。事故、危险及其随机抽样仍属于应用系统。 |
-| [军事模拟扩展](/tutorials/military-domain/) | military simulation extension | `canwu-military` | 可选的军事领域扩展，负责部队、行动、战斗、占领、军事知识，以及由其他领域结算并确认的待处理效果；不是通用战斗模型。 |
+| [军事模拟扩展](/tutorials/military-domain/) | military simulation extension | `canwu-military` | 可选的交战引擎：在宿主安装的战斗规则册上负责部队、按战斗步推进的交战、围城、渡河作战和交战报告；不是通用战斗模型，也不拥有控制或占领。 |
+| [交战](/architecture/military/) | engagement | `EngagementStateV1`, `OpenEngagement` | 宿主地点上双方之间按战斗步推进的一场战斗，由命令开启，结束时收束为一份总结。 |
+| [战斗步](/architecture/military/) | engagement step | `StepV1`, `EngagementStepsV1` | 战斗步公式的一次结算；每个战斗步的证据。 |
+| [战斗规则册](/architecture/military/) | combat rulebook | `CombatRulebookV1`, `InstallRulebook` | 宿主带版本、带哈希的参数，每个战斗步都读取它。 |
+| [战斗步结算器](/architecture/military/) | step resolver | `StepResolver`, `ParametricStepResolver` | 从战斗步输入和抽样到战斗步结果的确定性函数；可以是本 crate 的参数化结算器，也可以是宿主自己的。 |
+| [围城](/architecture/military/) | siege | `SiegeStateV1`, `InvestSite` | 对宿主地点的合围、火炮就位、破城、攻城、出城反击、援军解围和陷落。 |
+| [渡河作战](/architecture/military/) | contested crossing | `CrossingStateV1`, `OrderCrossing` | 分批渡河，经受拦截，登岸建立滩头。 |
+| [战斗条件输入](/architecture/military/) | condition input | `ConditionInputV1`, `SupplyInput` | 宿主为每一方提供、战斗步读取的数值，并引用它们所依据的宿主记录。 |
+| [战前预判](/architecture/military/) | pre-battle forecast | `ForecastV1`, `ForecastBandId` | 依据规则册的分档线得出的开战比值所在档位。 |
 | [军事补给参考消费者](/tutorials/cases/production-economy/) | force-supply reference consumer | `canwu-force-supply-reference` | 可替换的整合包，证明军事后勤可以消费公共资源 API，同时只拥有军队本地需求、战备、短缺后果和征发 saga；不是通用战斗模型。 |
 | [本地稀缺度投影](/tutorials/cases/production-economy/) | local scarcity projection | `LocalScarcityProjection` | 脱离式、持有人绑定的读取模型，解释可观察供给、需求、缓冲、路线可达性、安全与政策；不声称存在价格。 |
 | [价格压力投影](/tutorials/cases/production-economy/) | price-pressure projection | `PricePressureProjection` | 只有存在合格的价格证据和版本化解释规则时才生成的脱离式读取模型；既不形成市场，也不结算交易。 |

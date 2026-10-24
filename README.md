@@ -145,7 +145,9 @@ viewer` opens the browser trace viewer against the same live trace dump.
   maintenance, repair, and output-settlement extension
 - `canwu-economy-reference-content`: source/model-card-bound economy profiles
   with fail-closed place, period, resource, process, and coverage keys
-- `canwu-military`: optional military domain extension for forces, operations, combat, occupation, military knowledge, and military administration
+- `canwu-military`: optional engagement engine for forces, stepped engagements,
+  sieges, contested crossings, and engagement reports on a host-installed
+  combat rulebook; it owns no control or occupation
 - `canwu-movement`: optional movement lifecycle extension for movement orders,
   leg settlement, capacity-pool allocation, and holder-relative movement
   reports over `canwu-transport` records

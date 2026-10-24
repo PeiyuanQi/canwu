@@ -1,9 +1,15 @@
 # Military Domain Extension Design
 
-Status: implementation design for the complete reusable military domain and its
-reference integration. This design keeps military semantics downstream from the
-simulation core while making every requested military workflow executable,
-persisted, replayable, and actor-relative.
+Status: superseded in 0.20.0 by
+[military engagements](military-engagements.md), which replaced this model
+(its catalogue, operations, fixed combat round, occupation, ledger, and
+provider saga) with the engagement engine. Kept as the record of the 0.19.0
+design.
+
+Original status: implementation design for the complete reusable military
+domain and its reference integration. This design keeps military semantics
+downstream from the simulation core while making every requested military
+workflow executable, persisted, replayable, and actor-relative.
 
 ## Decision and invariant
 

@@ -1448,6 +1448,20 @@ externality intents at an exact expected revision. In `canwu-economy-reference`
 the exact target is the local economy, which must be unchanged since the
 revision it had when the requisition locked the economy record.
 
+`canwu-military` is the engagement engine: typed forces in the host's world,
+stepped engagements on a host-installed rulebook and a `StepResolver`, sieges
+and contested crossings, holder-relative engagement reports, and an outcome
+signal; it owns no doctrine, catalogue, control, or store. Every number that
+decides a fight is a parameter of the host's versioned, hashed
+`CombatRulebookV1`; a force stands at a host `EntityRef` the host places, and
+the plugin owns only its battle state. A fight steps only in a boundary that
+admits the plugin's step packet, which the optional wake system or the host's
+trusted `Step` command produces; each step is written with every per-step
+quantity, and a closed fight leaves a create-only summary. The plugin writes
+only its own records: a fallen site is a fact in the summary, never an
+occupation. See the
+[military engagements proposal](proposals/military-engagements.md).
+
 `canwu-economy-reference` composes these packages with routing and transport in
 a runnable synthetic grain loop. It also provides detached, holder-bound local
 scarcity and evidence-qualified price-pressure projections. Those projections

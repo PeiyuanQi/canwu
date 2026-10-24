@@ -1,5 +1,9 @@
 # canwu-military-reference-content
 
-Small, explicitly synthetic military rulesets used by the Canwu reference
-integration. The content is not a historical dataset and does not claim that
-its balance values describe a real army.
+One small, explicitly synthetic combat rulebook for the Canwu engagement
+engine (`canwu-military`): `synthetic_rulebook_v1()` with six terrain rows,
+five fortification grades, five band cuts, four postures, a day and a
+half-hour step profile, the six kind rules, and the reference limits, for the
+parametric step resolver. It is demonstration content for the reference
+integration, not a historical dataset, and no claim that its values describe
+a real army; a host compiles its own rulebook from its own content.

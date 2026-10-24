@@ -452,7 +452,6 @@ dependencies = [
  "canwu-military",
  "canwu-military-reference-content",
  "canwu-reference-world",
- "serde",
  "serde_json",
 ]
 
@@ -460,10 +459,10 @@ dependencies = [
 name = "canwu-military-reference-content"
 version = "0.19.0"
 dependencies = [
- "blake3",
  "canwu-api",
  "canwu-military",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 ---
-title: 运行军事扩展：从接敌到占领
-description: 运行军事起步示例：建立部队、行军接敌、结算战斗并建立占领，全部通过可重放的模拟领域扩展完成。
+title: 运行交战引擎：行军、会战、围城与渡河
+description: 运行军事起步示例：一支军队行军，打一场按战斗步推进的野战，强攻一座被围的城，再争渡一条河，全部在一份合成规则册上，通过可重放的模拟领域扩展完成。
 template: doc
 sidebar:
   label: 军事模拟扩展
@@ -8,115 +8,94 @@ sidebar:
 
 import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
-本教程运行军事参考起步示例。它建立一支野战部队，补充兵员，向有守军的领地行军，结算战斗并占领该地，最后确认保存和重放得到的副本与原运行一致。你会了解 `canwu-military` 如何接收命令、随机性从哪里来，以及哪些状态交给其他扩展管理。
+本教程运行军事参考起步示例。一支军队借助参考世界的移动插件行军，抵达后由宿主放置它的部队，随后一场野战先按日、再按半小时一个战斗步推进；与此同时，一座城被围、被轰开、被强攻，一支渡河部队绕过敌方船队渡过河去。你会了解 `canwu-military` 如何接收你的规则册和输入、何时推进一场战斗，以及哪些后果留给你的游戏处理。
 
 [军事模拟扩展](/reference/terminology/)分为三个 crate：
 
-- `canwu-military`：军事领域记录、`MilitaryCommand` 领域命令、边界系统、抽样证据和发给指挥官的报告，构建在 `canwu-api` 之上。
-- `canwu-military-reference-content`：两套带版本的规则集。
-- `canwu-military-reference`：可替换的参考整合包，为[参考世界](/tutorials/move-army/)加入军事目录。
+- `canwu-military`：交战引擎，负责部队、交战、围城、渡河作战及其记录和报告，构建在 `canwu-api` 之上。
+- `canwu-military-reference-content`：一份明确标为合成的战斗规则册。
+- `canwu-military-reference`：可替换的参考整合包，在[参考世界](/tutorials/move-army/)上安装这份规则册和六支部队。
 
 ## 运行
 
-在仓库根目录运行：
+在仓库根目录执行：
 
 ```shell
 cargo run -p canwu-military-reference --example military_starter
 ```
 
 ```text
-military_gameplan=complete riverine=riverine_preindustrial industrial=industrial_front checkpoint=43c8624eefa7f25036e8715d3064e732d99da49a51d12516767638a7320e7421
+engagement=canwu:military:crossing:capital-ford/ferry-0 kind=FerryFight outcome=Stalled steps=1 site_fell=false losses=0/0
+engagement=canwu:military:engagement:eastern-field kind=Field outcome=AttackerPrevailed steps=121 site_fell=false losses=16/424
+engagement=canwu:military:siege:westford/assault-1 kind=Assault outcome=AttackerPrevailed steps=5 site_fell=true losses=10/100
+siege=Fell cause=Some(Breach) crossing=Complete landed=2000
+…
+military_starter=complete engagements=3 signals=3 checkpoint=…
 ```
 
-`military_gameplan=complete` 表示所有断言都已通过：战斗得出了结果，占领已经建立，恢复和重放得到的副本与原运行的检查点哈希相同。`riverine` 和 `industrial` 打印的是两套参考规则集的名称。
+`military_starter=complete` 表示所有断言都通过了：每一场结束的战斗都向宿主发出了信号，被围的城已经陷落，恢复和重放得到的副本与实时运行的检查点哈希相同。中间几行打印的是一个政府持有的报告。
 
-## 军事命令的执行路径
+## 一场战斗如何推进
 
 <MermaidDiagram
-  label="军事命令经规范化输入准入，在第 7 阶段应用，在第 13 阶段向指挥官报告"
-  diagramLoading="正在渲染图表……"
+  label="宿主的输入和战斗步包在第 7 阶段汇合；引擎写出战斗步和总结；宿主应用结果"
+  diagramLoading="正在渲染图表…"
   sourceSummary="查看图表源码"
-  noScriptMessage="图表预览需要 JavaScript；下方步骤描述了同一路径。"
-  renderFailureMessage="图表预览不可用；下方步骤描述了同一路径。"
+  noScriptMessage="图表预览需要 JavaScript；下面的说明描述了同一路径。"
+  renderFailureMessage="图表预览不可用；下面的说明描述了同一路径。"
   definition={`flowchart TB
-    Cmd["military_command()<br/>Command::Plugin"] --> Queue["enqueue_command()<br/>规范化输入"]
-    Queue --> Admit["准入检查<br/>指挥官、兵种、战术"]
-    Admit --> Packet["military_command_v1<br/>输入数据包"]
-    Packet --> Apply["第 7 阶段<br/>检查修订号、<br/>写入记录、抽样"]
-    Apply --> Report["第 13 阶段<br/>向指挥官报告"]
+    Inputs["宿主：每方的 SupplyInput、<br/>PlaceForce、OpenEngagement"] --> Apply["第 7 阶段：应用命令"]
+    Wake["每日的日历结算边界<br/>唤醒系统"] --> Packet["military_step_v1"]
+    Packet --> Step["第 7 阶段：推进到期的工作<br/>结算器、损失、溃退规则"]
+    Apply --> Step
+    Step --> Summary["结束：engagement_summary<br/>结果信号"]
+    Step --> Reports["第 13 阶段：持有人报告"]
+    Summary --> Host["宿主处理控制、<br/>库存、人口"]
 `}
 />
 
-起步示例通过同一个辅助函数发送所有命令：
-
-```rust
-fn submit(
-    canwu: &mut Canwu,
-    sequence: u64,
-    issuer: Issuer,
-    command: MilitaryCommand,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let envelope = CommandEnvelope::new(issuer, military_command(command)?);
-    canwu.enqueue_command(
-        canwu.time(),
-        i32::try_from(sequence)?,
-        CommandRequest::new(CommandRequestId::new(sequence), canwu.revision(), envelope),
-    )?;
-    canwu.advance_canonical(SimDuration::minutes(1))?;
-    Ok(())
-}
-```
-
-军事命令必须走规范化输入（`enqueue_command`）；直接调用 `submit` 会返回 `MixedCommandIngress`。准入时，处理器检查签发者是否指挥这支部队，以及兵种或战术是否存在于当前规则集中；对 `CreateForce`，签发者必须把自己指定为新部队的指挥官。检查通过后，处理器排入一个 `military_command_v1` 数据包。第 7 阶段的系统 `apply-military-ingress-v1` 先确认 `expected_force_revision` 仍与部队记录一致，再应用它。
-
-每条命令都带一个 `MilitaryOperationKey`。用同一个键、同样的输入再次发送什么也不做；同一个键配上不同输入，会以 `IdempotencyConflict` 被拒绝。在第 7 阶段失败的命令，例如 `expected_force_revision` 已过期，会在军事账本中以 `Rejected` 记在它的键下，插件同时发出 `canwu.military.ingress_rejected.v1` 事件，之后的命令照常执行。要重试，请用新键发送修正后的命令。
+起步示例的规则册信任参考宿主的 `System` 签发方。每条命令都是一个 `MilitaryCommandV1`，通过 `military_command()` 经规范化输入发送；修改记录的命令要写明该记录的 `expected_host_revision`。引擎只在接收了战斗步包的结算边界推进战斗：这里由默认的唤醒系统在每个有到期工作的每日日历结算边界排入一个战斗步包。想自己驱动推进的宿主可以构造 `MilitaryPlugin::new().with_step_cadence(None)`，并在发送输入之后发送 `Step { up_to }`。
 
 ## 起步示例做了什么
 
-`demo_military_scenario()` 以参考世界的演示场景为基础，加入使用 `riverine_preindustrial` 规则集的军事目录。示例注册 `ReferenceWorldPlugin` 和 `military_plugin()`，然后发送五条命令：
+`demo_engagement_scenario()` 从参考世界的演示场景出发，加入一个敌对政府，并安装 `synthetic_rulebook_v1()` 和六支部队：都城里与野战军对应的部队、东方的敌方野战部队、西方的一对围城与守城部队，以及都城里面对敌方船队的渡河部队。
 
-| 步骤 | 命令 | 结果 |
+| 天 | 宿主命令 | 引擎做了什么 |
 | --- | --- | --- |
-| 1 | `CreateForce` | 沈将军的野战部队驻在中部节点，编制 2,500 人，实有 2,000 人。 |
-| 2 | `Recruit` | 新增 400 人的 `reserve` 子单位，部队记录升到版本 2。 |
-| 3 | `PlanOperation` | 一条处于 `Planned` 阶段的战略行动记录。 |
-| 4 | `CreateForce` | 东部节点上一支 100 人的守军，由罗大臣（Minister Luo）指挥。 |
-| 5 | `OrderMarch` | 野战部队向东部节点行军，以守军为对手。 |
+| 0 | 军队的移动命令（参考世界）；在 Westford `InvestSite`，`storm_on: BreachOrGate`；从都城向 Westford 越过船队的 `OrderCrossing` | 开始围城和渡河 |
+| 1 | 为已抵达的军队发送 `PlaceForce`；在东方 `OpenEngagement { kind: Field }` | 第一批人马被截住，打一场渡口之战；围城火炮就位 |
+| 2 | 双方的 `SupplyInput`；`ReviseCrossing { night: true }` | 野战推进一步；渡口之战结束；夜间的一批登岸 |
+| 3 | `SupplyInput`；`ReviseStepProfile` 改为半小时一步 | 城墙破开，当天开始强攻 |
+| 4 及以后 | 交战持续期间的 `SupplyInput` | 野战在半小时战斗步中结束；攻城击溃守军，城池陷落，守军溃散 |
 
-起步示例中的行军命令如下：
+起步示例这样开启野战：
 
 ```rust
-MilitaryCommand::OrderMarch {
-    operation: canwu_military::MilitaryOperationKey::new("canwu.military:op:march-front")?,
-    force: force.clone(),
-    operation_id: OperationId::new("canwu.military:operation:march-front")?,
-    destination: MilitaryNodeId::new(format!(
-        "canwu.military:node:{}",
-        ids.eastern_territory
-    ))?,
-    objective: "secure the eastern route".to_owned(),
-    tactic: "crossing_assault".to_owned(),
-    opposing_force: Some(ForceId::new("canwu.military:force:defender")?),
-    expected_force_revision: 2,
-}
+MilitaryCommandV1::OpenEngagement(Box::new(OpenEngagementV1 {
+    id: field(),
+    kind: EngagementKind::Field,
+    profile: None,
+    site: place(ids.eastern_territory),
+    fort: None,
+    attackers: vec![force_id("yun-field")],
+    defenders: vec![force_id("rival-field")],
+    holders: [
+        vec![ours.clone(), KnowledgeHolderRef::Person(ids.commander)],
+        vec![theirs.clone()],
+    ],
+    inputs: [condition("field", 720), condition("camp", 680)],
+    environment: environment(false),
+}))
 ```
 
-随后 `canwu.advance_canonical(SimDuration::days(5))` 推进五天：
+宿主把 `PlaceForce` 和 `OpenEngagement` 放在同一个准入顺序里发送：引擎按放置之后的部队检查是否同处一地，所以两者在同一个结算边界里就能衔接。
 
-1. 下令一分钟后，部队抵达目的地，接敌产生一条战斗记录。参考插件把行军当作一分钟的一步，并记录路线摘要（部队和目的地的哈希），详见[组合移动](#组合移动)。
-2. 交战中的行动每天结算一个战斗轮，每轮从 `military_random_stream()` 抽样一次，并记录为抽样证据。本次运行中，2,400 人的进攻方损失 7 人，在第一轮就全歼 100 人的守军，战斗以 `AttackerVictory` 结束。
-3. 胜利后，目的地建立占领，阶段为 `MilitaryControl`。占领每天更新一次，安全度和行政覆盖逐步上升；运行结束时分别为 600 和 80（千分比）。
+## 留给你的游戏的部分
 
-## 命令与所有权
+引擎只写它自己的记录。城池陷落体现为攻城总结里的 `site_fell`，以及围城记录上带 `Breach` 原因的 `Fell`；起步示例的宿主用自己的一个小插件接收每一场结束战斗的 `EngagementOutcomeSignalV1`。控制与占领、作为人口的伤亡和物资库存，都由你的游戏依据这些事实去改变；军事学说、内应、配给和水上巡逻，由你的游戏决定并作为输入传进来。[军事系统](/architecture/military/)列出了每条命令检查和写入的内容、战斗步公式以及各项上限。
 
-`MilitaryCommand` 有 13 个变体，其中 `AdvanceTick` 只能由插件自己安排。`canwu-military` 只写入自己的部队、行动、战斗、占领、账本和提供方结果记录；路线、资源、人口、法律和财政程序留给各自的扩展。每条命令检查和写入什么、战斗与占领规则，以及被拒绝的命令如何记录，见[军事系统](/architecture/military/)。
+## 参考规则册是合成的
 
-## 参考规则集是合成数据
+`synthetic_rulebook_v1()` 包含六种地形、五个城防等级、五条分档线、四种姿态、按日和按半小时两种战斗步配置、六种交战类型的规则，以及参考上限。这些数值是演示用的，选择它们只是为了让起步示例里的战斗在几天内结束，不代表任何历史结论。游戏应当从自己的内容编译自己的规则册。
 
-`canwu-military-reference-content` 提供 `riverine_preindustrial` 和 `industrial_front` 两套规则集，都标记为 `synthetic_reference`：它们用于覆盖不同的兵种、战术、地形、征募、战斗和占领假设，不代表任何历史结论。当前插件读取生效的规则集，用来校验兵种和战术名称；战斗和占领的计算写在 `canwu-military` 内部。
-
-## 组合移动
-
-当前的 `canwu-military` 插件在下令一分钟后完成行军，只记录路线摘要。需要路线和行军耗时的上层应用，应在自己的整合中围绕行军组合 `canwu-routing` 与 `canwu-transport` 或 `canwu-movement`，参见[路线规划与送信执行](/tutorials/routing-transport/)。
-
-完整的命令序列以及快照和重放检查，见[起步示例源码](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-military-reference/examples/military_starter.rs)。
+阅读完整的[起步示例源码](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-military-reference/examples/military_starter.rs)，可以看到每一条命令以及快照和重放检查。

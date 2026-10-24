@@ -179,7 +179,7 @@ registrar.register_boundary_system(system, apply_movement_transitions)?;
 | `canwu-fiscal` | 财政程序：法规、核算、授权、凭证和审计。资源余额和运输由其他 crate 负责。 | [财政制度](/architecture/fiscal/) |
 | `canwu-resource` | 守恒的资源账户、需求、分配、转移、动用授权和履约 | [资源与生产系统](/architecture/resources-production/) |
 | `canwu-production` | 生产工艺、设施、工单和产出结算 | [资源与生产系统](/architecture/resources-production/) |
-| `canwu-military` | 部队、行动、战斗、占领和军事知识，作为一种可选的军事模型 | [军事系统](/architecture/military/) |
+| `canwu-military` | 交战引擎：在你的战斗规则册上推进交战、围城和渡河作战；可以实现自己的 `StepResolver` 接入你的战斗公式 | [军事系统](/architecture/military/) |
 | `canwu-movement` | 移动生命周期：移动命令、路段结算、运力池和持有人相对的移动报告 | [路线、运输与移动系统](/architecture/routing-movement/) |
 | `canwu-information` | 信息生命周期，包括解读时的真伪判定 | [知识与信息系统](/architecture/knowledge-information/) |
 | `canwu-correspondence` | 通信，支持持有人相对规划、受托承运人和承运人扣押 | [知识与信息系统](/architecture/knowledge-information/) |

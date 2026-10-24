@@ -354,7 +354,7 @@ pub struct CrossingStateV1 { pub id: CrossingId, pub host_revision: u64, pub for
 pub struct CombatLimitsV1 { pub forces: u32 /* 4_096 */, pub components_per_force: u32 /* 64 */, pub forces_per_side: u32 /* 16 */,
     pub controllers_per_force: u32 /* 8 */, pub trusted_issuers: u32 /* 8 */, pub holders_per_side: u32 /* 8 */,
     pub open_engagements: u32 /* 8 */, pub open_sieges: u32 /* 8 */, pub open_crossings: u32 /* 4 */,
-    pub step_bytes: u32 /* 1_024, per step */, pub draws_per_step: u32 /* 64 */, pub retire_after_minutes: u64 /* 43_200 */,
+    pub step_bytes: u32 /* 2_048, per step */, pub draws_per_step: u32 /* 64 */, pub retire_after_minutes: u64 /* 43_200 */,
     pub evidence_refs_per_input: u32 /* 8 */, pub report_queue: u32 /* 64 */ }
 ```
 
@@ -1239,3 +1239,13 @@ sections above are updated to match.
   encodes to about 0.95 KB. Restore and exact replay were equal in every
   cell. An outcome-signal target no plugin registered fails the first
   closing boundary, as §16 states.
+- **The reference crates.** `synthetic_rulebook_v1()` sets `step_bytes`
+  2_048 rather than 1_024 (a step encodes to about 0.95 KB, so 1_024 left
+  almost no room for resolver terms), trusts
+  `Issuer::System("canwu-military-reference")`, and uses a day profile scale
+  of 230_400 (48 compressed half-hour steps at 48 %), `defense_offset` 200,
+  and cohesion base 1, with demonstration component values chosen so the
+  starter's fights end in days. `demo_engagement_scenario()` installs six
+  forces (a field pair, a siege pair, a river force and a fleet) and adds a
+  rival government entity beside the reference world's one; the starter
+  follows §18, without a relief fight, which the lifecycle test covers.

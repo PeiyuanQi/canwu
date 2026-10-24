@@ -1,6 +1,6 @@
 [package]
 name = "canwu-military-reference-content"
-description = "Versioned synthetic military rulesets for Canwu"
+description = "A versioned, explicitly synthetic combat rulebook for the Canwu engagement engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,10 +12,12 @@ categories.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-blake3.workspace = true
 canwu-api.workspace = true
 canwu-military.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

@@ -298,7 +298,7 @@ grants, delegated carriers, and so on), see
 | `canwu-resource` | Resource accounts with protected floors, demand, reservation, allocation, transfer, consumption, loss, access grants, and fulfillment |
 | `canwu-production` | Processes, production sites, facilities, capacity, work orders, work in progress, projects, and output |
 | `canwu-movement` | Movement orders, leg settlement, capacity-pool allocation, and movement reports, built on `canwu-transport` records |
-| `canwu-military` | Forces, operations, combat, occupation, and pending effects that other domains settle and acknowledge; replace it if your game needs different combat rules |
+| `canwu-military` | The engagement engine: stepped fights, sieges, and river crossings between forces on a host-installed combat rulebook, with engagement reports; every rule is a rulebook parameter and the step resolver is replaceable |
 | `canwu-society` | Social diffusion between population groups |
 | `canwu-culture` | Culture authoring and compilation, plus a culture lifecycle that runs on `canwu-society` |
 | `canwu-law` | Legal authoring, institutional procedures (including weighted, unit-block, and consultation stages), versioned law, and applicability; experimental |
@@ -314,7 +314,7 @@ grants, delegated carriers, and so on), see
 | --- | --- |
 | `canwu-ming-fiscal` | Source-cited fiscal content from the early Ming to the Southern Ming, with coverage declarations |
 | `canwu-economy-reference-content` | Economy model cards, citations, and coverage declarations, with explicit unknown and not-applicable states |
-| `canwu-military-reference-content` | Versioned synthetic military rulesets for the military extension |
+| `canwu-military-reference-content` | One versioned synthetic combat rulebook for the engagement engine |
 
 ### Reference integrations and tools (repository only)
 
@@ -324,7 +324,7 @@ grants, delegated carriers, and so on), see
 | `canwu-ming-fiscal-reference` | Runnable Hongwu, Wanli, and Hongguang fiscal scenarios | `canwu-fiscal`, `canwu-ming-fiscal`, `canwu-reference-world` |
 | `canwu-force-supply-reference` | Military supply as a replaceable resource consumer, with a requisition saga | `canwu-resource`, `canwu-economy-reference-content` |
 | `canwu-economy-reference` | A runnable grain loop combining resources, production, transport, force supply, scarcity, and price evidence | `canwu-resource`, `canwu-production`, `canwu-technology`, `canwu-economy-reference-content`, `canwu-force-supply-reference`, `canwu-reference-world` |
-| `canwu-military-reference` | The military extension and its synthetic content running in the reference world | `canwu-military`, `canwu-military-reference-content`, `canwu-reference-world` |
+| `canwu-military-reference` | The engagement engine and its synthetic rulebook running in the reference world | `canwu-military`, `canwu-military-reference-content`, `canwu-reference-world` |
 | `canwu-debug` | Desktop debug client built on the public API and the reference integrations | `canwu-reference-world`, `canwu-ming-fiscal-reference` |
 
 ## Domain systems

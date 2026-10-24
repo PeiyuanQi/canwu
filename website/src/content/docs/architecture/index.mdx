@@ -258,7 +258,7 @@ import ArchitectureMap from "../../../components/ArchitectureMap.astro";
 | `canwu-resource` | 资源账户及受保护底线、需求、预留、分配、转移、消费、损耗、动用授权与履约 |
 | `canwu-production` | 工艺、生产地点、设施、产能、工单、在制品、项目与产出 |
 | `canwu-movement` | 基于 `canwu-transport` 记录的移动命令、路段结算、运力池分配与移动报告 |
-| `canwu-military` | 部队、行动、战斗、占领，以及由其他领域结算并确认的待处理效果；游戏需要不同的战斗规则时可以替换 |
+| `canwu-military` | 交战引擎：在宿主安装的战斗规则册上推进部队之间的交战、围城和渡河作战，并发布交战报告；规则都是规则册的参数，结算器可以替换 |
 | `canwu-society` | 人群之间的社会传播 |
 | `canwu-culture` | 文化编写与编译，以及运行在 `canwu-society` 之上的文化生命周期 |
 | `canwu-law` | 法律编写、制度程序（包括加权、表决单元与征询阶段）、版本化法律与适用；实验性 |
@@ -274,7 +274,7 @@ import ArchitectureMap from "../../../components/ArchitectureMap.astro";
 | --- | --- |
 | `canwu-ming-fiscal` | 从明初到南明、带出处和覆盖声明的财政内容 |
 | `canwu-economy-reference-content` | 经济模型卡、出处与覆盖声明，并明确标出未知和不适用状态 |
-| `canwu-military-reference-content` | 供军事扩展使用的版本化合成军事规则集 |
+| `canwu-military-reference-content` | 供交战引擎使用的一份带版本的合成战斗规则册 |
 
 ### 参考整合包与工具（仅在仓库中）
 
@@ -284,7 +284,7 @@ import ArchitectureMap from "../../../components/ArchitectureMap.astro";
 | `canwu-ming-fiscal-reference` | 可运行的洪武、万历、弘光财政场景 | `canwu-fiscal`、`canwu-ming-fiscal`、`canwu-reference-world` |
 | `canwu-force-supply-reference` | 作为可替换资源消费者的军事补给，包含征发 saga | `canwu-resource`、`canwu-economy-reference-content` |
 | `canwu-economy-reference` | 组合资源、生产、运输、军事补给、稀缺度与价格证据的可运行粮食循环 | `canwu-resource`、`canwu-production`、`canwu-technology`、`canwu-economy-reference-content`、`canwu-force-supply-reference`、`canwu-reference-world` |
-| `canwu-military-reference` | 在参考世界中运行的军事扩展及其合成内容 | `canwu-military`、`canwu-military-reference-content`、`canwu-reference-world` |
+| `canwu-military-reference` | 在参考世界中运行的交战引擎及其合成规则册 | `canwu-military`、`canwu-military-reference-content`、`canwu-reference-world` |
 | `canwu-debug` | 基于对外 API 与参考整合包的桌面调试客户端 | `canwu-reference-world`、`canwu-ming-fiscal-reference` |
 
 ## 领域系统

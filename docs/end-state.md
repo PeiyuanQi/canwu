@@ -486,6 +486,10 @@ settlement; any non-nominal share must cite an exact evidence record of a kind
 the process revision declares and stay within its bound, so a shortfall or an
 unusually high yield remains cited evidence rather than a hidden multiplier.
 
+Since 0.20.0 the military extension is an engagement engine whose every
+deciding number is a host rulebook parameter; it writes no occupation or
+control.
+
 Military logistics remains an independent consumer. The replaceable
 `canwu-force-supply-reference` integration submits recurring demands and typed
 consumption intents, then owns readiness and shortage consequences after exact

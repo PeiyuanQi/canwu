@@ -1,6 +1,6 @@
 [package]
 name = "canwu-military-reference"
-description = "Runnable public-API military reference integration for Canwu"
+description = "Runnable public-API reference integration of the Canwu engagement engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,7 +17,6 @@ canwu-api.workspace = true
 canwu-military.workspace = true
 canwu-military-reference-content.workspace = true
 canwu-reference-world.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 
 [lints]

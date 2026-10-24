@@ -124,7 +124,8 @@ cargo run --locked -p canwu-debug
   产出结算扩展
 - `canwu-economy-reference-content`：以出处、model card 和精确地点/时期/资源/
   工艺覆盖键约束的经济参考内容
-- `canwu-military`：可选的军事模拟扩展，负责军队、行动、战斗、占领、军事知识和军政管理
+- `canwu-military`：可选的军事模拟扩展（交战引擎），在宿主安装的战斗规则册上
+  负责部队、按战斗步推进的交战、围城、渡河作战和交战报告；不拥有控制或占领
 - `canwu-movement`：可选的移动生命周期扩展，在 `canwu-transport` 记录之上负责
   移动命令、路段结算、运力池分配和持有人相对的移动报告
 - `canwu-force-supply-reference`：可替换的军需资源消费者，用于证明物资履约和
