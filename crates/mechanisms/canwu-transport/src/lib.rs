@@ -16,11 +16,13 @@ use std::cmp::Ordering;
 
 /// Semantic identity of the transport record and transition contract.
 ///
-/// `v5` adds capacity pools with deterministic booking allocation, booking
+/// `v5` added capacity pools with deterministic booking allocation, booking
 /// requests on an execution, cancellation, arrival settlement for executions
 /// without a delivery attempt, and booking confirmation or cancellation before
-/// the booking window opens.
-pub const TRANSPORT_SEMANTIC_VERSION: &str = "canwu-transport.v5";
+/// the booking window opens. `v6` adds the revocation of a confirmed booking
+/// by its pool's custodian ([`CapacityBooking::revoke`], status
+/// [`CapacityBookingStatus::Revoked`], [`CapacityBooking::revocation`]).
+pub const TRANSPORT_SEMANTIC_VERSION: &str = "canwu-transport.v6";
 
 /// Hash domain of [`CapacityBookingAllocationEvidenceV1::semantic_digest`].
 pub const CAPACITY_BOOKING_ALLOCATION_DIGEST_DOMAIN: &str =
@@ -372,6 +374,18 @@ pub enum CapacityBookingStatus {
     Expired,
     Cancelled,
     Failed,
+    /// Confirmed capacity that the pool's custodian took back
+    /// ([`CapacityBooking::revoke`]); it holds nothing, and
+    /// [`CapacityBooking::revocation`] records when and why.
+    Revoked,
+}
+
+/// Why and when a pool's custodian revoked a confirmed booking.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityBookingRevocationV1 {
+    pub at: SimTime,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -385,6 +399,11 @@ pub struct CapacityBooking {
     pub priority: i32,
     pub status: CapacityBookingStatus,
     pub allocation_evidence: Vec<EvidenceRef>,
+    /// Set by [`Self::revoke`]. This crate does not validate stored bookings;
+    /// the movement plugin's runtime validation requires it exactly when the
+    /// status is [`CapacityBookingStatus::Revoked`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revocation: Option<CapacityBookingRevocationV1>,
 }
 
 impl CapacityBooking {
@@ -412,7 +431,25 @@ impl CapacityBooking {
             priority,
             status: CapacityBookingStatus::Requested,
             allocation_evidence: Vec::new(),
+            revocation: None,
         })
+    }
+
+    /// Revokes a confirmed booking on behalf of its pool's custodian: the
+    /// booking becomes [`CapacityBookingStatus::Revoked`] and records `at` and
+    /// `reason` (non-empty, trimmed text). Return the quantity to the pool with
+    /// [`TransportCapacityPoolV1::apply_booking_transition`] from `Confirmed`
+    /// to `Revoked`. Only a confirmed booking can be revoked: a consumed one is
+    /// in use and a request holds nothing yet.
+    pub fn revoke(&mut self, at: SimTime, reason: String) -> Result<(), TransportError> {
+        if self.status != CapacityBookingStatus::Confirmed || !is_canonical_label(&reason) {
+            return Err(TransportError::InvalidBooking(
+                "only a confirmed booking can be revoked, with a reason".to_owned(),
+            ));
+        }
+        self.status = CapacityBookingStatus::Revoked;
+        self.revocation = Some(CapacityBookingRevocationV1 { at, reason });
+        Ok(())
     }
 
     /// Moves the booking through its windowed state machine.
@@ -420,7 +457,8 @@ impl CapacityBooking {
     /// A request may be confirmed, failed, or cancelled, and a confirmed
     /// booking released or cancelled, before its window opens; capacity can
     /// only be consumed inside the window, confirmed only until it ends, and
-    /// expired only after it ends.
+    /// expired only after it ends. A revocation goes through [`Self::revoke`],
+    /// which records its reason, never through this method.
     pub fn transition(
         &mut self,
         status: CapacityBookingStatus,
@@ -476,7 +514,7 @@ impl CapacityBooking {
 ///
 /// `quantity` is the capacity offered for the whole window. `booked` is held
 /// by confirmed bookings and `consumed` by consumed ones; released, expired,
-/// cancelled, and failed bookings hold nothing. `revision` advances whenever
+/// cancelled, failed, and revoked bookings hold nothing. `revision` advances whenever
 /// the offer or either counter changes, so allocation evidence can cite the
 /// exact pool state it read.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -632,8 +670,8 @@ impl TransportCapacityPoolV1 {
 
     /// Applies the capacity effect of one booking transition made after
     /// allocation: consumption moves quantity from `booked` to `consumed`,
-    /// while releasing, cancelling, or expiring a confirmed booking and
-    /// releasing a consumed one return it. Cancelling or failing a request
+    /// while releasing, cancelling, expiring, or revoking a confirmed booking
+    /// and releasing a consumed one return it. Cancelling or failing a request
     /// holds nothing and leaves the pool unchanged. Confirmation happens only
     /// through [`Self::apply_allocations`].
     pub fn apply_booking_transition(
@@ -643,7 +681,7 @@ impl TransportCapacityPoolV1 {
         to: CapacityBookingStatus,
     ) -> Result<(), TransportError> {
         use CapacityBookingStatus::{
-            Cancelled, Confirmed, Consumed, Expired, Failed, Released, Requested,
+            Cancelled, Confirmed, Consumed, Expired, Failed, Released, Requested, Revoked,
         };
         let underflow =
             || TransportError::InvalidCapacityPool("capacity pool counter underflow".to_owned());
@@ -657,7 +695,7 @@ impl TransportCapacityPoolV1 {
                     .checked_add(quantity)
                     .ok_or(TransportError::Overflow)?;
             }
-            (Confirmed, Released | Cancelled | Expired) => {
+            (Confirmed, Released | Cancelled | Expired | Revoked) => {
                 next.booked = next.booked.checked_sub(quantity).ok_or_else(underflow)?;
             }
             (Consumed, Released) => {

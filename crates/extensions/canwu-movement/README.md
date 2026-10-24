@@ -40,21 +40,38 @@ otherwise). Operations are:
   `delivery_attempt`, arrival enters `ArrivalPending`; without one, arrival on
   the final leg settles the execution.
 - `StartLeg`, `CompleteLeg`, `FailLeg`: act on the named current leg now.
-- `DelayLeg`: hold the named current departed leg until `until`, with a
-  bounded reason. The hold replaces the leg's arrival due, so later delays
-  lengthen, shorten, or lift it; `until` may not precede the settling
-  boundary or the arrival scheduled when the leg departed (its departure
-  plus its planned duration), so a hold never makes a leg faster. Only the
-  latest hold is kept, and it clears when the leg arrives or fails. A later
-  leg whose booking expires meanwhile fails with `capacity_unavailable` when
-  it is due to depart.
+- `DelayLeg`: hold the named current leg until `until`, with a bounded
+  reason: the arrival of a departed leg, or the departure of a leg that has
+  not departed. The hold replaces that due and creates no itinerary
+  revision, so a journey can be held at a stop any number of times; later
+  delays lengthen, shorten, or lift it. `until` may not precede the settling
+  boundary or the due it holds (the arrival scheduled when the leg departed,
+  its departure plus its planned duration, or the departure pending when the
+  leg was first held), so a hold never makes a leg earlier. Only the latest
+  hold is kept, and it ends when the held due settles, when the leg departs,
+  arrives, or fails, or when the execution is rerouted or cancelled. With `retime_later_legs`, the part of the hold that
+  elapsed is added to the order's `schedule_shift`, which moves the planned
+  departures and booking windows of the legs after it, so they keep their
+  planned spacing; without it they keep their planned times, and a leg after
+  a held arrival departs no earlier than that arrival. A later leg whose
+  booking expires meanwhile fails with `capacity_unavailable` when it is due
+  to depart, unless the booking was replaced.
 - `Reroute`: install a successor itinerary revision. It starts where the
   movement stands unless a leg failed after departing; a departed leg must
   arrive or fail first. An `ExternalCondition` reason must cite an existing
   version of a declared record kind.
 - `RecordHandoff`: record a planned handoff into a leg of the active itinerary.
 - `RequestBooking`: request pool capacity for one unstarted leg; the booking
-  window must lie inside the leg's planned window.
+  window must lie inside the leg's planned window moved by the holds that
+  re-time it. A request may name a booking of the same leg it `replaces`,
+  once: a requested one is cancelled, a confirmed one released, and a failed,
+  expired, or revoked one left as it is; the replaced booking no longer
+  counts when the leg departs.
+- `RevokeBooking`: the pool's custodian, or an application incident, revokes
+  a confirmed booking on the pool, with a bounded reason. The booking becomes `Revoked` (its `revocation`
+  records when and why) and its quantity returns to the pool. When its leg is
+  due to depart, the leg fails with `capacity_unavailable` unless the owner
+  or operator has replaced the booking.
 - `Cancel`: cancel an execution whose subject is not travelling.
 - `OfferPool`: offer or revise a `TransportCapacityPoolV1` held by the acting
   holder.
@@ -65,8 +82,8 @@ kind that must be the record's current version when the incident settles: a
 superseded version is refused even while the run still retains it, so a
 sealed run and its exact replay decide alike. An order's `delivery_attempt`
 must likewise be current. An incident may fail or delay a leg, reroute,
-record a handoff, including a seizure `HandoffKind::Seizure`, or reconcile a
-delivery. A seizure asserts an act by someone outside the itinerary and a
+record a handoff, including a seizure `HandoffKind::Seizure`, revoke a
+booking, or reconcile a delivery. A seizure asserts an act by someone outside the itinerary and a
 reconciliation asserts the delivery's outcome, so neither is accepted from a
 command; a reconciliation must cite the execution's delivery-attempt record.
 
@@ -90,32 +107,40 @@ rather than failing the boundary.
 Leg timing uses the internal scheduled ingress `movement_leg_due_v1`. An order
 schedules its first departure at the planned departure time; a departure
 schedules the arrival after the leg's planned duration; an arrival schedules
-the next departure; a hold moves the arrival to its `until`. A due packet
-acts only when it matches the order's persisted `pending_due`, so explicit
-operations make older packets stale, and an operation settled in the same
-boundary as a due packet acts first. Due work never fails a boundary: if it
-cannot be applied, the current leg fails with `due_settlement_failed`.
+the next departure, no earlier than its planned departure plus the
+order's `schedule_shift`; a hold moves the departure or arrival to its
+`until`. A due packet acts only when it matches the order's persisted
+`pending_due`, and an operation settled in the same boundary as a due packet
+acts first. When an operation or hold replaces a due that is not yet due, the
+plugin withdraws its queued packet (`CancelPluginIngress`), so superseded
+packets neither wait in the queue nor wake a boundary. Due work never fails a
+boundary: if it cannot be applied, the current leg fails with
+`due_settlement_failed`.
 
 Pools are allocated in phase 7 with `canwu_transport::allocate_capacity_bookings`
 rather than kernel phase-6 reservations: every booking requested in a boundary
 competes in one pass ordered by priority, window start, tie-break key,
 admission sequence, and booking identity, and is confirmed in full or failed
 with recorded evidence. Capacity already confirmed is never preempted by a
-later request. A departing leg consumes its confirmed bookings; a leg whose
-booking failed or expired fails with `capacity_unavailable` and waits for a
-reroute. A confirmed booking whose window has not opened delays the departure
+later request; only a revocation (`RevokeBooking`, from the pool's custodian
+or an application incident) takes it back. A departing
+leg consumes its confirmed bookings; a leg whose booking failed, expired, or
+was revoked, and not replaced, fails with `capacity_unavailable` and waits
+for a reroute. A confirmed booking whose window has not opened delays the departure
 until it opens.
 
 ## Reports
 
 `canwu.movement/movement_report` knowledge records carry a `MovementReportV1`
 projected for one holder. The owner and operator see the current execution,
-including its state, revision reasons, handoffs, bookings, failure reasons,
-and the hold on a departed leg (`MovementLegHoldV1`: its scheduled arrival,
-`until`, reason, and when it was set). A delayed remote observer sees only
-coarse progress as it stood the grant delay earlier, published by the
-internal `movement_report_wake_v1` ingress when that delay elapses; it learns
-of a hold only from the leg's arrival time. `observed_as_of` is the time of
+including its state, revision reasons, handoffs, bookings and their
+revocations, failure reasons, the hold on the current leg
+(`MovementLegHoldV1`: which due it holds, the due it replaced, `until`,
+reason, whether it re-times the later legs, and when it was set), and the
+schedule shift. A delayed remote observer sees only coarse progress as it
+stood the grant delay earlier, published by the internal
+`movement_report_wake_v1` ingress when that delay elapses; it learns of a
+hold only from the leg's departure or arrival time. `observed_as_of` is the time of
 the latest fact a report reflects, and a report is published only when it
 changes. Holders without a grant see nothing. Reports are published only to
 living person holders.

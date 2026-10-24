@@ -4,8 +4,9 @@
 //! cut: the current time for the operator and owner, and the current time
 //! minus the grant delay for a delayed remote observer. Only the operator and
 //! owner see the execution detail (state, revision reasons, handoffs,
-//! bookings, failure reasons, and the hold on a departed leg); a remote
-//! observer sees coarse progress and learns of a hold only from the leg's
+//! bookings and their revocations, failure reasons, the hold on the current
+//! leg, and the schedule shift of re-timed legs); a remote observer sees
+//! coarse progress and learns of a hold only from the leg's departure or
 //! arrival time.
 
 use crate::PLUGIN_NAMESPACE;
@@ -16,8 +17,8 @@ use crate::model::{
 use canwu_api::{
     CapacityBooking, Handoff, ItineraryRevisionId, ItineraryRevisionReason, KnowledgeHolderRef,
     KnowledgeRecordKind, KnowledgeSchemaId, LegExecutionId, LegExecutionStatus, MovementOrderId,
-    MovementSubject, RoutingNodeRef, SimTime, TransportExecution, TransportExecutionId,
-    TransportExecutionState, canonical_hash,
+    MovementSubject, RoutingNodeRef, SimDuration, SimTime, TransportExecution,
+    TransportExecutionId, TransportExecutionState, canonical_hash,
 };
 use serde::{Deserialize, Serialize};
 
@@ -91,10 +92,20 @@ pub struct MovementReportDetailV1 {
     pub failures: Vec<MovementLegFailureV1>,
     pub handoffs: Vec<Handoff>,
     pub bookings: Vec<CapacityBooking>,
-    /// The latest hold on the departed current leg, until it arrives or
-    /// fails.
+    /// The latest hold on the current leg, until the held due settles or
+    /// the leg departs, arrives, or fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<MovementLegHoldV1>,
+    /// How far the legs that have not departed run behind their planned
+    /// times by the holds that re-timed them
+    /// ([`MovementOrderRecordV1::schedule_shift`]); omitted when zero.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub schedule_shift: SimDuration,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(duration: &SimDuration) -> bool {
+    *duration == SimDuration::ZERO
 }
 
 /// Payload of one `canwu.movement.movement_report` knowledge record.
@@ -307,6 +318,7 @@ fn detail(
         handoffs: execution.handoffs.clone(),
         bookings: execution.bookings.clone(),
         hold: record.hold.clone(),
+        schedule_shift: record.schedule_shift,
     })
 }
 
@@ -345,7 +357,8 @@ pub(crate) fn observer_cut(at: SimTime, grant: &MovementObserverGrant) -> Option
 }
 
 /// Every time at which a fact in the reports about `record` changed;
-/// handoff, allocation, and hold times count only for detailed reports.
+/// handoff, allocation, revocation, and hold times count only for detailed
+/// reports.
 pub(crate) fn event_times(
     state: &MovementState,
     record: &MovementOrderRecordV1,
@@ -368,6 +381,12 @@ pub(crate) fn event_times(
     if detailed {
         times.extend(record.hold.as_ref().map(|hold| hold.held_at));
         times.extend(execution.handoffs.iter().map(|handoff| handoff.at));
+        times.extend(
+            execution
+                .bookings
+                .iter()
+                .filter_map(|booking| booking.revocation.as_ref().map(|revocation| revocation.at)),
+        );
         times.extend(
             state
                 .bookings

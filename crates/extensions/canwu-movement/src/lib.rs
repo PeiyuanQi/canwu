@@ -10,10 +10,11 @@
 //! reports.
 //!
 //! Incidents, hazards, and hostility remain application systems. The plugin
-//! never draws randomness: an application reports a leg failure, a hold on a
-//! departed leg, a reroute, or a seizure handoff through [`MOVEMENT_COMMAND`]
-//! or, from its own systems, through [`MOVEMENT_INCIDENT_INGRESS`] citing the
-//! current version of an evidence record.
+//! never draws randomness: an application reports a leg failure, a hold on the
+//! current leg, a reroute, a seizure handoff, or a booking revocation through
+//! [`MOVEMENT_COMMAND`] or, from its own systems, through
+//! [`MOVEMENT_INCIDENT_INGRESS`] citing the current version of an evidence
+//! record.
 
 #![allow(
     clippy::missing_errors_doc,

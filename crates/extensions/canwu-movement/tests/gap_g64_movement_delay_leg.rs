@@ -4,8 +4,8 @@
 //! G-64: `DelayLeg` holds a departed leg by replacing its arrival due. A hold
 //! is set by the owner, shortened by the operator, set again by an incident,
 //! and lifted; a hold that would end before the boundary or before the
-//! arrival scheduled at departure, or that names a leg that is not departed,
-//! is a recorded rejection and never fails the boundary. The owner and
+//! arrival scheduled at departure, or that names a leg that is not the
+//! current one, is a recorded rejection and never fails the boundary. The owner and
 //! operator see each hold in their reports; a delayed remote observer learns
 //! of it only from the arrival time. A later leg whose booking expires while
 //! the leg is held fails through the recorded `capacity_unavailable` failure,
@@ -36,11 +36,12 @@ use canwu_api::{
 };
 use canwu_movement::{
     MOVEMENT_GRANTEE_ROLE, MOVEMENT_SUBJECT_ROLE, MovementBookingRequestV1, MovementCommandV1,
-    MovementErrorCode, MovementIncidentV1, MovementLegHoldV1, MovementOperation,
-    MovementOperationDisposition, MovementOperationOutcomeV1, MovementOperationScopeV1,
-    MovementOrderRequestV1, MovementPhaseV1, MovementPlugin, MovementPoolOfferV1,
-    MovementRemoteObserverV1, MovementReportV1, MovementState, movement_command,
-    movement_incident_ingress, movement_report_knowledge_schema_id, movement_state,
+    MovementErrorCode, MovementIncidentV1, MovementLegDueKind, MovementLegHoldV1,
+    MovementOperation, MovementOperationDisposition, MovementOperationOutcomeV1,
+    MovementOperationScopeV1, MovementOrderRequestV1, MovementPhaseV1, MovementPlugin,
+    MovementPoolOfferV1, MovementRemoteObserverV1, MovementReportV1, MovementState,
+    movement_command, movement_incident_ingress, movement_report_knowledge_schema_id,
+    movement_state,
 };
 
 const WORLD: &str = "test.world";
@@ -298,6 +299,7 @@ fn delay(execution: u64, leg: u64, until: i64, reason: &str) -> MovementOperatio
         leg: LegExecutionId(leg),
         until: t(until),
         reason: reason.to_owned(),
+        retime_later_legs: false,
     }
 }
 
@@ -505,7 +507,7 @@ fn published_holds(reports: &[MovementReportV1]) -> Vec<(SimTime, SimTime, SimTi
         .iter()
         .filter_map(|report| {
             let hold = report.detail.as_ref()?.hold.as_ref()?;
-            Some((report.observed_as_of, hold.until, hold.scheduled_arrival_at))
+            Some((report.observed_as_of, hold.until, hold.scheduled_at))
         })
         .collect::<Vec<_>>();
     holds.dedup();
@@ -554,11 +556,12 @@ fn gap_g64_movement_delay_leg() {
             pool: POOL.to_owned(),
             leg: LegExecutionId(2),
             tie_break: "execution-2".to_owned(),
+            replaces: None,
         }),
     );
 
-    // A leg that has not departed cannot be held.
-    host.accept(1, "unstarted", delay(1, 1, 40, "ford in flood"));
+    // A leg that is not the current one cannot be held.
+    host.accept(1, "unstarted", delay(1, 2, 40, "ford in flood"));
     assert_eq!(
         rejected(&host.outcome(1, "unstarted")),
         Some(MovementErrorCode::InvalidState)
@@ -597,10 +600,12 @@ fn gap_g64_movement_delay_leg() {
         host.hold(1),
         Some(MovementLegHoldV1 {
             leg: LegExecutionId(1),
-            scheduled_arrival_at: t(20),
+            kind: MovementLegDueKind::Arrival,
+            scheduled_at: t(20),
             until: t(40),
             reason: "ford in flood".to_owned(),
             held_at: t(12),
+            retime_later_legs: false,
         })
     );
 
@@ -727,7 +732,7 @@ fn gap_g64_movement_delay_leg() {
     assert_eq!(host.arrival_due(2), t(60));
 
     // The lifted movement ran to plan; the earlier holds' due packets were
-    // skipped as stale.
+    // withdrawn when each hold replaced them.
     let state = host.state();
     let one = &state.executions[&TransportExecutionId(1)];
     assert_eq!(one.state, TransportExecutionState::Settled);

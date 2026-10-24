@@ -25,27 +25,30 @@ use canwu_api::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Tracked command carrying one [`MovementCommandV1`].
 pub const MOVEMENT_COMMAND: &str = "apply_movement_operation_v1";
 /// Command-caused packet settled by the lifecycle writer.
 pub const MOVEMENT_OPERATION_INGRESS: &str = "movement_operation_v1";
-/// Application-reported leg failure, leg delay, reroute, handoff, or delivery
-/// reconciliation ([`MovementIncidentV1`]).
+/// Application-reported leg failure, leg delay, reroute, handoff, booking
+/// revocation, or delivery reconciliation ([`MovementIncidentV1`]).
 pub const MOVEMENT_INCIDENT_INGRESS: &str = "movement_incident_v1";
 /// Plugin-scheduled departure or arrival of the current leg at its due time.
 pub const MOVEMENT_LEG_DUE_INGRESS: &str = "movement_leg_due_v1";
 /// Plugin-scheduled wake that publishes delayed remote reports.
 pub const MOVEMENT_REPORT_WAKE_INGRESS: &str = "movement_report_wake_v1";
-/// BLAKE3 of `canwu-movement plugin semantic hash 0.19.0: DelayLeg holds a
-/// departed leg; cited versions must be current`.
+/// BLAKE3 of `canwu-movement plugin semantic hash 0.20.0: DelayLeg holds a
+/// departure or an arrival and may re-time later legs; RevokeBooking; booking
+/// replacement; superseded dues are cancelled`.
 pub const MOVEMENT_SEMANTIC_HASH: &str =
-    "6cf78f1fc81cd752cfbf8a2363c43de513a1233f572a04c1131b90b43151550e";
+    "b211c92a573cc1a95cbad10619ac872e2f619c04bc03bdde34c1e7c62b39abbc";
 
-/// BLAKE3 of `canwu-movement movement_report knowledge schema 0.19.0:
-/// MovementReportDetailV1::hold`. The schema id stays at version 1: a report
-/// without a hold is byte-identical.
-const REPORT_SCHEMA_HASH: &str = "81cf8978b25fd602a46ae69b18c5d493f1318fd6ceb915cd7a78cc403b604f11";
+/// BLAKE3 of `canwu-movement movement_report knowledge schema 0.20.0:
+/// MovementLegHoldV1 kind, scheduled_at, retime_later_legs;
+/// MovementReportDetailV1::schedule_shift; CapacityBooking::revocation`. The
+/// schema id stays at version 1; the hash names the new payload shape.
+const REPORT_SCHEMA_HASH: &str = "33d6f3ab1237ad337eafefd8e15d989a0ccf7c0ab87085aa482011f22e79ed28";
 const APPLY_SYSTEM: &str = "movement_lifecycle_apply_v1";
 const VALIDATE_SYSTEM: &str = "movement_lifecycle_validate_v1";
 const REPORT_SYSTEM: &str = "movement_report_publish_v1";
@@ -182,8 +185,9 @@ impl SimulationPlugin for MovementPlugin {
         })?;
         registrar.register_ingress(PluginIngressDescriptor {
             name: MOVEMENT_INCIDENT_INGRESS.to_owned(),
-            description: "Record one evidence-backed leg failure, delay, reroute, or handoff"
-                .to_owned(),
+            description:
+                "Record one evidence-backed leg failure, delay, reroute, handoff, or booking revocation"
+                    .to_owned(),
             class: IngressClass::Information,
             payload_schema: PayloadSchema::Any,
         })?;
@@ -419,6 +423,14 @@ fn settle_movement_lifecycle(
         Some((record, state)) => (Some(record), state),
         None => (None, MovementState::default()),
     };
+    // The due each order had queued before this boundary. One that this
+    // boundary replaces and that is not yet due is withdrawn below, so a
+    // superseded packet never waits in the queue or wakes a boundary.
+    let queued = state
+        .orders
+        .values()
+        .filter_map(|order| order.pending_due.clone().map(|due| (order.execution, due)))
+        .collect::<BTreeMap<_, _>>();
     let reader = ViewEvidence(view);
     let mut changed = false;
     let mut scheduled = Vec::new();
@@ -549,11 +561,50 @@ fn settle_movement_lifecycle(
         summary: "Apply movement lifecycle operations and due legs".to_owned(),
     }];
     directives.extend(events);
+    let pending = state
+        .orders
+        .values()
+        .filter_map(|order| order.pending_due.as_ref().map(|due| (order.execution, due)))
+        .collect::<BTreeMap<_, _>>();
+    let superseded = queued
+        .iter()
+        .filter(|(execution, due)| {
+            due.due_at > context.at && pending.get(*execution).copied() != Some(*due)
+        })
+        .map(|(_, due)| due)
+        .collect::<BTreeSet<_>>();
+    if !superseded.is_empty() {
+        for item in view.cancellable_plugin_ingress()? {
+            let IngressPayload::Plugin {
+                plugin,
+                packet_type,
+                payload,
+                ..
+            } = &item.payload
+            else {
+                continue;
+            };
+            if plugin != PLUGIN_NAME || packet_type != MOVEMENT_LEG_DUE_INGRESS {
+                continue;
+            }
+            if decode::<MovementLegDueV1>(payload, "movement leg due")
+                .is_ok_and(|due| superseded.contains(&&due))
+            {
+                directives.push(BoundaryDirective::CancelPluginIngress {
+                    ingress_id: item.id,
+                    reason: "superseded movement leg due".to_owned(),
+                });
+            }
+        }
+    }
+    let mut placed = BTreeSet::new();
     for due in scheduled {
-        let pending = state
-            .order_for_execution(due.execution)
-            .and_then(|order| order.pending_due.as_ref());
-        if pending != Some(&due) {
+        // Schedule each order's final due once, unless the packet queued
+        // before this boundary already carries it.
+        if pending.get(&due.execution).copied() != Some(&due)
+            || (due.due_at > context.at && queued.get(&due.execution) == Some(&due))
+            || !placed.insert(due.execution)
+        {
             continue;
         }
         directives.push(BoundaryDirective::SchedulePluginIngress {

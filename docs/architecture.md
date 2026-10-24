@@ -2139,7 +2139,7 @@ hazards, and their authority stay in application systems.
 
 Transport also records capacity pools, and a terminal seizure closes an
 execution to further progress (`TRANSPORT_SEMANTIC_VERSION` is
-`canwu-transport.v5`). A `TransportCapacityPoolV1` offers a windowed quantity
+`canwu-transport.v6`). A `TransportCapacityPoolV1` offers a windowed quantity
 of one interchangeable resource held by a custodian; confirmed bookings hold
 `booked`, consumed bookings hold `consumed`, and the pool revision advances with
 every change. `allocate_capacity_bookings` is a pure function over one pool
@@ -2151,8 +2151,11 @@ with a `CapacityAllocationFailureV1` reason, so a later, smaller request may
 still fit. Each `BookingAllocationV1` carries replayable
 `CapacityBookingAllocationEvidenceV1` with a domain-separated digest. A booking
 may be confirmed, failed, or cancelled before its window opens but consumed
-only inside it; an execution can request a booking, be cancelled, and settle
-its arrival without a delivery attempt. A terminal seizure must be recorded on
+only inside it, and the pool's custodian can revoke a confirmed booking
+(`CapacityBooking::revoke`, status `Revoked`, with the time and reason in
+`revocation`), which returns its quantity to the pool; an execution can
+request a booking, be cancelled, and settle its arrival without a delivery
+attempt. A terminal seizure must be recorded on
 a leg of the active revision of a non-terminal execution, only one is allowed,
 no other custody may leave that leg, and afterwards the execution can no
 longer fail or reroute a leg, arrive, settle, book capacity, or record another
@@ -2166,7 +2169,7 @@ keeps every admitted order and execution in one `MovementState` record
 transition methods. The tracked command `apply_movement_operation_v1` carries a
 `MovementCommandV1` from the issuer's own holder with an `Order`, `StartLeg`,
 `CompleteLeg`, `FailLeg`, `DelayLeg`, `Reroute`, `RecordHandoff`,
-`RequestBooking`, `Cancel`, or `OfferPool` operation. Moving anyone but the
+`RequestBooking`, `RevokeBooking`, `Cancel`, or `OfferPool` operation. Moving anyone but the
 owner needs an `authority_basis`: the current version of a declared
 application record whose references name the owner as `movement_grantee` and
 every other subject as `movement_subject`. Seizures and reconciliations are
@@ -2179,20 +2182,26 @@ The phase-7 system `movement_lifecycle_apply_v1` applies admitted operations
 and incidents in admission order, runs one allocation pass per pool, applies
 due legs from the internal `movement_leg_due_v1` ingress, and retires closed
 executions; phase 8 validates the candidate runtime, and phase 13 publishes
-`canwu.movement/movement_report` knowledge. `DelayLeg` holds a departed leg:
-it replaces the leg's arrival due with an absolute `until` no earlier than
-the boundary or the arrival scheduled at departure, so a hold can be
-lengthened, shortened, or lifted but never makes the leg faster; the owner
-and operator see the hold in their reports, and a delayed remote observer
-learns of it only from the arrival. Each delay leaves the due packet it
-replaces queued until that packet's own due time, when it wakes a boundary
-and is skipped, so on a long run with many holds such packets accumulate and
-`pending_ingress` lists them. Pools are allocated in phase 7
+`canwu.movement/movement_report` knowledge. `DelayLeg` holds the current
+leg: the arrival of a departed leg, or the departure of a leg that has not
+departed, without an itinerary revision. It replaces that due with an
+absolute `until` no earlier than the boundary or the due it holds, so a hold
+can be lengthened, shortened, or lifted but never makes the leg earlier.
+With `retime_later_legs`, the part of the hold that elapsed is added to the
+order's `schedule_shift`, which moves the planned departures and booking
+windows of the later legs so they keep their planned spacing; a reroute
+resets it. The owner and operator see the hold in their reports, and a
+delayed remote observer learns of it only from the departure or arrival.
+When an operation or hold replaces a due that is not yet due, the plugin
+withdraws the queued packet with `CancelPluginIngress`, so superseded
+packets neither accumulate nor wake a boundary. Pools are allocated in phase 7
 rather than through kernel phase-6 reservations, which must name fixed
 identities at registration, may grant partial quantities, and cannot order by
 window start or admission sequence. A departing leg consumes its confirmed
-bookings; a leg whose booking failed or expired fails with
-`capacity_unavailable`. Reports are holder-relative: the owner and operator see
+bookings; a leg whose booking failed, expired, or was revoked by the pool's
+custodian (`RevokeBooking`, from its command or an application incident)
+fails with `capacity_unavailable`, unless the owner or operator replaced the
+booking with a new request naming it (`MovementBookingRequestV1::replaces`). Reports are holder-relative: the owner and operator see
 the current execution, a delayed remote observer sees coarse progress as of its
 delay, holders without a grant see nothing, and reports go only to living
 person holders. A closed execution retires once final reports are out, and at

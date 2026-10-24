@@ -10,14 +10,15 @@ use crate::model::{
     route_leg, scheduled_arrival, validate_plan, within_time_bound,
 };
 use canwu_api::{
-    BoundaryId, CanwuError, CapacityBookingRequestV1, CapacityBookingStatus, DomainRecord,
-    DomainRecordRef, DomainRecordVersionRef, DomainReferenceTarget, EntityRef, EvidenceRef,
-    Handoff, ItineraryRevision, ItineraryRevisionId, ItineraryRevisionReason, KnowledgeHolderRef,
-    LegExecutionId, LegExecutionStatus, MovementInitiative, MovementSubjectRole, PersonId,
-    ReconciliationOutcome, SagaState, SimDuration, SimTime, TransportCapacityPoolV1,
-    TransportExecution, TransportExecutionId, TransportExecutionState, allocate_capacity_bookings,
-    delivery_completion_operation_key,
+    BoundaryId, CanwuError, CapacityBookingId, CapacityBookingRequestV1, CapacityBookingStatus,
+    DomainRecord, DomainRecordRef, DomainRecordVersionRef, DomainReferenceTarget, EntityRef,
+    EvidenceRef, Handoff, ItineraryRevision, ItineraryRevisionId, ItineraryRevisionReason,
+    KnowledgeHolderRef, LegExecutionId, LegExecutionStatus, MovementInitiative,
+    MovementSubjectRole, PersonId, ReconciliationOutcome, SagaState, SimDuration, SimTime,
+    TransportCapacityPoolV1, TransportExecution, TransportExecutionId, TransportExecutionState,
+    allocate_capacity_bookings, delivery_completion_operation_key,
 };
+use std::collections::BTreeSet;
 
 /// Read access the lifecycle needs from the settlement view. Every answer is
 /// a function of current state, never of retained evidence, so a sealed run
@@ -44,6 +45,13 @@ pub(crate) enum OperationActor<'a> {
     Holder(&'a KnowledgeHolderRef),
     /// An application-reported incident citing `evidence`.
     Incident(&'a DomainRecordVersionRef),
+}
+
+/// The requested part of a [`MovementOperation::DelayLeg`].
+pub(crate) struct LegHold<'a> {
+    pub(crate) until: SimTime,
+    pub(crate) reason: &'a str,
+    pub(crate) retime_later_legs: bool,
 }
 
 fn evidence_error(error: &CanwuError) -> MovementError {
@@ -90,10 +98,11 @@ impl MovementState {
                     | MovementOperation::DelayLeg { .. }
                     | MovementOperation::Reroute { .. }
                     | MovementOperation::RecordHandoff { .. }
+                    | MovementOperation::RevokeBooking { .. }
                     | MovementOperation::Reconcile { .. }
             ) {
                 return Err(unauthorized(
-                    "an incident may only fail or delay a leg, reroute, record a handoff, or reconcile a delivery",
+                    "an incident may only fail or delay a leg, reroute, record a handoff, revoke a booking, or reconcile a delivery",
                 ));
             }
             // A superseded version would resolve only while the run retains
@@ -142,9 +151,20 @@ impl MovementState {
                 leg,
                 until,
                 reason,
+                retime_later_legs,
             } => {
                 self.authorize(*execution, actor)?;
-                self.delay_leg(*execution, *leg, *until, reason, at, scheduled)
+                self.delay_leg(
+                    *execution,
+                    *leg,
+                    &LegHold {
+                        until: *until,
+                        reason,
+                        retime_later_legs: *retime_later_legs,
+                    },
+                    at,
+                    scheduled,
+                )
             }
             MovementOperation::Reroute {
                 execution,
@@ -166,8 +186,13 @@ impl MovementState {
             }
             MovementOperation::RequestBooking(request) => {
                 self.authorize(request.booking.execution, actor)?;
-                self.request_booking(request)
+                self.request_booking(request, at)
             }
+            MovementOperation::RevokeBooking {
+                pool,
+                booking,
+                reason,
+            } => self.revoke_booking(pool, *booking, reason, actor, at),
             MovementOperation::Cancel { execution, reason } => {
                 self.authorize(*execution, actor)?;
                 if !is_label(reason, MovementLimitsV1::CURRENT.text_bytes) {
@@ -388,6 +413,7 @@ impl MovementState {
                 admitted_at: at,
                 pending_due: None,
                 hold: None,
+                schedule_shift: SimDuration::ZERO,
                 closed_at: None,
             },
         );
@@ -648,7 +674,8 @@ impl MovementState {
     }
 
     /// Departs the current leg: explicitly (a `StartLeg` operation) or at its
-    /// departure due time.
+    /// departure due time. A hold on the departure ends here, whether the
+    /// leg departs, waits for its booking window, or fails.
     pub(crate) fn depart(
         &mut self,
         execution_id: TransportExecutionId,
@@ -676,14 +703,28 @@ impl MovementState {
             return Err(MovementError::state("the named leg is not the current leg"));
         }
         let duration = planned_duration(route_leg(execution, revision, index)?);
+        self.end_hold(execution_id, leg_id, MovementLegDueKind::Departure, at)?;
+        let execution = self
+            .executions
+            .get(&execution_id)
+            .ok_or_else(|| MovementError::state("execution disappeared"))?;
         let mut waiting_until = None;
         let mut unavailable = false;
         let mut consume = Vec::new();
-        for binding in self
+        let bindings = self
             .bookings
             .values()
             .filter(|binding| binding.execution == execution_id && binding.leg == leg_id)
-        {
+            .collect::<Vec<_>>();
+        // A replaced booking no longer counts: its replacement does.
+        let replaced = bindings
+            .iter()
+            .filter_map(|binding| binding.replaces)
+            .collect::<BTreeSet<_>>();
+        for binding in bindings {
+            if replaced.contains(&binding.booking) {
+                continue;
+            }
             let booking = execution
                 .bookings
                 .iter()
@@ -695,7 +736,9 @@ impl MovementState {
                         "the leg has a capacity request that is not yet allocated",
                     ));
                 }
-                CapacityBookingStatus::Failed | CapacityBookingStatus::Expired => {
+                CapacityBookingStatus::Failed
+                | CapacityBookingStatus::Expired
+                | CapacityBookingStatus::Revoked => {
                     unavailable = true;
                 }
                 CapacityBookingStatus::Confirmed if booking.valid_from > at => {
@@ -762,7 +805,8 @@ impl MovementState {
     }
 
     /// Arrives the current departed leg: explicitly (a `CompleteLeg`
-    /// operation) or at its arrival due time.
+    /// operation) or at its arrival due time. The next leg departs no earlier
+    /// than its planned departure moved by the schedule shift.
     pub(crate) fn arrive(
         &mut self,
         execution_id: TransportExecutionId,
@@ -788,6 +832,7 @@ impl MovementState {
             .as_str()
             .to_owned();
         let settles = index + 1 == leg_count && execution.delivery_attempt.is_none();
+        self.end_hold(execution_id, leg_id, MovementLegDueKind::Arrival, at)?;
         if settles {
             self.execution_mut(execution_id)?
                 .settle_arrival(at, endpoint)?;
@@ -805,9 +850,21 @@ impl MovementState {
             .get(&execution_id)
             .ok_or_else(|| MovementError::state("execution disappeared"))?;
         let (next, revision, index) = current_leg(execution)?;
+        let shift = self
+            .order_for_execution(execution_id)
+            .map(|order| order.schedule_shift)
+            .ok_or_else(|| MovementError::state("order record disappeared"))?;
         let departure = later(
             at,
-            route_leg(execution, revision, index)?.planned_departure_at,
+            route_leg(execution, revision, index)?
+                .planned_departure_at
+                .checked_add(shift)
+                .ok_or_else(|| {
+                    MovementError::new(
+                        MovementErrorCode::LimitExceeded,
+                        "a re-timed departure exceeds the supported time bound",
+                    )
+                })?,
         );
         self.schedule(
             MovementLegDueV1 {
@@ -874,43 +931,85 @@ impl MovementState {
         self.clear_due(execution_id)
     }
 
-    /// Holds the current departed leg until `until`: the leg's arrival due
-    /// moves to `until` and the order keeps this hold in place of any
-    /// earlier one. `until` may not precede the settling boundary, which
-    /// would schedule due work in the past, nor the arrival scheduled when
-    /// the leg departed, so a hold never makes a leg faster than planned.
+    /// Holds the current leg until `until`: a departed leg's arrival due, or
+    /// the departure due of a leg that has not departed, moves to `until`,
+    /// and the order keeps this hold in place of any earlier one. `until` may
+    /// not precede the settling boundary, which would schedule due work in
+    /// the past, nor the due the hold replaced (the arrival scheduled when the
+    /// leg departed, or the departure pending when the leg was first held), so
+    /// a hold never makes a leg earlier than planned. No itinerary revision is
+    /// created. The latest hold's `retime_later_legs` decides whether the whole
+    /// time elapsed since the first bound is re-timed when the hold ends.
     fn delay_leg(
         &mut self,
         execution_id: TransportExecutionId,
         leg: LegExecutionId,
-        until: SimTime,
-        reason: &str,
+        hold: &LegHold<'_>,
         at: SimTime,
         scheduled: &mut Vec<MovementLegDueV1>,
     ) -> Result<(), MovementError> {
-        if !is_label(reason, MovementLimitsV1::CURRENT.text_bytes) {
+        if !is_label(hold.reason, MovementLimitsV1::CURRENT.text_bytes) {
             return Err(MovementError::invalid("a leg delay needs a bounded reason"));
         }
         let execution = self
             .executions
             .get(&execution_id)
             .ok_or_else(|| MovementError::new(MovementErrorCode::NotFound, "unknown execution"))?;
-        let departed = current_leg(execution).ok().filter(|(current, _, _)| {
-            *current == leg
-                && execution
-                    .legs
-                    .iter()
-                    .any(|item| item.id == leg && item.status == LegExecutionStatus::Departed)
-        });
-        let Some((_, revision, _)) = departed else {
-            return Err(MovementError::state(
-                "only the current departed leg can be delayed",
-            ));
+        let order = self
+            .order_for_execution(execution_id)
+            .ok_or_else(|| MovementError::new(MovementErrorCode::NotFound, "unknown execution"))?;
+        let current = current_leg(execution)
+            .ok()
+            .filter(|(current, _, _)| *current == leg);
+        let status = execution
+            .legs
+            .iter()
+            .find(|item| item.id == leg)
+            .map(|item| item.status);
+        let (revision, kind, scheduled_at) = match (current, status) {
+            (Some((_, revision, _)), Some(LegExecutionStatus::Departed)) => (
+                revision,
+                MovementLegDueKind::Arrival,
+                scheduled_arrival(execution, leg)?,
+            ),
+            (
+                Some((_, revision, _)),
+                Some(
+                    LegExecutionStatus::Planned
+                    | LegExecutionStatus::Booked
+                    | LegExecutionStatus::Waiting,
+                ),
+            ) => {
+                // Repeated holds of one departure keep the first bound, so
+                // they cannot drift earlier than the departure first held.
+                let first_bound = order
+                    .hold
+                    .as_ref()
+                    .filter(|earlier| {
+                        earlier.leg == leg && earlier.kind == MovementLegDueKind::Departure
+                    })
+                    .map(|earlier| earlier.scheduled_at);
+                let pending = order
+                    .pending_due
+                    .as_ref()
+                    .filter(|due| due.leg == leg && due.kind == MovementLegDueKind::Departure)
+                    .map(|due| due.due_at);
+                let Some(scheduled_at) = first_bound.or(pending) else {
+                    return Err(MovementError::state(
+                        "the current leg has no departure due to hold",
+                    ));
+                };
+                (revision, MovementLegDueKind::Departure, scheduled_at)
+            }
+            _ => {
+                return Err(MovementError::state(
+                    "only the current leg, departed or waiting to depart, can be held",
+                ));
+            }
         };
-        let scheduled_arrival_at = scheduled_arrival(execution, leg)?;
-        if until < at || until < scheduled_arrival_at {
+        if hold.until < at || hold.until < scheduled_at {
             return Err(MovementError::invalid(
-                "a delay holds a leg until no earlier than now and its scheduled arrival",
+                "a delay holds a leg until no earlier than now and the due it holds",
             ));
         }
         self.schedule(
@@ -918,18 +1017,61 @@ impl MovementState {
                 execution: execution_id,
                 revision,
                 leg,
-                kind: MovementLegDueKind::Arrival,
-                due_at: until,
+                kind,
+                due_at: hold.until,
             },
             scheduled,
         )?;
         self.order_mut(execution_id)?.hold = Some(MovementLegHoldV1 {
             leg,
-            scheduled_arrival_at,
-            until,
-            reason: reason.to_owned(),
+            kind,
+            scheduled_at,
+            until: hold.until,
+            reason: hold.reason.to_owned(),
             held_at: at,
+            retime_later_legs: hold.retime_later_legs,
         });
+        Ok(())
+    }
+
+    /// Ends the hold on `leg`'s `kind` due when that due settles at `at` or
+    /// the leg departs or arrives explicitly. A re-timing hold adds the part
+    /// of it that elapsed (from the due it replaced to `at`, at most to its
+    /// `until`) to the schedule shift, so the later legs keep their planned
+    /// spacing from the held one. Only the latest hold's `retime_later_legs`
+    /// counts: it decides the whole time elapsed since the first bound, also
+    /// for earlier holds of the same due that did not re-time.
+    fn end_hold(
+        &mut self,
+        execution_id: TransportExecutionId,
+        leg: LegExecutionId,
+        kind: MovementLegDueKind,
+        at: SimTime,
+    ) -> Result<(), MovementError> {
+        let order = self.order_mut(execution_id)?;
+        let Some(hold) = order
+            .hold
+            .take_if(|hold| hold.leg == leg && hold.kind == kind)
+        else {
+            return Ok(());
+        };
+        if hold.retime_later_legs {
+            let elapsed = at
+                .checked_sub(hold.scheduled_at)
+                .filter(|elapsed| !elapsed.is_negative())
+                .unwrap_or(SimDuration::ZERO)
+                .min(hold.extension());
+            order.schedule_shift = order
+                .schedule_shift
+                .checked_add(elapsed)
+                .filter(|shift| shift.as_minutes() <= MovementLimitsV1::CURRENT.time_bound_minutes)
+                .ok_or_else(|| {
+                    MovementError::new(
+                        MovementErrorCode::LimitExceeded,
+                        "the schedule shift exceeds the supported time bound",
+                    )
+                })?;
+        }
         Ok(())
     }
 
@@ -1026,6 +1168,11 @@ impl MovementState {
         self.execution_mut(execution_id)?
             .reroute(revision.clone(), at)?;
         self.release_leg_bookings(execution_id, |binding| binding.leg_revision == active, at)?;
+        // The new revision carries its own planned times: a hold on the
+        // superseded one and the shift it accumulated end here.
+        let order = self.order_mut(execution_id)?;
+        order.hold = None;
+        order.schedule_shift = SimDuration::ZERO;
         let execution = self
             .executions
             .get(&execution_id)
@@ -1089,7 +1236,11 @@ impl MovementState {
         Ok(())
     }
 
-    fn request_booking(&mut self, request: &MovementBookingRequestV1) -> Result<(), MovementError> {
+    fn request_booking(
+        &mut self,
+        request: &MovementBookingRequestV1,
+        at: SimTime,
+    ) -> Result<(), MovementError> {
         let limits = MovementLimitsV1::CURRENT;
         let booking = &request.booking;
         if !is_label(&request.tie_break, limits.text_bytes) {
@@ -1143,12 +1294,34 @@ impl MovementState {
                 )
             })?;
         let planned = route_leg(execution, active, leg.leg_index)?;
-        if booking.valid_from < planned.planned_departure_at
-            || booking.valid_until > planned.planned_arrival_at
+        let order = self
+            .order_for_execution(booking.execution)
+            .ok_or_else(|| MovementError::new(MovementErrorCode::NotFound, "unknown execution"))?;
+        let shift = booking_shift(
+            order,
+            execution,
+            leg.leg_index,
+            planned.planned_departure_at,
+        )?;
+        let moved = |time: SimTime| {
+            time.checked_add(shift)
+                .filter(|time| within_time_bound(*time))
+                .ok_or_else(|| {
+                    MovementError::new(
+                        MovementErrorCode::LimitExceeded,
+                        "a re-timed booking window exceeds the supported time bound",
+                    )
+                })
+        };
+        if booking.valid_from < moved(planned.planned_departure_at)?
+            || booking.valid_until > moved(planned.planned_arrival_at)?
         {
             return Err(MovementError::invalid(
-                "a booking window must lie inside its leg's planned window",
+                "a booking window must lie inside its leg's planned window, moved by the holds that re-time it",
             ));
+        }
+        if let Some(original) = request.replaces {
+            self.replace_booking(booking.execution, request.leg, original, at)?;
         }
         self.execution_mut(booking.execution)?
             .request_booking(booking.clone())?;
@@ -1166,8 +1339,125 @@ impl MovementState {
                 tie_break: request.tie_break.clone(),
                 admitted_sequence: sequence,
                 allocation: None,
+                replaces: request.replaces,
             },
         );
+        Ok(())
+    }
+
+    /// Lets a new booking of `leg` take the place of `original`, a booking of
+    /// the same leg that no other booking replaced: a requested original is
+    /// cancelled and a confirmed one released; a failed, expired, or revoked
+    /// one is left as it is. The original then no longer counts when the leg
+    /// departs.
+    fn replace_booking(
+        &mut self,
+        execution_id: TransportExecutionId,
+        leg: LegExecutionId,
+        original: CapacityBookingId,
+        at: SimTime,
+    ) -> Result<(), MovementError> {
+        let binding = self
+            .bookings
+            .get(&original)
+            .filter(|binding| binding.execution == execution_id && binding.leg == leg)
+            .ok_or_else(|| {
+                MovementError::invalid("a replacement names an earlier booking of the same leg")
+            })?;
+        if self
+            .bookings
+            .values()
+            .any(|other| other.replaces == Some(original))
+        {
+            return Err(MovementError::new(
+                MovementErrorCode::Conflict,
+                "the booking is already replaced",
+            ));
+        }
+        let pool = binding.pool.clone();
+        let booking = self
+            .booking_of(binding)
+            .ok_or_else(|| MovementError::state("booking binding has no booking"))?;
+        let target = match booking.status {
+            CapacityBookingStatus::Requested => Some(CapacityBookingStatus::Cancelled),
+            CapacityBookingStatus::Confirmed => Some(CapacityBookingStatus::Released),
+            CapacityBookingStatus::Failed
+            | CapacityBookingStatus::Expired
+            | CapacityBookingStatus::Revoked => None,
+            CapacityBookingStatus::Consumed
+            | CapacityBookingStatus::Released
+            | CapacityBookingStatus::Cancelled => {
+                return Err(MovementError::state(
+                    "only a requested, confirmed, failed, expired, or revoked booking can be replaced",
+                ));
+            }
+        };
+        let quantity = booking.quantity;
+        if let Some(target) = target {
+            self.transition_booking(execution_id, original, &pool, quantity, target, at)?;
+        }
+        Ok(())
+    }
+
+    /// Revokes a confirmed booking on `pool_id` for the pool's custodian or
+    /// an application incident: the booking keeps the reason, its quantity
+    /// returns to the pool, and its leg fails at departure unless the booking
+    /// is replaced first.
+    fn revoke_booking(
+        &mut self,
+        pool_id: &str,
+        booking_id: CapacityBookingId,
+        reason: &str,
+        actor: &OperationActor<'_>,
+        at: SimTime,
+    ) -> Result<(), MovementError> {
+        let pool = self.pools.get(pool_id).ok_or_else(|| {
+            MovementError::new(MovementErrorCode::NotFound, "unknown capacity pool")
+        })?;
+        if let OperationActor::Holder(holder) = actor
+            && pool.custodian != **holder
+        {
+            return Err(unauthorized(
+                "only the pool custodian may revoke its bookings",
+            ));
+        }
+        if !is_label(reason, MovementLimitsV1::CURRENT.text_bytes) {
+            return Err(MovementError::invalid(
+                "a revocation needs a bounded reason",
+            ));
+        }
+        let execution_id = self
+            .bookings
+            .get(&booking_id)
+            .filter(|binding| binding.pool == pool_id)
+            .map(|binding| binding.execution)
+            .ok_or_else(|| {
+                MovementError::new(
+                    MovementErrorCode::NotFound,
+                    "the booking is not on this pool",
+                )
+            })?;
+        let booking = self
+            .execution_mut(execution_id)?
+            .bookings
+            .iter_mut()
+            .find(|booking| booking.id == booking_id)
+            .ok_or_else(|| MovementError::state("booking binding has no booking"))?;
+        if booking.status != CapacityBookingStatus::Confirmed {
+            return Err(MovementError::state(
+                "only a confirmed booking can be revoked",
+            ));
+        }
+        let quantity = booking.quantity;
+        booking.revoke(at, reason.to_owned())?;
+        self.pools
+            .get_mut(pool_id)
+            .ok_or_else(|| MovementError::state("pool disappeared"))?
+            .apply_booking_transition(
+                quantity,
+                CapacityBookingStatus::Confirmed,
+                CapacityBookingStatus::Revoked,
+            )?;
         Ok(())
     }
 
@@ -1473,6 +1763,49 @@ fn current_leg(
         })
         .map(|leg| (leg.id, revision, leg.leg_index))
         .ok_or_else(|| MovementError::state("execution has no current leg"))
+}
+
+/// How far a booking requested now for the leg at `leg_index` of the active
+/// revision, planned to depart at `planned_departure_at`, moves that leg's
+/// planned window: the order's schedule shift, plus the pending hold's
+/// extension when a re-timing hold of an earlier leg re-times it. A held
+/// departure moves its own leg's window so that it opens at the hold's
+/// `until`, which also covers lateness absorbed before the hold.
+fn booking_shift(
+    order: &MovementOrderRecordV1,
+    execution: &TransportExecution,
+    leg_index: usize,
+    planned_departure_at: SimTime,
+) -> Result<SimDuration, MovementError> {
+    let Some(hold) = &order.hold else {
+        return Ok(order.schedule_shift);
+    };
+    let held_index = execution
+        .legs
+        .iter()
+        .find(|leg| leg.id == hold.leg)
+        .map(|leg| leg.leg_index)
+        .ok_or_else(|| MovementError::state("held leg disappeared"))?;
+    if hold.kind == MovementLegDueKind::Departure && leg_index == held_index {
+        return Ok(hold
+            .until
+            .checked_sub(planned_departure_at)
+            .filter(|moved| !moved.is_negative())
+            .unwrap_or(SimDuration::ZERO)
+            .max(order.schedule_shift));
+    }
+    if !(hold.retime_later_legs && leg_index > held_index) {
+        return Ok(order.schedule_shift);
+    }
+    order
+        .schedule_shift
+        .checked_add(hold.extension())
+        .ok_or_else(|| {
+            MovementError::new(
+                MovementErrorCode::LimitExceeded,
+                "a re-timed booking window exceeds the supported time bound",
+            )
+        })
 }
 
 fn observer_grants(

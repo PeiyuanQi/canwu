@@ -235,6 +235,7 @@ fn booking(id: u64, execution: u64, priority: i32) -> MovementOperation {
         pool: POOL.to_owned(),
         leg: LegExecutionId(1),
         tie_break: format!("execution-{execution}"),
+        replaces: None,
     })
 }
 

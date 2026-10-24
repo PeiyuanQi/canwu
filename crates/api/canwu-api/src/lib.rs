@@ -159,13 +159,13 @@ pub use canwu_time::{SimDuration, SimTime};
 pub use canwu_transport::{
     BookingAllocationV1, CAPACITY_BOOKING_ALLOCATION_DIGEST_DOMAIN, CapacityAllocationFailureV1,
     CapacityBooking, CapacityBookingAllocationEvidenceV1, CapacityBookingId,
-    CapacityBookingRequestV1, CapacityBookingStatus, DeliveryCompletionRequest, DeliverySaga,
-    Handoff, HandoffId, HandoffKind, ItineraryRevision, ItineraryRevisionId,
-    ItineraryRevisionReason, LegExecution, LegExecutionId, LegExecutionStatus, MovementInitiative,
-    MovementOrder, MovementOrderError, MovementOrderId, MovementSubject, MovementSubjectRole,
-    ReconciliationOutcome, SagaState, TRANSPORT_SEMANTIC_VERSION, TransportCapacityPoolV1,
-    TransportError, TransportExecution, TransportExecutionId, TransportExecutionState,
-    allocate_capacity_bookings, capacity_booking_allocation_operation_key,
+    CapacityBookingRequestV1, CapacityBookingRevocationV1, CapacityBookingStatus,
+    DeliveryCompletionRequest, DeliverySaga, Handoff, HandoffId, HandoffKind, ItineraryRevision,
+    ItineraryRevisionId, ItineraryRevisionReason, LegExecution, LegExecutionId, LegExecutionStatus,
+    MovementInitiative, MovementOrder, MovementOrderError, MovementOrderId, MovementSubject,
+    MovementSubjectRole, ReconciliationOutcome, SagaState, TRANSPORT_SEMANTIC_VERSION,
+    TransportCapacityPoolV1, TransportError, TransportExecution, TransportExecutionId,
+    TransportExecutionState, allocate_capacity_bookings, capacity_booking_allocation_operation_key,
     delivery_completion_operation_key,
 };
 use serde::{Deserialize, Serialize};
