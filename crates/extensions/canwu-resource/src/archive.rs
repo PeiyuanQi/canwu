@@ -77,6 +77,34 @@ pub enum ResourceTerminalArchivePayloadV1 {
     ArchiveMaintenanceReceipt(ResourceArchiveMaintenanceReceiptV1),
 }
 
+impl ResourceTerminalArchivePayloadV1 {
+    /// The exact record versions this terminal record cites, which its
+    /// archive entry carries as `exact_evidence`: an outcome's and a terminal
+    /// transfer's exact evidence, a consumption's consumer evidence, a loss's
+    /// cause when it is a record version, and an external participant's
+    /// coordinator source. The hot terminal bucket that holds the record
+    /// declares them identity-only until the record leaves for the archive.
+    #[must_use]
+    pub fn exact_evidence(&self) -> Vec<DomainRecordVersionRef> {
+        match self {
+            Self::Outcome(value) => value.exact_evidence.clone(),
+            Self::Consumption(value) => vec![value.consumer_evidence.clone()],
+            Self::Loss(value) => match &value.cause {
+                canwu_api::EvidenceRef::DomainRecordVersion(version) => vec![version.clone()],
+                _ => Vec::new(),
+            },
+            Self::Transfer(value) => value.exact_evidence.clone(),
+            Self::ExternalCompletionParticipant(value) => vec![value.coordinator_source.clone()],
+            Self::Demand(_)
+            | Self::Reservation(_)
+            | Self::AllocationLeg(_)
+            | Self::Fulfillment(_)
+            | Self::LeaseReceipt(_)
+            | Self::ArchiveMaintenanceReceipt(_) => Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceTerminalArchiveRecordV1 {
     pub key: ResourceTerminalRecordKeyV1,
@@ -1072,264 +1100,235 @@ impl ResourceState {
         key: &ResourceTerminalRecordKeyV1,
         archive_sequence: u64,
     ) -> Result<ResourceTerminalArchiveRecordV1, ResourceError> {
-        let (operation_key, quantity, remainder, evidence, digest, record_sequence, payload) =
-            match key {
-                ResourceTerminalRecordKeyV1::Outcome(operation_key) => {
-                    let value = self.outcomes.get(operation_key).ok_or_else(|| {
+        let (operation_key, quantity, remainder, digest, record_sequence, payload) = match key {
+            ResourceTerminalRecordKeyV1::Outcome(operation_key) => {
+                let value = self.outcomes.get(operation_key).ok_or_else(|| {
+                    ResourceError::NotFound("terminal resource outcome is unavailable".to_owned())
+                })?;
+                if !matches!(
+                    value.status,
+                    ResourceOperationStatus::Applied | ResourceOperationStatus::Rejected
+                ) {
+                    return Err(ResourceError::InvalidLifecycle(
+                        "resource outcome is not terminal".to_owned(),
+                    ));
+                }
+                (
+                    value.operation_key.clone(),
+                    value.quantity,
+                    value.remainder,
+                    value.semantic_digest.clone(),
+                    value.sequence,
+                    ResourceTerminalArchivePayloadV1::Outcome(value.clone()),
+                )
+            }
+            ResourceTerminalRecordKeyV1::Demand(id) => {
+                let value = self.demands.get(id).ok_or_else(|| {
+                    ResourceError::NotFound("terminal resource demand is unavailable".to_owned())
+                })?;
+                if matches!(
+                    value.status,
+                    crate::DemandStatus::Open | crate::DemandStatus::PartiallyFulfilled
+                ) {
+                    return Err(ResourceError::InvalidLifecycle(
+                        "resource demand is not terminal".to_owned(),
+                    ));
+                }
+                let digest = canonical_digest("canwu.resource.demand.v1", value)?;
+                (
+                    ResourceOperationKey::new(format!("resource:demand-terminal:{digest}"))?,
+                    value.fulfilled,
+                    value.remainder(),
+                    digest,
+                    archive_sequence,
+                    ResourceTerminalArchivePayloadV1::Demand(value.clone()),
+                )
+            }
+            ResourceTerminalRecordKeyV1::Reservation(id) => {
+                let value = self.reservations.get(id).ok_or_else(|| {
+                    ResourceError::NotFound(
+                        "terminal resource reservation is unavailable".to_owned(),
+                    )
+                })?;
+                if value.status == crate::ReservationStatus::Active {
+                    return Err(ResourceError::InvalidLifecycle(
+                        "resource reservation is not terminal".to_owned(),
+                    ));
+                }
+                (
+                    value.operation_key.clone(),
+                    value.quantity,
+                    0,
+                    canonical_digest("canwu.resource.reservation.v1", value)?,
+                    archive_sequence,
+                    ResourceTerminalArchivePayloadV1::Reservation(value.clone()),
+                )
+            }
+            ResourceTerminalRecordKeyV1::AllocationLeg(id) => {
+                let value = self.allocation_legs.get(id).ok_or_else(|| {
+                    ResourceError::NotFound(
+                        "terminal resource allocation leg is unavailable".to_owned(),
+                    )
+                })?;
+                if value.status == crate::AllocationLegStatus::Reserved {
+                    return Err(ResourceError::InvalidLifecycle(
+                        "resource allocation leg is not terminal".to_owned(),
+                    ));
+                }
+                (
+                    value.operation_key.clone(),
+                    value.quantity,
+                    0,
+                    value.semantic_digest.clone(),
+                    archive_sequence,
+                    ResourceTerminalArchivePayloadV1::AllocationLeg(value.clone()),
+                )
+            }
+            ResourceTerminalRecordKeyV1::Consumption(id) => {
+                let value = self.consumptions.get(id).ok_or_else(|| {
+                    ResourceError::NotFound("terminal consumption is unavailable".to_owned())
+                })?;
+                if value.status != ConsumptionStatus::Settled {
+                    return Err(ResourceError::InvalidLifecycle(
+                        "resource consumption is not terminal".to_owned(),
+                    ));
+                }
+                (
+                    value.operation_key.clone(),
+                    value.quantity,
+                    0,
+                    value.semantic_digest.clone(),
+                    value.terminal_sequence,
+                    ResourceTerminalArchivePayloadV1::Consumption(value.clone()),
+                )
+            }
+            ResourceTerminalRecordKeyV1::Fulfillment(id) => {
+                let value = self.fulfillments.get(id).ok_or_else(|| {
+                    ResourceError::NotFound("terminal fulfillment is unavailable".to_owned())
+                })?;
+                if !matches!(
+                    value.status,
+                    FulfillmentStatus::Partial
+                        | FulfillmentStatus::Complete
+                        | FulfillmentStatus::RejectedMinimum
+                        | FulfillmentStatus::Cancelled
+                        | FulfillmentStatus::Expired
+                ) {
+                    return Err(ResourceError::InvalidLifecycle(
+                        "resource fulfillment is not terminal".to_owned(),
+                    ));
+                }
+                (
+                    value.operation_key.clone(),
+                    value.consumed_quantity,
+                    value.remainder,
+                    value.semantic_digest.clone(),
+                    value.terminal_sequence,
+                    ResourceTerminalArchivePayloadV1::Fulfillment(value.clone()),
+                )
+            }
+            ResourceTerminalRecordKeyV1::Loss(id) => {
+                let value = self.losses.get(id).ok_or_else(|| {
+                    ResourceError::NotFound("terminal loss is unavailable".to_owned())
+                })?;
+                (
+                    value.operation_key.clone(),
+                    value.quantity,
+                    0,
+                    canonical_digest("canwu.resource.loss.v1", value)?,
+                    value.terminal_sequence,
+                    ResourceTerminalArchivePayloadV1::Loss(value.clone()),
+                )
+            }
+            ResourceTerminalRecordKeyV1::Transfer(id) => {
+                let value = self.transfers.get(id).ok_or_else(|| {
+                    ResourceError::NotFound("terminal transfer is unavailable".to_owned())
+                })?;
+                if !matches!(
+                    value.state,
+                    ResourceTransferState::Accepted
+                        | ResourceTransferState::Lost
+                        | ResourceTransferState::ExternalOutflowSettled
+                        | ResourceTransferState::Cancelled
+                        | ResourceTransferState::Returned
+                ) {
+                    return Err(ResourceError::InvalidLifecycle(
+                        "resource transfer is not terminal".to_owned(),
+                    ));
+                }
+                (
+                    value.operation_key.clone(),
+                    value.quantity,
+                    0,
+                    canonical_digest("canwu.resource.transfer.v1", value)?,
+                    value.terminal_sequence,
+                    ResourceTerminalArchivePayloadV1::Transfer(value.clone()),
+                )
+            }
+            ResourceTerminalRecordKeyV1::ExternalCompletionParticipant(acquisition) => {
+                let value = self
+                    .external_completion_participants
+                    .terminal_grants
+                    .get(acquisition)
+                    .ok_or_else(|| {
                         ResourceError::NotFound(
-                            "terminal resource outcome is unavailable".to_owned(),
+                            "terminal external completion participant is unavailable".to_owned(),
                         )
                     })?;
-                    if !matches!(
-                        value.status,
-                        ResourceOperationStatus::Applied | ResourceOperationStatus::Rejected
-                    ) {
-                        return Err(ResourceError::InvalidLifecycle(
-                            "resource outcome is not terminal".to_owned(),
-                        ));
-                    }
-                    (
-                        value.operation_key.clone(),
-                        value.quantity,
-                        value.remainder,
-                        value.exact_evidence.clone(),
-                        value.semantic_digest.clone(),
-                        value.sequence,
-                        ResourceTerminalArchivePayloadV1::Outcome(value.clone()),
-                    )
+                if value.grant.state != crate::CompletionGrantStateV1::Completed {
+                    return Err(ResourceError::InvalidLifecycle(
+                        "external completion participant archive candidate is not completed"
+                            .to_owned(),
+                    ));
                 }
-                ResourceTerminalRecordKeyV1::Demand(id) => {
-                    let value = self.demands.get(id).ok_or_else(|| {
+                (
+                    value.grant.operation_key.clone(),
+                    value.grant.reserved_units,
+                    0,
+                    canonical_digest("canwu.resource.external-completion-participant.v1", value)?,
+                    archive_sequence,
+                    ResourceTerminalArchivePayloadV1::ExternalCompletionParticipant(value.clone()),
+                )
+            }
+            ResourceTerminalRecordKeyV1::LeaseReceipt(sequence) => {
+                let value = self
+                    .completion_leases
+                    .receipts
+                    .get(sequence)
+                    .ok_or_else(|| {
                         ResourceError::NotFound(
-                            "terminal resource demand is unavailable".to_owned(),
+                            "terminal completion receipt is unavailable".to_owned(),
                         )
                     })?;
-                    if matches!(
-                        value.status,
-                        crate::DemandStatus::Open | crate::DemandStatus::PartiallyFulfilled
-                    ) {
-                        return Err(ResourceError::InvalidLifecycle(
-                            "resource demand is not terminal".to_owned(),
-                        ));
-                    }
-                    let digest = canonical_digest("canwu.resource.demand.v1", value)?;
-                    (
-                        ResourceOperationKey::new(format!("resource:demand-terminal:{digest}"))?,
-                        value.fulfilled,
-                        value.remainder(),
-                        Vec::new(),
-                        digest,
-                        archive_sequence,
-                        ResourceTerminalArchivePayloadV1::Demand(value.clone()),
-                    )
-                }
-                ResourceTerminalRecordKeyV1::Reservation(id) => {
-                    let value = self.reservations.get(id).ok_or_else(|| {
+                (
+                    value.operation_key.clone(),
+                    value.reserved_units,
+                    0,
+                    value.semantic_digest.clone(),
+                    *sequence,
+                    ResourceTerminalArchivePayloadV1::LeaseReceipt(value.clone()),
+                )
+            }
+            ResourceTerminalRecordKeyV1::ArchiveMaintenanceReceipt(sequence) => {
+                let value = self
+                    .archive_maintenance_receipts
+                    .get(sequence)
+                    .ok_or_else(|| {
                         ResourceError::NotFound(
-                            "terminal resource reservation is unavailable".to_owned(),
-                        )
-                    })?;
-                    if value.status == crate::ReservationStatus::Active {
-                        return Err(ResourceError::InvalidLifecycle(
-                            "resource reservation is not terminal".to_owned(),
-                        ));
-                    }
-                    (
-                        value.operation_key.clone(),
-                        value.quantity,
-                        0,
-                        Vec::new(),
-                        canonical_digest("canwu.resource.reservation.v1", value)?,
-                        archive_sequence,
-                        ResourceTerminalArchivePayloadV1::Reservation(value.clone()),
-                    )
-                }
-                ResourceTerminalRecordKeyV1::AllocationLeg(id) => {
-                    let value = self.allocation_legs.get(id).ok_or_else(|| {
-                        ResourceError::NotFound(
-                            "terminal resource allocation leg is unavailable".to_owned(),
-                        )
-                    })?;
-                    if value.status == crate::AllocationLegStatus::Reserved {
-                        return Err(ResourceError::InvalidLifecycle(
-                            "resource allocation leg is not terminal".to_owned(),
-                        ));
-                    }
-                    (
-                        value.operation_key.clone(),
-                        value.quantity,
-                        0,
-                        Vec::new(),
-                        value.semantic_digest.clone(),
-                        archive_sequence,
-                        ResourceTerminalArchivePayloadV1::AllocationLeg(value.clone()),
-                    )
-                }
-                ResourceTerminalRecordKeyV1::Consumption(id) => {
-                    let value = self.consumptions.get(id).ok_or_else(|| {
-                        ResourceError::NotFound("terminal consumption is unavailable".to_owned())
-                    })?;
-                    if value.status != ConsumptionStatus::Settled {
-                        return Err(ResourceError::InvalidLifecycle(
-                            "resource consumption is not terminal".to_owned(),
-                        ));
-                    }
-                    (
-                        value.operation_key.clone(),
-                        value.quantity,
-                        0,
-                        vec![value.consumer_evidence.clone()],
-                        value.semantic_digest.clone(),
-                        value.terminal_sequence,
-                        ResourceTerminalArchivePayloadV1::Consumption(value.clone()),
-                    )
-                }
-                ResourceTerminalRecordKeyV1::Fulfillment(id) => {
-                    let value = self.fulfillments.get(id).ok_or_else(|| {
-                        ResourceError::NotFound("terminal fulfillment is unavailable".to_owned())
-                    })?;
-                    if !matches!(
-                        value.status,
-                        FulfillmentStatus::Partial
-                            | FulfillmentStatus::Complete
-                            | FulfillmentStatus::RejectedMinimum
-                            | FulfillmentStatus::Cancelled
-                            | FulfillmentStatus::Expired
-                    ) {
-                        return Err(ResourceError::InvalidLifecycle(
-                            "resource fulfillment is not terminal".to_owned(),
-                        ));
-                    }
-                    (
-                        value.operation_key.clone(),
-                        value.consumed_quantity,
-                        value.remainder,
-                        Vec::new(),
-                        value.semantic_digest.clone(),
-                        value.terminal_sequence,
-                        ResourceTerminalArchivePayloadV1::Fulfillment(value.clone()),
-                    )
-                }
-                ResourceTerminalRecordKeyV1::Loss(id) => {
-                    let value = self.losses.get(id).ok_or_else(|| {
-                        ResourceError::NotFound("terminal loss is unavailable".to_owned())
-                    })?;
-                    (
-                        value.operation_key.clone(),
-                        value.quantity,
-                        0,
-                        match &value.cause {
-                            canwu_api::EvidenceRef::DomainRecordVersion(version) => {
-                                vec![version.clone()]
-                            }
-                            _ => Vec::new(),
-                        },
-                        canonical_digest("canwu.resource.loss.v1", value)?,
-                        value.terminal_sequence,
-                        ResourceTerminalArchivePayloadV1::Loss(value.clone()),
-                    )
-                }
-                ResourceTerminalRecordKeyV1::Transfer(id) => {
-                    let value = self.transfers.get(id).ok_or_else(|| {
-                        ResourceError::NotFound("terminal transfer is unavailable".to_owned())
-                    })?;
-                    if !matches!(
-                        value.state,
-                        ResourceTransferState::Accepted
-                            | ResourceTransferState::Lost
-                            | ResourceTransferState::ExternalOutflowSettled
-                            | ResourceTransferState::Cancelled
-                            | ResourceTransferState::Returned
-                    ) {
-                        return Err(ResourceError::InvalidLifecycle(
-                            "resource transfer is not terminal".to_owned(),
-                        ));
-                    }
-                    (
-                        value.operation_key.clone(),
-                        value.quantity,
-                        0,
-                        value.exact_evidence.clone(),
-                        canonical_digest("canwu.resource.transfer.v1", value)?,
-                        value.terminal_sequence,
-                        ResourceTerminalArchivePayloadV1::Transfer(value.clone()),
-                    )
-                }
-                ResourceTerminalRecordKeyV1::ExternalCompletionParticipant(acquisition) => {
-                    let value = self
-                        .external_completion_participants
-                        .terminal_grants
-                        .get(acquisition)
-                        .ok_or_else(|| {
-                            ResourceError::NotFound(
-                                "terminal external completion participant is unavailable"
-                                    .to_owned(),
-                            )
-                        })?;
-                    if value.grant.state != crate::CompletionGrantStateV1::Completed {
-                        return Err(ResourceError::InvalidLifecycle(
-                            "external completion participant archive candidate is not completed"
+                            "terminal resource archive maintenance receipt is unavailable"
                                 .to_owned(),
-                        ));
-                    }
-                    (
-                        value.grant.operation_key.clone(),
-                        value.grant.reserved_units,
-                        0,
-                        vec![value.coordinator_source.clone()],
-                        canonical_digest(
-                            "canwu.resource.external-completion-participant.v1",
-                            value,
-                        )?,
-                        archive_sequence,
-                        ResourceTerminalArchivePayloadV1::ExternalCompletionParticipant(
-                            value.clone(),
-                        ),
-                    )
-                }
-                ResourceTerminalRecordKeyV1::LeaseReceipt(sequence) => {
-                    let value = self
-                        .completion_leases
-                        .receipts
-                        .get(sequence)
-                        .ok_or_else(|| {
-                            ResourceError::NotFound(
-                                "terminal completion receipt is unavailable".to_owned(),
-                            )
-                        })?;
-                    (
-                        value.operation_key.clone(),
-                        value.reserved_units,
-                        0,
-                        Vec::new(),
-                        value.semantic_digest.clone(),
-                        *sequence,
-                        ResourceTerminalArchivePayloadV1::LeaseReceipt(value.clone()),
-                    )
-                }
-                ResourceTerminalRecordKeyV1::ArchiveMaintenanceReceipt(sequence) => {
-                    let value =
-                        self.archive_maintenance_receipts
-                            .get(sequence)
-                            .ok_or_else(|| {
-                                ResourceError::NotFound(
-                                    "terminal resource archive maintenance receipt is unavailable"
-                                        .to_owned(),
-                                )
-                            })?;
-                    (
-                        ResourceOperationKey::new(format!(
-                            "resource:archive-maintenance:{sequence}"
-                        ))?,
-                        u64::from(value.archived_records),
-                        0,
-                        Vec::new(),
-                        value.semantic_digest.clone(),
-                        *sequence,
-                        ResourceTerminalArchivePayloadV1::ArchiveMaintenanceReceipt(value.clone()),
-                    )
-                }
-            };
+                        )
+                    })?;
+                (
+                    ResourceOperationKey::new(format!("resource:archive-maintenance:{sequence}"))?,
+                    u64::from(value.archived_records),
+                    0,
+                    value.semantic_digest.clone(),
+                    *sequence,
+                    ResourceTerminalArchivePayloadV1::ArchiveMaintenanceReceipt(value.clone()),
+                )
+            }
+        };
         if !matches!(
             key,
             ResourceTerminalRecordKeyV1::LeaseReceipt(_)
@@ -1346,7 +1345,8 @@ impl ResourceState {
             operation_key,
             quantity,
             remainder,
-            exact_evidence: evidence,
+            // The evidence the bucket that holds the record declares.
+            exact_evidence: payload.exact_evidence(),
             semantic_digest: digest,
             terminal_sequence: archive_sequence,
             payload,

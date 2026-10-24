@@ -46,6 +46,11 @@ and active. Trial or committed adoption must likewise bind current active
 implementations; an older exact version remains historical evidence, not fresh
 authorization to install, recommit, or spread a practice.
 
+A record's holder, operator, owner, adopter, and site are its `core`
+references. One that is a domain entity is referenced as its record
+(`DomainReferenceTarget::Domain`) under that role, since 0.20.0, as the engine
+requires of a domain entity; a core entity stays a core target.
+
 Attempts and production runs must stay inside their authorized intent window.
 Observations cannot predate their attempts, and assessments cannot predate the
 claim or evidence they assess. Restore validation recomputes these causal cuts

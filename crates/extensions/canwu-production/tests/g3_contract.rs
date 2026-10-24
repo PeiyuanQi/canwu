@@ -5769,6 +5769,729 @@ fn live_completion_settles_output() {
     );
 }
 
+/// Downstream gap G-77: the outcomes of a live completion cite production
+/// versions the production root supersedes within the instant (the output
+/// credit cites the version its dispatch pinned). A continuation checkpoint
+/// taken at any boundary of the completion, while those outcomes are hot,
+/// restores, validates, and continues exactly as the run it was taken from,
+/// which seals after every boundary.
+#[test]
+fn continuation_checkpoints_through_a_live_completion_restore_and_continue_exactly() {
+    let LiveCompletionFixture {
+        production,
+        resource,
+        holder,
+        execution,
+        locked_production,
+        ..
+    } = live_completion_fixture();
+    let mut scenario = scenario_with_production(production);
+    scenario
+        .domain_records
+        .extend(resource.into_records().expect("resource output root"));
+    let production_plugin = ProductionPlugin;
+    let resource_plugin = ResourcePlugin::default();
+    let plugins: [&dyn canwu_api::SimulationPlugin; 2] = [&production_plugin, &resource_plugin];
+    let mut canwu =
+        Canwu::new_with_plugins(216, scenario, &plugins).expect("live-completion runtime");
+    let later = SimTime::from_minutes(30);
+    complete_live_execution(&mut canwu, &holder, &execution, later);
+    let mut run = canwu.into_compacted().expect("compact run");
+    // The completion, its output, the participant's completion, and the
+    // lease's release all settle at `later`.
+    let steps = [later; 12];
+    let mut cuts = Vec::new();
+    for (index, at) in steps.iter().enumerate() {
+        run.settle_boundary(BoundaryRequest::at(*at))
+            .unwrap_or_else(|error| panic!("boundary {index}: {error}"));
+        run.seal_evidence().expect("the settled history seals");
+        cuts.push(
+            run.continuation_checkpoint()
+                .unwrap_or_else(|error| panic!("checkpoint {index}: {error}")),
+        );
+    }
+    let settled = compact_production_state(&run);
+    let output_source = settled.executions[&execution]
+        .output_source
+        .clone()
+        .expect("settled output pins its production source");
+    assert!(
+        output_source.record == locked_production.record
+            && run
+                .current_domain_record_version(&output_source.record)
+                .expect("production version query")
+                .is_some_and(|current| current.version > output_source.version),
+        "the credit cites a production version the root has superseded"
+    );
+    let end = (
+        run.checkpoint_hash(),
+        run.authoritative_state_hash().expect("state hash"),
+    );
+    for (index, (checkpoint, hash)) in cuts.into_iter().enumerate() {
+        let mut restored = canwu_api::CompactedCanwu::from_continuation_checkpoint_verified(
+            checkpoint, &hash, &plugins,
+        )
+        .unwrap_or_else(|error| panic!("checkpoint {index} restores: {error}"));
+        canwu_resource::validate_resource_runtime(&restored)
+            .unwrap_or_else(|error| panic!("checkpoint {index} validates: {error}"));
+        for at in &steps[index + 1..] {
+            restored
+                .settle_boundary(BoundaryRequest::at(*at))
+                .unwrap_or_else(|error| panic!("checkpoint {index} continues: {error}"));
+            restored.seal_evidence().expect("the restored run seals");
+        }
+        assert_eq!(
+            (
+                restored.checkpoint_hash(),
+                restored.authoritative_state_hash().expect("state hash"),
+            ),
+            end,
+            "the run restored from checkpoint {index} continues exactly"
+        );
+    }
+}
+
+/// Downstream gap G-75: a completion lease reserves its holder's report, and
+/// the holder's report grant here has no observation head, so there is
+/// nothing to report from. The participant archives without the report once
+/// it completes, and the report system neither keeps the grant dirty nor
+/// wakes itself: later boundaries leave the resource root as it is.
+#[test]
+fn a_completion_whose_report_grant_has_no_head_archives_its_participant_and_stays_quiet() {
+    let LiveCompletionFixture {
+        production,
+        resource,
+        holder,
+        execution,
+        acquisition,
+        ..
+    } = live_completion_fixture();
+    assert!(
+        resource.observation_heads.is_empty()
+            && resource
+                .completion_report_reservations
+                .contains_key(&acquisition),
+        "the lease reserves a report on a grant with no observation head"
+    );
+    let mut scenario = scenario_with_production(production);
+    scenario
+        .domain_records
+        .extend(resource.into_records().expect("resource output root"));
+    let production_plugin = ProductionPlugin;
+    let resource_plugin = ResourcePlugin::default();
+    let plugins: [&dyn canwu_api::SimulationPlugin; 2] = [&production_plugin, &resource_plugin];
+    let mut canwu =
+        Canwu::new_with_plugins(216, scenario, &plugins).expect("live-completion runtime");
+    let later = SimTime::from_minutes(30);
+    complete_live_execution(&mut canwu, &holder, &execution, later);
+    for boundary in 0..12 {
+        canwu
+            .settle_boundary(BoundaryRequest::at(later))
+            .unwrap_or_else(|error| panic!("live completion boundary {boundary}: {error}"));
+    }
+    let (record, resources) = canwu_resource::resource_state(&canwu)
+        .expect("resource state query")
+        .expect("resource state");
+    assert_eq!(
+        resources
+            .external_completion_participants
+            .participant(&acquisition)
+            .map(|participant| participant.grant.state),
+        Some(CompletionGrantStateV1::Completed)
+    );
+    assert!(
+        resources.completion_report_reservations.is_empty()
+            && resources.completion_report_ready.is_empty()
+            && resources.report_dirty_grants.is_empty(),
+        "the reserved report is given up and the grant is not left dirty"
+    );
+    assert!(
+        resources
+            .terminal_archive_candidates
+            .values()
+            .any(|key| *key
+                == canwu_resource::ResourceTerminalRecordKeyV1::ExternalCompletionParticipant(
+                    acquisition.clone()
+                )),
+        "the completed participant is an archive candidate"
+    );
+    assert!(
+        !canwu.pending_ingress().any(|ingress| matches!(
+            &ingress.payload,
+            canwu_api::IngressPayload::Plugin { packet_type, .. }
+                if packet_type == canwu_resource::RESOURCE_REPORT_WAKE_INGRESS
+        )),
+        "no report wake is queued"
+    );
+    // A quiet hour and a day later rewrite nothing.
+    for minutes in [90, 30 + 24 * 60] {
+        canwu
+            .settle_boundary(BoundaryRequest::at(SimTime::from_minutes(minutes)))
+            .expect("a later boundary settles");
+    }
+    assert_eq!(
+        canwu
+            .domain_record(&record.reference)
+            .expect("resource live root")
+            .version,
+        record.version,
+        "later boundaries leave the resource root as it is"
+    );
+}
+
+/// The canonical cross-plugin completion coordinator, driven one step per
+/// boundary by live ingress on a compact run, with a provider-recorded
+/// observation head among the steps (downstream gap G-77).
+struct ParticipantSteps {
+    holder: KnowledgeHolderRef,
+    recipe: CompletionCapacityRecipeV1,
+    eligibility: EligibilityEnvelopeV1,
+    acquisition: CompletionLeaseAcquisitionId,
+    operation_key: ResourceOperationKey,
+    production_grant: CompletionCapacityGrantId,
+    resource_grant: CompletionCapacityGrantId,
+    report_grant: ResourceReportGrantId,
+}
+
+impl ParticipantSteps {
+    /// Steps the run settles: the request command and its admission, the
+    /// observation, the coordinator's nine steps, and three quiet ones.
+    const COUNT: usize = 15;
+
+    fn production_source(run: &canwu_api::CompactedCanwu) -> DomainRecordVersionRef {
+        run.current_domain_record_version(production_runtime_reference().as_untyped())
+            .expect("production version query")
+            .expect("production runtime")
+    }
+
+    fn resource_source(run: &canwu_api::CompactedCanwu) -> DomainRecordVersionRef {
+        run.current_domain_record_version(canwu_resource::resource_runtime_reference().as_untyped())
+            .expect("resource version query")
+            .expect("resource runtime")
+    }
+
+    fn resource(run: &canwu_api::CompactedCanwu) -> ResourceState {
+        canwu_resource::resource_state(run)
+            .expect("resource query")
+            .expect("resource state")
+            .1
+    }
+
+    fn participant(&self, run: &canwu_api::CompactedCanwu) -> CompletionCapacityGrantV1 {
+        Self::resource(run).external_completion_participants.grants[&self.acquisition]
+            .grant
+            .clone()
+    }
+
+    fn production(run: &mut canwu_api::CompactedCanwu, operation: &ProductionCompletionIngressV1) {
+        enqueue_production_completion_operation(run, SimTime::EPOCH, operation)
+            .expect("production completion ingress");
+    }
+
+    fn resource_step(
+        run: &mut canwu_api::CompactedCanwu,
+        operation: &ResourceCompletionOperationV1,
+    ) {
+        enqueue_resource_completion_operation(run, SimTime::EPOCH, operation)
+            .expect("resource completion ingress");
+    }
+
+    /// Queues what step `step` sends into a run whose next boundary is
+    /// `boundary`. Every input is read from the run, so a run restored from a
+    /// continuation checkpoint queues exactly what the run it was taken from
+    /// queued.
+    #[allow(clippy::too_many_lines)]
+    fn queue(&self, run: &mut canwu_api::CompactedCanwu, step: usize, boundary: u64) {
+        let revision = |value| ResourceRevision::new(value).expect("revision");
+        match step {
+            0 => {
+                let expected_runtime_revision = compact_production_state(run).revision;
+                let request = RequestCompletionLeaseV1 {
+                    id: self.acquisition.clone(),
+                    operation_key: self.operation_key.clone(),
+                    holder: self.holder.clone(),
+                    operation_namespace: PRODUCTION_COMPLETION_OPERATION_NAMESPACE.to_owned(),
+                    eligibility_time: SimTime::EPOCH,
+                    eligibility_envelope: self.eligibility.clone(),
+                    recipe: self.recipe.clone(),
+                    expected_participants: BTreeSet::from([
+                        canwu_production::PLUGIN_NAME.to_owned(),
+                        canwu_resource::PLUGIN_NAME.to_owned(),
+                    ]),
+                    policy_class: CompletionPolicyClassV1::Guaranteed,
+                };
+                let revision = run.revision();
+                run.enqueue_command(
+                    SimTime::EPOCH,
+                    0,
+                    CommandRequest::new(
+                        CommandRequestId::new(1),
+                        revision,
+                        CommandEnvelope::new(
+                            Issuer::Actor(PersonId::new(1)),
+                            Command::Plugin {
+                                plugin: canwu_production::PLUGIN_NAME.to_owned(),
+                                command: PRODUCTION_COMMAND.to_owned(),
+                                payload: serde_json::to_value(ProductionCommandEnvelope {
+                                    operation_id: ProductionOperationOutcomeId::new(
+                                        "production:operation:request-participant-steps",
+                                    )
+                                    .expect("outcome ID"),
+                                    holder: self.holder.clone(),
+                                    expected_runtime_revision,
+                                    operation: ProductionOperation::RequestCompletionLease {
+                                        request,
+                                    },
+                                    scope: None,
+                                })
+                                .expect("production command payload"),
+                            },
+                        )
+                        .at_time(SimTime::EPOCH),
+                    ),
+                )
+                .expect("tracked completion request");
+            }
+            // The production root as the provider of the holder's
+            // observation; its next write, the local grant, supersedes the
+            // source the head cites.
+            2 => {
+                let provider_source = Self::production_source(run);
+                let head = canwu_resource::ResourceObservationHeadV1 {
+                    id: canwu_resource::ResourceObservationHeadId::new(
+                        "fixture:observation-head:participant-steps",
+                    )
+                    .expect("head ID"),
+                    revision: ResourceRevision::INITIAL,
+                    provider_plugin: canwu_production::PLUGIN_NAME.to_owned(),
+                    provider_version: "fixture".to_owned(),
+                    provider_semantic_hash: PRODUCTION_SEMANTIC_HASH.to_owned(),
+                    provider_source: provider_source.clone(),
+                    holder: self.holder.clone(),
+                    grant: self.report_grant.clone(),
+                    provider_state_revision: Self::resource(run).state_revision,
+                    observed_at: SimTime::EPOCH,
+                    confidence_per_mille: 1_000,
+                    stock: Vec::new(),
+                    demands: Vec::new(),
+                    allocations: Vec::new(),
+                    fulfillments: Vec::new(),
+                    transfers: Vec::new(),
+                    consumptions: Vec::new(),
+                    losses: Vec::new(),
+                    source_versions: vec![provider_source.clone()],
+                    semantic_digest: String::new(),
+                }
+                .seal()
+                .expect("observation head");
+                canwu_resource::enqueue_resource_adapter_operation(
+                    run,
+                    SimTime::EPOCH,
+                    &canwu_resource::ResourceAdapterOperationV1 {
+                        provider_plugin: canwu_production::PLUGIN_NAME.to_owned(),
+                        provider_source,
+                        request: ResourceOperationRequestV1::RecordObservation(
+                            canwu_resource::ResourceObservationRequestV1 {
+                                operation_key: ResourceOperationKey::new(
+                                    "fixture:observe:participant-steps",
+                                )
+                                .expect("observation key"),
+                                head,
+                            },
+                        ),
+                    },
+                )
+                .expect("observation ingress");
+            }
+            3 => Self::production(
+                run,
+                &ProductionCompletionIngressV1::GrantLocal(GrantCompletionCapacityV1 {
+                    grant_id: self.production_grant.clone(),
+                    acquisition: self.acquisition.clone(),
+                    expected_acquisition_revision: ResourceRevision::INITIAL,
+                    owner_plugin: canwu_production::PLUGIN_NAME.to_owned(),
+                    target_versions: vec![CompletionLockedTargetV1::ExternalRecord {
+                        version: Self::production_source(run),
+                    }],
+                    current_boundary: boundary,
+                }),
+            ),
+            4 => {
+                let coordinator_source = Self::production_source(run);
+                Self::resource_step(
+                    run,
+                    &ResourceCompletionOperationV1::GrantExternalParticipant(
+                        RequestExternalCompletionParticipantGrantV1 {
+                            coordinator_plugin: canwu_production::PLUGIN_NAME.to_owned(),
+                            coordinator_source: coordinator_source.clone(),
+                            coordinator_acquisition_revision: revision(2),
+                            acquisition: self.acquisition.clone(),
+                            operation_key: self.operation_key.clone(),
+                            holder: self.holder.clone(),
+                            operation_namespace: PRODUCTION_COMPLETION_OPERATION_NAMESPACE
+                                .to_owned(),
+                            eligibility_time: SimTime::EPOCH,
+                            eligibility_envelope_digest: self.eligibility.digest.clone(),
+                            recipe: self.recipe.clone(),
+                            policy_class: CompletionPolicyClassV1::Guaranteed,
+                            grant_id: self.resource_grant.clone(),
+                            target_versions: vec![CompletionLockedTargetV1::ExternalRecord {
+                                version: coordinator_source,
+                            }],
+                            current_boundary: boundary,
+                        },
+                    ),
+                );
+            }
+            5 => {
+                let operation = ProductionCompletionIngressV1::AcknowledgeParticipantGrant {
+                    acquisition: self.acquisition.clone(),
+                    expected_acquisition_revision: revision(2),
+                    participant: canwu_resource::PLUGIN_NAME.to_owned(),
+                    provider_source: Self::resource_source(run),
+                    grant: self.participant(run),
+                };
+                Self::production(run, &operation);
+            }
+            6 => Self::production(
+                run,
+                &ProductionCompletionIngressV1::PrepareLocal(PrepareCompletionCapacityV1 {
+                    acquisition: self.acquisition.clone(),
+                    expected_acquisition_revision: revision(3),
+                    grant: self.production_grant.clone(),
+                    expected_grant_revision: ResourceRevision::INITIAL,
+                    current_boundary: boundary,
+                    eligibility_envelope_digest: self.eligibility.digest.clone(),
+                }),
+            ),
+            7 => {
+                let operation = ResourceCompletionOperationV1::PrepareExternalParticipant(
+                    PrepareExternalCompletionParticipantGrantV1 {
+                        coordinator_source: Self::production_source(run),
+                        acquisition: self.acquisition.clone(),
+                        expected_grant_revision: ResourceRevision::INITIAL,
+                        current_boundary: boundary,
+                        eligibility_envelope_digest: self.eligibility.digest.clone(),
+                    },
+                );
+                Self::resource_step(run, &operation);
+            }
+            8 => {
+                let operation = ProductionCompletionIngressV1::AcknowledgeParticipantPrepared {
+                    acquisition: self.acquisition.clone(),
+                    expected_acquisition_revision: revision(4),
+                    participant: canwu_resource::PLUGIN_NAME.to_owned(),
+                    provider_source: Self::resource_source(run),
+                    grant: self.participant(run),
+                };
+                Self::production(run, &operation);
+            }
+            9 => Self::production(
+                run,
+                &ProductionCompletionIngressV1::Activate {
+                    acquisition: self.acquisition.clone(),
+                    expected_acquisition_revision: revision(5),
+                    current_boundary: boundary,
+                },
+            ),
+            10 => {
+                let operation = ResourceCompletionOperationV1::ConsumeExternalParticipant(
+                    ConsumeExternalCompletionParticipantGrantV1 {
+                        coordinator_source: Self::production_source(run),
+                        certificate: compact_production_state(run)
+                            .production_completion_certificates[&self.acquisition]
+                            .clone(),
+                        at: SimTime::EPOCH,
+                    },
+                );
+                Self::resource_step(run, &operation);
+            }
+            11 => {
+                let operation = ProductionCompletionIngressV1::AcknowledgeParticipantConsumed {
+                    acquisition: self.acquisition.clone(),
+                    expected_acquisition_revision: revision(6),
+                    participant: canwu_resource::PLUGIN_NAME.to_owned(),
+                    provider_source: Self::resource_source(run),
+                    grant: self.participant(run),
+                };
+                Self::production(run, &operation);
+            }
+            // Step 1 admits the command's ingress; the last steps are quiet.
+            _ => {}
+        }
+    }
+}
+
+/// Downstream gap G-77, the participant steps: the resource participant's
+/// grant, prepare, and consume each cite the production root's version at the
+/// step, and an observation head cites it as its source; the production root
+/// moves on at the next step each time. A continuation checkpoint taken after
+/// every boundary of a run that seals after every boundary restores,
+/// validates, and continues exactly as the run it was taken from.
+#[test]
+fn continuation_checkpoints_through_live_participant_steps_restore_and_continue_exactly() {
+    let (mut production, holder, _, _) = base_state();
+    let recipe = CompletionCapacityRecipeV1 {
+        receipts: MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE,
+        mutations: 4,
+        reports_per_holder: 1,
+        holders: 1,
+        bytes: 4_096,
+    };
+    let units = recipe.canonical_units().expect("recipe units");
+    let budget = RunBudgetRevisionV1 {
+        revision: ResourceRevision::INITIAL,
+        total_completion_units: units.saturating_mul(4),
+        shared_pending_slots: 0,
+        partitions: vec![CompletionCapacityPartitionV1 {
+            authority: holder.clone(),
+            operation_namespace: PRODUCTION_COMPLETION_OPERATION_NAMESPACE.to_owned(),
+            guaranteed_units: units.saturating_mul(2),
+            reserved_pending_slots: 2,
+            maximum_burst_units: units,
+            request_token_capacity: 2,
+            request_token_refill_minutes: 1,
+            reacquire_cooldown_minutes: 1,
+            root_acquisition_cap_per_sim_time: 2,
+            guaranteed_max_wait_boundaries: 4,
+        }],
+        semantic_digest: String::new(),
+    }
+    .seal()
+    .expect("run budget");
+    production.production_run_budget = Some(budget.clone());
+    let report_grant =
+        ResourceReportGrantId::new("resource:participant-steps-report").expect("report grant ID");
+    let mut resource = ResourceState::empty(ResourceLimitsV1::canonical()).expect("resource");
+    resource
+        .install_run_budget(budget)
+        .expect("resource run budget");
+    resource
+        .install_report_grant(ResourceReportGrantV1 {
+            id: report_grant.clone(),
+            holder: holder.clone(),
+            scope: ResourceScopeId::new("resource:participant-steps-scope")
+                .expect("report scope ID"),
+            accounts: BTreeSet::new(),
+            demands: BTreeSet::new(),
+            include_transfer_details: false,
+            confidence_per_mille: 1_000,
+            cadence_minutes: 60,
+            delay_minutes: 0,
+        })
+        .expect("completion report grant");
+    resource.report_dirty_grants.clear();
+    let mut scenario = scenario_with_production(production);
+    scenario
+        .domain_records
+        .extend(resource.into_records().expect("resource root"));
+    let production_plugin = ProductionPlugin;
+    let resource_plugin = ResourcePlugin::default();
+    let plugins: [&dyn canwu_api::SimulationPlugin; 2] = [&production_plugin, &resource_plugin];
+    let steps = ParticipantSteps {
+        holder,
+        recipe,
+        eligibility: EligibilityEnvelopeV1::new(
+            Vec::new(),
+            BTreeMap::new(),
+            BTreeSet::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("eligibility"),
+        acquisition: CompletionLeaseAcquisitionId::new(
+            "production:completion-acquisition:participant-steps",
+        )
+        .expect("acquisition"),
+        operation_key: ResourceOperationKey::new("resource:production-output:participant-steps")
+            .expect("operation key"),
+        production_grant: CompletionCapacityGrantId::new(
+            "production:completion-grant:participant-steps",
+        )
+        .expect("production grant"),
+        resource_grant: CompletionCapacityGrantId::new(
+            "resource:completion-grant:participant-steps",
+        )
+        .expect("resource grant"),
+        report_grant,
+    };
+    let mut run = Canwu::new_with_plugins(217, scenario, &plugins)
+        .expect("participant-step runtime")
+        .into_compacted()
+        .expect("compact run");
+    // Settles each step's boundary, seals, and returns the next boundary.
+    let settle = |run: &mut canwu_api::CompactedCanwu, step: usize, boundary: u64| {
+        steps.queue(run, step, boundary);
+        let receipt = run
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+            .unwrap_or_else(|error| panic!("step {step}: {error}"));
+        assert_eq!(receipt.boundary_id.get(), boundary, "step {step}");
+        run.seal_evidence().expect("the settled history seals");
+        boundary + 1
+    };
+    let mut boundary = 1;
+    let mut cuts = Vec::new();
+    for step in 0..ParticipantSteps::COUNT {
+        boundary = settle(&mut run, step, boundary);
+        let (checkpoint, hash) = run
+            .continuation_checkpoint()
+            .unwrap_or_else(|error| panic!("checkpoint after step {step}: {error}"));
+        cuts.push((checkpoint, hash, boundary));
+    }
+    // The participant is consumed and the lease active, and every step
+    // outcome and the head cite a production version the root has
+    // superseded.
+    let state = ParticipantSteps::resource(&run);
+    assert_eq!(
+        steps.participant(&run).state,
+        CompletionGrantStateV1::Consumed
+    );
+    let production_now = ParticipantSteps::production_source(&run);
+    let cited = state
+        .outcomes
+        .values()
+        .filter(|outcome| {
+            outcome
+                .operation_key
+                .as_str()
+                .starts_with("resource:completion:participant-")
+                || outcome.operation_key.as_str() == "fixture:observe:participant-steps"
+        })
+        .inspect(|outcome| {
+            assert_eq!(
+                outcome.status,
+                ResourceOperationStatus::Applied,
+                "{:?}",
+                outcome.rejection_reason
+            );
+        })
+        .flat_map(|outcome| outcome.exact_evidence.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(cited.len(), 4, "grant, observation, prepare, and consume");
+    assert!(cited.iter().all(|version| {
+        version.record == production_now.record
+            && version.version < production_now.version
+            && !matches!(
+                version.established_by,
+                DomainRecordVersionSource::InitialScenario
+            )
+    }));
+    assert!(state.observation_heads.values().all(|head| {
+        head.source_versions
+            .iter()
+            .all(|source| source.version < production_now.version)
+    }));
+    let end = (
+        run.checkpoint_hash(),
+        run.authoritative_state_hash().expect("state hash"),
+    );
+    for (step, (checkpoint, hash, next_boundary)) in cuts.into_iter().enumerate() {
+        let mut restored = canwu_api::CompactedCanwu::from_continuation_checkpoint_verified(
+            checkpoint, &hash, &plugins,
+        )
+        .unwrap_or_else(|error| panic!("checkpoint after step {step} restores: {error}"));
+        canwu_resource::validate_resource_runtime(&restored)
+            .unwrap_or_else(|error| panic!("checkpoint after step {step} validates: {error}"));
+        let mut boundary = next_boundary;
+        for later in step + 1..ParticipantSteps::COUNT {
+            boundary = settle(&mut restored, later, boundary);
+        }
+        assert_eq!(
+            (
+                restored.checkpoint_hash(),
+                restored.authoritative_state_hash().expect("state hash"),
+            ),
+            end,
+            "the run restored after step {step} continues exactly"
+        );
+    }
+}
+
+/// Picks the scenario record a tamper case changes.
+type Selects<'a> = &'a dyn Fn(&canwu_api::DomainRecord) -> bool;
+
+/// Downstream gap G-77: each evidence declaration the resource and production
+/// roots persist is a function of the record that carries it, so a root
+/// whose declaration was changed is refused when it is installed: a hot
+/// terminal bucket that declares other evidence than its entries cite, a live
+/// bucket that declares any, a live root whose declaration is not the one its
+/// state computes, and a production root whose declaration is not its
+/// canonical encoding.
+#[test]
+fn a_tampered_evidence_declaration_is_refused_when_the_roots_are_installed() {
+    let LiveCompletionFixture {
+        production,
+        resource,
+        ..
+    } = live_completion_fixture();
+    let mut scenario = scenario_with_production(production);
+    scenario
+        .domain_records
+        .extend(resource.into_records().expect("resource output root"));
+    let production_plugin = ProductionPlugin;
+    let resource_plugin = ResourcePlugin::default();
+    let plugins: [&dyn canwu_api::SimulationPlugin; 2] = [&production_plugin, &resource_plugin];
+    let install = |scenario: canwu_api::Scenario| {
+        Canwu::new_with_plugins(218, scenario, &plugins).map(|_| ())
+    };
+    install(scenario.clone()).expect("the untouched roots install");
+    let forged = serde_json::to_value(vec![EvidenceRef::DomainRecordVersion(
+        DomainRecordVersionRef {
+            record: production_runtime_reference().into_untyped(),
+            version: 2,
+            established_by: DomainRecordVersionSource::BoundaryChange {
+                boundary: canwu_api::BoundaryId::new(1),
+                change_index: 0,
+            },
+        },
+    )])
+    .expect("forged dependency");
+    let tamper = |selects: Selects<'_>| {
+        let mut tampered = scenario.clone();
+        let record = tampered
+            .domain_records
+            .iter_mut()
+            .find(|record| selects(record))
+            .expect("a record to tamper with");
+        record.payload[canwu_api::IDENTITY_EVIDENCE_DEPENDENCIES_FIELD]["dependencies"] =
+            forged.clone();
+        tampered
+    };
+    let cases: [(&str, Selects<'_>, &str); 4] = [
+        (
+            "hot terminal bucket",
+            &|record| record.reference.id.starts_with("resource:hot-terminal:"),
+            "declares other evidence than its entries cite",
+        ),
+        (
+            "live bucket",
+            &|record| record.reference.id.starts_with("resource:live:"),
+            "resource bucket is malformed",
+        ),
+        (
+            "live root",
+            &|record| {
+                record.reference == canwu_resource::resource_runtime_reference().into_untyped()
+            },
+            "identity-only evidence dependencies differ",
+        ),
+        (
+            "production root",
+            &|record| {
+                record
+                    .reference
+                    .kind
+                    .matches_type::<ProductionRuntimeRecord>()
+            },
+            "not canonically encoded",
+        ),
+    ];
+    for (label, selects, refusal) in cases {
+        let error = install(tamper(selects)).expect_err(label);
+        assert!(error.message.contains(refusal), "{label}: {error}");
+    }
+}
+
 /// An output batch the resource plugin defers settles at the instant it came
 /// due, not at the completion instant, so its credits' requests commit to
 /// that later instant. The output acknowledgement records it, and the

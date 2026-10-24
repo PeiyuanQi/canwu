@@ -1013,7 +1013,11 @@ an entry of a live bucket `resource:live:{n}` (`ResourceLiveBucketV1`, about
 four records per bucket), each chosen by a domain-separated hash of its
 identity among a bucket count fixed for the life of the root. Both bucket
 families are one record kind, `canwu.resource` `bucket`
-(`ResourceBucketRecord`). The custodian index
+(`ResourceBucketRecord`). Since 0.20.0 each hot terminal bucket declares the
+exact evidence of its records identity-only, and the live root the versions
+its held completion state and observation heads cite, so a seal or a
+continuation checkpoint keeps proof of a version a hot record cites after its
+record moved on (`canwu_identity_evidence_dependencies`). The custodian index
 (`ResourceCustodianAccountsV1`) lists the accounts one holder holds, so a
 holder's stock is read without a scan. `ResourceState::into_records`
 persists a state and `from_records` restores it, checking that every entry
@@ -1044,7 +1048,8 @@ records with `attach_live` or `attach_custodian_accounts`, or
 `resource_hot_terminal_state_key()` beside the live root's; a reader of a
 consumption follows `ResourceConsumption::fulfillment` to its fulfillment
 without a search; the host's `resource_state` reads the whole root. A
-finished lease (released or expired, its report reservation published)
+finished lease (released or expired, its reserved report published or given
+up)
 leaves the root at once; its receipts stay hot terminal records until an
 archive commit takes them, and an acquisition identity still starts one
 lease for the run. A host expires grants with

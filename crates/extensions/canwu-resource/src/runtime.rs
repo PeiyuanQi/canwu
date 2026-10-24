@@ -20,7 +20,10 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const RESOURCE_STATE_FORMAT_VERSION: u32 = 5;
+/// Format of the resource root ([`ResourceState`]). 6 since 0.20.0: the live
+/// root declares identity-only evidence dependencies
+/// (`canwu_identity_evidence_dependencies`), and so does each bucket.
+pub const RESOURCE_STATE_FORMAT_VERSION: u32 = 6;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceAllocationRequestV1 {
@@ -1212,6 +1215,7 @@ impl ResourceState {
             format_version: RESOURCE_STATE_FORMAT_VERSION,
             state_revision: ResourceRevision::INITIAL,
             continuation: canwu_api::PayloadRequiredEvidenceContinuationV1::completed(),
+            identity_evidence: canwu_api::IdentityEvidenceDependenciesV1::new(Vec::new()),
             limits,
             definitions: BTreeMap::new(),
             units: BTreeMap::new(),
@@ -1438,10 +1442,22 @@ impl ResourceState {
         Ok(())
     }
 
+    /// Installs a holder report grant, refusing one whose holder is of a
+    /// kind that can never hold knowledge (a core organization, resource,
+    /// route, or territory, or a person as an entity): its reports could
+    /// never be published. Whether a person or a domain entity can hold
+    /// knowledge depends on the run, so a grant to one that cannot is
+    /// installed and published nothing; a completion that would reserve its
+    /// report is refused when it settles.
     pub fn install_report_grant(
         &mut self,
         grant: ResourceReportGrantV1,
     ) -> Result<(), ResourceError> {
+        if !crate::holder_kind_can_hold_knowledge(&grant.holder) {
+            return Err(ResourceError::InvalidDefinition(
+                "resource report grant holder is of a kind that can hold no knowledge".to_owned(),
+            ));
+        }
         if grant.confidence_per_mille > 1_000
             || grant.cadence_minutes == 0
             || self.report_grants.contains_key(&grant.id)
@@ -1497,6 +1513,31 @@ impl ResourceState {
         }
     }
 
+    /// Settles the report a completion reserved on `grant`: it was
+    /// published, or it is given up because the grant has no observation
+    /// head to report from or its holder cannot receive knowledge. When it
+    /// was the completion's last reserved report, the completed participant
+    /// becomes an archive candidate.
+    pub(crate) fn release_completion_report(
+        &mut self,
+        acquisition: &CompletionLeaseAcquisitionId,
+        grant: &crate::ResourceReportGrantId,
+    ) -> Result<(), ResourceError> {
+        if let Some(grants) = self.completion_report_reservations.get_mut(acquisition) {
+            grants.remove(grant);
+        }
+        if self
+            .completion_report_reservations
+            .get(acquisition)
+            .is_some_and(BTreeSet::is_empty)
+        {
+            self.completion_report_reservations.remove(acquisition);
+            self.completion_report_ready.remove(acquisition);
+            self.mark_external_participant_archive_ready(acquisition)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn mark_external_participant_archive_ready(
         &mut self,
         acquisition: &CompletionLeaseAcquisitionId,
@@ -1516,6 +1557,9 @@ impl ResourceState {
         }
         let terminal_sequence = self.next_sequence()?;
         self.add_hot_candidate(terminal_sequence, key)?;
+        // Its coordinator source moves from the live root's declaration to
+        // its bucket's.
+        self.refresh_continuation();
         Ok(())
     }
 
@@ -1960,9 +2004,12 @@ impl ResourceState {
     /// [`Self::apply_operation`] have no separate settlement clock, so their
     /// request times stand in for it), with `external_refusal`, what the
     /// plugin found against the simulation view, as its recorded rejection.
-    /// A lease start (an archived outcome that took its identity), an
-    /// account rescope (evidence that is not current or not of an adapter
-    /// evidence kind), and an operation that redeems a completion lease (a
+    /// A lease start (an archived outcome that took its identity, or a report
+    /// holder that cannot receive knowledge), an external participant grant
+    /// (a report holder that cannot receive knowledge), an account rescope
+    /// (evidence that is not current or not of an adapter evidence kind), an
+    /// observation head (a source that is not current or not of a kind the
+    /// plugin reads), and an operation that redeems a completion lease (a
     /// loss identity an archived loss took, or a lease a tracked command may
     /// not redeem) read such a refusal.
     pub(crate) fn settle_operation_refused_by(
@@ -2485,6 +2532,10 @@ impl ResourceState {
             ResourceOperationRequestV1::SetProtectedFloor(value) => self.set_protected_floor(value),
             ResourceOperationRequestV1::CancelDemand(value) => self.cancel_demand(value),
             ResourceOperationRequestV1::RecordObservation(value) => {
+                // A source the plugin found not current.
+                if let Some(refusal) = external_refusal {
+                    return Err(refusal.clone());
+                }
                 self.record_observation_head(value.head.clone())?;
                 Ok(AppliedOperation {
                     quantity: 0,
@@ -2530,6 +2581,13 @@ impl ResourceState {
                 | ResourceCompletionOperationV1::ReleaseExternalParticipant(_)
                 | ResourceCompletionOperationV1::ExpireExternalParticipants(_)
         ) {
+            // The plugin refuses a participant grant whose report holder
+            // cannot receive knowledge.
+            if let (ResourceCompletionOperationV1::GrantExternalParticipant(_), Some(refusal)) =
+                (operation, external_refusal)
+            {
+                return Err(refusal.clone());
+            }
             return self.apply_external_completion_participant(operation);
         }
         let operation_key = operation.operation_key();
@@ -3860,6 +3918,9 @@ impl ResourceState {
             due.retain(|grant| !grants.contains(grant));
         }
         leases.expiry_due.retain(|_, due| !due.is_empty());
+        // The retired grants and certificates no longer declare the
+        // versions they locked.
+        self.refresh_continuation();
     }
 
     fn begin_transfer(
@@ -6997,6 +7058,12 @@ impl ResourceState {
                     "resource report grant cadence or confidence is invalid".to_owned(),
                 ));
             }
+            if !crate::holder_kind_can_hold_knowledge(&grant.holder) {
+                return Err(ResourceError::InvalidDefinition(
+                    "resource report grant holder is of a kind that can hold no knowledge"
+                        .to_owned(),
+                ));
+            }
         }
         for (acquisition, grants) in &self.completion_report_reservations {
             let holder = self
@@ -7124,6 +7191,11 @@ impl ResourceState {
             return Err(ResourceError::InvalidDefinition(
                 "resource payload-required evidence continuation differs from active work"
                     .to_owned(),
+            ));
+        }
+        if self.identity_evidence != self.computed_identity_evidence() {
+            return Err(ResourceError::InvalidDefinition(
+                "resource identity-only evidence dependencies differ from the live root".to_owned(),
             ));
         }
         // The hot terminal budgets, and the ledger against the attached

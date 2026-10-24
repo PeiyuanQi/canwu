@@ -3,7 +3,8 @@ use canwu_api::{
     BoundaryId, CanwuError, CommandAttemptId, CommandRequestId, DecisionTicketId, DecisionTraceId,
     DomainRecord, DomainRecordClass, DomainRecordDraft, DomainRecordKind, DomainRecordLifecycle,
     DomainRecordType, DomainRecordVersionRef, DomainValueKindClass, EntityRef, ErrorCode,
-    EvidenceRef, KnowledgeHolderRef, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
+    EvidenceRef, IDENTITY_EVIDENCE_DEPENDENCIES_FIELD, IdentityEvidenceDependenciesV1,
+    KnowledgeHolderRef, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
     PayloadRequiredEvidenceContinuationV1, RandomDrawAddress, RandomOperationTarget, RandomSample,
     RandomStreamKey, SimTime, TypedDomainRecordRef, canonical_hash,
 };
@@ -1612,18 +1613,50 @@ impl ProductionState {
         } else {
             PayloadRequiredEvidenceContinuationV1::active(dependencies)
         };
-        draft
+        // The output source an execution pinned at dispatch is an earlier
+        // version of this root, which the dispatch itself supersedes. The
+        // output credits cite it, and the resource root declares them only
+        // once they settle, so until the execution has its output outcomes
+        // this root declares the source identity-only: a seal or a
+        // continuation checkpoint taken between the dispatch and the
+        // settlement keeps proof that it exists. Only its identity is ever
+        // compared, so no body is kept.
+        let pending_output_sources = IdentityEvidenceDependenciesV1::new(
+            self.executions
+                .values()
+                .filter(|execution| execution.output_outcomes.is_empty())
+                .filter_map(|execution| execution.output_source.clone())
+                .filter(|version| {
+                    !matches!(
+                        version.established_by,
+                        canwu_api::DomainRecordVersionSource::InitialScenario
+                    )
+                })
+                .map(EvidenceRef::DomainRecordVersion)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        );
+        let payload = draft
             .payload
             .as_object_mut()
-            .ok_or_else(|| invalid("production runtime payload is not an object"))?
-            .insert(
-                PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD.to_owned(),
-                serde_json::to_value(continuation).map_err(|error| {
-                    invalid(format!(
-                        "production continuation could not be encoded: {error}"
-                    ))
-                })?,
-            );
+            .ok_or_else(|| invalid("production runtime payload is not an object"))?;
+        payload.insert(
+            PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD.to_owned(),
+            serde_json::to_value(continuation).map_err(|error| {
+                invalid(format!(
+                    "production continuation could not be encoded: {error}"
+                ))
+            })?,
+        );
+        payload.insert(
+            IDENTITY_EVIDENCE_DEPENDENCIES_FIELD.to_owned(),
+            serde_json::to_value(pending_output_sources).map_err(|error| {
+                invalid(format!(
+                    "production identity dependencies could not be encoded: {error}"
+                ))
+            })?,
+        );
         Ok(draft)
     }
 

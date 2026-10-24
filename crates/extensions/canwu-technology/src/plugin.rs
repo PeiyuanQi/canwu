@@ -30,7 +30,10 @@ pub const TECHNOLOGY_COMMAND: &str = "apply_technology_operation_v1";
 pub(crate) const TECHNOLOGY_COMMAND_INGRESS: &str = "technology_command_v1";
 pub const TECHNOLOGY_RESULT_INGRESS: &str = "technology_result_v1";
 const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
-const SEMANTIC_HASH: &str = "63f9af9a4d6eea65122dc4d372ada9ebc282e960f96adfdcc1286359f79a23ed";
+/// BLAKE3, lowercase hex, of `canwu-technology 0.20.0 semantics: domain-entity
+/// holders, operators, and sites referenced as domain records` (one line, one
+/// space after each comma and colon).
+const SEMANTIC_HASH: &str = "8b4703e2106176664e83721607e8e997bf7323347bb1d054142c4fc7604dce3a";
 pub(crate) const INPUT_HASH_DOMAIN: &str = "canwu.technology.operation-input.v1";
 pub(crate) const CONFLICT_HASH_DOMAIN: &str = "canwu.technology.operation-conflict.v1";
 pub(crate) const APPLY_SYSTEM: &str = "technology_operation_apply_v1";

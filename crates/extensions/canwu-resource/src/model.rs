@@ -1,13 +1,13 @@
 use crate::{
-    CompletionLeaseAcquisitionId, CompletionLeaseBookV1, PLUGIN_NAMESPACE,
-    ResourceArchiveHeadStateV1, ResourceArchiveMaintenanceReceiptV1,
+    CompletionLeaseAcquisitionId, CompletionLeaseBookV1, CompletionLockedTargetV1,
+    PLUGIN_NAMESPACE, ResourceArchiveHeadStateV1, ResourceArchiveMaintenanceReceiptV1,
     ResourceArchiveRetentionHandleV1, ResourceTerminalRecordKeyV1, RunBudgetRevisionV1,
 };
 use canwu_api::{
     CapacityBookingId, DomainRecord, DomainRecordType, DomainRecordVersionRef,
-    DomainValueKindClass, EntityRef, EvidenceRef, HandoffId, ItineraryRevisionId,
-    KnowledgeHolderRef, LegExecutionId, PayloadRequiredEvidenceContinuationV1, SimTime,
-    TransportExecutionId,
+    DomainValueKindClass, EntityRef, EvidenceRef, HandoffId, IdentityEvidenceDependenciesV1,
+    ItineraryRevisionId, KnowledgeHolderRef, LegExecutionId, PayloadRequiredEvidenceContinuationV1,
+    SimTime, TransportExecutionId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1464,6 +1464,13 @@ pub struct ResourceState {
     pub state_revision: ResourceRevision,
     #[serde(rename = "canwu_payload_required_evidence_continuation")]
     pub continuation: PayloadRequiredEvidenceContinuationV1,
+    /// The record versions the live root's held completion state and
+    /// observation heads cite, declared identity-only so that a seal and a
+    /// continuation checkpoint keep proof that they exist
+    /// ([`Self::computed_identity_evidence`]). The hot terminal records
+    /// declare theirs on their buckets ([`crate::ResourceHotTerminalBucketV1`]).
+    #[serde(rename = "canwu_identity_evidence_dependencies")]
+    pub identity_evidence: IdentityEvidenceDependenciesV1,
     pub limits: ResourceLimitsV1,
     pub definitions: BTreeMap<ResourceDefinitionRevisionId, ResourceDefinitionRevision>,
     pub units: BTreeMap<ResourceUnitRevisionId, ResourceUnitRevision>,
@@ -1612,8 +1619,80 @@ impl ResourceState {
         Ok(records.remove(0))
     }
 
+    /// Recomputes both evidence declarations of the live root: the
+    /// payload-required continuation and the identity-only dependencies.
     pub(crate) fn refresh_continuation(&mut self) {
         self.continuation = self.computed_continuation();
+        self.identity_evidence = self.computed_identity_evidence();
+    }
+
+    /// The identity-only evidence dependencies of the live root: every
+    /// external record version a completion lease grant in the live root
+    /// locks; for each external participant grant the live root holds open
+    /// (held, prepared, or consumed) or completed and waiting for its holder
+    /// report, its coordinator source and the external record versions its
+    /// own grant locks; and the source versions of every observation head.
+    /// Initial-scenario versions are left out.
+    ///
+    /// Each is a version the plugin required to be current when it recorded
+    /// it, so each still exists. An activation certificate's locked targets
+    /// are left out: a local lease's are its grants' targets, and an external
+    /// participant's certificate also names the targets of the coordinator's
+    /// own grants, which the resource never proved and the coordinator may
+    /// have superseded before the certificate arrived.
+    ///
+    /// A participant that is a hot archive candidate is left out: its bucket
+    /// declares its coordinator source with the rest of its hot terminal
+    /// evidence. A partial state therefore computes what the whole state
+    /// does.
+    #[must_use]
+    pub fn computed_identity_evidence(&self) -> IdentityEvidenceDependenciesV1 {
+        let hot_participants = self
+            .terminal_archive_candidates
+            .values()
+            .filter_map(|key| match key {
+                ResourceTerminalRecordKeyV1::ExternalCompletionParticipant(id) => Some(id),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let leases = &self.completion_leases;
+        let participants = &self.external_completion_participants;
+        let lease_versions = leases
+            .grants
+            .values()
+            .flat_map(|grant| external_record_versions(&grant.target_versions));
+        // A released, expired, or rejected participant stays in `grants` for
+        // its coordinator's acknowledgement, but nothing cites its versions.
+        let participant_versions = participants
+            .grants
+            .iter()
+            .filter(|(_, participant)| {
+                matches!(
+                    participant.grant.state,
+                    crate::CompletionGrantStateV1::Held
+                        | crate::CompletionGrantStateV1::Prepared
+                        | crate::CompletionGrantStateV1::Consumed
+                )
+            })
+            .chain(
+                participants
+                    .terminal_grants
+                    .iter()
+                    .filter(|(id, _)| !hot_participants.contains(id)),
+            )
+            .flat_map(|(_, participant)| {
+                std::iter::once(&participant.coordinator_source)
+                    .chain(external_record_versions(&participant.grant.target_versions))
+            });
+        let head_versions = self
+            .observation_heads
+            .values()
+            .flat_map(|head| head.source_versions.iter());
+        identity_declaration(
+            lease_versions
+                .chain(participant_versions)
+                .chain(head_versions),
+        )
     }
 
     #[must_use]
@@ -1677,6 +1756,39 @@ impl ResourceState {
             PayloadRequiredEvidenceContinuationV1::active(dependencies)
         }
     }
+}
+
+/// The external record versions among `targets`.
+fn external_record_versions(
+    targets: &[CompletionLockedTargetV1],
+) -> impl Iterator<Item = &DomainRecordVersionRef> {
+    targets.iter().filter_map(|target| match target {
+        CompletionLockedTargetV1::ExternalRecord { version } => Some(version),
+        _ => None,
+    })
+}
+
+/// An identity-only declaration of `versions`: sorted, without duplicates,
+/// and without an initial-scenario version, which stays readable after any
+/// seal and which the engine refuses as a declaration.
+pub(crate) fn identity_declaration<'a>(
+    versions: impl IntoIterator<Item = &'a DomainRecordVersionRef>,
+) -> IdentityEvidenceDependenciesV1 {
+    IdentityEvidenceDependenciesV1::new(
+        versions
+            .into_iter()
+            .filter(|version| {
+                !matches!(
+                    version.established_by,
+                    canwu_api::DomainRecordVersionSource::InitialScenario
+                )
+            })
+            .cloned()
+            .map(EvidenceRef::DomainRecordVersion)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1750,6 +1862,23 @@ pub fn canonical_digest<T: Serialize>(domain: &str, value: &T) -> Result<String,
     hasher.update(&[0]);
     hasher.update(&bytes);
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Whether a holder of this kind can ever hold knowledge: a person, an army,
+/// a government, or a domain entity, as the engine's publication rule admits
+/// ([`canwu_api::SimulationView::knowledge_holder_accepts_publication`]). A
+/// core organization, resource, route, or territory, and a person given as
+/// an entity, never can. Whether one of the admitted kinds can now is for the
+/// view to answer.
+#[must_use]
+pub fn holder_kind_can_hold_knowledge(holder: &KnowledgeHolderRef) -> bool {
+    matches!(
+        holder,
+        KnowledgeHolderRef::Person(_)
+            | KnowledgeHolderRef::Entity(
+                EntityRef::Army(_) | EntityRef::Government(_) | EntityRef::Domain(_)
+            )
+    )
 }
 
 pub(crate) fn holder_entity(holder: &KnowledgeHolderRef) -> EntityRef {

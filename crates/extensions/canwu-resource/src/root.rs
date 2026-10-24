@@ -50,18 +50,22 @@ use crate::{
 use canwu_api::{
     BoundaryDirective, CanwuError, CanwuRun, DomainRecord, DomainRecordClass, DomainRecordDraft,
     DomainRecordLifecycle, DomainRecordMutation, DomainRecordRef, DomainRecordType,
-    DomainValueKindClass, ErrorCode, KnowledgeHolderRef, SimulationView, TypedDomainRecordRef,
+    DomainValueKindClass, ErrorCode, IDENTITY_EVIDENCE_DEPENDENCIES_FIELD,
+    IdentityEvidenceDependenciesV1, KnowledgeHolderRef, SimulationView, TypedDomainRecordRef,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Format of a hot terminal bucket ([`ResourceHotTerminalBucketV1`]).
-pub const RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION: u32 = 1;
+/// Format of a hot terminal bucket ([`ResourceHotTerminalBucketV1`]). 2 since
+/// 0.20.0: the bucket declares its entries' exact evidence identity-only.
+pub const RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION: u32 = 2;
 
-/// Format of a live bucket ([`ResourceLiveBucketV1`]).
-pub const RESOURCE_LIVE_BUCKET_FORMAT_VERSION: u32 = 1;
+/// Format of a live bucket ([`ResourceLiveBucketV1`]). 2 since 0.20.0: the
+/// bucket carries the identity-only declaration its record kind requires,
+/// always empty.
+pub const RESOURCE_LIVE_BUCKET_FORMAT_VERSION: u32 = 2;
 
 /// Hot terminal records one bucket holds, on average, at a full candidate
 /// budget ([`resource_hot_terminal_bucket_count`]). An archive commit
@@ -336,6 +340,11 @@ pub struct ResourceLiveBucketV1 {
     pub bucket: u32,
     /// The bucket's live records, in ascending key order.
     pub entries: Vec<ResourceLiveEntryV1>,
+    /// The identity-only declaration the bucket record kind requires. A live
+    /// record's citations are read only while it is current, so it is always
+    /// empty.
+    #[serde(rename = "canwu_identity_evidence_dependencies")]
+    pub evidence: IdentityEvidenceDependenciesV1,
 }
 
 /// Counts and totals over the live records of a resource root that persist
@@ -666,6 +675,31 @@ pub struct ResourceHotTerminalBucketV1 {
     /// The bucket's hot terminal records, in ascending key order. A bucket
     /// emptied by an archive commit stays as a record with no entries.
     pub entries: Vec<ResourceHotTerminalEntryV1>,
+    /// The exact evidence of its entries
+    /// ([`ResourceTerminalArchivePayloadV1::exact_evidence`]), declared
+    /// identity-only: a seal and a continuation checkpoint keep proof that
+    /// each cited version exists until its record leaves for the archive,
+    /// even after a later version of that record supersedes it within the
+    /// instant. Sorted, without duplicates or initial-scenario versions.
+    #[serde(rename = "canwu_identity_evidence_dependencies")]
+    pub evidence: IdentityEvidenceDependenciesV1,
+}
+
+/// The identity-only declaration of a hot terminal bucket that holds
+/// `entries`: the exact evidence of each.
+fn hot_bucket_declaration<'a>(
+    entries: impl IntoIterator<Item = &'a ResourceHotTerminalEntryV1>,
+) -> IdentityEvidenceDependenciesV1 {
+    let evidence = entries
+        .into_iter()
+        .flat_map(|entry| entry.payload.exact_evidence())
+        .collect::<Vec<_>>();
+    crate::identity_declaration(&evidence)
+}
+
+/// The declaration every live bucket carries: none.
+fn empty_declaration() -> IdentityEvidenceDependenciesV1 {
+    IdentityEvidenceDependenciesV1::new(Vec::new())
 }
 
 /// Domain record type of the resource buckets, hot terminal
@@ -810,12 +844,15 @@ pub fn resource_live_bucket(key: &ResourceLiveRecordKeyV1, buckets: u32) -> u32 
 /// The two bucket spaces: what parsing a stored bucket of either needs.
 trait BucketKey: Ord + Clone + DeserializeOwned {
     const FORMAT_VERSION: u32;
+    /// Whether the bucket's identity-only declaration may name evidence.
+    const DECLARES_EVIDENCE: bool;
     fn reference(bucket: u32) -> DomainRecordRef;
     fn bucket_of(&self, buckets: u32) -> u32;
 }
 
 impl BucketKey for ResourceTerminalRecordKeyV1 {
     const FORMAT_VERSION: u32 = RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION;
+    const DECLARES_EVIDENCE: bool = true;
 
     fn reference(bucket: u32) -> DomainRecordRef {
         resource_hot_terminal_bucket_reference(bucket).into_untyped()
@@ -828,6 +865,7 @@ impl BucketKey for ResourceTerminalRecordKeyV1 {
 
 impl BucketKey for ResourceLiveRecordKeyV1 {
     const FORMAT_VERSION: u32 = RESOURCE_LIVE_BUCKET_FORMAT_VERSION;
+    const DECLARES_EVIDENCE: bool = false;
 
     fn reference(bucket: u32) -> DomainRecordRef {
         resource_live_bucket_reference(bucket).into_untyped()
@@ -1542,12 +1580,14 @@ impl ResourceState {
         let mut records = vec![live_root_record(live, version)?];
         for (bucket, mut entries) in bucketed {
             entries.sort_by(|left, right| left.key.cmp(&right.key));
+            let evidence = hot_bucket_declaration(&entries);
             records.push(bucket_record(
                 resource_hot_terminal_bucket_reference(bucket).into_untyped(),
                 encode_value(&ResourceHotTerminalBucketV1 {
                     format_version: RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION,
                     bucket,
                     entries,
+                    evidence,
                 })?,
             )?);
         }
@@ -1559,6 +1599,7 @@ impl ResourceState {
                     format_version: RESOURCE_LIVE_BUCKET_FORMAT_VERSION,
                     bucket,
                     entries,
+                    evidence: empty_declaration(),
                 })?,
             )?);
         }
@@ -1581,7 +1622,7 @@ impl ResourceState {
         let mut live_ledger = ResourceLiveLedgerV1::default();
         for record in buckets {
             if record.reference.id.starts_with(LIVE_BUCKET_PREFIX) {
-                let (bucket, entries) =
+                let (bucket, entries, _) =
                     stored_bucket_entries::<ResourceLiveRecordKeyV1>(record, live_count)?;
                 if !seen.insert((true, bucket)) {
                     return Err(invalid("resource live bucket is listed twice"));
@@ -1596,16 +1637,21 @@ impl ResourceState {
                 }
                 continue;
             }
-            let (bucket, entries) =
+            let (bucket, entries, declared) =
                 stored_bucket_entries::<ResourceTerminalRecordKeyV1>(record, count)?;
             if !seen.insert((false, bucket)) {
                 return Err(invalid("resource hot terminal bucket is listed twice"));
             }
+            let mut decoded = Vec::with_capacity(entries.len());
             for value in entries.into_values() {
                 let entry = decode_canonical::<ResourceHotTerminalEntryV1>(value)?;
                 bytes = bytes
                     .checked_add(entry.encoded_len().map_err(resource_canwu_error)?)
                     .ok_or_else(|| invalid("resource hot terminal bytes overflow"))?;
+                decoded.push(entry);
+            }
+            check_hot_bucket_declaration(&declared, &decoded)?;
+            for entry in decoded {
                 state
                     .attach_hot_terminal(entry)
                     .map_err(resource_canwu_error)?;
@@ -1802,6 +1848,8 @@ impl<H: CanwuRun + ?Sized> HotTerminalSource for RunSource<'_, H> {
 struct StoredBucket<'s, K> {
     version: Option<u64>,
     entries: BTreeMap<K, &'s Value>,
+    /// The bucket's identity-only declaration as it was stored.
+    declared: IdentityEvidenceDependenciesV1,
 }
 
 /// A hot terminal record attached by the work, as it was stored.
@@ -1817,13 +1865,15 @@ struct AttachedLive {
 }
 
 /// The keys of one stored bucket of a space with `count` buckets, with each
-/// entry's encoded value, checking that it is the bucket its identity names,
-/// that its keys ascend, and that each lies in this bucket. Entry bodies are
-/// checked when they are attached.
+/// entry's encoded value and the bucket's identity-only declaration,
+/// checking that it is the bucket its identity names, that its keys ascend,
+/// that each lies in this bucket, and that a live bucket declares nothing.
+/// Entry bodies are checked when they are attached, and a hot terminal
+/// bucket's declaration against them when the whole root is read.
 fn stored_bucket_entries<K: BucketKey>(
     record: &DomainRecord,
     count: u32,
-) -> Result<(u32, BTreeMap<K, &Value>), CanwuError> {
+) -> Result<(u32, BTreeMap<K, &Value>, IdentityEvidenceDependenciesV1), CanwuError> {
     let malformed = || invalid("resource bucket is malformed or holds a record of another bucket");
     let fields = record.payload.as_object().ok_or_else(malformed)?;
     let bucket = fields
@@ -1835,7 +1885,15 @@ fn stored_bucket_entries<K: BucketKey>(
         .get("entries")
         .and_then(Value::as_array)
         .ok_or_else(malformed)?;
-    if fields.len() != 3
+    let declared = fields
+        .get(IDENTITY_EVIDENCE_DEPENDENCIES_FIELD)
+        .map(IdentityEvidenceDependenciesV1::deserialize)
+        .transpose()
+        .map_err(|_| malformed())?
+        .ok_or_else(malformed)?;
+    if fields.len() != 4
+        || declared.format_version != canwu_api::IDENTITY_EVIDENCE_DEPENDENCIES_FORMAT_VERSION
+        || (!K::DECLARES_EVIDENCE && !declared.dependencies.is_empty())
         || fields.get("format_version").and_then(Value::as_u64)
             != Some(u64::from(K::FORMAT_VERSION))
         || bucket >= count
@@ -1863,7 +1921,21 @@ fn stored_bucket_entries<K: BucketKey>(
         }
         keyed.insert(key, entry);
     }
-    Ok((bucket, keyed))
+    Ok((bucket, keyed, declared))
+}
+
+/// Refuses a hot terminal bucket whose stored declaration is not the one its
+/// entries make.
+fn check_hot_bucket_declaration<'a>(
+    declared: &IdentityEvidenceDependenciesV1,
+    entries: impl IntoIterator<Item = &'a ResourceHotTerminalEntryV1>,
+) -> Result<(), CanwuError> {
+    if *declared != hot_bucket_declaration(entries) {
+        return Err(invalid(
+            "a resource hot terminal bucket declares other evidence than its entries cite",
+        ));
+    }
+    Ok(())
 }
 
 /// Decodes one stored entry, which must be in its canonical encoding: what
@@ -1961,11 +2033,16 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
                 None => StoredBucket {
                     version: None,
                     entries: BTreeMap::new(),
+                    declared: empty_declaration(),
                 },
-                Some(record) => StoredBucket {
-                    version: Some(record.version),
-                    entries: stored_bucket_entries(record, self.bucket_count)?.1,
-                },
+                Some(record) => {
+                    let (_, entries, declared) = stored_bucket_entries(record, self.bucket_count)?;
+                    StoredBucket {
+                        version: Some(record.version),
+                        entries,
+                        declared,
+                    }
+                }
             };
             self.buckets.insert(bucket, stored);
         }
@@ -1984,11 +2061,17 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
                 None => StoredBucket {
                     version: None,
                     entries: BTreeMap::new(),
+                    declared: empty_declaration(),
                 },
-                Some(record) => StoredBucket {
-                    version: Some(record.version),
-                    entries: stored_bucket_entries(record, self.live_bucket_count)?.1,
-                },
+                Some(record) => {
+                    let (_, entries, declared) =
+                        stored_bucket_entries(record, self.live_bucket_count)?;
+                    StoredBucket {
+                        version: Some(record.version),
+                        entries,
+                        declared,
+                    }
+                }
             };
             self.live_buckets.insert(bucket, stored);
         }
@@ -2346,6 +2429,17 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
                 "resource bucket ledgers differ from the stored entries",
             ));
         }
+        // Every stored entry is attached now, so each bucket's declaration
+        // is checked against all of its entries.
+        for (bucket, stored) in &self.buckets {
+            check_hot_bucket_declaration(
+                &stored.declared,
+                self.attached
+                    .values()
+                    .filter(|attached| attached.bucket == *bucket)
+                    .map(|attached| &attached.entry),
+            )?;
+        }
         Ok(())
     }
 
@@ -2550,12 +2644,27 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
                     }
                 }
             }
+            // The declaration covers every entry the bucket keeps: those this
+            // work holds, and the stored ones it did not attach, decoded here.
+            let mut kept = Vec::with_capacity(entries.len());
+            for (key, value) in &entries {
+                match present.get(key) {
+                    Some(entry) => kept.push(entry.clone()),
+                    None => kept.push(ResourceHotTerminalEntryV1::deserialize(value).map_err(
+                        |error| {
+                            invalid(format!("resource bucket entry cannot be decoded: {error}"))
+                        },
+                    )?),
+                }
+            }
+            let evidence = encode_value(&hot_bucket_declaration(&kept))?;
             directives.push(bucket_directive(
                 resource_hot_terminal_bucket_reference(bucket).into_untyped(),
                 serde_json::json!({
                     "format_version": RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION,
                     "bucket": bucket,
                     "entries": entries.into_values().collect::<Vec<_>>(),
+                    IDENTITY_EVIDENCE_DEPENDENCIES_FIELD: evidence,
                 }),
                 version,
                 summary,
@@ -2587,6 +2696,7 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
                     "format_version": RESOURCE_LIVE_BUCKET_FORMAT_VERSION,
                     "bucket": bucket,
                     "entries": entries.into_values().collect::<Vec<_>>(),
+                    IDENTITY_EVIDENCE_DEPENDENCIES_FIELD: encode_value(&empty_declaration())?,
                 }),
                 version,
                 summary,

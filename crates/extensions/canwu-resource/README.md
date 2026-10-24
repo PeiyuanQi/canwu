@@ -444,12 +444,24 @@ miss) still fails the boundary.
 
 A lease leaves the root as soon as it finishes: once its operation completes
 it, or a `Release`, an expiry, or an abort ends it, and any report it reserved
-has published, the acquisition, its grants, and its certificate are removed.
-Its receipts stay hot terminal records until an archive commit takes them, and
-the outcomes under its keys answer a resend. A later request naming a finished
-lease under a key it has not used is refused as `not_found`, and an
-`Acquire` or a single step of its identity as `idempotency_conflict`: an
-identity starts one lease for the run.
+has published or been given up, the acquisition, its grants, and its
+certificate are removed. A reserved report waits for an observation head at or
+after the completion's revision; every lease of one holder that reserved the
+same grant is served by the one report. When its grant has no observation head
+at all, or its holder is one the engine would refuse knowledge
+(`SimulationView::knowledge_holder_accepts_publication`), the report is given
+up at the boundary the completion makes it due, and the completed participant
+becomes an archive candidate without it; the report system does not wake
+itself for it. An acquisition, a single-step lease, or an external participant
+grant that reserves reports for a holder the engine refuses now is the
+operation's recorded `invalid_authority` rejection, and `install_report_grant`
+refuses a holder of a kind that can never hold knowledge
+(`holder_kind_can_hold_knowledge`: a core organization, resource, route, or
+territory, or a person given as an entity). Its receipts stay hot terminal
+records until an archive commit takes them, and the outcomes under its keys
+answer a resend. A later request naming a finished lease under a key it has
+not used is refused as `not_found`, and an `Acquire` or a single step of its
+identity as `idempotency_conflict`: an identity starts one lease for the run.
 
 What a host application has to watch:
 
@@ -693,7 +705,11 @@ ground truth. Each stock observation carries the authoritative
 `ResourceScopeId` derived from the account's exact resource-definition revision;
 consumers must preserve it and cannot rewrite distant stock as local. The
 persisted observation head is the only report source, so materialization never
-backdates current balances into an older observation cut.
+backdates current balances into an older observation cut. Since 0.20.0 every
+source version a provider's `RecordObservation` head cites must be its
+record's current version, and of a kind the resource plugin reads, when the
+head is recorded; otherwise the operation is a recorded rejection. The root
+declares a head's sources for as long as the head stands.
 
 Terminal resource records are moved through the bounded package-owned archive:
 `prepare_resource_archive(candidate_limit, store)` selects only hot terminal
@@ -722,6 +738,28 @@ record lies in a bucket record `resource:hot-terminal:{bucket}`
 rounded up to a power of two. Each live record lies in a live bucket
 `resource:live:{bucket}` (`ResourceLiveBucketV1`, `resource_live_bucket`).
 Both are records of one kind, `canwu.resource` `bucket`.
+
+The root's evidence survives a seal and a continuation checkpoint for as long
+as a hot record cites it. The live root's payload-required continuation
+declares the evidence of open transfers and unreleased acquisitions, whose
+bodies the plugin reads. Since 0.20.0 the root also declares identity-only
+evidence dependencies (`canwu_identity_evidence_dependencies`): each hot
+terminal bucket the exact evidence of its records
+(`ResourceTerminalArchivePayloadV1::exact_evidence`: an outcome's exact
+evidence, a consumption's consumer evidence, a loss's record cause, a terminal
+transfer's exact evidence, an external participant's coordinator source) until
+the record leaves for the archive, and the live root the external record
+versions its lease grants and open external participant grants lock, each
+such participant's coordinator source, and the source
+versions of every observation head
+(`ResourceState::computed_identity_evidence`). A live bucket declares none.
+So a version that the record citing it outlives, such as a coordinator's
+scope root superseded within the instant, stays provably existing, and
+`validate_resource_runtime` gives the same answer for a run, its sealed twin,
+and a run restored from its continuation checkpoint. `max_state_bytes` bounds
+the live root, its declaration included, and every hot terminal and live
+entry; a bucket's declaration, which repeats evidence its entries carry, is
+not counted.
 
 A boundary reads and writes the live root and the buckets of the records it
 touches: the resource plugin attaches every record a packet names, and every

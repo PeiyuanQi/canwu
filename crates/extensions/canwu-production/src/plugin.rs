@@ -59,11 +59,13 @@ const INCIDENT_COMMIT_AUDIT_SYSTEM: &str = "production_incident_commit_audit_v1"
 const OUTPUT_DISPATCH_SYSTEM: &str = "production_output_dispatch_v1";
 const REPORT_SYSTEM: &str = "production_holder_report_publish_v1";
 const PRODUCTION_REPORT_KNOWLEDGE: &str = "holder_report";
-/// BLAKE3, lowercase hex, of `canwu-production 0.18.0 semantics: scope roots,
-/// batch command, residue archive, boundary activity triggers, folded incident
-/// receipts` (one line, one space after each comma and colon).
+/// BLAKE3, lowercase hex, of `canwu-production 0.20.0 semantics: asset binding
+/// and application spec reads declared, cited record kinds checked before
+/// reading, pending output sources declared identity-only, report holders that
+/// cannot receive knowledge skipped` (one line, one space after each comma and
+/// colon).
 pub const PRODUCTION_SEMANTIC_HASH: &str =
-    "7b39f2f5d5dab13ab1ee6e7c9b051c34eb05870249cdce287d89c879e2248ed0";
+    "eded50444992d0a08392ecf601ab9b38954d244e65aa8f06f83ed3ef3f8f6d9e";
 const REPORT_SCHEMA_HASH: &str = "2e84d66c85841a251a94aa15fa4fd477d29136ed31c8434c5dd61dc92156fdf8";
 static PRODUCTION_ARCHIVE_COMMIT_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static PRODUCTION_ARCHIVE_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
@@ -163,6 +165,8 @@ fn production_external_state_keys() -> Vec<StateKey> {
         DomainRecordSchema::for_record::<canwu_technology::AdoptionRecord>().state_key(),
         DomainRecordSchema::for_record::<canwu_technology::ExperimentAttempt>().state_key(),
         DomainRecordSchema::for_record::<canwu_technology::AttemptObservation>().state_key(),
+        DomainRecordSchema::for_record::<canwu_technology::AssetBinding>().state_key(),
+        DomainRecordSchema::for_record::<canwu_technology::ApplicationSpec>().state_key(),
     ]
 }
 
@@ -257,10 +261,16 @@ impl SimulationPlugin for ProductionPlugin {
     fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
         let mut runtime_schema = DomainRecordSchema::for_record::<ProductionRuntimeRecord>();
         runtime_schema.payload_schema = PayloadSchema::Object {
-            properties: std::collections::BTreeMap::from([(
-                PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD.to_owned(),
-                payload_required_evidence_continuation_property_v1(),
-            )]),
+            properties: std::collections::BTreeMap::from([
+                (
+                    PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD.to_owned(),
+                    payload_required_evidence_continuation_property_v1(),
+                ),
+                (
+                    canwu_api::IDENTITY_EVIDENCE_DEPENDENCIES_FIELD.to_owned(),
+                    canwu_api::identity_evidence_dependencies_property_v1(),
+                ),
+            ]),
             allow_additional: true,
         };
         registrar.register_record_schema(runtime_schema)?;
@@ -2059,6 +2069,12 @@ fn publish_holder_reports(
             (&left.1, &left.3.scope, &left.3.id).cmp(&(&right.1, &right.3.scope, &right.3.id))
         });
         for (key, holder, place, report, source_evidence) in candidates {
+            // A holder the engine would refuse knowledge (a core
+            // organization, a dead person, a retired entity) gets no report,
+            // rather than failing the boundary (downstream gap G-75).
+            if !view.knowledge_holder_accepts_publication(&holder)? {
+                continue;
+            }
             let holder_count = holder_counts.count(view, &holder, &limits)?;
             let payload = serde_json::to_value(&report).map_err(|error| encode_error(&error))?;
             let payload_bytes = serde_json::to_vec(&payload)
@@ -3031,6 +3047,7 @@ fn validate_external_operation_evidence(
         )?;
     }
 
+    require_technology_binding_kinds(&execution.technology)?;
     let mut technology_records = Vec::new();
     for reference in [
         Some(&execution.technology.technique_revision),
@@ -3116,6 +3133,10 @@ fn validate_external_operation_evidence(
         })
         .transpose()?;
     if let Some(adoption) = &adoption {
+        require_kind::<canwu_technology::ApplicationSpec>(
+            &adoption.application,
+            "adoption application",
+        )?;
         let application =
             current_version_body(view, &adoption.application, "adoption application")?
                 .decode_payload::<canwu_technology::ApplicationSpec>()?;
@@ -3416,6 +3437,7 @@ fn validate_authoritative_technology_binding(
     site: &crate::ProductionSite,
     binding: &crate::TechnologyEvidenceBinding,
 ) -> Result<(), CanwuError> {
+    require_technology_binding_kinds(binding)?;
     let mut records = Vec::new();
     for reference in [
         Some(&binding.technique_revision),
@@ -3494,6 +3516,10 @@ fn validate_authoritative_technology_binding(
         })
         .transpose()?;
     if let Some(adoption) = &adoption {
+        require_kind::<canwu_technology::ApplicationSpec>(
+            &adoption.application,
+            "adoption application",
+        )?;
         let application =
             current_version_body(view, &adoption.application, "adoption application")?
                 .decode_payload::<canwu_technology::ApplicationSpec>()?;
@@ -3575,6 +3601,19 @@ fn validate_authoritative_provider_binding(
     site: &crate::ProductionSite,
     binding: &crate::ProductionEvidenceBinding,
 ) -> Result<(), CanwuError> {
+    // A record of another kind is refused before it is read: the plugin
+    // declares the reads of the provider kinds only.
+    let kind = &binding.version.record.kind;
+    if !(kind.matches_type::<canwu_technology::AssetBinding>()
+        || kind.matches_type::<canwu_technology::CapabilityQualification>()
+        || kind.matches_type::<canwu_technology::ImplementationRecord>()
+        || kind.matches_type::<canwu_technology::AdoptionRecord>()
+        || kind.matches_type::<canwu_technology::AttemptObservation>())
+    {
+        return Err(invalid(
+            "production provider evidence is not a supported typed provider record",
+        ));
+    }
     let record = current_version_body(view, &binding.version, "provider evidence")?;
     let (allowed_kinds, explicit_capabilities, available_quantity) =
         if record
@@ -3677,6 +3716,10 @@ fn validate_authoritative_provider_binding(
             .matches_type::<canwu_technology::AttemptObservation>()
         {
             let observation = record.decode_payload::<canwu_technology::AttemptObservation>()?;
+            require_kind::<canwu_technology::ExperimentAttempt>(
+                &observation.attempt,
+                "environment observation attempt",
+            )?;
             let attempt = current_version_body(
                 view,
                 &observation.attempt,
@@ -3759,6 +3802,47 @@ fn validate_authoritative_provider_binding(
         return Err(invalid(
             "production provider binding differs from its authoritative typed record body",
         ));
+    }
+    Ok(())
+}
+
+/// Refuses a cited version that is not of the record kind `T`, before it is
+/// read: a read of a kind the plugin does not declare would fail the
+/// boundary, and the citation is the packet's error.
+fn require_kind<T: canwu_api::DomainRecordType>(
+    version: &canwu_api::DomainRecordVersionRef,
+    label: &str,
+) -> Result<(), CanwuError> {
+    if version.record.kind.matches_type::<T>() {
+        Ok(())
+    } else {
+        Err(invalid(format!(
+            "production {label} is not a record of its expected kind"
+        )))
+    }
+}
+
+/// Refuses a technology binding whose citations are not of their kinds
+/// (technique revision, capability qualification, implementation, adoption)
+/// before any of them is read.
+fn require_technology_binding_kinds(
+    binding: &crate::TechnologyEvidenceBinding,
+) -> Result<(), CanwuError> {
+    require_kind::<canwu_technology::TechniqueRevision>(
+        &binding.technique_revision,
+        "technique revision",
+    )?;
+    if let Some(reference) = &binding.capability_qualification {
+        require_kind::<canwu_technology::CapabilityQualification>(
+            reference,
+            "capability qualification",
+        )?;
+    }
+    if let Some(reference) = &binding.implementation {
+        require_kind::<canwu_technology::ImplementationRecord>(reference, "implementation")?;
+    }
+    if let Some(reference) = &binding.adoption {
+        require_kind::<canwu_technology::AdoptionRecord>(reference, "adoption")?;
     }
     Ok(())
 }
@@ -3921,6 +4005,18 @@ fn validate_production_completion_ingress(
                 return Err(CanwuError::new(
                     ErrorCode::InvalidAuthority,
                     "production completion participant acknowledgement has the wrong owner",
+                ));
+            }
+            // A source of another kind is refused before it is read: only the
+            // resource runtime's read is declared.
+            if !provider_source
+                .record
+                .kind
+                .matches_type::<canwu_resource::ResourceRuntimeRecord>()
+            {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "production completion participant source is not the resource runtime",
                 ));
             }
             if !view.domain_record_version_is_current(provider_source)? {

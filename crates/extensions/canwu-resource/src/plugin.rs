@@ -6,14 +6,15 @@ use canwu_api::{
     ArchiveReachabilityManifest, BoundaryContext, BoundaryDirective, BoundaryPhase,
     BoundaryProposal, BoundarySystemContract, CanwuError, CauseRef, Command, CommandContext,
     CommandIngress, DomainRecord, DomainRecordKind, DomainRecordSchema, DomainRecordType,
-    EntityRef, ErrorCode, EventAudience, EvidenceRef, IngressClass, IngressId, IngressPayload,
-    IngressRecord, Issuer, KnowledgeOrigin, KnowledgeRecordDraft, KnowledgeRecordKind,
-    KnowledgeSchemaId, KnowledgeSubject, KnowledgeSubjectSchema, KnowledgeSubjectTarget,
-    KnowledgeSubjectTargetKind, KnowledgeWriteGrant, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
-    PayloadSchema, PluginActionDescriptor, PluginArchiveObjectProvider, PluginArchiveRetention,
+    EntityRef, ErrorCode, EventAudience, EvidenceRef, IDENTITY_EVIDENCE_DEPENDENCIES_FIELD,
+    IngressClass, IngressId, IngressPayload, IngressRecord, Issuer, KnowledgeOrigin,
+    KnowledgeRecordDraft, KnowledgeRecordKind, KnowledgeSchemaId, KnowledgeSubject,
+    KnowledgeSubjectSchema, KnowledgeSubjectTarget, KnowledgeSubjectTargetKind,
+    KnowledgeWriteGrant, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD, PayloadSchema,
+    PluginActionDescriptor, PluginArchiveObjectProvider, PluginArchiveRetention,
     PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest, PluginIngressTarget,
     PluginKnowledgeSchema, PluginRegistrar, SimTime, SimulationPlugin, SimulationView, StateKey,
-    StateVisibility, SystemCadence, SystemDirective,
+    StateVisibility, SystemCadence, SystemDirective, identity_evidence_dependencies_property_v1,
     payload_required_evidence_continuation_property_v1,
 };
 use serde::{Deserialize, Serialize};
@@ -47,8 +48,13 @@ pub const RESOURCE_DEFERRED_INGRESS: &str = "resource_deferred_packet_v1";
 /// another plugin's boundary system schedules on it settles nothing.
 pub const RESOURCE_ACCOUNT_RESCOPE_INGRESS: &str = "resource_account_rescope_v1";
 pub const RESOURCE_REPORT_KNOWLEDGE: &str = "resource_report";
+/// BLAKE3, lowercase hex, of `canwu-resource plugin semantic hash 0.20.0:
+/// identity-only evidence of hot terminal records and held completion state,
+/// current observation sources, completion reports given up without an
+/// observation head, report holders that cannot receive knowledge refused`
+/// (one line, one space after each comma and colon).
 pub const RESOURCE_SEMANTIC_HASH: &str =
-    "3a1e04cb2e61f397db3ecb7b13ebaf0f7af0cc87f621121b726cf1e2221a32ac";
+    "6fbe03085ee5cde95721728f49cc32b6aa48f0eccc1ad2a17fd73f1f8e7f159a";
 
 const RESOURCE_REPORT_SCHEMA_HASH: &str =
     "2e271b9ea79404e662ba51360ce8061421ae896c1e70b09e99feb8d0de01a007";
@@ -413,6 +419,92 @@ fn lease_identity_refusal(
     Ok(taken.then(crate::lease_identity_taken))
 }
 
+/// The refusal of a completion operation that reserves holder reports (an
+/// acquisition, a single-step lease, or an external participant grant whose
+/// recipe reserves at least one report) for a holder the engine would refuse
+/// knowledge now: a missing or dead person, a missing army or government, or
+/// a domain entity that is retired, deleted, or of a kind whose schema
+/// admits no holders. Its reports could never be published, so the operation
+/// is refused as its recorded rejection, never at publication as a failed
+/// boundary (downstream gap G-75). A holder that becomes ineligible later is
+/// skipped when its report would be published.
+fn completion_report_holder_refusal(
+    view: &SimulationView<'_>,
+    operation: &crate::ResourceCompletionOperationV1,
+) -> Result<Option<crate::ResourceError>, CanwuError> {
+    let (holder, recipe) = match operation {
+        crate::ResourceCompletionOperationV1::Acquire(request) => {
+            (&request.holder, &request.recipe)
+        }
+        crate::ResourceCompletionOperationV1::SingleStepLease(request) => {
+            (&request.lease.holder, &request.lease.recipe)
+        }
+        crate::ResourceCompletionOperationV1::GrantExternalParticipant(request) => {
+            (&request.holder, &request.recipe)
+        }
+        _ => return Ok(None),
+    };
+    if recipe.reports_per_holder == 0
+        || recipe.holders == 0
+        || view.knowledge_holder_accepts_publication(holder)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(crate::ResourceError::Authority(
+        "completion reserves holder reports for a holder that cannot receive knowledge".to_owned(),
+    )))
+}
+
+/// What the simulation view holds against a completion operation that the
+/// root alone cannot tell: a lease identity an archived lease took, then a
+/// report holder that cannot receive knowledge.
+fn completion_refusal(
+    view: &SimulationView<'_>,
+    state: &crate::ResourceState,
+    operation: &crate::ResourceCompletionOperationV1,
+) -> Result<Option<crate::ResourceError>, CanwuError> {
+    match lease_identity_refusal(view, state, operation)? {
+        Some(refusal) => Ok(Some(refusal)),
+        None => completion_report_holder_refusal(view, operation),
+    }
+}
+
+/// The refusal of an observation head that cites a source version that is
+/// not its record's current version, or a record of a kind the resource
+/// plugin does not read. The root declares every head's sources
+/// identity-only for as long as the head stands, so each must be proven when
+/// the head is recorded, and only a current version can be without retained
+/// evidence; an unproven source would refuse every later seal. Only the
+/// current-version index is read, so a sealed run and its exact replay find
+/// the same.
+fn observation_source_refusal(
+    view: &SimulationView<'_>,
+    request: &ResourceOperationRequestV1,
+) -> Result<Option<crate::ResourceError>, CanwuError> {
+    let ResourceOperationRequestV1::RecordObservation(value) = request else {
+        return Ok(None);
+    };
+    for version in &value.head.source_versions {
+        match is_current_version(view, version) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(Some(crate::ResourceError::VersionConflict(
+                    "resource observation head cites a source version that is not current"
+                        .to_owned(),
+                )));
+            }
+            Err(error) if error.code == ErrorCode::UndeclaredStateRead => {
+                return Ok(Some(crate::ResourceError::Authority(
+                    "resource observation head cites a record kind the resource plugin does not read"
+                        .to_owned(),
+                )));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
 /// The refusal of an operation that would record a loss under an identity
 /// an archived loss took. The root holds only its hot losses and refuses a
 /// hot identity itself; the archive is read for one that has left, as it is
@@ -588,9 +680,7 @@ impl SimulationPlugin for ResourcePlugin {
 
     fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
         registrar.register_record_schema(resource_record_schema())?;
-        registrar.register_record_schema(DomainRecordSchema::for_record::<
-            crate::ResourceBucketRecord,
-        >())?;
+        registrar.register_record_schema(resource_bucket_schema())?;
         registrar.register_knowledge_schema(resource_report_knowledge_schema())?;
         registrar.register_event_audience(
             "canwu.resource.operation_settled.v1",
@@ -845,12 +935,36 @@ impl SimulationPlugin for ResourcePlugin {
     }
 }
 
+/// The live root declares both a payload-required continuation (the open
+/// transfers' and unreleased acquisitions' evidence, whose bodies the plugin
+/// reads) and identity-only dependencies (the versions its held completion
+/// state and observation heads cite).
 fn resource_record_schema() -> DomainRecordSchema {
     let mut schema = DomainRecordSchema::for_record::<ResourceRuntimeRecord>();
     schema.payload_schema = PayloadSchema::Object {
+        properties: std::collections::BTreeMap::from([
+            (
+                PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD.to_owned(),
+                payload_required_evidence_continuation_property_v1(),
+            ),
+            (
+                IDENTITY_EVIDENCE_DEPENDENCIES_FIELD.to_owned(),
+                identity_evidence_dependencies_property_v1(),
+            ),
+        ]),
+        allow_additional: true,
+    };
+    schema
+}
+
+/// Each bucket declares identity-only dependencies: a hot terminal bucket
+/// the exact evidence of its records, a live bucket none.
+fn resource_bucket_schema() -> DomainRecordSchema {
+    let mut schema = DomainRecordSchema::for_record::<crate::ResourceBucketRecord>();
+    schema.payload_schema = PayloadSchema::Object {
         properties: std::collections::BTreeMap::from([(
-            PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD.to_owned(),
-            payload_required_evidence_continuation_property_v1(),
+            IDENTITY_EVIDENCE_DEPENDENCIES_FIELD.to_owned(),
+            identity_evidence_dependencies_property_v1(),
         )]),
         allow_additional: true,
     };
@@ -1808,7 +1922,7 @@ fn settle_command_packet(
         Some(refusal) => Some(refusal),
         None => match request {
             ResourceOperationRequestV1::Completion(operation) => {
-                lease_identity_refusal(view, state, operation)?
+                completion_refusal(view, state, operation)?
             }
             _ => loss_identity_refusal(view, state, request)?,
         },
@@ -1916,7 +2030,10 @@ fn settle_adapter_packet(
             &operation_key,
         );
     }
-    let refusal = loss_identity_refusal(view, state, &packet.request)?;
+    let refusal = match loss_identity_refusal(view, state, &packet.request)? {
+        Some(refusal) => Some(refusal),
+        None => observation_source_refusal(view, &packet.request)?,
+    };
     match state
         .settle_operation_refused_by(&packet.request, Some(context.at), refusal.as_ref())
         .map_err(resource_canwu_error)?
@@ -2273,7 +2390,11 @@ fn settle_completion_packet(
             state.settle_prepare_with_external_revalidation(request, external_targets_current)
         }
         crate::ResourceCompletionOperationV1::Acquire(_) => {
-            let refusal = lease_identity_refusal(view, state, &operation)?;
+            let refusal = completion_refusal(view, state, &operation)?;
+            state.settle_operation_refused_by(&request, None, refusal.as_ref())
+        }
+        crate::ResourceCompletionOperationV1::GrantExternalParticipant(_) => {
+            let refusal = completion_report_holder_refusal(view, &operation)?;
             state.settle_operation_refused_by(&request, None, refusal.as_ref())
         }
         _ => state.settle_operation(&request),
@@ -2868,26 +2989,58 @@ fn materialize_reports_on<S: crate::HotTerminalSource + ?Sized>(
     let mut published = 0_usize;
     let mut directives = Vec::new();
     for grant_id in candidates {
-        let mandatory_binding =
-            state
-                .completion_report_reservations
-                .iter()
-                .find_map(|(acquisition, grants)| {
-                    grants.contains(&grant_id).then(|| {
-                        state
-                            .completion_report_ready
-                            .get(acquisition)
-                            .copied()
-                            .map(|required| (acquisition.clone(), required))
-                    })?
-                });
-        let mandatory = mandatory_binding.as_ref().is_some_and(|(_, required)| {
-            state
-                .observation_head_by_grant
-                .get(&grant_id)
-                .and_then(|head| state.observation_heads.get(head))
-                .is_some_and(|head| head.provider_state_revision >= *required)
-        });
+        // Every completed lease whose reserved report this grant owes: one
+        // holder's leases may each reserve the same grant, and each is ready
+        // from the revision its completion settled at.
+        let ready_bindings = state
+            .completion_report_reservations
+            .iter()
+            .filter(|(_, grants)| grants.contains(&grant_id))
+            .filter_map(|(acquisition, _)| {
+                state
+                    .completion_report_ready
+                    .get(acquisition)
+                    .map(|required| (acquisition.clone(), *required))
+            })
+            .collect::<Vec<_>>();
+        let grant = state
+            .report_grants
+            .get(&grant_id)
+            .cloned()
+            .ok_or_else(|| invalid("resource dirty report index lost its grant"))?;
+        // A grant with no observation head has nothing to report from, and
+        // a holder the engine would refuse can be published nothing. Neither
+        // waits: the grant leaves the dirty set with no wake, and every
+        // completion ready for its report gives that report up, so its
+        // participant archives without one (downstream gap G-75). A provider
+        // that records a head later dirties the grant again.
+        if !state.observation_head_by_grant.contains_key(&grant_id)
+            || !view.knowledge_holder_accepts_publication(&grant.holder)?
+        {
+            state.report_dirty_grants.remove(&grant_id);
+            for (acquisition, _) in &ready_bindings {
+                state
+                    .release_completion_report(acquisition, &grant_id)
+                    .map_err(resource_canwu_error)?;
+            }
+            state.report_cursor = Some(grant_id);
+            changed = true;
+            continue;
+        }
+        // The report from the grant's head is the one every ready completion
+        // at or before the head's revision waits for; a completion after it
+        // waits for a newer head.
+        let head_revision = state
+            .observation_head_by_grant
+            .get(&grant_id)
+            .and_then(|head| state.observation_heads.get(head))
+            .map(|head| head.provider_state_revision);
+        let satisfied = ready_bindings
+            .into_iter()
+            .filter(|(_, required)| head_revision.is_some_and(|revision| revision >= *required))
+            .map(|(acquisition, _)| acquisition)
+            .collect::<Vec<_>>();
+        let mandatory = !satisfied.is_empty();
         if !report_publication_slot_available(
             existing,
             published,
@@ -2895,21 +3048,6 @@ fn materialize_reports_on<S: crate::HotTerminalSource + ?Sized>(
             state.limits.max_reports_per_boundary,
             mandatory,
         ) {
-            continue;
-        }
-        let grant = state
-            .report_grants
-            .get(&grant_id)
-            .cloned()
-            .ok_or_else(|| invalid("resource dirty report index lost its grant"))?;
-        if !state.observation_head_by_grant.contains_key(&grant_id) {
-            if mandatory_binding.is_none() {
-                state.report_dirty_grants.remove(&grant_id);
-            } else {
-                directives.push(report_wake_directive(grant.cadence_minutes));
-            }
-            state.report_cursor = Some(grant_id);
-            changed = true;
             continue;
         }
         if grant.delay_minutes > 0 && !due_ready.contains(&grant_id) {
@@ -2933,10 +3071,7 @@ fn materialize_reports_on<S: crate::HotTerminalSource + ?Sized>(
         grants_by_holder
             .entry(grant.holder)
             .or_insert_with(Vec::new)
-            .push((
-                grant_id.clone(),
-                mandatory.then(|| mandatory_binding.expect("mandatory binding exists").0),
-            ));
+            .push((grant_id.clone(), satisfied));
         state.report_dirty_grants.remove(&grant_id);
         let cadence = i64::try_from(grant.cadence_minutes)
             .map_err(|_| invalid("resource report cadence exceeds simulation time"))?;
@@ -2982,7 +3117,7 @@ fn materialize_reports_on<S: crate::HotTerminalSource + ?Sized>(
     let state = &mut work.state;
     for (batch_ordinal, (holder, grant_ids)) in grants_by_holder.into_iter().enumerate() {
         let mut records = Vec::with_capacity(grant_ids.len());
-        for (grant_id, mandatory_acquisition) in grant_ids {
+        for (grant_id, satisfied) in grant_ids {
             let head_id = state
                 .observation_head_by_grant
                 .get(&grant_id)
@@ -3030,21 +3165,10 @@ fn materialize_reports_on<S: crate::HotTerminalSource + ?Sized>(
                 supersedes: Vec::new(),
                 contradicts: Vec::new(),
             });
-            if let Some(acquisition) = mandatory_acquisition {
-                if let Some(grants) = state.completion_report_reservations.get_mut(&acquisition) {
-                    grants.remove(&grant_id);
-                }
-                if state
-                    .completion_report_reservations
-                    .get(&acquisition)
-                    .is_some_and(std::collections::BTreeSet::is_empty)
-                {
-                    state.completion_report_reservations.remove(&acquisition);
-                    state.completion_report_ready.remove(&acquisition);
-                    state
-                        .mark_external_participant_archive_ready(&acquisition)
-                        .map_err(resource_canwu_error)?;
-                }
+            for acquisition in &satisfied {
+                state
+                    .release_completion_report(acquisition, &grant_id)
+                    .map_err(resource_canwu_error)?;
             }
         }
         directives.push(BoundaryDirective::PublishKnowledge {
@@ -4100,6 +4224,12 @@ fn single_step_lease_refusal(
         return Ok(Some(crate::ResourceError::LimitExceeded(
             "completion admission cannot reserve its bounded terminal report path".to_owned(),
         )));
+    }
+    if let Some(refusal) = completion_report_holder_refusal(
+        view,
+        &crate::ResourceCompletionOperationV1::SingleStepLease(request.clone()),
+    )? {
+        return Ok(Some(refusal));
     }
     let envelope = &lease.eligibility_envelope;
     let locked = request

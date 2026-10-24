@@ -263,8 +263,17 @@ them first. An ended execution or project no longer declares its inputs'
 consumer evidence, which restore compares by reference only. A settled
 output's pinned production source is not read back: the acknowledgement must
 name exactly the source the dispatch pinned, and the exact resource outcome
-cites it. Restore rebuilds a hot settled execution's request digests and
-acknowledgement digest at `output_settled_at`, as the archive does.
+cites it. The pinned source is an earlier version of the root, which the
+dispatch supersedes, so until the execution has its output outcomes the root
+also declares it identity-only (`canwu_identity_evidence_dependencies`): a
+seal between the dispatch and the credit keeps proof that it exists, and the
+resource root declares it once the credit settles. Production reads the
+technology `AssetBinding` and `ApplicationSpec` records an evidence binding or
+an adoption names, and declares both reads; a citation of any other kind is
+refused before it is read. A site report to a holder the
+engine would refuse knowledge is skipped. Restore rebuilds a hot settled
+execution's request digests and acknowledgement digest at
+`output_settled_at`, as the archive does.
 
 The host application can queue the public packet types, the operation packet
 and the output acknowledgement among them, and any completion coordinator

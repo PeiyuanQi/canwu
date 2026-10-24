@@ -748,10 +748,17 @@ impl TechnologyRecordPayload {
                 }
             }
         }
+        // A holder, operator, or site that is a domain entity is referenced as
+        // its record under the same role, which the engine requires of a
+        // domain entity (downstream gap G-76); a core entity stays a core
+        // target.
         core.into_iter()
             .map(|target| DomainReference {
                 role: "core".to_owned(),
-                target: DomainReferenceTarget::Core(target),
+                target: match target {
+                    EntityRef::Domain(record) => DomainReferenceTarget::Domain(record),
+                    core => DomainReferenceTarget::Core(core),
+                },
             })
             .chain(domain.into_iter().map(|target| DomainReference {
                 role: "domain".to_owned(),

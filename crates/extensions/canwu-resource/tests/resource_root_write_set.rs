@@ -806,6 +806,8 @@ fn a_tampered_hot_terminal_bucket_is_refused_when_the_root_is_installed() {
         "format_version": RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION,
         "bucket": other,
         "entries": [entry],
+        canwu_api::IDENTITY_EVIDENCE_DEPENDENCIES_FIELD:
+            moved[bucket_at].payload[canwu_api::IDENTITY_EVIDENCE_DEPENDENCIES_FIELD].clone(),
     });
     moved[bucket_at].payload["entries"]
         .as_array_mut()
