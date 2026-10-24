@@ -1,6 +1,6 @@
 # Opus progress — downstream engine gaps / Opus 进度记录
 
-> Updated 2026-10-24 at Canwu **0.20.0** (release commit and tag `v0.20.0`: see §1).
+> Updated 2026-10-24 at Canwu **0.20.0** (tag `v0.20.0`, release commit `a82ffeb` on `main`), published the same day.
 > This file is the to-do list of engine gaps that a downstream application has filed against the published crates.
 > The application is Celestial Mandate (CM); its gap ledger (implementation document `59`, in the CM repository) gives
 > each row its id (`G-nn`) and the full evidence. Priorities are the ledger's severities: High, Medium, Low.
@@ -19,10 +19,10 @@
 
 | Item | State |
 | --- | --- |
-| Release | 0.20.0, released 2026-10-24: the release commit on `main`, the annotated tag `v0.20.0`, the 24 library crates on crates.io in the order of `docs/releasing.md` (`canwu-fiscal` after `canwu-resource`), the GitHub release, and the website deployed from `main`; 0.19.0 is yanked once 0.20.0 resolves. Verification on the integrated release tree (owner, 2026-10-24: no extensive testing): fmt, Clippy with warnings denied, the workspace tests (856 passed, 0 failed, 3 ignored), the debug client, the documentation build with warnings denied, the four public examples, the performance harness checked (not run), the website build, and CI on Windows, macOS, and Linux. Not run for this release: the workspace-wide continuation gate (each persistence package ran it on its own crates during review), the release-only `#[ignore]` scale tests, and the minimum-Rust-version check. Downstream pins `=0.19.0` and moves to `=0.20.0` as its next change set. |
+| Release | 0.20.0 is published (2026-10-24): all 24 library crates on crates.io (one workspace publish from the tagged commit; the index lists each), the annotated tag `v0.20.0` on the release commit `a82ffeb`, the GitHub release, and the website deployed from `main` (canwu.org shows `=0.20.0` in both languages). 0.20.0 is the only live version: 0.19.0 was yanked on 2026-10-24. A registry-only consumer of `canwu-api`, `canwu-military`, and `canwu-military-reference-content` at `=0.20.0` builds and runs. Verification on the release tree (owner, 2026-10-24: no extensive testing): fmt, Clippy with warnings denied, the workspace tests (856 passed, 0 failed, 3 ignored), the debug client, the documentation build with warnings denied, the four public examples, the performance harness checked (not run), the website build, and CI on Windows, macOS, and Linux; not run: the workspace-wide continuation gate (each persistence package ran it on its own crates in review), the release-only `#[ignore]` scale tests, and the minimum-Rust-version check. Downstream pins `=0.19.0` (its locked build keeps resolving the yanked version) and moves to `=0.20.0` as its next change set. |
 | Policy | **Same version only** (owner, 2026-10-14): Canwu crates depend only on the exact same version of each other (`=0.20.0` once released); nothing written by an earlier release is read; no migration. |
 | Proposals of 0.20.0 (all "implemented in 0.20.0") | `docs/proposals/`: `correspondence-domain-parties.md` (G-72, G-78, E-41's correspondence half), `movement-holds-and-revocation.md` (G-73, G-79, G-80, E-48), `decision-deadlines-reassignment-and-reads.md` (G-70, G-81, G-82), `military-engagements.md` (G-38; supersedes `military-domain-design.md`), `resource-continuation-and-completion-reports.md` (G-74 to G-77), `calendar-marks-and-draw-retirement.md` (G-69, G-71). The 0.19.0 and 0.18.0 proposals are listed in their entries of `docs/versioning.md`. |
-| Branches and worktrees | `release/0.20.0` carries the integrated packages; the package worktrees under `.worktrees/` (`g20-correspondence`, `g20-movement`, `g20-decision`, `g20-military`, `g38-military-design`, `g20-resource`, `g20-sim`) and this documentation branch (`release-0.20.0-docs`) are removed once the release commit is on `main`. |
+| Branches and worktrees | Only `main`, locally and on the remote; no 0.20.0 worktrees remain. |
 | Release procedure | `.agents/skills/canwu-contributor-release/SKILL.md` and `docs/releasing.md`. The orchestrator runs the full verification list once on the integrated release tree and the pre-release tests (the public examples, the performance-harness checks, the release-only `#[ignore]` scale tests in a release build, the continuation gate) before tagging (the counts are in the release row). |
 | What the adopter must know first | (1) Pin every Canwu crate at `=0.20.0`; nothing earlier loads (commitment format 7 and continuation checkpoint format 4 refuse 0.19.0 saves by their format as well as their engine version). (2) Read the "Upgrading from 0.19.0" notes of the 0.20.0 entry of `docs/versioning.md` and its "Known limits": `DelayLeg` takes `retime_later_legs` and holds a leg before departure; `MovementLegHoldV1::scheduled_at` with `kind`; `RevokeBooking` and `MovementBookingRequestV1::replaces`; superseded leg dues leave `pending_ingress()`; `ExtendDeadline`, `Reassign`, `with_option_bias`, `decision_tickets_opened`, `open_decision_tickets_of`, `open_decision_tickets_of_controller`; `KnowledgeSeedReceipt::refusal` and `settled_at`, domain-entity correspondence parties, a dead person cannot carry; `canwu-military` is rewritten (rulebook, `MilitaryPlugin<R>`, `RegisterForce`, `PlaceForce`, `OpenEngagement`, `SupplyInput`, `Step`, `engagement_summary`); resource state format 6 and bucket formats 2, a continuation checkpoint taken mid-lease loads, report grants need holders that can hold knowledge, a reserved report without an observation head is given up; production reads asset bindings and application specs; technology references domain entities as records; calendar marks (`schedule_calendar_marks`, `BoundarySystemContract::calendar`) and keyed-draw retirement (`KeyedDrawRetirement`). (3) The 0.19.0 and 0.18.0 notes still apply. |
 
@@ -95,15 +95,14 @@ own leases) and E-37's publication-budget overshoot (the application's publisher
 
 ## 5. Next steps
 
-1. **Yank 0.19.0** once `=0.20.0` resolves from the index, and remove the release worktrees and branches.
-2. **Wait for the downstream's adoption of 0.20.0** (its ledger records each row's adoption at the `=0.20.0` pin) and
+1. **Wait for the downstream's adoption of 0.20.0** (its ledger records each row's adoption at the `=0.20.0` pin) and
    for the rows it files against 0.20.0. Nothing is filed at the time of writing.
-3. Then the §4.2 limits by downstream need: **E-50** first if the downstream runs cross-plugin completions through a
+2. Then the §4.2 limits by downstream need: **E-50** first if the downstream runs cross-plugin completions through a
    long campaign (the cap of 1,024 ended participants); **E-49** if a host wants malformed correspondence commands
    recorded rather than validated before sending; E-41's force-supply deferral if a host runs the reference economy
    near its byte cap; E-46 to E-47 and the military limits (E-51) as the downstream's military slice asks; §4.3 if the
    downstream asks.
-4. Each change set follows the 0.18.0 pattern: one worktree and branch per package under `.worktrees/`, a proposal,
+3. Each change set follows the 0.18.0 pattern: one worktree and branch per package under `.worktrees/`, a proposal,
    durable tests that bite, an independent code review (two for persistence-heavy packages) and a delta review of the
    fixes, integration on a release branch, the pre-release tests of the release skill (the continuation gate
    included), then one release commit with the shared docs, the website (with its accuracy and copy reviews), and the
