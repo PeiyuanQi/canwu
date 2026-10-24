@@ -4,7 +4,7 @@ use canwu_api::{
     KnowledgeQuery, KnowledgeQueryResult, KnowledgeRecordKind, KnowledgeRecordView,
     KnowledgeSchemaId, MAX_KNOWLEDGE_PAGE_SIZE, PayloadSchema, PlanningSnapshot,
     PluginKnowledgeSchema, RoutingConnection, RoutingConnectionRef, RoutingEndpoint,
-    RoutingNetwork, RoutingNodeRef, SimTime, SimulationView, canonical_hash,
+    RoutingEndpointKind, RoutingNetwork, RoutingNodeRef, SimTime, SimulationView, canonical_hash,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -19,6 +19,8 @@ const KNOWLEDGE_NAMESPACE: &str = "canwu.correspondence";
 const KNOWLEDGE_CUT_HASH_DOMAIN: &str = "canwu.correspondence.knowledge-cut.v1";
 const TOPOLOGY_HASH_DOMAIN: &str = "canwu.correspondence.topology.v1";
 const PLANNING_READ_SET_HASH_DOMAIN: &str = "canwu.correspondence.planning-read-set.v1";
+/// Version label of the one-connection network a seed's connection is checked in.
+const CONNECTION_CHECK_NETWORK: &str = "canwu.correspondence.seed-connection-check.v1";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct KnownRoutingEndpoint {
@@ -345,6 +347,42 @@ fn replace_latest<K, V>(
             },
         );
     }
+}
+
+/// The first connection fact of `seed`, in seed order, that no planning
+/// network admits on its own, with the router's reason.
+///
+/// Each connection is checked in a network of its own two endpoints, so the
+/// check covers what the fact itself states (distinct endpoints, risk,
+/// availability window, traversal model) and not whether the holder knows
+/// those endpoints, which depends on the rest of the holder's ledger and is
+/// decided when the carrier plans.
+pub(crate) fn first_invalid_connection(
+    seed: &NetworkKnowledgeSeed,
+) -> Option<(RoutingConnectionRef, String)> {
+    seed.connections.iter().find_map(|known| {
+        let connection = &known.connection;
+        let mut nodes = vec![connection.from.clone(), connection.to.clone()];
+        nodes.sort();
+        nodes.dedup();
+        // The endpoint kind is a placeholder: the router never validates an
+        // endpoint's kind, so the check depends on the connection fact alone
+        // and not on the kinds the holder knows its endpoints by.
+        let endpoints = nodes
+            .into_iter()
+            .map(|id| RoutingEndpoint {
+                id,
+                kind: RoutingEndpointKind::Settlement,
+            })
+            .collect();
+        RoutingNetwork::new(
+            CONNECTION_CHECK_NETWORK,
+            endpoints,
+            vec![connection.clone()],
+        )
+        .err()
+        .map(|error| (connection.id.clone(), error.to_string()))
+    })
 }
 
 pub(crate) fn schema_id(name: &str) -> KnowledgeSchemaId {

@@ -2063,11 +2063,37 @@ or the carrier as its own seizer rejects the incident; a handoff ID that
 already names another handoff is kept as suppressed evidence. Only the carrier
 holder receives an `attempt_report` (`CorrespondenceAttemptReport`), which does
 not name the seizer; a sender that delegated the carrying learns of the seizure
-only when the application relays it. The correspondence request contract
+only when the application relays it. A carrier that accepts no knowledge when
+the report settles (a person who died after the seizure, a domain entity
+retired since) receives nothing: the plugin emits
+`canwu.correspondence.attempt_report_withheld.v1` instead, and the boundary
+stands. The correspondence request contract
 exposes only
 `CorrespondenceCapacityAdmission::Unconstrained`: the plugin neither checks nor
 persists a booking. Constrained transport requires a future admission variant
 backed by exact booking or simulation-reservation evidence.
+
+Any knowledge holder can be a correspondence party, a domain entity included.
+The plugin's operation, opportunity, and seed records, and the delivery-attempt
+and access bindings it hands to `canwu-information`, name a domain-entity
+sender, recipient, carrier, candidate, interceptor, or seed holder by its domain
+record and any other party by its core identity; the prepared dispatch may name
+its sender either way. The plugin's own party roles admit a retired entity, so
+its history does not stop a party's owner from retiring it (the roles of
+`canwu-information`'s records keep their own rule), but a retired party takes
+no new correspondence: a carrier the engine would not publish knowledge to (a
+retired, deleted, or ineligible entity, or a dead person) is refused with
+`InvalidAuthority` when a correspondence, a retry, or a carrier delegation is
+admitted, and a start whose carrier became so before it settled is skipped
+with `canwu.correspondence.start_skipped.v1`. A domain-entity sender or
+carrier issues its commands under `DecisionOrigin::Institution`. A
+`NetworkKnowledgeSeed` settles once per `seed_key` with a
+`KnowledgeSeedReceipt`: a seed whose holder accepts no knowledge, that one
+publication directive cannot carry (over 1,000 records, or a record over
+65,536 payload bytes), or that states a connection no planning network admits
+(equal endpoints, risk over 1,000 per mille, an inverted availability window,
+or a malformed traversal model), publishes nothing, and its receipt records
+the `KnowledgeSeedRefusal`.
 
 The plugin's holder-relative planning rule is also public.
 `planning_snapshot_from_holder_knowledge(view, holder, observed_at)` reads only

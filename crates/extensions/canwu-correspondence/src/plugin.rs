@@ -1,7 +1,7 @@
 use crate::knowledge::{
     ADDRESS_KNOWLEDGE_SCHEMA, ATTEMPT_REPORT_KNOWLEDGE_SCHEMA, CONNECTION_KNOWLEDGE_SCHEMA,
     ENDPOINT_KNOWLEDGE_SCHEMA, NetworkKnowledgeSeed, carrier_planning_snapshot,
-    correspondence_knowledge_schemas, schema_id,
+    correspondence_knowledge_schemas, first_invalid_connection, schema_id,
 };
 use crate::model::{
     CarrierAuthority, CarrierDelegationRecord, CarrierDelegationRequest, CommunicationOpportunity,
@@ -11,7 +11,7 @@ use crate::model::{
     CorrespondenceIncidentRequest, CorrespondenceIntent, CorrespondenceOperation,
     CorrespondenceOperationRecord, CorrespondencePlanningEvidence, CorrespondenceRecovery,
     CorrespondenceRecoveryAction, CorrespondenceStatus, InformationSagaStep,
-    InitiateCorrespondenceRequest, KnowledgeSeedReceipt, KnowledgeSeedRecord,
+    InitiateCorrespondenceRequest, KnowledgeSeedReceipt, KnowledgeSeedRecord, KnowledgeSeedRefusal,
     PendingInformationOperation, ProgressAction, ProgressRequest, ResolveCorrespondenceRequest,
     carrier_delegation_ref, correspondence_operation_ref, knowledge_seed_ref, opportunity_ref,
 };
@@ -21,12 +21,13 @@ use canwu_api::{
     DomainRecordDraft, DomainRecordMutation, DomainRecordSchema, DomainRecordType,
     DomainRecordVersionRef, DomainReference, DomainReferenceSchema, DomainReferenceTarget,
     DomainReferenceTargetKind, EntityRef, ErrorCode, EvidenceRef, HandoffId, HandoffKind,
-    IngressClass, IngressPayload, KnowledgeHolderRef, KnowledgeOrigin, KnowledgeRecordDraft,
-    KnowledgeWriteGrant, LegExecutionStatus, PayloadSchema, PluginActionDescriptor,
-    PluginIngressDescriptor, PluginIngressTarget, PluginRegistrar, RandomOperationTarget,
-    RandomStreamKey, ReconciliationOutcome, RoutingRequest, SimDuration, SimTime, SimulationPlugin,
-    SimulationView, StateKey, StateVisibility, SystemCadence, SystemDirective, TransportExecution,
-    TransportExecutionState, TypedDomainRecordRef, canonical_hash, plan_route,
+    IngressClass, IngressPayload, KnowledgeHolderRef, KnowledgeLimitsV1, KnowledgeOrigin,
+    KnowledgeRecordDraft, KnowledgeWriteGrant, LegExecutionStatus, PayloadSchema,
+    PluginActionDescriptor, PluginIngressDescriptor, PluginIngressTarget, PluginRegistrar,
+    RandomOperationTarget, RandomStreamKey, ReconciliationOutcome, RoutingRequest, SimDuration,
+    SimTime, SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence,
+    SystemDirective, TransportExecution, TransportExecutionState, TypedDomainRecordRef,
+    canonical_hash, plan_route,
 };
 use canwu_information::{
     Access, AccessPayload, AddressedDeliveryAttemptDraft, Channel, DeliveryAttempt,
@@ -61,9 +62,19 @@ pub const CARRIER_DELEGATION_COMMAND: &str = "delegate_carrier_v1";
 /// The delegation capability a carrier other than the sender must hold: the
 /// claim of the cited [`CARRIER_DELEGATION_COMMAND`] must list it.
 pub const CARRY_CORRESPONDENCE_CAPABILITY: &str = "carry_correspondence";
+/// Event recording an attempt report that was not published because the
+/// carrier holder accepted no knowledge when the report settled (see
+/// [`crate::CorrespondenceAttemptReport`]).
+pub const ATTEMPT_REPORT_WITHHELD_EVENT: &str = "canwu.correspondence.attempt_report_withheld.v1";
+/// Event recording an admitted correspondence that was not started because
+/// its carrier accepted no knowledge when the start settled (it was retired,
+/// deleted, or died after the command was admitted). No operation is created.
+pub const START_SKIPPED_EVENT: &str = "canwu.correspondence.start_skipped.v1";
 
 const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
-const SEMANTIC_HASH: &str = "a197a514cf20b6626241812132eaa532bd6d07be9a4142b6dff048f39dce5685";
+/// BLAKE3 of `canwu-correspondence plugin semantic hash 0.20.0: domain-entity
+/// parties, withheld attempt reports, refused knowledge seeds`.
+const SEMANTIC_HASH: &str = "c26226b97ab2f75fa1ca5b49fa412024f58237f6bd733c565ba5ef13ad92cfcf";
 const SEIZURE_FAILURE_REASON: &str = "carrier seized";
 const REPORT_ORIGIN_METHOD: &str = "correspondence_attempt_report_v1";
 const INPUT_HASH_DOMAIN: &str = "canwu.correspondence.input.v1";
@@ -243,6 +254,7 @@ impl SimulationPlugin for CorrespondencePlugin {
             record_state::<CorrespondenceOperationRecord>(),
         ];
         lifecycle.random_streams = vec![correspondence_random_stream()];
+        lifecycle.emits = vec![START_SKIPPED_EVENT.to_owned()];
         lifecycle.plugin_ingress_targets = vec![PluginIngressTarget {
             target_plugin: canwu_information::PLUGIN_NAME.to_owned(),
             packet_type: INFORMATION_INGRESS.to_owned(),
@@ -263,6 +275,7 @@ impl SimulationPlugin for CorrespondencePlugin {
             record_state::<KnowledgeSeedRecord>(),
         ];
         knowledge.writes = vec![record_state::<KnowledgeSeedRecord>()];
+        knowledge.emits = vec![ATTEMPT_REPORT_WITHHELD_EVENT.to_owned()];
         knowledge.knowledge_writes = knowledge_schemas
             .into_iter()
             .map(|schema| KnowledgeWriteGrant {
@@ -287,6 +300,7 @@ fn initiate_correspondence_command(
     }
     let request: InitiateCorrespondenceRequest = decode(payload, "correspondence request")?;
     validate_start_request(&request)?;
+    require_available_carrier(view, &request.carrier)?;
     let carrier_authority = current_carrier_authority(
         view,
         &request.sender,
@@ -323,6 +337,8 @@ fn initiate_correspondence_command(
             "correspondence requires a prepared single-recipient dispatch",
         ));
     }
+    // The dispatch names a domain-entity sender by its domain record and any
+    // other sender by its core identity; either names `request.sender`.
     let sender_references = dispatch
         .references
         .iter()
@@ -330,8 +346,7 @@ fn initiate_correspondence_command(
         .collect::<Vec<_>>();
     if !matches!(
         sender_references.as_slice(),
-        [reference]
-            if reference.target == DomainReferenceTarget::Core(request.sender.clone())
+        [reference] if target_entity(&reference.target) == request.sender
     ) {
         return Err(invalid_record(
             "correspondence sender must match the prepared dispatch sender",
@@ -429,7 +444,7 @@ fn initiate_correspondence_command(
 /// admission reads instead of command evidence. The delegation is citable
 /// once that record exists.
 fn carrier_delegation_command_handler(
-    _view: &SimulationView<'_>,
+    view: &SimulationView<'_>,
     context: &CommandContext,
     payload: &Value,
 ) -> Result<Vec<SystemDirective>, CanwuError> {
@@ -445,6 +460,7 @@ fn carrier_delegation_command_handler(
             "carrier delegation requires the carrier's command authority",
         ));
     }
+    require_available_carrier(view, &holder_from_entity(&claim.performed_by))?;
     if holder_from_entity(&claim.performed_by) == claim.performed_for {
         return Err(invalid_authority(
             "a carrier cannot delegate carrying to itself",
@@ -502,9 +518,11 @@ fn resolve_correspondence_command_handler(
         &request.action,
         CorrespondenceRecoveryAction::RetryDelivery { .. }
     ) {
-        // A retry dispatches again, so it must cite the carrier's current
-        // delegation; when the retry settles only the admitted claim's
-        // window is checked again.
+        // A retry dispatches again, so its carrier must still be available
+        // and it must cite the carrier's current delegation; when the retry
+        // settles only the carrier and the admitted claim's window are
+        // checked again.
+        require_available_carrier(view, &operation.intent.carrier)?;
         intent_carrier_authority(view, &operation.intent, context.simulation_time)?;
     }
     if !matches!(
@@ -828,6 +846,19 @@ fn settle_start(
         admitted.carrier_authority.as_ref(),
         context.at,
     )?;
+    // A carrier retired, deleted, or dead since admission takes no carrying:
+    // the start is skipped with an event, and no operation is created.
+    if !view.knowledge_holder_accepts_publication(&admitted.request.carrier)? {
+        directives.push(BoundaryDirective::Emit {
+            event_type: START_SKIPPED_EVENT.to_owned(),
+            summary: format!(
+                "correspondence {} was not started: its carrier accepts no knowledge",
+                admitted.request.operation_key
+            ),
+            affected: vec![admitted.request.sender.clone()],
+        });
+        return Ok(());
+    }
     let carrier_authority = admitted.carrier_authority.clone();
     let (snapshot, address) = carrier_planning_snapshot(
         view,
@@ -2055,7 +2086,7 @@ fn install_planning_knowledge(
                     "correspondence attempt reports require boundary-generated ingress",
                 ));
             }
-            directives.push(attempt_report_publication(view, *ingress_id, payload)?);
+            directives.push(attempt_report_directive(view, *ingress_id, payload)?);
             continue;
         }
         if plugin != PLUGIN_NAME || packet_type != KNOWLEDGE_INGRESS {
@@ -2087,50 +2118,68 @@ fn install_planning_knowledge(
             }
             continue;
         }
+        // A seed the holder cannot take, that one publication directive cannot
+        // carry, or that states a connection no planning network admits,
+        // publishes nothing: the receipt records the refusal and the
+        // boundary stands.
+        let holder_accepts = view.knowledge_holder_accepts_publication(&seed.holder)?;
         let mut records = Vec::new();
-        for endpoint in &seed.endpoints {
-            records.push(knowledge_draft(
-                ENDPOINT_KNOWLEDGE_SCHEMA,
-                endpoint,
-                *ingress_id,
-            )?);
+        let refusal = if holder_accepts {
+            for endpoint in &seed.endpoints {
+                records.push(knowledge_draft(
+                    ENDPOINT_KNOWLEDGE_SCHEMA,
+                    endpoint,
+                    *ingress_id,
+                )?);
+            }
+            for connection in &seed.connections {
+                records.push(knowledge_draft(
+                    CONNECTION_KNOWLEDGE_SCHEMA,
+                    connection,
+                    *ingress_id,
+                )?);
+            }
+            for address in &seed.addresses {
+                records.push(knowledge_draft(
+                    ADDRESS_KNOWLEDGE_SCHEMA,
+                    address,
+                    *ingress_id,
+                )?);
+            }
+            seed_size_refusal(&records)?.or_else(|| {
+                first_invalid_connection(seed).map(|(connection, reason)| {
+                    KnowledgeSeedRefusal::InvalidConnection { connection, reason }
+                })
+            })
+        } else {
+            Some(KnowledgeSeedRefusal::HolderUnavailable)
+        };
+        if refusal.is_none() {
+            directives.push(BoundaryDirective::PublishKnowledge {
+                visibility: StateVisibility::SameBoundary,
+                producer_correlation: Some(format!("knowledge-seed:{}", seed.seed_key)),
+                supersession: canwu_api::KnowledgeSupersession::Explicit,
+                groups: vec![canwu_api::KnowledgePublicationGroup {
+                    holders: vec![seed.holder.clone()],
+                    records,
+                }],
+                summary: "Publish holder-relative correspondence planning knowledge".to_owned(),
+            });
         }
-        for connection in &seed.connections {
-            records.push(knowledge_draft(
-                CONNECTION_KNOWLEDGE_SCHEMA,
-                connection,
-                *ingress_id,
-            )?);
-        }
-        for address in &seed.addresses {
-            records.push(knowledge_draft(
-                ADDRESS_KNOWLEDGE_SCHEMA,
-                address,
-                *ingress_id,
-            )?);
-        }
-        directives.push(BoundaryDirective::PublishKnowledge {
-            visibility: StateVisibility::SameBoundary,
-            producer_correlation: Some(format!("knowledge-seed:{}", seed.seed_key)),
-            supersession: canwu_api::KnowledgeSupersession::Explicit,
-            groups: vec![canwu_api::KnowledgePublicationGroup {
-                holders: vec![seed.holder.clone()],
-                records,
-            }],
-            summary: "Publish holder-relative correspondence planning knowledge".to_owned(),
-        });
         let receipt = KnowledgeSeedReceipt {
             seed_key: seed.seed_key.clone(),
             canonical_input_hash: hash.clone(),
             holder: seed.holder.clone(),
-            published_at: context.at,
+            settled_at: context.at,
+            refusal,
+        };
+        let references = if holder_accepts {
+            vec![holder_reference("holder", &seed.holder)]
+        } else {
+            Vec::new()
         };
         directives.push(mutate(
-            create_typed(
-                &reference,
-                &receipt,
-                vec![holder_reference("holder", &seed.holder)],
-            )?,
+            create_typed(&reference, &receipt, references)?,
             "Persist correspondence knowledge seed receipt",
         ));
     }
@@ -2140,11 +2189,37 @@ fn install_planning_knowledge(
     })
 }
 
+/// The refusal of a seed that one publication directive cannot carry: more
+/// record drafts than [`KnowledgeLimitsV1::records_per_batch`], or a draft
+/// whose payload, measured as the engine charges it, exceeds
+/// [`KnowledgeLimitsV1::payload_bytes_per_record`].
+fn seed_size_refusal(
+    records: &[KnowledgeRecordDraft],
+) -> Result<Option<KnowledgeSeedRefusal>, CanwuError> {
+    let limits = KnowledgeLimitsV1::CURRENT;
+    let mut largest = 0_usize;
+    for record in records {
+        largest = largest.max(record.payload_bytes()?);
+    }
+    if records.len() <= limits.records_per_batch && largest <= limits.payload_bytes_per_record {
+        return Ok(None);
+    }
+    Ok(Some(KnowledgeSeedRefusal::TooLarge {
+        records: u64::try_from(records.len()).unwrap_or(u64::MAX),
+        largest_record_bytes: u64::try_from(largest).unwrap_or(u64::MAX),
+    }))
+}
+
 /// Publishes one attempt report to the carrier holder. The report is derived
 /// from persisted records only: the triggered seizure incident, the
 /// information operation that closed the attempt, and the closed delivery
 /// attempt record.
-fn attempt_report_publication(
+///
+/// A carrier that accepts no knowledge when the report settles (a person who
+/// died after the seizure, a domain entity retired since, by the engine's own
+/// holder rule) is not published to: the report is withheld and an
+/// [`ATTEMPT_REPORT_WITHHELD_EVENT`] records it, so the boundary stands.
+fn attempt_report_directive(
     view: &SimulationView<'_>,
     ingress_id: canwu_api::IngressId,
     payload: &Value,
@@ -2198,6 +2273,16 @@ fn attempt_report_publication(
             custody_handoff: *custody_handoff,
         },
     };
+    if !view.knowledge_holder_accepts_publication(&operation.intent.carrier)? {
+        return Ok(BoundaryDirective::Emit {
+            event_type: ATTEMPT_REPORT_WITHHELD_EVENT.to_owned(),
+            summary: format!(
+                "attempt {} of correspondence {} ended by seizure; its carrier accepts no knowledge, so no report was published",
+                report.attempt_number, report.operation_key
+            ),
+            affected: vec![operation.intent.sender.clone()],
+        });
+    }
     let mut evidence = vec![
         EvidenceRef::Ingress(ingress_id),
         EvidenceRef::DomainRecordVersion(attempt_version),
@@ -2305,6 +2390,13 @@ fn begin_retry(
         operation.intent.carrier_authority.as_ref(),
         context.at,
     )?;
+    // A carrier retired, deleted, or dead since admission takes no carrying:
+    // the retry is recorded without a new attempt, as a retry with no route.
+    if !view.knowledge_holder_accepts_publication(&operation.intent.carrier)? {
+        operation.last_error = Some("retry carrier accepts no knowledge".to_owned());
+        advance_sequence(operation)?;
+        return Ok(());
+    }
     let excluded = active_disaster_connections(operation);
     let (mut snapshot, address) = carrier_planning_snapshot(
         view,
@@ -2645,7 +2737,7 @@ fn operation_references(
     attempt: Option<TypedDomainRecordRef<DeliveryAttempt>>,
 ) -> Vec<DomainReference> {
     let mut references = vec![
-        core_reference("sender", operation.intent.sender.clone()),
+        entity_reference("sender", &operation.intent.sender),
         holder_reference("recipient", &operation.intent.recipient),
         holder_reference("carrier", &operation.intent.carrier),
     ];
@@ -2681,7 +2773,7 @@ fn current_operation_references(
 }
 
 fn opportunity_references(opportunity: &CommunicationOpportunity) -> Vec<DomainReference> {
-    let mut references = vec![core_reference("sender", opportunity.sender.clone())];
+    let mut references = vec![entity_reference("sender", &opportunity.sender)];
     references.extend(
         opportunity
             .candidates
@@ -2764,12 +2856,7 @@ fn knowledge_draft(
 fn operation_schema() -> DomainRecordSchema {
     let mut schema = DomainRecordSchema::for_record::<CorrespondenceOperationRecord>();
     schema.references = vec![
-        reference_schema(
-            "carrier",
-            vec![DomainReferenceTargetKind::AnyEntity],
-            true,
-            false,
-        ),
+        party_schema("carrier", true, false),
         reference_schema(
             "delivery_attempt",
             vec![DomainReferenceTargetKind::for_domain::<DeliveryAttempt>()],
@@ -2790,18 +2877,8 @@ fn operation_schema() -> DomainRecordSchema {
             false,
             false,
         ),
-        reference_schema(
-            "recipient",
-            vec![DomainReferenceTargetKind::AnyEntity],
-            true,
-            false,
-        ),
-        reference_schema(
-            "sender",
-            vec![DomainReferenceTargetKind::AnyEntity],
-            true,
-            false,
-        ),
+        party_schema("recipient", true, false),
+        party_schema("sender", true, false),
     ];
     schema
 }
@@ -2809,31 +2886,34 @@ fn operation_schema() -> DomainRecordSchema {
 fn opportunity_schema() -> DomainRecordSchema {
     let mut schema = DomainRecordSchema::for_record::<CommunicationOpportunityRecord>();
     schema.references = vec![
-        reference_schema(
-            "candidate",
-            vec![DomainReferenceTargetKind::AnyEntity],
-            true,
-            true,
-        ),
-        reference_schema(
-            "sender",
-            vec![DomainReferenceTargetKind::AnyEntity],
-            true,
-            false,
-        ),
+        party_schema("candidate", true, true),
+        party_schema("sender", true, false),
     ];
     schema
 }
 
+/// A refused seed whose holder accepts no knowledge references no holder,
+/// since that holder may be one no record can reference (a missing army or a
+/// deleted domain entity).
 fn knowledge_seed_schema() -> DomainRecordSchema {
     let mut schema = DomainRecordSchema::for_record::<KnowledgeSeedRecord>();
-    schema.references = vec![reference_schema(
-        "holder",
-        vec![DomainReferenceTargetKind::AnyEntity],
-        true,
-        false,
-    )];
+    schema.references = vec![party_schema("holder", false, false)];
     schema
+}
+
+/// A party role: any entity, a domain entity by its domain record. A retired
+/// party stays referenced, so a correspondence record, which is history and
+/// is never deleted, does not stop the party's owner from retiring it.
+fn party_schema(role: &str, required: bool, multiple: bool) -> DomainReferenceSchema {
+    DomainReferenceSchema {
+        allow_retired: true,
+        ..reference_schema(
+            role,
+            vec![DomainReferenceTargetKind::AnyEntity],
+            required,
+            multiple,
+        )
+    }
 }
 
 fn carrier_delegation_schema() -> DomainRecordSchema {
@@ -2862,19 +2942,29 @@ fn mutate(mutation: DomainRecordMutation, summary: &str) -> BoundaryDirective {
     }
 }
 
-fn core_reference(role: &str, entity: EntityRef) -> DomainReference {
+/// A party reference: a domain entity by its domain record, since the runtime
+/// refuses a core alias of one, and any other entity by its core identity (as
+/// `canwu-information`'s holder and custodian roles name theirs).
+fn entity_reference(role: &str, entity: &EntityRef) -> DomainReference {
     DomainReference {
         role: role.to_owned(),
-        target: DomainReferenceTarget::Core(entity),
+        target: match entity {
+            EntityRef::Domain(record) => DomainReferenceTarget::Domain(record.clone()),
+            core => DomainReferenceTarget::Core(core.clone()),
+        },
     }
 }
 
 fn holder_reference(role: &str, holder: &KnowledgeHolderRef) -> DomainReference {
-    let entity = match holder {
-        KnowledgeHolderRef::Person(person) => EntityRef::Person(*person),
-        KnowledgeHolderRef::Entity(entity) => entity.clone(),
-    };
-    core_reference(role, entity)
+    entity_reference(role, &holder_entity(holder))
+}
+
+/// The entity a reference target names, whichever form names it.
+fn target_entity(target: &DomainReferenceTarget) -> EntityRef {
+    match target {
+        DomainReferenceTarget::Core(entity) => entity.clone(),
+        DomainReferenceTarget::Domain(record) => EntityRef::Domain(record.clone()),
+    }
 }
 
 fn typed<T: DomainRecordType>(
@@ -2902,6 +2992,25 @@ fn validate_start_request(request: &InitiateCorrespondenceRequest) -> Result<(),
         ));
     }
     Ok(())
+}
+
+/// Refuses, as an expected command rejection, a carrier the engine would not
+/// publish knowledge to now: a dead or unknown person, a person named as an
+/// entity, a missing army or government, a retired, deleted, or ineligible
+/// domain entity, or a kind that holds no knowledge. Such a carrier takes no
+/// new correspondence, retry, or delegation, though records that already name
+/// it keep naming it.
+fn require_available_carrier(
+    view: &SimulationView<'_>,
+    carrier: &KnowledgeHolderRef,
+) -> Result<(), CanwuError> {
+    if view.knowledge_holder_accepts_publication(carrier)? {
+        Ok(())
+    } else {
+        Err(invalid_authority(
+            "the correspondence carrier accepts no knowledge and takes no new carrying",
+        ))
+    }
 }
 
 /// Resolves the carrier's current delegation for the sender, requires it to

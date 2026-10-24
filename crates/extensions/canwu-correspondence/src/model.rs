@@ -413,12 +413,56 @@ pub fn opportunity_ref(
     TypedDomainRecordRef::new(operation_key)
 }
 
+/// The settled outcome of one knowledge seed key: published to the holder,
+/// or refused with nothing published.
+///
+/// Every admitted seed leaves one receipt, so a refused seed is a recorded
+/// rejection, not a failed boundary, and its key is spent: an exact resend is
+/// ignored and a resend with different input under the same key is an
+/// idempotency conflict, as for a published seed. The receipt references the
+/// holder in its `holder` role unless the refusal is
+/// [`KnowledgeSeedRefusal::HolderUnavailable`].
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct KnowledgeSeedReceipt {
     pub seed_key: String,
     pub canonical_input_hash: String,
     pub holder: KnowledgeHolderRef,
-    pub published_at: SimTime,
+    /// The boundary time the seed settled, whether published or refused.
+    pub settled_at: SimTime,
+    /// `None` when the seed was published; otherwise why nothing was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<KnowledgeSeedRefusal>,
+}
+
+/// Why a knowledge seed published nothing. The holder is checked first, then
+/// the seed's size, then its connections.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum KnowledgeSeedRefusal {
+    /// The holder accepts no knowledge when the seed settles, by the engine's
+    /// own holder rule: a dead or unknown person, a person named as an
+    /// entity, a missing army or government, a retired, deleted, or
+    /// ineligible domain entity, or an entity kind that holds no knowledge.
+    HolderUnavailable,
+    /// One publication directive cannot carry the seed: its endpoint,
+    /// connection, and address facts together are more than
+    /// `KnowledgeLimitsV1::records_per_batch` records (`records`), or one
+    /// fact's payload is more than `KnowledgeLimitsV1::payload_bytes_per_record`
+    /// bytes (`largest_record_bytes`, measured as the engine charges it).
+    TooLarge {
+        records: u64,
+        largest_record_bytes: u64,
+    },
+    /// `connection`, the first such connection fact in seed order, is not a
+    /// routing connection any planning network admits: its two endpoints are
+    /// the same, its risk exceeds 1,000 per mille, its availability window is
+    /// inverted, or its traversal model is malformed (for example a
+    /// recurring pattern whose offsets are not strictly increasing inside a
+    /// positive period). `reason` is the router's message.
+    InvalidConnection {
+        connection: RoutingConnectionRef,
+        reason: String,
+    },
 }
 
 #[must_use]
