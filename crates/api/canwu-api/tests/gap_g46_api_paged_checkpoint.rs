@@ -179,11 +179,6 @@ fn assert_same_run(restored: &Canwu, live: &Canwu) {
     );
 }
 
-#[test]
-fn paged_checkpoint_round_trips_through_the_public_api_and_stores_only_changed_pages() {
-    paged_round_trip();
-}
-
 /// The same round trip on a 1 MiB thread, the Windows main-thread default:
 /// a debug build must keep room on the stack for the runtime and its
 /// transaction checkpoints, which hold the commitment cache by box.

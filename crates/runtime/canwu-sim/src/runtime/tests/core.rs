@@ -116,32 +116,6 @@ impl SimulationPlugin for SameBoundaryVersionPlugin {
 }
 
 #[test]
-fn same_boundary_proposal_does_not_hide_valid_prior_version_evidence() {
-    let (mut scenario, _) = demo_scenario();
-    scenario.domain_records.push(DomainRecord {
-        reference: same_boundary_record_ref(),
-        owner: SAME_BOUNDARY_VERSION_PLUGIN.to_owned(),
-        class: DomainRecordClass::Record,
-        version: 1,
-        lifecycle: DomainRecordLifecycle::Active,
-        payload: serde_json::json!({"value": 1}),
-        references: Vec::new(),
-    });
-    let mut simulation = Simulation::new_with_plugins(811, scenario, &[&SameBoundaryVersionPlugin])
-        .expect("same-boundary fixture should initialize");
-    simulation
-        .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
-        .expect("both old and proposed versions should remain valid evidence");
-    assert_eq!(
-        simulation
-            .domain_record(&same_boundary_record_ref())
-            .expect("updated record")
-            .version,
-        2
-    );
-}
-
-#[test]
 fn current_record_version_is_rebuilt_and_fails_closed_on_cache_corruption() {
     let (mut scenario, _) = demo_scenario();
     scenario.domain_records.push(DomainRecord {

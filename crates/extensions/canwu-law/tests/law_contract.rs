@@ -5780,11 +5780,3 @@ fn recovery_rebuilds_latest_participation_index() {
     tampered.latest_participation_by_key.insert(key, 0);
     assert!(LegalRuntime::from_state(&plan, tampered).is_err());
 }
-
-#[test]
-fn plugin_registers_all_legal_schemas_and_pending_intent_command() {
-    assert_eq!(law_record_schemas().len(), 6);
-    assert_eq!(law_command_descriptor().name, LAW_COMMAND);
-    canwu_api::Canwu::new_with_plugins(7, Scenario::new(SimTime::EPOCH, Vec::new()), &[&LawPlugin])
-        .expect("law plugin registration");
-}

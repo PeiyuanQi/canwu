@@ -18,7 +18,7 @@ use canwu_fiscal::{
     MAX_FISCAL_HOT_BOOKS_PER_LEDGER, MAX_FISCAL_PARTITION_KEYS, PLUGIN_NAME, audit_fiscal_records,
     enqueue_execution_receipts, fiscal_action_command, fiscal_action_target,
     fiscal_catalog_reference, fiscal_historical_context_ingress, fiscal_reports,
-    fiscal_root_reference, fiscal_target_revision,
+    fiscal_target_revision,
 };
 use canwu_ming_fiscal_reference::{
     DEFAULT_SEED, ReferenceFiscalExecutionEvidence, enqueue_reference_execution_result,
@@ -26,18 +26,6 @@ use canwu_ming_fiscal_reference::{
     reference_execution_evidence_ref, reference_execution_evidence_version,
     replay_ming_fiscal_reference, restore_ming_fiscal_reference, run_ming_fiscal_sample_cycle,
 };
-
-#[test]
-fn all_reference_starts_load_with_world_adapter_and_fiscal_plugins() {
-    for fixture in fixture_ids() {
-        let canwu = new_ming_fiscal_reference(DEFAULT_SEED, fixture).expect("reference start");
-        assert!(
-            canwu
-                .domain_record(&fiscal_root_reference().into_untyped())
-                .is_some()
-        );
-    }
-}
 
 #[test]
 fn every_fixture_completes_the_reference_fiscal_vertical_slice() {

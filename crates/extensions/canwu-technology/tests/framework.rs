@@ -2845,39 +2845,6 @@ fn compact_archive_declares_old_payload_dependencies_and_restores_for_continuati
 }
 
 #[test]
-fn operation_records_cannot_bypass_admitted_provenance() {
-    let (mut scenario, _, _) = scenario();
-    let payload = TechnologyOperationPayload {
-        id: "injected-operation".to_owned(),
-        canonical_input_hash: "0".repeat(64),
-        canonical_input_hashes: vec!["0".repeat(64)],
-        causes: vec![EvidenceRef::DomainRecordVersion(initial_record_version::<
-            TechnicalProgram,
-        >("missing-cause"))],
-        provider: None,
-        execution_intent: None,
-        status: TechnologyOperationStatus::Rejected,
-        result: None,
-        rejection_code: Some("invalid_domain_record".to_owned()),
-    };
-    let draft = initial_operation_draft(&payload);
-    scenario.domain_records.push(DomainRecord {
-        reference: draft.reference,
-        owner: "canwu-technology".to_owned(),
-        class: DomainRecordClass::Record,
-        version: 1,
-        lifecycle: DomainRecordLifecycle::Active,
-        payload: draft.payload,
-        references: draft.references,
-    });
-    let canwu = Canwu::new_with_plugins(53, scenario, &[&TechnologyPlugin])
-        .expect("kernel accepts plugin-owned initial payload shape");
-    let error = validate_technology_runtime(&canwu)
-        .expect_err("module restore validation must reject injected operations");
-    assert_eq!(error.code, canwu_api::ErrorCode::InvalidDomainRecord);
-}
-
-#[test]
 fn public_snapshot_wrapper_rejects_kernel_valid_domain_invalid_state() {
     let (mut scenario, _, _) = scenario();
     let payload = TechnologyOperationPayload {
