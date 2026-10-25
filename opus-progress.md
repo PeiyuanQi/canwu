@@ -1,7 +1,6 @@
 # Opus progress — downstream engine gaps / Opus 进度记录
 
-> Updated 2026-10-25 at Canwu **0.21.0** (release in progress on `release/0.21.0`; the release row below is completed by
-> the orchestrator at the tag). This file is the to-do list of engine gaps that a downstream application has filed
+> Updated 2026-10-25 at Canwu **0.21.0** (tag `v0.21.0`, release commit `3e9da86` on `main`, published 2026-10-25). This file is the to-do list of engine gaps that a downstream application has filed
 > against the published crates. The application is Celestial Mandate (CM); its gap ledger (implementation document `59`,
 > in the CM repository) gives each row its id (`G-nn`) and the full evidence. Priorities are the ledger's severities:
 > High, Medium, Low.
@@ -18,10 +17,10 @@
 
 | Item | State |
 | --- | --- |
-| Release | **0.21.0 — to be completed by the orchestrator at the tag:** the release commit, the annotated tag `v0.21.0`, the crates.io publication of all 24 library crates in the publish order of `docs/releasing.md`, the GitHub release, the website deployment (both languages showing `=0.21.0`), the registry-only consumer smoke test, and the verification counts (the full list, the pre-release tests, the continuation gate, the `#[ignore]` scale tests, the minimum-Rust-version check). 0.20.0 (tag `v0.20.0`, release commit `a82ffeb`, published 2026-10-24) stays the only live version until then; 0.19.0 was yanked on 2026-10-24. Downstream pins `=0.20.0` (CM 0.89.0) and moves to `=0.21.0` as its next change set. |
+| Release | 0.21.0 is published (2026-10-25): all 24 library crates on crates.io (one workspace publish from the tagged commit, every package dry-run first), the annotated tag `v0.21.0` on the release commit `3e9da86`, the GitHub release, and the website deployed from `main` (canwu.org shows `=0.21.0` in both languages). A registry-only consumer of `canwu-api`, `canwu-military`, and `canwu-military-reference-content` at `=0.21.0` builds and runs. Verification on the release tree: fmt, Clippy with warnings denied, the workspace tests (860 passed, 0 failed, 3 ignored), the debug client, the documentation build with warnings denied, the four public examples, the minimum Rust version (1.88), the performance-harness checks, the release-only `#[ignore]` scale tests in a release build (3 passed), the continuation gate across the workspace (green after the E-55 fix; 11 `canwu-economy-reference` tests failed before it, as on 0.20.0), and the website build. 0.20.0 (tag `v0.20.0`, `a82ffeb`) stays published and is not yanked; 0.19.0 was yanked on 2026-10-24. The downstream pins `=0.20.0` (CM 0.89.1) and moves to `=0.21.0` as its next change set. |
 | Policy | **Same version only** (owner, 2026-10-14): Canwu crates depend only on the exact same version of each other (`=0.21.0` once released); nothing written by an earlier release is read; no migration. |
 | Proposals of 0.21.0 (all "implemented in 0.21.0") | `docs/proposals/`: `decision-ticket-option-bias.md` (G-84), `movement-kept-bookings.md` (G-83), `fiscal-archive-after-continuation-restore.md` (G-91), `military-engagement-revisions.md` (G-85 to G-90; extends `military-engagements.md`). The 0.20.0, 0.19.0, and 0.18.0 proposals are listed in their entries of `docs/versioning.md`. |
-| Branches and worktrees | `release/0.21.0` (worktree `.worktrees/release-0.21.0`) integrates the decision, movement, fiscal, and military packages (the military package's final commit `0d7ae1c` on `g21-military`, `d480572` on the release branch); `release-0.21.0-docs` carries the shared release documentation. The orchestrator deletes every 0.21.0 branch and worktree after the release, leaving `main` alone locally and on the remote. |
+| Branches and worktrees | Only `main`, locally and on the remote; no 0.21.0 worktrees remain. |
 | Release procedure | `.agents/skills/canwu-contributor-release/SKILL.md` and `docs/releasing.md`. The orchestrator runs the full verification list once on the integrated release tree and the pre-release tests (the public examples, the performance-harness checks, the release-only `#[ignore]` scale tests in a release build, the continuation gate) before tagging (the counts go in the release row). |
 | What the adopter must know first | (1) Pin every Canwu crate at `=0.21.0`; nothing earlier loads (commitment format 8 and decision archive format 2 refuse 0.20.0 saves and archive blobs by their format as well as their engine version; a military payload at schema version 1 and a movement or military run by its semantic hash). (2) Read the "Upgrading from 0.20.0" notes of the 0.21.0 entry of `docs/versioning.md` and its "Known limits": `DecisionOption::bias` / `with_bias` (a per-ticket bias on the option, one controller per decision maker and class; struct literals add `bias: 0`); kept bookings (`bookings_per_execution` 64 kept at once, `bookings_per_runtime` 16,384, closed and replaced bookings leave the execution, `LimitExceeded` at the bound, a closed booking's final status from reports or the record history); a continuation restore is not a seal (`sealed_evidence_cursor()` is `None` until the restored run seals, so a continuation-only host archives in every session; a "not yet" arm for `UnsealedCitations` may stay); military `JoinSiege`, `ReviseSiegeV1::release`, `ReviseCrossing::defenders`, `OpenEngagementV1::max_minutes`, the timed step (`timed_step_ingress`, queued after each daily boundary instead of `Step`), no report queued for a subject without holders, `SCHEMA_VERSION` 2. (3) The 0.20.0, 0.19.0, and 0.18.0 notes still apply. |
 
@@ -100,11 +99,8 @@ own leases) and E-37's publication-budget overshoot (the application's publisher
 
 ## 5. Next steps
 
-1. **Finish the 0.21.0 release** (orchestrator): run the full verification list and the pre-release tests once on
-   the integrated tree, bump the workspace version and every `=0.21.0` pin (the README pins,
-   `developer/integration.mdx`, `HomePage.astro`), build the website once with its accuracy and copy reviews, make the
-   release commit, tag, publish in the order of `docs/releasing.md`, deploy the website, and complete the release row
-   above. Then the downstream moves to `=0.21.0` and its ledger records the adoption of G-83 to G-91.
+1. **Wait for the downstream's adoption of 0.21.0** (its ledger records each row's adoption at the `=0.21.0` pin) and
+   for the rows it files against 0.21.0.
 2. Then the §4.2 limits by downstream need: **E-50** first if the downstream runs cross-plugin completions through a
    long campaign (the cap of 1,024 ended participants); **E-49** if a host wants malformed correspondence commands
    recorded rather than validated before sending; E-41's force-supply deferral if a host runs the reference economy
