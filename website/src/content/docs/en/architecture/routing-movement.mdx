@@ -147,9 +147,11 @@ Due work never fails a boundary. When a due departure or arrival cannot apply, t
 
 ### Capacity pools
 
-The plugin allocates pools inside phase 7 with `allocate_capacity_bookings`, apart from the kernel's phase-6 [resource allocation](/en/architecture/settlement/#resource-allocation). An `OfferPool` operation offers a pool, and `RequestBooking` asks for capacity for one unstarted leg, inside that leg's planned window moved by the [schedule shift](/en/reference/terminology/) (and by a pending hold that will re-time it); a request may name an earlier booking of the same leg in `replaces` (a [booking replacement](/en/reference/terminology/); each booking is replaced at most once), which cancels a requested original or releases a confirmed one at once. Each booking requested in the boundary is confirmed in full or failed, and the result is recorded as `CapacityBookingAllocationEvidenceV1`. The pass orders requests by priority (highest first), window start, tie-break key, admission sequence, and booking identity. Capacity already confirmed stays with its booking when later requests arrive.
+The plugin allocates pools inside phase 7 with `allocate_capacity_bookings`, apart from the kernel's phase-6 [resource allocation](/en/architecture/settlement/#resource-allocation). An `OfferPool` operation offers a pool, and `RequestBooking` asks for capacity for one unstarted leg, inside that leg's planned window moved by the [schedule shift](/en/reference/terminology/) (and by a pending hold that will re-time it); a request may name an earlier booking of the same leg in `replaces` (a [booking replacement](/en/reference/terminology/); each booking is replaced at most once), which cancels a requested original or releases a confirmed one at once; the replaced booking leaves the execution, and its replacement takes its place. Each booking requested in the boundary is confirmed in full or failed, and the result is recorded as `CapacityBookingAllocationEvidenceV1`. The pass orders requests by priority (highest first), window start, tie-break key, admission sequence, and booking identity. Capacity already confirmed stays with its booking when later requests arrive.
 
 A departing leg consumes its confirmed bookings. The pool's custodian, or an application incident citing current evidence, revokes a confirmed booking with `RevokeBooking` (a [booking revocation](/en/reference/terminology/)): the booking becomes `Revoked` with its time and reason, and the capacity returns to the pool for a later request or for `OfferPool` to remove. A leg whose booking failed, expired, or was revoked and not replaced fails with `capacity_unavailable` and waits for a reroute. A confirmed booking whose window has not opened holds the departure until the window opens.
+
+An execution keeps only the bookings that still bear on its legs (its [kept bookings](/en/reference/terminology/)): requested or confirmed, consumed by the leg under way, or lost (failed, expired, or revoked) for a leg of the active revision that has not departed. Every other booking is a [closed booking](/en/reference/terminology/) and leaves the execution, and its binding leaves the runtime, in the step that closed it: the replacing request, the arrival or failure of the leg that consumed it, or the release, cancellation, reroute, or close of the execution. Consumed capacity stays counted by its pool (`MovementState::retired_consumption`). The booking bounds count kept bookings only: at most 64 in an execution and 16,384 in the runtime at once, and a request past either is refused with `LimitExceeded`.
 
 ### Operation keys
 
@@ -178,7 +180,7 @@ Movement reports are holder-relative. Each is a `canwu.movement/movement_report`
 
 | Holder | Role | What the report shows |
 | --- | --- | --- |
-| The ordering holder, when it is a person | `Owner` | Current phase and legs, plus detail: execution state, revision reasons, failures, handoffs, bookings, the hold on the current leg (`MovementLegHoldV1`: its kind, scheduled due, `until`, reason, when it was set, and whether it re-times later legs), the schedule shift, and each booking's revocation time and reason |
+| The ordering holder, when it is a person | `Owner` | Current phase and legs, plus detail: execution state, revision reasons, failures, handoffs, the bookings it keeps, the hold on the current leg (`MovementLegHoldV1`: its kind, scheduled due, `until`, reason, when it was set, and whether it re-times later legs), the schedule shift, and each booking's revocation time and reason |
 | The order's `operator` | `Operator` | The same as the owner |
 | Each entry in `remote_observers` | `DelayedRemote` | Phase, legs, and last known endpoint as they stood one grant delay earlier, without detail |
 | Anyone else | none | Nothing |
@@ -224,7 +226,8 @@ Exact replay feeds the recorded commands, incidents, and due packets through the
 | Operation keys, labels, and reasons (`text_bytes`) | 256 bytes |
 | Subjects per order | 32 |
 | Report grants per order, owner and operator included | 16, so at most 14 remote observers |
-| Legs, itinerary revisions, handoffs, and bookings per execution | 64, 8, 16, and 16 |
+| Legs, itinerary revisions, and handoffs per execution | 64, 8, and 16 |
+| Bookings an execution and the runtime keep at once | 64 and 16,384 |
 | Orders per runtime and per owner | 1,024 and 256 |
 | Capacity pools per runtime | 256 |
 | Reports and report holders per boundary | 1,024 and 64 |

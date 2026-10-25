@@ -353,7 +353,9 @@ has not departed at its stop without spending an itinerary revision, and with
 `retime_later_legs` it moves the later legs' departures and booking windows by
 the part of the hold that elapsed. A pool's custodian, or an application
 incident, can revoke a confirmed booking, and the owner replaces it with a new
-request that names it. Capacity pools offer windowed transport
+request that names it. Since 0.21.0 an execution keeps only the bookings
+that still bear on its legs, so a leg books many lots at once and re-books a
+lost one in place as often as it is lost. Capacity pools offer windowed transport
 capacity, and one deterministic, all-or-nothing allocation pass per pool orders
 requests by priority, window start, tie-break key, admission sequence, and
 booking identity without preempting confirmed capacity. After a terminal

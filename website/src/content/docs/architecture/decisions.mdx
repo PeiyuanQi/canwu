@@ -61,7 +61,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `DecisionAuthority` | 控制者以谁的名义行事：`Actor`、`Institution`（可指定责任角色）、`Council` 或 `NoResponsibleActor`。 |
 | `DecisionTicketDraft`、`DecisionTicket` | 决策票据：定义名、决策者（`decision_maker`）、指派的控制者、摘要、上下文、选项、可选的截止时间和前序票据。保存后还带有版本号、开启与更新时间和状态。 |
 | `DecisionTicketState` | `Open`、`Resolved`（记下选中的选项和决策轨迹 ID）、`Cancelled`（带原因）或 `Expired`。 |
-| `DecisionOption` | [决策选项](/reference/terminology/)：ID、标签、说明、动作（`DecisionAction::None` 或一条序列化的 `Command`）、效用输入、阻碍项 `blockers` 和元数据。阻碍项非空的选项不可选。 |
+| `DecisionOption` | [决策选项](/reference/terminology/)：ID、标签、说明、动作（`DecisionAction::None` 或一条序列化的 `Command`）、效用输入、票据选项偏置 `bias`（为零时省略）、阻碍项 `blockers` 和元数据。阻碍项非空的选项不可选。 |
 | `DecisionContext` | 票据上下文：一个 schema 名加一段 JSON 载荷，内容由应用定义。 |
 | `DecisionMutation` | 七种决策变更：`RegisterController`、`Open`、`ReplaceOptions`、`ExtendDeadline`（[展期](/reference/terminology/)）、`Reassign`（[改派](/reference/terminology/)）、`Resolve` 和 `Cancel`。 |
 | `DecisionIngressRequest` | 一条决策输入：请求 ID、预期修订版本、一项变更，以及可选的嵌套命令请求。 |
@@ -77,14 +77,14 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | 种类 | SDK 类型 | 怎样作答 |
 | --- | --- | --- |
 | `Utility` | `WeightedUtilityPolicy` | 用 `UtilityProfile` 的权重乘以各选项的 `utility_inputs` 并求和，最高分胜出，同分取选项 ID 最小的选项；所有选项都被阻碍时推迟。 |
-| `Utility` | `GuardedUtilityPolicy`（[前置规则效用策略](/reference/terminology/)） | 先按顺序运行前置规则（`DecisionRule` 返回 `RuleChoice` 的 `Select`、`Defer`、`Exclude` 或 `NoMatch`），再为剩下的选项打分。开启 `random_tie_break` 且至少两个选项与最高分相差不超过 `near_equivalence_margin` 时，返回 `PendingRandom`。得分是加权因子之和加上该选项的[选项偏置](/reference/terminology/)（`WeightedUtilityEvaluator::with_option_bias`，策略对某个选项的固定整数偏好）；偏置与各因子分开记录在 `DecisionOptionEvaluation::bias` 中，在容差之前生效。 |
+| `Utility` | `GuardedUtilityPolicy`（[前置规则效用策略](/reference/terminology/)） | 先按顺序运行前置规则（`DecisionRule` 返回 `RuleChoice` 的 `Select`、`Defer`、`Exclude` 或 `NoMatch`），再为剩下的选项打分。开启 `random_tie_break` 且至少两个选项与最高分相差不超过 `near_equivalence_margin` 时，返回 `PendingRandom`。得分是加权因子之和加上该选项的[选项偏置](/reference/terminology/)：策略对该选项的固定整数偏好（`WeightedUtilityEvaluator::with_option_bias`，属于策略配置，计入语义哈希）加上票据起草者写在该选项上的[票据选项偏置](/reference/terminology/)（`DecisionOption::bias`，属于票据内容，不在策略身份之内，所以偏置各不相同的票据共用同一个控制者）；两者之和不加权，与各因子分开记录在 `DecisionOptionEvaluation::bias` 中，在容差之前生效。 |
 | `Rule` | `OrderedRulePolicy` | 按顺序运行规则，遇到第一条 `Select` 或 `Defer` 即结束；没有规则命中时推迟。 |
 | `Random` | 无 | 由边界系统抽样结算，见下文。 |
 | `Human` | `QueuedHumanPolicy` | 提交 `HumanDecisionResponse` 之前返回 `Pending`。 |
 | `External` | `QueuedExternalPolicy` | 提交 `ExternalDecisionResponse` 之前返回 `Pending`。 |
 | `Llm` | `QueuedLlmPolicy` | 同上；回答中的 `provider` 还必须与 `LlmModelIdentity` 一致。 |
 
-人类、外部服务和 LLM 的答复都写明针对哪个票据版本。针对旧版本的答复返回 `VersionConflict`，同一版本重复提交返回 `DuplicateResponse`，针对更新版本的答复会替换旧答复。`GuardedUtilityPolicy` 的 `semantic_hash` 覆盖前置规则策略的身份、规则 ID、效用权重、选项偏置（没有偏置时哈希不变）、容差和平局决胜开关；规则的具体行为属于应用代码，行为变化时要改规则 ID 或策略版本。
+人类、外部服务和 LLM 的答复都写明针对哪个票据版本。针对旧版本的答复返回 `VersionConflict`，同一版本重复提交返回 `DuplicateResponse`，针对更新版本的答复会替换旧答复。`GuardedUtilityPolicy` 的 `semantic_hash` 覆盖前置规则策略的身份、规则 ID、效用权重、策略自己的选项偏置（没有偏置时哈希不变；票据上的选项偏置不计入）、容差和平局决胜开关；规则的具体行为属于应用代码，行为变化时要改规则 ID 或策略版本。
 
 `Deferred` 也会写入决策轨迹并提升票据版本，票据保持开启，推迟不会延长截止时间。如果到那时仍未选定选项，票据会在截止时间之后的第一个结算边界到期（见第 8 步）；持续运行、从快照恢复和重放的运行都是如此。`Pending` 和 `PendingRandom` 只是中间结果，不能作为 `Resolve` 提交。
 

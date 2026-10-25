@@ -129,7 +129,7 @@ sidebar:
 | 结果环 | outcome ring | `FISCAL_RECENT_OUTCOMES`、`fiscal_recent_outcome` | 一个行动目标保留的最近八个结果，连同**结果下限**（outcome floor），即最近被挤出的结果的结算修订号。两者只凭常驻状态就能拒绝重发的行动；每个结果都留在它的结算事件里。 |
 | 周期水位线 | cycle watermark | `FISCAL_CYCLE_ARCHIVED` | 一个范围已归档的最大核算周期（范围水位线，scope watermark），或其机构已归档合计的最大核算周期（机构水位线，office watermark）。不在任何一条水位线及以下开立新账册，所以一个核算分区在整个运行中最多核算一次，而无需读取归档。 |
 | 分区键 | partition key | `MAX_FISCAL_PARTITION_KEYS` | 账册或报告行中一条事实的单位和支付形态。一个机构在一个周期、一种机制下的账册最多使用四个。 |
-| [财政归档](/architecture/fiscal/#核算周期与归档) | fiscal archive | `FiscalArchiveStore`、`prepare_fiscal_archive`、`enqueue_fiscal_archive`、`finalize_fiscal_archive_retention`、`archived_fiscal_record`、`FiscalArchiveKeyV1` | 由上层应用保存、按内容寻址的归档，存放已关闭的账册、各周期的机构合计和维护凭证，带有资源归档格式的累积查找索引。没有任何边界读取它；一次模拟运行可以做任意多次提交。辅助函数接收模拟运行本身，只读一次提交需要的记录；账册引用的证据如果比运行自己的封存切点（`sealed_evidence_cursor`）更新就会被拒绝，所以会封存的上层应用在每次存档时都先封存。 |
+| [财政归档](/architecture/fiscal/#核算周期与归档) | fiscal archive | `FiscalArchiveStore`、`prepare_fiscal_archive`、`enqueue_fiscal_archive`、`finalize_fiscal_archive_retention`、`archived_fiscal_record`、`FiscalArchiveKeyV1` | 由上层应用保存、按内容寻址的归档，存放已关闭的账册、各周期的机构合计和维护凭证，带有资源归档格式的累积查找索引。没有任何边界读取它；一次模拟运行可以做任意多次提交。辅助函数接收模拟运行本身，只读一次提交需要的记录；账册引用的证据如果比运行自己的封存切点（`sealed_evidence_cursor`；运行在创建或恢复之后尚未封存时没有封存切点，接续恢复也不算封存，此时不拒绝任何账册）更新就会被拒绝，所以会封存的上层应用在每次存档时都先封存。 |
 | [报告周期槽位](/architecture/fiscal/#报告如何发布) | cycle slot | `MAX_FISCAL_REPORT_CYCLE_SLOTS` | 观察者报告中一个常驻周期占用的 64 个位置之一；槽位 `s` 的分段 `p` 对应报告行 `1 + s * 1,024 + p`。离开报告的周期把它的分段发布为空并释放槽位；槽位用完时的周期计入摘要的 `omitted_cycles`。 |
 | [报告分段](/architecture/fiscal/#报告如何发布) | report part | `FiscalReportRecord`、`FISCAL_REPORT_ROWS_PER_PART` | 报告的一条知识记录：一个周期的 16 个相邻行（范围行或机构行），独占一条报告行，只在各行的摘要值变化时重新发布。第 0 行是摘要。 |
 | [历史财政语境](/architecture/fiscal/) | fiscal historical context | `FiscalHistoricalContext` | 用于判断活动时期和改革候选的显式历史年份与模式；只通过规范化输入改变，不会自动实施改革。 |
@@ -179,6 +179,10 @@ sidebar:
 | [渡河作战](/architecture/military/) | contested crossing | `CrossingStateV1`, `OrderCrossing` | 分批渡河，经受拦截，登岸建立滩头。 |
 | [战斗条件输入](/architecture/military/) | condition input | `ConditionInputV1`, `SupplyInput` | 宿主为每一方提供、战斗步读取的数值，并引用它们所依据的宿主记录。 |
 | [战前预判](/architecture/military/) | pre-battle forecast | `ForecastV1`, `ForecastBandId` | 依据规则册的分档线得出的开战比值所在档位。 |
+| [定时战斗步](/architecture/military/) | timed step | `timed_step_ingress`, `MILITARY_TIMED_STEP_INGRESS` | 上层应用作为插件输入排入、在指定时刻到期的战斗步；该时刻的边界结算到期的工作，所以每天推进一步的上层应用不必增加边界；该边界准入的命令在它之后生效。 |
+| [加入围城](/architecture/military/) | siege join | `JoinSiege` | 把地点上空闲的部队加入某场围城的围城方或守军，以及正在进行的攻城或出城反击的命令。 |
+| [撤出围城](/architecture/military/) | siege release | `ReviseSiegeV1::release` | 围城修订中把部队从围城一方撤出、使其可以重新布置的部分。 |
+| [交战时限](/architecture/military/) | engagement time limit | `OpenEngagementV1::max_minutes`, `EngagementStateV1::max_minutes` | 一场战斗在无人溃退时最多进行多久，到时以 `Stalled` 结束：取其种类规则的时限，或上层应用开战时指定的更短时限。 |
 | [军事补给参考消费者](/tutorials/cases/production-economy/) | force-supply reference consumer | `canwu-force-supply-reference` | 可替换的整合包，证明军事后勤可以消费公共资源 API，同时只拥有军队本地需求、战备、短缺后果和征发 saga；不是通用战斗模型。 |
 | [本地稀缺度投影](/tutorials/cases/production-economy/) | local scarcity projection | `LocalScarcityProjection` | 脱离式、持有人绑定的读取模型，解释可观察供给、需求、缓冲、路线可达性、安全与政策；不声称存在价格。 |
 | [价格压力投影](/tutorials/cases/production-economy/) | price-pressure projection | `PricePressureProjection` | 只有存在合格的价格证据和版本化解释规则时才生成的脱离式读取模型；既不形成市场，也不结算交易。 |
@@ -267,7 +271,9 @@ sidebar:
 | [排定时刻](/architecture/routing-movement/#路段计时) | scheduled due | `MovementLegHoldV1::scheduled_at` | 滞留所取代、且滞留不会早于它结束的到期时刻：已出发路段的实际出发时间加计划时长，或路段首次被滞留时待处理的出发时刻。解除滞留就是把 `until` 设回这个时刻。 |
 | [行程顺延量](/architecture/routing-movement/#路段计时) | schedule shift | `MovementOrderRecordV1::schedule_shift`、`MovementReportDetailV1::schedule_shift`、`DelayLeg::retime_later_legs` | 生效行程中尚未出发的各路段因重新排时的滞留（`retime_later_legs`）而落后于计划时间的量；它顺延这些路段的计划出发和预订窗口，只在重新排时的滞留结束时增长，改道会把它清零。 |
 | [预订撤销](/architecture/routing-movement/#运力池) | booking revocation | `MovementOperation::RevokeBooking`、`CapacityBookingStatus::Revoked`、`CapacityBooking::revocation` | 运力池保管人（或应用事故）撤回一项已确认的预订，记下时间和原因；运力回到运力池，预订未被先行替换时，路段出发时失败。 |
-| [预订替换](/architecture/routing-movement/#运力池) | booking replacement | `MovementBookingRequestV1::replaces` | 同一路段的一项新预订取代一项更早的预订，只能替换一次；待处理或已确认的原预订被取消或释放，已失去的原预订出发时不再计入。 |
+| [预订替换](/architecture/routing-movement/#运力池) | booking replacement | `MovementBookingRequestV1::replaces` | 同一路段的一项新预订取代一项更早的预订，只能替换一次；待处理或已确认的原预订被取消或释放，原预订随即离开运输执行。 |
+| [在持预订](/architecture/routing-movement/#运力池) | kept booking | `MovementLimitsV1::bookings_per_execution`、`bookings_per_runtime` | 运输执行因其仍与某个路段有关而继续保留的预订：已申请或已确认的、正在途中的路段消耗掉的，或尚未出发的路段已失去且尚未替换的。只有在持预订计入预订上限。 |
+| [已了结预订](/architecture/routing-movement/#运力池) | closed booking | — | 不再与任何路段有关的预订：已释放、已取消或已被替换的，被已到达或已失败的路段消耗掉的，或所属路段已失败、已被取代或所属运输执行已关闭而失去的。它在了结它的那一步离开运输执行，其绑定也离开运行时；已消耗的运力仍由运力池计入。 |
 | [投影](/developer/reading-state/) | projection | — | 不暴露权威领域状态而生成的角色范围物化表示。 |
 | [权限](/developer/integration/) | authority | `CommandAuthority` | 发出命令或执行动作的已验证权利；`authoritative state` 应译为“权威状态”。 |
 | [签发者](/developer/integration/) | issuer | `Issuer` | 命令声明的来源身份；权限验证决定该身份是否可以行动。 |
@@ -284,7 +290,8 @@ sidebar:
 | [决策尝试](/tutorials/cases/warlord-aid-decision/) | decision attempt | `DecisionAttemptRecord` | 一条已准入决策请求的权威记录，写明该请求被接受还是被拒绝。请求可以是注册控制者，也可以是开启票据、替换票据选项、为票据展期、改派票据、解决票据或取消票据。 |
 | [展期](/architecture/decisions/) | deadline extension | `DecisionMutation::ExtendDeadline` | 在票据 ID 不变的前提下把开启票据的截止时间推后，按票据版本校验。 |
 | [改派](/architecture/decisions/) | ticket reassignment | `DecisionMutation::Reassign` | 把开启的票据改派给另一个已注册的控制者，此后只有它能结算该票据；决策者和前序关系不变。 |
-| [选项偏置](/architecture/decisions/) | option bias | `WeightedUtilityEvaluator::with_option_bias`、`DecisionOptionEvaluation::bias` | 策略对某个选项的固定整数偏好，加到该选项的加权得分上，并与各因子行分开记录。 |
+| [选项偏置](/architecture/decisions/) | option bias | `WeightedUtilityEvaluator::with_option_bias`、`DecisionOption::bias`、`DecisionOptionEvaluation::bias` | 对某个选项的整数偏好，不加权地加到该选项的加权得分上，并与各因子行分开记录：策略的固定偏置加上票据写在该选项上的偏置。 |
+| [票据选项偏置](/architecture/decisions/) | ticket option bias | `DecisionOption::bias` | 票据起草者写在某个选项上的偏置：属于票据内容，不在策略身份之内，与策略对该选项的偏置相加，所以偏置各不相同的票据共用同一个控制者。 |
 | [准入批次](/architecture/decisions/) | admission batch | `DecisionState::tickets_opened_in_batch`、`SimulationView::decision_tickets_opened` | 最近一个边界准入的决策 `Open` 所创建的票据，按准入顺序排列；属于持久化的决策状态，纳入决策根的承诺。 |
 | [决策轨迹](/tutorials/cases/warlord-aid-decision/) | decision trace | `DecisionTrace` | 用于解释和重放的评分、证据、策略身份、所选选项与结果。 |
 

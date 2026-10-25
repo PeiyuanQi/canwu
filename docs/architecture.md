@@ -2273,7 +2273,7 @@ booking with a new request naming it (`MovementBookingRequestV1::replaces`).
 An execution keeps only the bookings that still bear on its legs (requested
 and confirmed ones, those the leg under way consumed, and those lost for a leg
 that has not departed, until replaced); a replaced booking leaves at once, a
-consumed one when its leg arrives, and the others when their leg fails or is
+consumed one when its leg arrives or fails, and the others when their leg fails or is
 superseded or the execution closes, consumed capacity staying counted by its
 pool. `bookings_per_execution` (64) and `bookings_per_runtime` (16,384) bound
 what is kept at once, not what an execution books over its life. Reports are holder-relative: the owner and operator see

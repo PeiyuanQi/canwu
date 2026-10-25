@@ -139,9 +139,13 @@ with a machine-validated payload and declared core/component access.
   lists the latest settled boundary's.
 - Declare a doctrine's standing preference for an option as a bias, not a
   factor: `WeightedUtilityEvaluator::new(profile).with_option_bias(option_id,
-  bias)`; the trace records it apart from the factors as
-  `DecisionOptionEvaluation::bias`, and the policy's semantic hash changes,
-  so register the binding with the biased policy.
+  bias)`; the policy's semantic hash changes, so register the binding with
+  the biased policy. A value that differs from ticket to ticket goes on the
+  option instead (0.21.0): `DecisionOption::new(..).with_bias(bias)` when
+  you draft the ticket or replace its options, never a controller per value.
+  The trace records the policy's bias plus the ticket's, unweighted, apart
+  from the factors as `DecisionOptionEvaluation::bias`; the ticket's part is
+  outside the policy's hash, so one controller serves every ticket.
 
 ## Save, seal, and continue (0.16.0 contract; 0.20.0 writes continuation format 4)
 
@@ -218,8 +222,12 @@ with a machine-validated payload and declared core/component access.
   (`InvalidSnapshot`), not only at the seal.
 - A fiscal host that archives closed books seals at each save, before it
   writes a continuation checkpoint: the archive helpers refuse a book citing
-  evidence newer than the run's own sealed cut (`sealed_evidence_cursor`),
-  and a run that retains all its evidence refuses nothing.
+  evidence newer than the run's own sealed cut (`sealed_evidence_cursor`, the
+  end of the run's own last seal), and a run that has not sealed since it was
+  created or restored refuses nothing. Since 0.21.0 a continuation restore is
+  not a seal: `sealed_evidence_cursor()` is `None` until the restored run
+  seals, and until then it archives freely, so a host that never seals
+  archives in every session.
 - A refusal is never a failed boundary: an inadmissible packet is a recorded
   rejection, a skipped packet with a traced reason
   (`canwu.resource.ingress_skipped.v1`, `canwu.production.ingress_refused.v1`,
@@ -342,7 +350,12 @@ with a machine-validated payload and declared core/component access.
   (`CapacityBookingStatus::Revoked`); the owner replaces a failed, expired,
   or revoked booking with a `RequestBooking` whose `replaces` names it, or
   the leg fails at departure with `capacity_unavailable`. Superseded leg-due
-  packets are withdrawn, so `pending_ingress()` no longer lists them.
+  packets are withdrawn, so `pending_ingress()` no longer lists them. Since
+  0.21.0 an execution keeps at most 64 bookings at once (the runtime 16,384)
+  and closed or replaced bookings leave it: book a leg's lots at once,
+  re-book a lost lot in place as often as it is lost, read a closed booking's
+  final status from a report or the record history, and treat
+  `LimitExceeded` on `RequestBooking` as the bound.
 - Correspondence (0.20.0): any knowledge holder, a domain entity included,
   can be a sender, recipient, carrier, or seed holder (name a domain-entity
   sender in the prepared dispatch by its domain record and issue its
@@ -373,7 +386,19 @@ with a machine-validated payload and declared core/component access.
   `canwu.military.command_rejected.v1` events, and a step the rulebook
   cannot resolve holds the engagement (`canwu.military.engagement_held.v1`).
   Start from `cargo run -p canwu-military-reference --example
-  military_starter`.
+  military_starter`. Since 0.21.0: queue
+  `timed_step_ingress(next_daily_boundary)` on the run handle after each
+  daily boundary to step once a day without a boundary of the step's own
+  (the default wake cadence may stay; the commands that boundary admits
+  apply after the step, so send `Step` with orders that must apply first);
+  open a fight shorter than its kind with
+  `OpenEngagementV1 { max_minutes: Some(..), .. }`; add a column to an
+  invested place with `JoinSiege`, which also enters the siege's assault or
+  sortie in progress; let a
+  besieged force march off with `ReviseSiege { release, .. }` and place it
+  in the same admission order; name a force that reached the far bank with
+  `ReviseCrossing { defenders: Some(..), .. }`. A subject whose sides name
+  no holder queues no report. Payloads use `SCHEMA_VERSION` (2).
 - Society (0.18.0): author intergroup relations with
   `IntergroupRelations::into_record` beside the root, revise many per
   packet with `intergroup_relation_revision_v1` (each change names the edge

@@ -33,6 +33,7 @@ coding agents.
 - [Pending ingress read](proposals/pending-ingress-read.md)
 - [Decision deadlines, reassignment, and reads](proposals/decision-deadlines-reassignment-and-reads.md)
 - [Calendar marks and keyed-draw retirement](proposals/calendar-marks-and-draw-retirement.md)
+- [Decision ticket option bias](proposals/decision-ticket-option-bias.md)
 - [End-state design](end-state.md)
 - [Reusable-engine conformance](engine-conformance.md)
 - [Versioning and compatibility](versioning.md)
@@ -78,6 +79,9 @@ current published **social diffusion simulation module**
 - [Correspondence domain-entity parties, withheld reports, and refused seeds](proposals/correspondence-domain-parties.md)
 - [Movement holds before departure, re-timed later legs, and booking revocation](proposals/movement-holds-and-revocation.md)
 - [Resource continuation evidence and completion reports](proposals/resource-continuation-and-completion-reports.md)
+- [Movement executions keep only the bookings that bear on their legs](proposals/movement-kept-bookings.md)
+- [Fiscal archive after a continuation restore](proposals/fiscal-archive-after-continuation-restore.md)
+- [Military engagement revisions](proposals/military-engagement-revisions.md)
 - [Downstream grand-strategy gap set](proposals/downstream-grand-strategy-gap-set.md)
 
 ## Runnable cases, reference content, and starter kits

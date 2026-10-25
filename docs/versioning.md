@@ -8,10 +8,10 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.20.0`. A live `SimulationSnapshot` has:
+The workspace version is `0.21.0`. A live `SimulationSnapshot` has:
 
 - snapshot format `9`;
-- commitment format `7`;
+- commitment format `8`;
 - checkpoint/evidence-journal format `6`;
 - paged-checkpoint envelope format `7` and continuation checkpoint format `4`;
 - state revision format `3`;
@@ -25,6 +25,433 @@ The workspace version is `0.20.0`. A live `SimulationSnapshot` has:
 Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
+
+Version 0.21.0 is a pre-1.0 minor release. Its changes come from the
+packages that close every downstream gap filed against 0.20.0, each with its
+own proposal:
+
+- [decision ticket option bias](proposals/decision-ticket-option-bias.md)
+  (`canwu-decision`, `canwu-sim`: downstream gap G-84);
+- [movement executions keep only the bookings that bear on their legs](proposals/movement-kept-bookings.md)
+  (`canwu-movement`: downstream gap G-83);
+- [fiscal archive after a continuation restore](proposals/fiscal-archive-after-continuation-restore.md)
+  (`canwu-sim`, `canwu-fiscal`: downstream gap G-91);
+- [military engagement revisions](proposals/military-engagement-revisions.md)
+  (`canwu-military`: downstream gaps G-85 to G-90).
+
+The release's continuation gate also found engine finding E-55, present since
+0.20.0 in the unpublished `canwu-force-supply-reference`, fixed in this release
+(below).
+
+What changed, in one list:
+
+- **Ticket option bias.** A `DecisionOption` carries `bias: i64`, written by
+  the ticket's drafter at `Open` or `ReplaceOptions`
+  (`DecisionOption::with_bias`), zero and omitted when the option has none.
+  `WeightedUtilityEvaluator` adds it to the policy's own bias for the option
+  (`with_option_bias`) and records the sum, unweighted, as
+  `DecisionOptionEvaluation::bias` beside the factor lines;
+  `WeightedUtilityPolicy` and `GuardedUtilityPolicy` score through it, in the
+  guarded policy before the near-equivalence margin. The ticket's bias is
+  ticket content, not policy configuration: the guarded policy's semantic
+  hash is unchanged, so one controller serves every ticket of a decision
+  maker whatever the tickets' biases. The decision commitment is
+  `canwu.commitment.decisions.v4`, `COMMITMENT_FORMAT_VERSION` is 8, and
+  `DECISION_ARCHIVE_FORMAT_VERSION` is 2.
+- **Kept bookings.** A transport execution keeps only the bookings that
+  still bear on its legs: requested or confirmed, consumed by the leg under
+  way, or lost (failed, expired, or revoked) for a leg of the active revision
+  that has not departed. Every other booking is closed and leaves the
+  execution, and its binding the runtime, in the step that closed it (the
+  replacing `RequestBooking`, the arrival or failure, the release,
+  cancellation, reroute, or close); a consumed booking's quantity moves to
+  `MovementState::retired_consumption`, so the pool's `consumed` stays
+  counted. `MovementLimitsV1::CURRENT.bookings_per_execution` bounds what an
+  execution keeps at once and is raised from 16 to 64; a new
+  `bookings_per_runtime` (16,384) bounds the runtime's kept bookings.
+  `MOVEMENT_SEMANTIC_HASH` changes; no format number does.
+- **A continuation restore is not a seal.** `sealed_evidence_cursor()` (on
+  `Simulation`, `CompactedSimulation`, `Canwu`, `CompactedCanwu`, and
+  `CanwuRun`) answers where the run's own last seal ended and is `None` until
+  a run seals after it is created or restored; in 0.20.0 a run restored from
+  a continuation checkpoint answered the checkpoint's settled cut. So
+  `prepare_fiscal_archive` no longer refuses, as
+  `FiscalArchiveError::UnsealedCitations`, a book citing a version
+  established after a continuation restore on a run that has not sealed
+  since; a run that has sealed is refused past its own last seal as before.
+  `canwu-fiscal` changes no code, only its rustdoc and README.
+- **The military report queue.** `canwu-military` queues
+  a report item only for an engagement, siege, or crossing whose sides name a
+  holder, so a host that names no report holder writes the combat registry
+  at most once in a stepping boundary (0.20.0 wrote it twice: the queue
+  filled in phase 7 and drained in phase 13).
+- **Engagement time limit.**
+  `OpenEngagementV1::max_minutes: Option<u32>` opens a fight shorter than its
+  kind's rule (`None` takes the kind's; a value must be from 1 to the kind
+  rule's, else a recorded `ValueOutOfRange` rejection);
+  `EngagementStateV1::max_minutes: u32` holds the duration resolved at the
+  opening, and the step reads it. A fight the plugin opens (an assault, a
+  sortie, a ferry or bridgehead fight) takes its kind's.
+- **Siege join and release.**
+  `MilitaryCommandV1::JoinSiege { siege, expected_host_revision, side, forces }`
+  adds free forces at the site to a siege's besiegers or defenders, as
+  `JoinEngagement` does for a fight; while the siege's assault or sortie is
+  in progress the joining forces also enter that fight on the matching side.
+  A siege's two sides have different owners: `JoinSiege` refuses a force of
+  the opposite side's owner, and `InvestSite` now refuses besiegers and
+  defenders of one owner. `ReviseSiegeV1::release: Vec<ForceId>`
+  takes forces off either side, free to be placed in the same boundary
+  (`PlaceForce` after the release in one admission order); a release that
+  would leave no besieger is refused (`LiftSiege` ends a siege), and one that
+  leaves no defender lets the next siege day find the place `Abandoned` with
+  nobody dispersed. Every change to a siege's sides is a siege command naming
+  the siege's `expected_host_revision`.
+- **Revised crossing defenders.**
+  `MilitaryCommandV1::ReviseCrossing` gains `defenders: Option<Vec<ForceId>>`,
+  which replaces the defending list under the checks `OrderCrossing` applies
+  (within `forces_per_side`, none named twice, not the crossing force, each
+  registered, active, and at the far bank), from a trusted issuer or the
+  crossing force's controller, who may name any list, or else from an issuer
+  who controls a force on the old or new list and every registered force the
+  revision removes; the next landed wave's bridgehead fight takes the free defenders from
+  the revised list.
+- **The timed step.** A public plugin ingress,
+  `military_timed_step_v1` (`MILITARY_TIMED_STEP_INGRESS`, class
+  `ScheduledSystem`, payload `Null`), that the host queues on its run handle
+  due at a named time with `enqueue_plugin_ingress(timed_step_ingress(due_at))`;
+  the boundary at that instant admits it with the host's other ingress, and
+  the settle system treats it as a step packet with `up_to` at the boundary's
+  time, so a host that steps once a day adds no boundary of its own. The wake
+  system schedules nothing in a boundary that admitted a step packet of
+  either kind (its contract reads `core_ingress`), so the default `Daily`
+  wake cadence may stay. The host may withdraw a pending timed step with
+  `cancel_plugin_ingress`. `SCHEMA_VERSION` is 2 and the plugin descriptor
+  version `0.21.0`.
+- **The force-supply reference keeps the force versions it cites (engine
+  finding E-55).** The reference root cited earlier versions of itself in
+  its completion state (an acquisition's evidence, a local grant's target,
+  an activation certificate's target) but declared none, so the first seal
+  after a write superseded such a version dropped it, and a later
+  first-time declaration of it by the resource's hot terminal bucket was
+  refused at the next seal (`ArchiveNotReady`). The root now declares those
+  versions identity-only while a live acquisition, grant, or certificate
+  cites them (released, rejected, and expired ones excluded), and an
+  acquisition or grant that cites a force version the root has not written
+  is a recorded rejection. `canwu-force-supply-reference` is not published;
+  its root format moves 2 → 3 (a required
+  `canwu_identity_evidence_dependencies`), and its runtime record schema and
+  `FORCE_SUPPLY_SEMANTIC_HASH` change.
+
+**Same version only.** Canwu crates depend only on the exact same version of
+each other: every first-party crate requires `=0.21.0` of every other
+first-party crate it uses, and a host pins `canwu-api = "=0.21.0"` and the
+same version of every extension. Nothing written by 0.20.0 is read by
+0.21.0. There is no migration and no decoding of an old shape: the exact
+engine-version check refuses every 0.20.0 snapshot, checkpoint journal, paged
+checkpoint, continuation checkpoint, replay journal, evidence segment, and
+scenario that records its engine version; a commitment at format 7, a
+decision archive blob or receipt at format 1, and a military payload at
+schema version 1 are refused by their format as well; a run with the movement
+or military plugin would also be refused by its semantic hash, and a movement
+runtime that keeps a closed booking by `MovementState::validate`. A scenario
+built with 0.20.0 types is rebuilt with the 0.21.0 types: a `DecisionOption`
+struct literal lists `bias`, a `MovementLimitsV1` literal
+`bookings_per_runtime`, and the military payloads their new fields. Retain
+the 0.20.0 engine to read 0.20.0 data.
+
+Formats and schemas that change, each deliberately versioned:
+
+| Item | 0.20.0 | 0.21.0 | What changed |
+| --- | --- | --- | --- |
+| Snapshot, commitment, checkpoint/evidence-journal, paged-checkpoint, and continuation-checkpoint formats | 9, 7, 6, 7, 4 | 9, 8, 6, 7, 4 | commitment 8 commits to decision state through `canwu.commitment.decisions.v4`; the other four keep their shape; the engine version in every checkpoint hash changes |
+| Decision commitment | `canwu.commitment.decisions.v3` | `canwu.commitment.decisions.v4` | the same inputs (the controllers, the hot-history root, the archive receipt root, the admission batch); the new tag marks that the committed tickets carry option biases; a format 7 snapshot, checkpoint, or replay journal is refused by its format as well as its engine version |
+| `DecisionOption` (in `DecisionTicketDraft`, `ReplaceOptions`, and `DecisionTicket`: decision ingress, replay journal, snapshot and checkpoint decision state, continuation checkpoint, hot history, archive blobs) | — | — | `bias: i64`, omitted when zero; strict loading refuses an explicit `"bias": 0` as a non-canonical encoding |
+| `DecisionOptionEvaluation::bias` (in `PolicyDecision` and `DecisionTrace`) | the evaluator's bias | the evaluator's bias plus the option's | the same field and encoding, omitted when the sum is zero |
+| `DECISION_ARCHIVE_FORMAT_VERSION` (archive blob, receipt, verified archive commit) | 1 | 2 | an archived ticket's options carry their bias; a blob records no engine version, so its format alone names its shape, and a format 1 blob or receipt is refused |
+| `GuardedUtilityPolicy` semantic hash; the hot-history leaf tag `canwu.decision.hot-history-leaf.v2`; the decision ingress commitment `canwu.decision.ingress-request.v1`; the decision archive bucket page format (1) | — | — | unchanged: ticket biases are not part of the policy hash, and the two tags hash the canonical encoding of what they cover, so a biased ticket already hashes apart from an unbiased one |
+| `MovementState` (runtime record payload) | — | — | shape unchanged; `validate` refuses an execution that keeps a closed booking, a binding's `replaces` naming a kept booking or named by two kept bindings, and more than 64 kept bookings in an execution or 16,384 in the runtime |
+| `MovementBookingBindingV1::replaces` | names an earlier booking of its leg still in the runtime | names a booking that has left the runtime | — |
+| `MovementState::retired_consumption` | the consumption of retired executions' bookings | the consumption of every booking that has left the runtime | — |
+| `TransportExecution::bookings` (in the runtime) | every booking of the execution's life | the kept bookings, in request order | — |
+| `MovementReportDetailV1::bookings` (report payload) | every booking of the execution | the kept bookings | payload shape and the `movement_report` schema hash (`33d6f3ab…ed28`) unchanged |
+| `MovementLimitsV1` (not persisted) | `bookings_per_execution` 16 | `bookings_per_execution` 64, `bookings_per_runtime` 16,384 | the per-execution bound counts what is kept, not what was booked over the execution's life; the new field is the runtime-wide bound |
+| `MOVEMENT_SEMANTIC_HASH` | `b211c92a…abbc` | `e01d702b…826f` | BLAKE3 of the string recorded in the proposal; the snapshot, continuation, and journal formats are unchanged |
+| `sealed_evidence_cursor` (a derived read; nothing persisted) | the end of the last seal, or the settled cut of the continuation checkpoint the run was restored from | the end of the run's own last seal; `None` until a run seals after it is created or restored | derived from the segment manifest and the archived cursor the runtime already holds; no fiscal, snapshot, checkpoint, record, or plugin format changes |
+| `canwu-military` payloads (`SCHEMA_VERSION`) | 1 | 2 | the engagement record changed shape; the plugin keeps one schema version for all its payloads, so no 0.20.0 military record loads |
+| `canwu.military:engagement` | — | `max_minutes: u32` | activation refuses an active engagement whose `max_minutes` is 0 or above its kind rule's, or whose kind has no rule |
+| `canwu.military:siege`, `canwu.military:crossing` | — | — | shapes unchanged; activation also checks the side lists and the crossing's defenders against `forces_per_side`, since commands now grow them |
+| `canwu.military:registry` | — | — | shape unchanged; the report queue holds items only for subjects with a holder |
+| `MilitaryCommandV1` (the `military_command_v1` and `military_apply_v1` payloads in the journals) | 17 variants | 18 variants | adds `JoinSiege { siege, expected_host_revision, side, forces }`; `OpenEngagementV1` gains `max_minutes`, `ReviseSiegeV1` gains `release`, `ReviseCrossing` gains `defenders` |
+| `canwu-military` ingress | the command action `military_command_v1`; internal `military_apply_v1` and `military_step_v1` | the same, and the public ingress `military_timed_step_v1` (class `ScheduledSystem`, payload `Null`) | an ordinary host ingress record: the snapshot, the journals, the replay journal, and a continuation checkpoint's pinned ingress carry it while it is pending, and exact replay re-queues it |
+| `canwu-military` plugin descriptor | version `0.20.0` | version `0.21.0`; semantic hash BLAKE3 of `canwu-military plugin semantic hash 0.21.0: engagements <resolver name>@<resolver version>` | the public ingress and the wake system's `core_ingress` read are descriptor-recorded; the `engagement_report` and `engagement_outcome` knowledge schemas are unchanged (v1, same bodies and hashes) |
+
+Semantic identities that differ from 0.20.0: `canwu-movement`,
+`canwu-military`, and the unpublished `canwu-force-supply-reference`. The other first-party plugins keep their semantic hash
+constants; `canwu-transport`'s semantic version, the `movement_report` schema
+hash, and every `GuardedUtilityPolicy` hash are unchanged. As with any
+version change, the engine version in every checkpoint hash changes and
+first-party plugins that take their plugin version from the crate version
+report a new one.
+
+New and changed public contracts, by crate:
+
+- `canwu-decision`: `DecisionOption::bias` (new field; a struct literal that
+  lists every field sets it, one built with `..DecisionOption::new(..)` needs
+  nothing) and `DecisionOption::with_bias` (new builder);
+  `DECISION_ARCHIVE_FORMAT_VERSION` is 2; the rustdoc of
+  `WeightedUtilityEvaluator`, `with_option_bias`, `GuardedUtilityPolicy`, and
+  `DecisionOptionEvaluation::bias` states the sum. Behaviour:
+  `WeightedUtilityEvaluator::evaluate` adds the option's bias to its own for
+  the option (checked `i64`; an overflow of the sum or of the score is
+  `DecisionErrorCode::InvalidDecision` to the caller, as a factor overflow
+  is, returned by `prepare_decision` and `drive_decision` before any ingress
+  is queued); blocked and guard-excluded options are not scored and record no
+  bias. No refusal is new: `Open` and `ReplaceOptions` admit any bias, and a
+  `ReplaceOptions` that changes a bias advances the ticket version, so a
+  response computed before it is stale.
+- `canwu-sim`: `COMMITMENT_FORMAT_VERSION` is 8.
+  `Simulation::sealed_evidence_cursor` and
+  `CompactedSimulation::sealed_evidence_cursor` keep their signatures and
+  answer as above; the rustdoc of `continuation_base` and
+  `journal_segment_since` says that a continuation-restored run's retained
+  evidence begins at its base until it seals.
+- `canwu-api`: no new item (`DecisionOption`, both decision constants, and
+  `sealed_evidence_cursor` on `Canwu`, `CompactedCanwu`, and `CanwuRun` were
+  already there); no `&mut self` method on `Canwu` is added, so `gated!` is
+  unchanged.
+- `canwu-movement`: `MovementLimitsV1::bookings_per_runtime` (new field),
+  `MovementLimitsV1::CURRENT.bookings_per_execution` 64,
+  `MOVEMENT_SEMANTIC_HASH` (new value); the rustdoc of
+  `bookings_per_execution`, `MovementBookingRequestV1::replaces`,
+  `MovementBookingBindingV1::replaces`, `MovementState::retired_consumption`,
+  `MovementState::validate`, and `MovementReportDetailV1::bookings` states
+  the new meaning. Behaviour: closed and replaced bookings leave the
+  execution, and departure reads every kept booking of its leg (the 0.20.0
+  skip of replaced bookings is gone). Refusals of `RequestBooking`, each a
+  recorded rejection, in order: a bounded tie-break key and a known pool with
+  the booking's resource (`InvalidOperation`, `NotFound`); an identity
+  neither kept nor named by a kept binding's `replaces` (`Conflict`); a known
+  execution that is not arrival-pending (`NotFound`, `InvalidState`), an
+  unstarted leg of the active revision (`InvalidState`), and a window inside
+  the leg's re-timed planned window (`InvalidOperation`, `LimitExceeded`); a
+  `replaces` naming a kept booking of the same execution and leg
+  (`InvalidOperation`), not one that left because a kept booking of that leg
+  replaced it (`Conflict`, "already replaced"), in a status that can be
+  replaced (`InvalidState`); fewer than 64 kept bookings in the execution and
+  16,384 in the runtime (`LimitExceeded`; 0.20.0 refused the 17th booking of
+  the execution's life with `InvalidState`). No `canwu-transport`,
+  `canwu-api`, or `canwu-sim` change.
+- `canwu-fiscal`: no code change; the rustdoc of `prepare_fiscal_archive`
+  and `FiscalArchiveError::UnsealedCitations` and the crate README say what
+  the read says. `UnsealedCitations` keeps its shape and meaning on a run
+  that has sealed, a continuation-restored run no longer meets it until it
+  seals, and `Backpressure`, `NothingToArchive`, and `Mismatch` are unchanged.
+- `canwu-military`: `MilitaryCommandV1::JoinSiege` (new
+  variant), `timed_step_ingress(due_at) -> PluginIngressRequest` and
+  `MILITARY_TIMED_STEP_INGRESS` (new), `OpenEngagementV1::max_minutes:
+  Option<u32>`, `EngagementStateV1::max_minutes: u32`,
+  `ReviseSiegeV1::release: Vec<ForceId>`, and
+  `MilitaryCommandV1::ReviseCrossing::defenders: Option<Vec<ForceId>>` (new
+  fields), `SCHEMA_VERSION` 2. Behaviour: a subject whose sides name no
+  holder queues no report; the wake system skips a boundary that admitted a
+  step packet of either kind; `JoinSiege` enters the siege's assault or
+  sortie in progress; `InvestSite` refuses besiegers and defenders of one
+  owner. Recorded rejections (`canwu.military.command_rejected.v1`), added to
+  0.20.0's: a `max_minutes` of 0 or above the kind rule's
+  (`ValueOutOfRange`); a joining force that is not free at the site, already
+  in the siege, of another owner than its side or of the opposite side's
+  owner, or past the siege's or its open fight's side limit, or a join of a
+  force the issuer does not control (`InvalidAuthority`); an `InvestSite`
+  whose besiegers and defenders have one owner; a release of a force not in
+  the siege, in a fight, or not the issuer's (`InvalidAuthority`), or a
+  release that would leave no besieger; a revised defender not at the far
+  bank, the crossing force itself, or past the side limit, or a revision by
+  an issuer who controls neither the crossing force nor a defender, or who
+  would remove a defender it does not control (`InvalidAuthority`). A force named twice
+  in a join, a release, or a revised defender list is refused at admission
+  (`InvalidPayload`). The timed step cannot be refused in a boundary: a
+  non-null payload is refused when the host enqueues it, and a timed step
+  with no rulebook installed or no work due steps nothing. `canwu-api` and
+  the reference crates are unchanged in behaviour (the starter and the
+  content only build the new fields).
+
+The source-incompatible changes are the new fields (`DecisionOption::bias`,
+`MovementLimitsV1::bookings_per_runtime`, `OpenEngagementV1::max_minutes`,
+`EngagementStateV1::max_minutes`, `ReviseSiegeV1::release`, and
+`MilitaryCommandV1::ReviseCrossing::defenders`) and the new variant
+`MilitaryCommandV1::JoinSiege`. No `&mut self` method on `Canwu` is added.
+The release is therefore a minor version.
+
+Version 0.21.0 also changes these behaviours, which are visible to existing
+code and runs:
+
+- **A ticket's options carry a bias.** The trace's `bias` is the policy's
+  bias for the option plus the bias of the option on the ticket version the
+  trace names; a host whose tickets carry no bias scores exactly as in
+  0.20.0. A ticket bias that cancels the policy's records zero and is
+  omitted. A host that evaluates a policy again after a restore scores the
+  same, because the bias is in the ticket it reads.
+- **Closed bookings are not in the live runtime.**
+  `TransportExecution::bookings` and the owner's report list only the kept
+  bookings, so a booking's final status after it closed is read from a
+  report published while it was kept or from the record history; a replaced
+  booking is gone from the runtime when its replacement is admitted, and a
+  settled or cancelled execution keeps no booking. A pool's `consumed` is its
+  kept consumed bookings plus `retired_consumption`, which gains a booking's
+  quantity when the booking leaves, not only when its execution retires.
+- **The booking bound counts what is kept.** A leg may book more than 16 lots
+  at once (up to 64 kept per execution, the lots the leg under way consumed
+  and the lost lots not yet replaced counted), and a lost lot is re-booked in
+  place with `replaces` as often as it is lost, because the replacement takes
+  its original's place. `LimitExceeded` on `RequestBooking` means that the
+  execution or the runtime keeps as many bookings as it may.
+- **A continuation-restored run archives freely until it seals.** A host
+  that saves only by continuation checkpoint and never seals archives every
+  closed book in every session again, and its ledgers no longer fill after a
+  restore. When such a run seals, its segments start at its base, and from
+  then on citations past its own last seal are refused as before. Forks
+  answer as their source does; a continuation checkpoint written by a run
+  that archived books citing versions after its base no longer carries those
+  versions and restores.
+- **Military.** A host without report holders writes the
+  registry once in a stepping boundary when its own fields move and not at
+  all otherwise; a host with holders behaves as in 0.20.0. A fight's duration
+  is fixed when it opens. A joined or released force changes the siege's
+  investment from its next siege day that runs (in the same boundary when one
+  is due there); a force that joins during the siege's assault or sortie
+  enters that fight too, while revised crossing defenders enter only the next
+  landed wave's bridgehead fight. Every command the timed step's boundary
+  admits, queued as ingress for its instant or proposed during it, applies in
+  the next cut, after the step.
+
+Upgrading from 0.20.0, for hosts and plugin authors:
+
+- **Pin `=0.21.0`** for `canwu-api` and every extension. Nothing earlier
+  loads.
+- **A decision host** that registered a controller per bias value (a
+  per-ticket value folded into `with_option_bias`) registers one controller
+  per decision maker and class with the policy's standing biases only, and
+  writes each ticket's value on its option with `DecisionOption::with_bias`
+  when it drafts the ticket or replaces its options; the trace's `bias` is
+  then the sum of the two. Struct literals of `DecisionOption` that list
+  every field add `bias: 0`. Decision archive blobs written by 0.20.0
+  (format 1) are refused, so keep them with the 0.20.0 engine.
+- **A movement host** may book more than 16 lots for one leg and re-book a
+  lost lot in place every time it is lost; a leg no longer has to wait for
+  lots it cannot book again. A host that read a booking's final status from
+  the runtime after it closed reads it from a report published while the
+  booking was kept or from the record history, or records it when it closes
+  the booking. Treat `LimitExceeded` on `RequestBooking` as the bound (0.20.0
+  answered the 17th booking of a life with `InvalidState`). A hand-built
+  runtime (`MovementState::into_initial_record`) keeps no closed booking, and
+  a binding's `replaces` names a booking not in the runtime; struct literals
+  of `MovementLimitsV1` add `bookings_per_runtime` (a host reads `CURRENT`).
+- **A fiscal host** that saves only by continuation checkpoint archives its
+  closed books in every session again; a "not yet" arm for
+  `UnsealedCitations` may stay, it no longer fires there. A host that read
+  `sealed_evidence_cursor()` for where a run's retained evidence begins gets
+  the 0.20.0 answer with
+  `run.sealed_evidence_cursor().or_else(|| run.continuation_base().map(|base| base.cut))`
+  on a `CompactedCanwu` (`continuation_base` is not on `CanwuRun`; a base at
+  the zero cut answers `Some` of it where 0.20.0 answered `None`);
+  `continuation_base()` alone is not that answer, since it stays set after
+  the run's first seal. A sealing host changes nothing.
+- **A military host** adds `max_minutes: None` to
+  `OpenEngagementV1` literals (the kind's duration, as before), `release:
+  Vec::new()` to `ReviseSiegeV1`, and `defenders: None` to
+  `MilitaryCommandV1::ReviseCrossing`; payloads use `SCHEMA_VERSION` (now 2),
+  so a host that writes the constant needs no other change. A host that names
+  no report holder pays at most one registry write a stepping boundary, with
+  no change on its side. To open a fight shorter than its kind, set
+  `max_minutes`. To add a column to an invested place, send `JoinSiege` (not
+  a second `InvestSite`); during the siege's assault or sortie the column
+  also enters that fight, and an `InvestSite` whose besiegers and defenders
+  have one owner is refused. To let a
+  besieged force march off, release it with `ReviseSiege { release }` and
+  place it in the same admission order; lift a siege whose last besieger
+  leaves with `LiftSiege`. To make a force that reached the far bank resist
+  the landing, send `ReviseCrossing { defenders: Some(..) }`. To step once a
+  day without a boundary of the step's own, queue
+  `timed_step_ingress(<the next daily boundary's time>)` on the run handle
+  after each daily boundary instead of sending `Step`; the default wake
+  cadence may stay. Commands that boundary admits apply in later cuts after
+  the step; on a day whose orders must apply before the step, send `Step`
+  with them and withdraw that day's timed step with `cancel_plugin_ingress`.
+  No 0.20.0 save loads (every military record carries schema version 1), and
+  a host record that embeds a 0.20.0 `ReviseSiege` does not decode (`release`
+  is required); an embedded `OpenEngagement` or `ReviseCrossing` decodes with
+  `max_minutes` or `defenders` as `None`.
+- **Saves.** Write a fresh continuation checkpoint, snapshot, or checkpoint
+  journal with 0.21.0; nothing from 0.20.0 loads.
+- **Force-supply reference.** A host that runs the unpublished
+  `canwu-force-supply-reference` rebuilds its initial force root with
+  `into_initial_record`; a format-2 root is refused.
+
+Known limits carried by this release, each stated in its proposal:
+
+- Decisions: a trace records one bias per option, and its ticket part is the
+  bias of the option on the ticket version the trace names (always the
+  current options for a resolving trace, but not for a deferring trace after
+  a later `ReplaceOptions`, because hot history keeps only a ticket's latest
+  version); only the shipped utility evaluator reads the bias (rule, human,
+  external, and LLM policies ignore it, `ExternalDecisionRequest` does not
+  carry it, and a host `UtilityEvaluator` reads `option.bias` only if it
+  chooses to); a policy built on `WeightedUtilityEvaluator` cannot opt out of
+  ticket biases; the bias is unbounded, so a host that wants a clamp applies
+  it when it drafts the option
+  ([known limits](proposals/decision-ticket-option-bias.md#known-limits)).
+- Movement: closed bookings are not in the live runtime (a booking that
+  closes in the boundary it was decided appears in no report); a replaced
+  booking's identity is free again once its replacement leaves, so a host
+  that wants booking identities unique for the run keeps them so; the bound
+  counts the leg under way, so a host that books the next leg while the
+  current one is under way needs room for both (two legs of 32 lots), and a
+  lost lot counts until it is replaced or its leg fails; one runtime-wide
+  booking bound without a per-owner quota; each `RequestBooking` scans every
+  kept binding of the runtime (at most 16,384) for a `replaces` naming its
+  identity; an `OfferPool` window can be narrowed past a consumed booking
+  that left, the pool's `consumed` still holding the quantity; a report of an
+  execution near 64 kept bookings and 64 legs with labels near 256 bytes can
+  pass the 64 KiB knowledge payload limit and is withheld with
+  `canwu.movement.report_withheld.v1`
+  ([known limits](proposals/movement-kept-bookings.md#known-limits)). The
+  0.20.0 limit that replacements count against `bookings_per_execution` (16)
+  is lifted.
+- Fiscal: a host that saves only by continuation checkpoint and never seals
+  keeps no segment, so the versions its archived books cite are in nothing
+  it holds once their books leave the run (the archived book names them by
+  identity), as was already true for every citation at or below a restore's
+  base and for a never-sealed run's first session; a host that seals at each
+  save archives, in its first session after a continuation restore and until
+  its first seal there, books whose citations its next seal puts in a segment
+  rather than one that already holds them, as in a fresh run's first session
+  (seal at each save, before the continuation checkpoint, keeps every
+  archived citation in a segment); a "not yet" arm for `UnsealedCitations`
+  is harmless
+  ([known limits](proposals/fiscal-archive-after-continuation-restore.md#known-limits)).
+- Military: a day's orders still cost their boundaries
+  (a command admitted by the timed step's boundary, queued as ingress for its
+  instant or proposed during it, applies in the next cut, after the step, so
+  a host whose orders depend on its daily boundary's
+  results still pays the command boundary and the cut that applies them, and
+  those orders step from the next timed step, a day after a `Step` sent with
+  them would); report holders are fixed at the opening, so a fight, siege, or
+  crossing opened without them never queues a report; joined and released
+  forces change the siege from its next siege day (investment is not
+  recomputed at once), and a besieger that joins during a relief stands
+  beside it, not in it; a fight's duration is fixed at its opening and a
+  fight the plugin opens takes its kind's; revised crossing defenders do not
+  enter a fight already in progress; the 0.20.0 military limits (engine
+  finding E-51) stand
+  ([known limits](proposals/military-engagement-revisions.md#known-limits)).
+- Every limit of the 0.20.0 entry stands except the booking bound of 16 for
+  an execution's life (downstream gap G-83) and the continuation restore
+  counted as a seal (downstream gap G-91), which this release fixes.
+
+The hash algorithms are unchanged. The engine version in every checkpoint
+hash changes, first-party plugins that take their plugin version from the
+crate version report a new one, and the exact engine-version check rejects
+0.20.0 saves; retain the 0.20.0 engine to read them.
 
 Version 0.20.0 is a pre-1.0 minor release. Its changes come from the
 packages that close every downstream gap and engine finding filed against
@@ -118,7 +545,8 @@ What changed, in one list:
   `canwu.core.decisions` read, with the same three on `Simulation`,
   `CompactedSimulation`, `Canwu`, and `CompactedCanwu` for the trusted host.
   The **admission batch** is persisted decision state committed in
-  `canwu.commitment.decisions.v3`; `COMMITMENT_FORMAT_VERSION` is 7.
+  `canwu.commitment.decisions.v3`; `COMMITMENT_FORMAT_VERSION` became 7
+  (0.21.0 moves it to 8).
 - **The engagement engine.** `canwu-military` is rewritten as an engagement
   engine: typed forces in the host's world, stepped engagements on a
   host-installed `CombatRulebookV1` and a `StepResolver`
