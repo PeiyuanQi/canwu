@@ -1323,7 +1323,12 @@ participant, time and lease checks. A digest verifies content consistency; it
 does not grant authority. The provider owns intent authorization and retirement;
 resource settlement owns the debit and receipt. The force-supply reference keeps
 its specialized adapter, which also accepts an earlier version of its source
-record. This provider contract is part of the resource plugin semantic identity
+record: the version the consumption's certificate locked. Its root declares,
+identity-only, every earlier version of itself that its held completion state
+cites, from the acquisition on (an activated lease through its certificate;
+a released or expired one no longer), so that the resource's declaration of that version as consumer evidence still
+resolves after a seal; an acquisition or grant that cites a version of the
+root not yet written is a recorded rejection. This provider contract is part of the resource plugin semantic identity
 and introduces no callback registry or core schema.
 
 `canwu-production` is a downstream production-asset extension. It owns

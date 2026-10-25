@@ -8,11 +8,12 @@ use canwu_api::{
     ArchiveReachabilityManifest, BoundaryContext, BoundaryDirective, BoundaryPhase,
     BoundaryProposal, BoundarySystemContract, CanwuError, Command, CommandContext, CommandIngress,
     DecisionAction, DecisionOrigin, DecisionTicketState, DomainRecord, DomainRecordMutation,
-    DomainRecordSchema, ErrorCode, IngressClass, IngressPayload, Issuer, KnowledgeHolderRef,
-    PayloadSchema, PluginActionDescriptor, PluginArchiveObjectProvider, PluginArchiveRetention,
-    PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest, PluginRegistrar,
-    SimDuration, SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence,
-    SystemDirective, canonical_hash,
+    DomainRecordSchema, ErrorCode, IDENTITY_EVIDENCE_DEPENDENCIES_FIELD, IngressClass,
+    IngressPayload, Issuer, KnowledgeHolderRef, PayloadSchema, PluginActionDescriptor,
+    PluginArchiveObjectProvider, PluginArchiveRetention, PluginIngressDescriptor,
+    PluginIngressPermit, PluginIngressRequest, PluginRegistrar, SimDuration, SimulationPlugin,
+    SimulationView, StateKey, StateVisibility, SystemCadence, SystemDirective, canonical_hash,
+    identity_evidence_dependencies_property_v1,
 };
 use canwu_resource::{
     ResourceOperationOutcomeVersionV1, ResourceRuntimeRecord, resource_runtime_reference,
@@ -32,7 +33,7 @@ const RESOURCE_DISPATCH_SYSTEM: &str = "force_supply_resource_dispatch_v1";
 const DUE_EVALUATION_SYSTEM: &str = "force_supply_due_evaluation_v1";
 const VALIDATE_SYSTEM: &str = "force_supply_lifecycle_validate_v1";
 pub const FORCE_SUPPLY_SEMANTIC_HASH: &str =
-    "061d2cdc99c4a1843f973bf92c8261e4382ca35303f9368b842d8d9ab7703fa5";
+    "41e410dbebb9e35fee72aaf24da0995a85c7237ed054f9f4af10a54d56d5f18e";
 /// The event of an operation skipped because the root had no room for its
 /// result; [`force_operation_skip`] reads it back.
 pub const FORCE_OPERATION_SKIPPED_EVENT: &str = "canwu.force-supply.operation_skipped.v1";
@@ -86,6 +87,21 @@ fn force_archive_reachability(
         provider,
         manifest,
     )
+}
+
+/// The root declares identity-only dependencies: the earlier versions of
+/// itself that its held completion state cites
+/// ([`ForceSupplyStateV1::computed_identity_evidence`]).
+fn force_runtime_record_schema() -> DomainRecordSchema {
+    let mut schema = DomainRecordSchema::for_record::<ForceSupplyRuntimeRecord>();
+    schema.payload_schema = PayloadSchema::Object {
+        properties: std::collections::BTreeMap::from([(
+            IDENTITY_EVIDENCE_DEPENDENCIES_FIELD.to_owned(),
+            identity_evidence_dependencies_property_v1(),
+        )]),
+        allow_additional: true,
+    };
+    schema
 }
 
 #[must_use]
@@ -160,8 +176,7 @@ impl SimulationPlugin for ForceSupplyReferencePlugin {
 
     fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
         registrar.register_archive_reachability_participant(force_archive_reachability)?;
-        registrar
-            .register_record_schema(DomainRecordSchema::for_record::<ForceSupplyRuntimeRecord>())?;
+        registrar.register_record_schema(force_runtime_record_schema())?;
         registrar.register_command(force_supply_command_descriptor(), admit_force_operation)?;
         registrar.register_ingress(PluginIngressDescriptor {
             name: FORCE_OPERATION_INGRESS.to_owned(),

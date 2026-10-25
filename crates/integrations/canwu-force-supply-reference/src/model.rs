@@ -1,8 +1,9 @@
 use crate::{PLUGIN_NAME, PLUGIN_NAMESPACE};
 use canwu_api::{
     CanwuError, DomainRecord, DomainRecordClass, DomainRecordDraft, DomainRecordLifecycle,
-    DomainRecordType, DomainRecordVersionRef, DomainValueKindClass, ErrorCode, KnowledgeHolderRef,
-    SimTime, TypedDomainRecordRef, canonical_hash,
+    DomainRecordType, DomainRecordVersionRef, DomainRecordVersionSource, DomainValueKindClass,
+    ErrorCode, EvidenceRef, IdentityEvidenceDependenciesV1, KnowledgeHolderRef, SimTime,
+    TypedDomainRecordRef, canonical_hash,
 };
 use canwu_economy_reference_content::{
     CompiledEconomyReferenceContentV1, CoverageKeyV1, DefinitionId, ExternalityApplicability,
@@ -13,21 +14,22 @@ use canwu_resource::{
     CompletionGrantStateV1, CompletionLeaseAcquisitionId, CompletionLeaseAcquisitionStateV1,
     CompletionLeaseAcquisitionV1, CompletionLeaseActivationCertificateV1, CompletionLeaseBookV1,
     CompletionLeaseReceiptActionV1, CompletionLeaseStatusDtoV1, CompletionLockedTargetV1,
-    ExpireCompletionCapacityV1, ExternalCompletionParticipantGrantV1, GrantCompletionCapacityV1,
-    PrepareCompletionCapacityV1, ReleaseCompletionCapacityV1, RequestCompletionLeaseV1,
-    ResourceAccountId, ResourceAllocationLegVersionV1, ResourceConsumptionId,
-    ResourceConsumptionRequestV1, ResourceDefinitionRevisionId, ResourceError,
-    ResourceOperationKey, ResourceOperationOutcomeId, ResourceOperationOutcomeVersionV1,
-    ResourceOperationStatus, ResourceRecordRefV1, ResourceRevision, ResourceUnitRevisionId,
-    RunBudgetRevisionV1,
+    EligibilityEnvelopeV1, ExpireCompletionCapacityV1, ExternalCompletionParticipantGrantV1,
+    GrantCompletionCapacityV1, PrepareCompletionCapacityV1, ReleaseCompletionCapacityV1,
+    RequestCompletionLeaseV1, ResourceAccountId, ResourceAllocationLegVersionV1,
+    ResourceConsumptionId, ResourceConsumptionRequestV1, ResourceDefinitionRevisionId,
+    ResourceError, ResourceOperationKey, ResourceOperationOutcomeId,
+    ResourceOperationOutcomeVersionV1, ResourceOperationStatus, ResourceRecordRefV1,
+    ResourceRevision, ResourceUnitRevisionId, RunBudgetRevisionV1,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
 
 pub const FORCE_RUNTIME_ID: &str = "canwu.force-supply-reference:runtime:v1";
-/// Format of the force-supply root. 2 adds `archive_receipt_chain`.
-pub const FORCE_FORMAT_VERSION: u32 = 2;
+/// Format of the force-supply root. 2 adds `archive_receipt_chain`; 3 adds
+/// the derived `canwu_identity_evidence_dependencies`.
+pub const FORCE_FORMAT_VERSION: u32 = 3;
 pub const ECONOMY_EXTERNALITY_PROVIDER: &str = "canwu-economy-reference";
 pub const MAX_IDENTIFIER_BYTES: usize = 192;
 pub const MAX_REQUIREMENTS_PER_PROFILE: usize = 64;
@@ -795,6 +797,12 @@ struct ForceSupplyStateStorageV1 {
         CompletionLeaseAcquisitionId,
         BTreeMap<String, ExternalCompletionParticipantGrantV1>,
     >,
+    /// Derived from the root on encoding
+    /// ([`ForceSupplyStateV1::computed_identity_evidence`]) and ignored on
+    /// decoding: a root whose declaration differs does not re-encode to its
+    /// record's payload, which activation and validation refuse.
+    #[serde(rename = "canwu_identity_evidence_dependencies")]
+    identity_evidence: IdentityEvidenceDependenciesV1,
     next_terminal_sequence: u64,
     terminal_receipts: BTreeMap<u64, ForceTerminalReceiptV1>,
     terminal_continuation: Option<ForceTerminalContinuationV1>,
@@ -807,6 +815,7 @@ struct ForceSupplyStateStorageV1 {
 
 impl From<ForceSupplyStateV1> for ForceSupplyStateStorageV1 {
     fn from(state: ForceSupplyStateV1) -> Self {
+        let identity_evidence = state.computed_identity_evidence();
         Self {
             format_version: state.format_version,
             revision: state.revision,
@@ -826,6 +835,7 @@ impl From<ForceSupplyStateV1> for ForceSupplyStateStorageV1 {
             completion_run_budget: state.completion_run_budget,
             completion_leases: state.completion_leases,
             completion_participant_grants: state.completion_participant_grants,
+            identity_evidence,
             next_terminal_sequence: state.next_terminal_sequence,
             terminal_receipts: state.terminal_receipts,
             terminal_continuation: state.terminal_continuation,
@@ -942,6 +952,83 @@ pub fn force_supply_runtime_reference() -> TypedDomainRecordRef<ForceSupplyRunti
 }
 
 impl ForceSupplyStateV1 {
+    /// The identity-only evidence dependencies of the root: every earlier
+    /// version of the force runtime that its held completion state cites, in
+    /// an open lease acquisition's eligibility envelope (its exact evidence,
+    /// capability bindings, and route evidence), an open local grant's locked
+    /// targets, or an activation certificate's locked targets, the one a
+    /// pending intent carries.
+    ///
+    /// The resource records a force consumption with the force version its
+    /// certificate locked as consumer evidence, and its hot terminal records
+    /// declare that version, by then superseded. Declaring it here from the
+    /// acquisition on keeps proof across every seal that it exists, so the
+    /// resource's later declaration resolves as it does in an unsealed run.
+    /// A released or expired acquisition and a released, rejected, or expired
+    /// grant lead to no further consumption, so they cite nothing still
+    /// needed: an activated lease's version stays declared through its
+    /// certificate. The versions of other records the root cites are their
+    /// owners' to declare. Initial-scenario versions, which stay readable
+    /// after any seal and which the engine refuses as a declaration, and
+    /// versions past the root's own record version, which do not exist yet,
+    /// are left out.
+    #[must_use]
+    pub fn computed_identity_evidence(&self) -> IdentityEvidenceDependenciesV1 {
+        let runtime = force_supply_runtime_reference().into_untyped();
+        let leases = &self.completion_leases;
+        let acquired = leases
+            .acquisitions
+            .values()
+            .filter(|acquisition| {
+                !matches!(
+                    acquisition.state,
+                    CompletionLeaseAcquisitionStateV1::Released
+                        | CompletionLeaseAcquisitionStateV1::Expired
+                )
+            })
+            .flat_map(|acquisition| envelope_versions(&acquisition.eligibility_envelope));
+        let granted = leases
+            .grants
+            .values()
+            .filter(|grant| {
+                !matches!(
+                    grant.state,
+                    CompletionGrantStateV1::Released
+                        | CompletionGrantStateV1::Rejected
+                        | CompletionGrantStateV1::Expired
+                )
+            })
+            .flat_map(|grant| external_record_versions(&grant.target_versions));
+        let certified = leases
+            .certificates
+            .values()
+            .map(|certificate| &certificate.locked_target_versions)
+            .chain(
+                self.intents
+                    .values()
+                    .map(|intent| &intent.completion_certificate.locked_target_versions),
+            )
+            .flat_map(|targets| external_record_versions(targets));
+        // A boundary measures the root's room before it raises the root's
+        // version to the one it writes, which no held state can cite yet, so
+        // the declaration it measures is the one it writes.
+        let versions = acquired
+            .chain(granted)
+            .chain(certified)
+            .filter(|version| {
+                version.record == runtime
+                    && version.version <= self.provider_record_version
+                    && !matches!(
+                        version.established_by,
+                        DomainRecordVersionSource::InitialScenario
+                    )
+            })
+            .cloned()
+            .map(EvidenceRef::DomainRecordVersion)
+            .collect::<BTreeSet<_>>();
+        IdentityEvidenceDependenciesV1::new(versions.into_iter().collect())
+    }
+
     pub fn rebuild_derived_indexes(&mut self) {
         self.due_index.clear();
         for force in self.forces.values() {
@@ -2106,6 +2193,10 @@ impl ForceSupplyStateV1 {
                         "force completion acquisition is not holder/namespace authorized",
                     ));
                 }
+                refuse_unwritten_force_versions(
+                    self.provider_record_version,
+                    envelope_versions(&request.eligibility_envelope),
+                )?;
                 let active_completion = self
                     .completion_leases
                     .acquisitions
@@ -2155,6 +2246,10 @@ impl ForceSupplyStateV1 {
                         "force completion grant is not holder-authorized",
                     ));
                 }
+                refuse_unwritten_force_versions(
+                    self.provider_record_version,
+                    external_record_versions(&request.target_versions),
+                )?;
                 let grant = self
                     .completion_leases
                     .grant_capacity(&self.completion_run_budget, request.clone())
@@ -4264,6 +4359,51 @@ fn exact_economy_target(
 fn apply_delta(value: u16, delta: i16) -> u16 {
     let next = i32::from(value) + i32::from(delta);
     u16::try_from(next.clamp(0, 1_000)).expect("clamped value")
+}
+
+/// The external record versions among `targets`.
+fn external_record_versions(
+    targets: &[CompletionLockedTargetV1],
+) -> impl Iterator<Item = &DomainRecordVersionRef> {
+    targets.iter().filter_map(|target| match target {
+        CompletionLockedTargetV1::ExternalRecord { version } => Some(version),
+        _ => None,
+    })
+}
+
+/// Every record version an eligibility envelope cites.
+fn envelope_versions(
+    envelope: &EligibilityEnvelopeV1,
+) -> impl Iterator<Item = &DomainRecordVersionRef> {
+    envelope
+        .exact_evidence
+        .iter()
+        .chain(&envelope.capability_bindings)
+        .chain(&envelope.route_evidence)
+}
+
+/// Refuses a citation of a boundary-established force-runtime version the
+/// root has not written yet. The root declares the versions it cites, and
+/// once a boundary writes the cited version the declaration would name the
+/// root's own version, which a seal refuses.
+fn refuse_unwritten_force_versions<'a>(
+    written: u64,
+    versions: impl IntoIterator<Item = &'a DomainRecordVersionRef>,
+) -> Result<(), CanwuError> {
+    let runtime = force_supply_runtime_reference().into_untyped();
+    if versions.into_iter().any(|version| {
+        version.record == runtime
+            && version.version > written
+            && !matches!(
+                version.established_by,
+                DomainRecordVersionSource::InitialScenario
+            )
+    }) {
+        return Err(invalid(
+            "force completion cites a force-runtime version the root has not written",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn invalid(message: impl Into<String>) -> CanwuError {

@@ -1163,3 +1163,138 @@ fn terminal_capacity_rejects_new_acquisition_before_irreversible_work() {
     );
     persisted_roundtrip(&state);
 }
+
+fn acquire_citing(
+    state: &mut ForceSupplyStateV1,
+    holder: &KnowledgeHolderRef,
+    suffix: &str,
+    eligibility_envelope: EligibilityEnvelopeV1,
+) -> Result<(), canwu_api::CanwuError> {
+    state.apply_operation(
+        &ForceCommandEnvelopeV1 {
+            operation_id: ForceOperationId::new(format!(
+                "canwu.force-supply-reference:operation:completion-acquire:{suffix}"
+            ))
+            .expect("ID"),
+            holder: holder.clone(),
+            expected_runtime_revision: state.revision,
+            operation: ForceOperationV1::Completion {
+                operation: ForceCompletionOperationV1::Acquire(RequestCompletionLeaseV1 {
+                    id: CompletionLeaseAcquisitionId::new(format!(
+                        "canwu.force-supply-reference:completion-acquisition:{suffix}"
+                    ))
+                    .expect("ID"),
+                    operation_key: ResourceOperationKey::new(format!(
+                        "canwu.resource:operation:force-{suffix}"
+                    ))
+                    .expect("ID"),
+                    holder: holder.clone(),
+                    operation_namespace: "canwu.force-supply-reference:requisition".to_owned(),
+                    eligibility_time: SimTime::EPOCH,
+                    eligibility_envelope,
+                    recipe: CompletionCapacityRecipeV1 {
+                        receipts: 8,
+                        mutations: 16,
+                        reports_per_holder: 1,
+                        holders: 1,
+                        bytes: 8_192,
+                    },
+                    expected_participants: BTreeSet::from([
+                        PLUGIN_NAME.to_owned(),
+                        canwu_resource::PLUGIN_NAME.to_owned(),
+                    ]),
+                    policy_class: CompletionPolicyClassV1::Guaranteed,
+                }),
+            },
+        },
+        SimTime::EPOCH,
+    )
+}
+
+/// Engine finding E-55: the resource records a force consumption with the
+/// force version its certificate locked, by then superseded, and declares it;
+/// the root keeps that version declared from the acquisition on, so a seal in
+/// between still proves it exists.
+#[test]
+fn the_root_declares_the_earlier_force_versions_its_completion_state_cites() {
+    let (mut state, holder, ..) = base_state();
+    state
+        .configure_completion_authority(holder.clone())
+        .expect("completion authority");
+    state.provider_record_version = 4;
+    let force_version = |version, boundary| DomainRecordVersionRef {
+        record: force_supply_runtime_reference().into_untyped(),
+        version,
+        established_by: DomainRecordVersionSource::BoundaryChange {
+            boundary: canwu_api::BoundaryId::new(boundary),
+            change_index: 0,
+        },
+    };
+    let other_owner = DomainRecordVersionRef {
+        record: canwu_api::DomainRecordRef::new(
+            "canwu.economy-reference",
+            "runtime",
+            "canwu.economy-reference:runtime:v1",
+        ),
+        ..force_version(4, 8)
+    };
+    // Each envelope field cites one earlier own version, which is declared;
+    // an initial-scenario own version and another owner's are not.
+    let envelope = |exact, capability, route| {
+        EligibilityEnvelopeV1::new(
+            vec![
+                exact,
+                other_owner.clone(),
+                provider_version(force_supply_runtime_reference().into_untyped(), 1),
+            ],
+            BTreeMap::new(),
+            BTreeSet::new(),
+            vec![capability],
+            vec![route],
+        )
+        .expect("eligibility envelope")
+    };
+    acquire_citing(
+        &mut state,
+        &holder,
+        "e55",
+        envelope(
+            force_version(2, 7),
+            force_version(3, 9),
+            force_version(4, 11),
+        ),
+    )
+    .expect("acquire force completion");
+    let declared = |state: &ForceSupplyStateV1| {
+        serde_json::to_value(state).expect("encode force-supply state")
+            [canwu_api::IDENTITY_EVIDENCE_DEPENDENCIES_FIELD]
+            .clone()
+    };
+    let expected = serde_json::to_value(canwu_api::IdentityEvidenceDependenciesV1::new(
+        [(2, 7), (3, 9), (4, 11)]
+            .into_iter()
+            .map(|(version, boundary)| {
+                canwu_api::EvidenceRef::DomainRecordVersion(force_version(version, boundary))
+            })
+            .collect(),
+    ))
+    .expect("encode declaration");
+    assert_eq!(declared(&state), expected);
+    persisted_roundtrip(&state);
+
+    // A version the root has not written is refused as a domain rejection,
+    // which the plugin records, and changes nothing.
+    let refused = acquire_citing(
+        &mut state,
+        &holder,
+        "e55-unwritten",
+        envelope(
+            force_version(2, 7),
+            force_version(3, 9),
+            force_version(5, 12),
+        ),
+    )
+    .expect_err("an unwritten force version is refused");
+    assert_eq!(refused.code, canwu_api::ErrorCode::InvalidDomainRecord);
+    assert_eq!(declared(&state), expected);
+}
