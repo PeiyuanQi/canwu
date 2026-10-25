@@ -77,7 +77,7 @@ fn boundary_hash_covers_knowledge_change_visibility_and_correlation() {
         snapshot.commitment_format_version,
         COMMITMENT_FORMAT_VERSION
     );
-    assert_eq!(COMMITMENT_FORMAT_VERSION, 7);
+    assert_eq!(COMMITMENT_FORMAT_VERSION, 8);
     let first = &snapshot.boundaries[0].knowledge_changes[0];
     assert_eq!(first.phase, BoundaryPhase::PerceptionAndAttentionRefresh);
     assert_eq!(first.visibility, StateVisibility::SameBoundary);
@@ -97,7 +97,7 @@ fn boundary_hash_covers_knowledge_change_visibility_and_correlation() {
 
     // A snapshot that declares the previous commitment format is refused.
     let mut previous_format = snapshot;
-    previous_format.commitment_format_version = 6;
-    let error = load(previous_format, &plugin).expect_err("a format 6 snapshot must not load");
+    previous_format.commitment_format_version = 7;
+    let error = load(previous_format, &plugin).expect_err("a format 7 snapshot must not load");
     assert_eq!(error.code, ErrorCode::InvalidSnapshot);
 }

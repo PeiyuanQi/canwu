@@ -205,7 +205,7 @@ period-specific AI subsystem. The long-term ownership boundary is:
 | `canwu-decision` | Domain-neutral ticket/controller contracts, versioned options, ticket lineage, accepted/rejected attempt records, traces, deterministic utility evaluation, Utility/Rule/Random/Human/External/LLM policy interfaces, and the guarded utility composite policy. |
 | `canwu-sim` | Authoritative decision state, canonical ingress, operation-keyed random resolution, non-poisoning rejection admission, deadlines, authority derivation, transactional command admission, commitments, persistence validation, and exact replay. |
 | `canwu-api` | The supported public API for creating, refreshing, evaluating, inspecting, saving, and replaying decisions. |
-| Domain packages | Decision triggers, actor-relative fact projection, option and blocker generation, utility factors and weights, rules, personality or doctrine, and the command represented by each option. |
+| Domain packages | Decision triggers, actor-relative fact projection, option and blocker generation, utility factors and weights, per-ticket option biases, rules, personality or doctrine, and the command represented by each option. |
 
 A controller is a durable binding between a ticket, a policy identity, and the
 authority context under which a selected option may act. It is not an
@@ -226,7 +226,8 @@ authentication, retries, model invocation, and operator UI remain host-adapter
 responsibilities rather than hidden kernel services.
 
 The generic utility evaluator uses deterministic integer inputs and records a
-factor-by-factor score breakdown. Factor names, weights, normalization,
+factor-by-factor score breakdown, with an option's bias (the policy's own for
+the option plus the ticket's per-option bias) recorded apart from the factors. Factor names, weights, normalization,
 personality, doctrine, uncertainty, and historical interpretation remain
 domain or policy data. Rule policies, human control, external services, and LLM
 adapters converge on the same constrained option-selection contract instead of

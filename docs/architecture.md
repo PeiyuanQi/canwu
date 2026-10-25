@@ -456,10 +456,14 @@ or defer decides at the `Guard` stage, while `Exclude` removes one option,
 records `excluded by <guard>: <reason>` as its blocker, and continues. A later
 rule that selects an excluded option is an error, including in
 `OrderedRulePolicy`. The remaining options are scored by the weighted utility
-evaluator: the weighted sum of an option's factors plus the option's bias when
-the evaluator declares one (`WeightedUtilityEvaluator::with_option_bias`, keyed
-by option ID). A bias is the policy's own standing preference for an option,
-such as a doctrine's, not a factor of the option; each evaluation records it as
+evaluator: the weighted sum of an option's factors plus the option's bias. That
+bias has two unweighted parts: the policy's own standing preference for the
+option, such as a doctrine's (`WeightedUtilityEvaluator::with_option_bias`,
+keyed by option ID and part of the policy's configuration), and the option's
+per-ticket bias that the ticket's drafter writes at `Open` or
+`ReplaceOptions` (`DecisionOption::bias`, ticket content like the utility
+inputs, so tickets whose biases differ share one controller and policy).
+Neither is a factor of the option; each evaluation records their sum as
 `bias` apart from its factor lines, so a trace shows it as a bias. When
 `random_tie_break` is set and at least two options score within
 the `u64` near-equivalence margin of the best score, the policy returns
@@ -474,7 +478,8 @@ record the `DecisionStage` (`Guard`, `Utility`, or `Random`) and the guard IDs
 that fired. The policy identity reuses `DecisionPolicyKind::Utility` and carries
 a BLAKE3 `semantic_hash` over the guard policy identity, guard IDs, utility
 weights, option biases, margin, and tie-break flag, so a binding rejects a reconfigured policy
-that keeps its ID and version with `PolicyMismatch`. Guard behavior itself is
+that keeps its ID and version with `PolicyMismatch`; a ticket option's bias is
+outside that hash. Guard behavior itself is
 application code outside that hash; change a guard ID or the guard policy
 version when it changes.
 
@@ -2770,7 +2775,7 @@ the dedicated private `canwu-sim` state module. This is an implementation
 ownership boundary only: public snapshots and replay journals remain flat and
 unchanged.
 
-Every current snapshot stores commitment format 7 roots for world, knowledge,
+Every current snapshot stores commitment format 8 roots for world, knowledge,
 plugin components, generic records, scheduler state, commands and attempts,
 events, ingress, random state/evidence, the boundary chain, run/plugin identity,
 and runtime control counters. Unordered collections are canonicalized by stable

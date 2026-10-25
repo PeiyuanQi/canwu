@@ -267,8 +267,11 @@ pub const ADMISSION_CURSOR_FORMAT_VERSION: u32 = 3;
 /// Format 7 commits to decision state through `canwu.commitment.decisions.v3`,
 /// which adds the latest boundary's decision admission batch (the tickets its
 /// admitted `Open`s created) to the controllers, hot-history root, and
-/// archive receipt root. Format 6 is refused.
-pub const COMMITMENT_FORMAT_VERSION: u32 = 7;
+/// archive receipt root.
+///
+/// Format 8 commits to decision state through `canwu.commitment.decisions.v4`,
+/// whose tickets' options carry a per-ticket bias. Format 7 is refused.
+pub const COMMITMENT_FORMAT_VERSION: u32 = 8;
 /// Maximum nested depth of the compatibility synchronous event-reactor path.
 ///
 /// New plugin mechanics should use phased boundary systems instead of relying

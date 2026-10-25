@@ -31,14 +31,19 @@ pub struct UtilityProfile {
 }
 
 /// Scores an available option as `Σ weight × utility_inputs[factor]` over
-/// its factors, plus the option's bias when the evaluator declares one.
+/// its factors, plus its bias: the evaluator's own bias for the option plus
+/// the option's per-ticket bias ([`DecisionOption::bias`]).
 ///
-/// A bias is the policy's own standing preference for one option, such as a
-/// doctrine's, kept apart from the factors: it is not a factor of the
-/// option, so it is keyed by option ID rather than carried by the ticket,
-/// and the evaluation records it in [`DecisionOptionEvaluation::bias`]
-/// beside the factor lines, so a trace shows it as a bias. Options that the
-/// map does not name have no bias; blocked options are not scored.
+/// A bias is a preference for one option kept apart from the factors, and
+/// it is not weighted. The evaluator's bias is the policy's own standing
+/// preference, such as a doctrine's, keyed by option ID and part of the
+/// policy's configuration; the option's bias is ticket content written by
+/// the ticket's drafter, so tickets whose biases differ share one policy
+/// and controller. The evaluation records their sum in
+/// [`DecisionOptionEvaluation::bias`] beside the factor lines, so a trace
+/// shows it as a bias. Options that neither names have no bias; blocked
+/// options are not scored. Checked `i64` arithmetic: an overflowing factor,
+/// bias, or score is a policy error.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WeightedUtilityEvaluator {
     pub profile: UtilityProfile,
@@ -57,10 +62,11 @@ impl WeightedUtilityEvaluator {
     }
 
     /// Declares a bias for the option with this ID: an integer added to the
-    /// option's weighted factor sum and recorded on its evaluation as
-    /// `bias`. A later call for the same option replaces its bias, and a
-    /// zero bias removes it, so the map holds only biases that change a
-    /// score. Part of a [`GuardedUtilityPolicy`]'s semantic hash.
+    /// option's weighted factor sum, with the option's own per-ticket bias,
+    /// and recorded on its evaluation as `bias`. A later call for the same
+    /// option replaces its bias, and a zero bias removes it, so the map holds
+    /// only biases that change a score. Part of a [`GuardedUtilityPolicy`]'s
+    /// semantic hash; a per-ticket bias ([`DecisionOption::bias`]) is not.
     #[must_use]
     pub fn with_option_bias(mut self, option_id: impl Into<String>, bias: i64) -> Self {
         let option_id = option_id.into();
@@ -121,7 +127,17 @@ impl UtilityEvaluator for WeightedUtilityEvaluator {
             .option_biases
             .get(&option.id)
             .copied()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .checked_add(option.bias)
+            .ok_or_else(|| {
+                DecisionError::new(
+                    DecisionErrorCode::InvalidDecision,
+                    format!(
+                        "the policy and ticket biases of option {} exceed the i64 range",
+                        option.id
+                    ),
+                )
+            })?;
         score = score.checked_add(bias).ok_or_else(|| {
             DecisionError::new(
                 DecisionErrorCode::InvalidDecision,
@@ -401,17 +417,19 @@ fn run_ordered_rules(
 /// and equal scores fall back to the lowest option ID.
 ///
 /// Option biases declared on the utility evaluator
-/// ([`WeightedUtilityEvaluator::with_option_bias`]) are added to the scores
-/// before the near-equivalence margin applies, so a bias can make or break a
-/// tie-break, and each evaluation records its bias apart from its factors.
+/// ([`WeightedUtilityEvaluator::with_option_bias`]) and the ticket options'
+/// own biases ([`DecisionOption::bias`]) are added to the scores before the
+/// near-equivalence margin applies, so a bias can make or break a tie-break,
+/// and each evaluation records its bias apart from its factors.
 ///
 /// The identity reuses [`DecisionPolicyKind::Utility`]; its
 /// `semantic_hash` commits to the guard policy identity, the ordered guard
 /// IDs, utility weights, option biases (when any are declared), margin, and
 /// tie-break flag, so a controller binding rejects a reconfigured policy
-/// that keeps the same ID and version. Guard
-/// behavior is application code outside the hash: change a guard's ID or the
-/// guard policy version when its behavior changes. A controller must also opt
+/// that keeps the same ID and version. A ticket option's bias is ticket
+/// content outside the hash, so one binding serves tickets whose biases
+/// differ. Guard behavior is application code outside the hash: change a
+/// guard's ID or the guard policy version when its behavior changes. A controller must also opt
 /// in with `DecisionControllerBinding::with_random_tie_break` before a pending
 /// tie-break can be evaluated or resolved.
 ///

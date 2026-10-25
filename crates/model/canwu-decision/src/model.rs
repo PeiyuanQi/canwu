@@ -312,6 +312,16 @@ pub struct DecisionOption {
     pub action: DecisionAction,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub utility_inputs: BTreeMap<String, i64>,
+    /// The drafter's bias for this option on this ticket: an integer that a
+    /// utility evaluator adds, unweighted, to the option's score together
+    /// with the policy's own bias for the option, and records in
+    /// [`DecisionOptionEvaluation::bias`] apart from the factor lines (see
+    /// [`crate::WeightedUtilityEvaluator`]). It is ticket content, like the
+    /// utility inputs, so tickets with different biases share one controller
+    /// and policy. Zero, and omitted from the encoding, when the option has
+    /// none; a blocked option is not scored, so its bias is not applied.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub bias: i64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<String>,
     #[serde(default)]
@@ -327,6 +337,7 @@ impl DecisionOption {
             description: String::new(),
             action: DecisionAction::None,
             utility_inputs: BTreeMap::new(),
+            bias: 0,
             blockers: Vec::new(),
             metadata: Value::Null,
         }
@@ -335,6 +346,13 @@ impl DecisionOption {
     #[must_use]
     pub fn with_command(mut self, command: Value) -> Self {
         self.action = DecisionAction::Command { command };
+        self
+    }
+
+    /// Sets the option's per-ticket bias ([`Self::bias`]); zero removes it.
+    #[must_use]
+    pub const fn with_bias(mut self, bias: i64) -> Self {
+        self.bias = bias;
         self
     }
 
@@ -513,11 +531,16 @@ pub struct DecisionOptionEvaluation {
     pub score: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub factors: Vec<DecisionFactorContribution>,
-    /// The utility stage's per-option bias for this option, kept apart from
-    /// the factor lines: a scored option's `score` is the sum of its factor
-    /// contributions plus this bias. Zero, and omitted from the encoding,
-    /// when the evaluator declares no bias for the option or the option was
-    /// not scored (see [`crate::WeightedUtilityEvaluator::with_option_bias`]).
+    /// The utility stage's bias for this option, kept apart from the factor
+    /// lines: the evaluator's own bias for the option
+    /// ([`crate::WeightedUtilityEvaluator::with_option_bias`]) plus the
+    /// option's per-ticket bias ([`DecisionOption::bias`]), so a scored
+    /// option's `score` is the sum of its factor contributions plus this
+    /// bias, and the policy's part is this bias less the bias of the option
+    /// on the ticket version the trace names (exact for a resolving trace;
+    /// not for a deferring trace after a later `ReplaceOptions`, because hot
+    /// history keeps only a ticket's latest version). Zero, and omitted from
+    /// the encoding, when the two sum to zero or the option was not scored.
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub bias: i64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

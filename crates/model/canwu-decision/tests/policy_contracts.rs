@@ -581,3 +581,104 @@ fn utility_option_bias_moves_the_score_and_is_recorded_apart_from_factors() {
         biased.identity().semantic_hash
     );
 }
+
+/// Downstream gap G-84: a ticket option's own bias is ticket content. The
+/// evaluator adds it to the policy's bias for that option and records the
+/// sum as the evaluation's one bias line, so tickets whose biases differ
+/// are decided differently by one policy identity, and the bias encodes
+/// only when it is nonzero.
+#[test]
+fn ticket_option_bias_joins_the_policy_bias_under_one_policy_identity() {
+    let option = |id: &str, merit: i64, bias: i64| DecisionOption {
+        utility_inputs: BTreeMap::from([("merit".to_owned(), merit)]),
+        ..DecisionOption::new(id, id).with_bias(bias)
+    };
+    let with_options = |options| {
+        let mut ticket = ticket(1);
+        ticket.options = options;
+        ticket
+    };
+    let profile = UtilityProfile {
+        weights: BTreeMap::from([("merit".to_owned(), 10)]),
+    };
+    // One doctrine: a standing +5 for `hold`, whatever the ticket says.
+    let policy = GuardedUtilityPolicy::new(
+        "doctrine-utility",
+        "1",
+        OrderedRulePolicy::new("doctrine-guards", "1", Vec::new()),
+        WeightedUtilityEvaluator::new(profile).with_option_bias("hold", 5),
+        0,
+        false,
+    );
+    let evaluation = |decision: &PolicyDecision, id: &str| {
+        decision
+            .evaluations
+            .iter()
+            .find(|evaluation| evaluation.option_id == id)
+            .cloned()
+            .expect("every option is evaluated")
+    };
+    let selected = |decision: &PolicyDecision| match &decision.outcome {
+        DecisionOutcome::Selected { option_id } => option_id.clone(),
+        other => panic!("the utility stage selects, got {other:?}"),
+    };
+
+    // Without a ticket bias the doctrine's +5 is not enough: 30 beats 25.
+    let plain = with_options(vec![option("hold", 2, 0), option("proceed", 3, 0)]);
+    let plain_decision = policy.decide(&plain).expect("plain decision");
+    assert_eq!(selected(&plain_decision), "proceed");
+    assert_eq!(evaluation(&plain_decision, "hold").bias, 5);
+    let encoded = serde_json::to_value(&plain.options[0]).expect("option json");
+    assert!(encoded.get("bias").is_none(), "a zero bias is not encoded");
+
+    // A drafter's +10 on the same option turns the same policy: the
+    // evaluation carries one bias, the policy's plus the ticket's, beside
+    // unchanged factor lines.
+    let leaning = with_options(vec![option("hold", 2, 10), option("proceed", 3, 0)]);
+    let decision = policy.decide(&leaning).expect("leaning decision");
+    decision
+        .validate(&leaning)
+        .expect("leaning decision validates");
+    assert_eq!(selected(&decision), "hold");
+    let hold = evaluation(&decision, "hold");
+    assert_eq!(hold.factors, evaluation(&plain_decision, "hold").factors);
+    assert_eq!(hold.bias, 15);
+    let factors: i64 = hold.factors.iter().map(|line| line.contribution).sum();
+    assert_eq!(hold.score, Some(factors + hold.bias));
+    assert_eq!(
+        serde_json::to_value(&leaning.options[0]).expect("option json")["bias"],
+        json!(10)
+    );
+
+    // A drafter's bias can also cancel the doctrine's: the recorded bias is
+    // then zero and omitted, and the option keeps its own.
+    let cancelling = with_options(vec![option("hold", 2, -5), option("proceed", 3, 0)]);
+    let decision = policy.decide(&cancelling).expect("cancelling decision");
+    let hold = evaluation(&decision, "hold");
+    assert_eq!((hold.score, hold.bias), (Some(20), 0));
+    assert!(
+        serde_json::to_value(&hold)
+            .expect("evaluation json")
+            .get("bias")
+            .is_none()
+    );
+
+    // A blocked option is not scored, so its bias is not applied.
+    let mut blocked = option("hold", 2, 10);
+    blocked.blockers = vec!["the road is cut".to_owned()];
+    let decision = policy
+        .decide(&with_options(vec![blocked, option("proceed", 3, 0)]))
+        .expect("blocked decision");
+    assert_eq!(selected(&decision), "proceed");
+    let hold = evaluation(&decision, "hold");
+    assert_eq!((hold.available, hold.score, hold.bias), (false, None, 0));
+
+    // The two biases are checked arithmetic, as factors are.
+    let error = policy
+        .decide(&with_options(vec![
+            option("hold", 2, i64::MAX),
+            option("proceed", 3, 0),
+        ]))
+        .expect_err("an overflowing bias is a policy error");
+    assert_eq!(error.code, DecisionErrorCode::InvalidDecision);
+}
