@@ -1,7 +1,7 @@
 # Opus progress — downstream engine gaps / Opus 进度记录
 
 > Updated 2026-10-25 at Canwu **0.20.0** (tag `v0.20.0`, release commit `a82ffeb` on `main`, published 2026-10-24),
-> with the rows the downstream filed when it adopted 0.20.0 (CM 0.89.0).
+> with the rows the downstream filed when it adopted 0.20.0 (CM 0.89.0) and G-91 from its B33 fix (CM 0.89.1).
 > This file is the to-do list of engine gaps that a downstream application has filed against the published crates.
 > The application is Celestial Mandate (CM); its gap ledger (implementation document `59`, in the CM repository) gives
 > each row its id (`G-nn`) and the full evidence. Priorities are the ledger's severities: High, Medium, Low.
@@ -11,7 +11,8 @@
 >
 > 0.20.0 closed every row the downstream filed after adopting 0.19.0 (G-69 to G-82), the recorded design question
 > G-38 (`canwu-military` rewritten as the engagement engine), engine finding E-48, and the correspondence half of
-> E-41. Open: eight Low downstream rows filed at the downstream's 0.20.0 adoption (G-83 to G-90, §4); the known limits the 0.18.0 to 0.20.0 packages left on purpose (§4.2, with the
+> E-41. Open: one Medium downstream row from the downstream's B33 fix (G-91, §3) and eight Low rows filed at the
+> downstream's 0.20.0 adoption (G-83 to G-90, §4); the known limits the 0.18.0 to 0.20.0 packages left on purpose (§4.2, with the
 > three new findings E-49 and E-50, pre-existing and found by the 0.20.0 packages, and E-51, the military limits),
 > two limits the downstream met and worked around (§4.3), and the decisions this run took for the owner to confirm
 > (§6).
@@ -33,7 +34,11 @@ No row filed by the downstream ledger is open.
 
 ## 3. Medium
 
-No row filed by the downstream ledger is open.
+Filed 2026-10-25 by the downstream's B33 fix (CM 0.89.1), verified in the published 0.20.0 source.
+
+| Id | Sev. | Crate | Gap at 0.20.0 | Proposed fix | Downstream effect |
+| --- | --- | --- | --- | --- | --- |
+| G-91 | Medium | `canwu-fiscal` (with `canwu-sim`) | (filed 2026-10-25 from the downstream's B33; verified in the published 0.20.0 source: `canwu-sim` `runtime/persistence.rs` `Simulation::sealed_evidence_cursor` is "where its last seal ended, or the settled cut of the continuation checkpoint it was restored from", and `canwu-fiscal` `archive.rs` `prepare_archive_batch` refuses a selected book that cites a version a boundary established after that cut (`FiscalArchiveError::UnsealedCitations`), while `prepare_fiscal_archive`'s own note says a run restored "from a checkpoint and its journal until its next seal refuses none") A host that never seals and saves continuation checkpoints cannot archive any book that cites a version established since its last restore: every book closed in a session from one restore is refused, so the ledger's 64 hot books (`MAX_FISCAL_HOT_BOOKS_PER_LEDGER`) fill and the next book's open is rejected with `FISCAL_HOT_BOOKS_EXHAUSTED` | **Contract:** a continuation restore's cut is not a seal for the archive's citation check — refuse only citations past a cut the run itself sealed (the note's own rule), or let the archive commit carry what its books' citations need so no cut has to cover them; and make the two notes agree | **built around (CM 0.89.1):** the host's archive step takes `UnsealedCitations` as "not yet"; a refused book waits in its ledger until a later restore's cut passes it, so a session from one restore archives no new book and the court ledger fills about five game years after the restore |
 
 ## 4. Low
 
@@ -109,8 +114,8 @@ own leases) and E-37's publication-budget overshoot (the application's publisher
 
 ## 5. Next steps
 
-1. **Wait for the downstream's adoption of 0.20.0** (its ledger records each row's adoption at the `=0.20.0` pin) and
-   for the rows it files against 0.20.0. Nothing is filed at the time of writing.
+1. **Fix G-83 to G-91 and release 0.21.0** (owner, 2026-10-25: address every open downstream row, release, deploy the
+   website, and move the downstream to the new release). The downstream adopted 0.20.0 in CM 0.89.0.
 2. Then the §4.2 limits by downstream need: **E-50** first if the downstream runs cross-plugin completions through a
    long campaign (the cap of 1,024 ended participants); **E-49** if a host wants malformed correspondence commands
    recorded rather than validated before sending; E-41's force-supply deferral if a host runs the reference economy
