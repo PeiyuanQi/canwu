@@ -2261,12 +2261,19 @@ window start or admission sequence. A departing leg consumes its confirmed
 bookings; a leg whose booking failed, expired, or was revoked by the pool's
 custodian (`RevokeBooking`, from its command or an application incident)
 fails with `capacity_unavailable`, unless the owner or operator replaced the
-booking with a new request naming it (`MovementBookingRequestV1::replaces`). Reports are holder-relative: the owner and operator see
+booking with a new request naming it (`MovementBookingRequestV1::replaces`).
+An execution keeps only the bookings that still bear on its legs (requested
+and confirmed ones, those the leg under way consumed, and those lost for a leg
+that has not departed, until replaced); a replaced booking leaves at once, a
+consumed one when its leg arrives, and the others when their leg fails or is
+superseded or the execution closes, consumed capacity staying counted by its
+pool. `bookings_per_execution` (64) and `bookings_per_runtime` (16,384) bound
+what is kept at once, not what an execution books over its life. Reports are holder-relative: the owner and operator see
 the current execution, a delayed remote observer sees coarse progress as of its
 delay, holders without a grant see nothing, and reports go only to living
 person holders. A closed execution retires once final reports are out, and at
 most 365 days after it closed; `MovementLimitsV1` bounds orders, pools,
-outcomes, and reports with per-owner and per-holder quotas. The plugin never
+kept bookings, outcomes, and reports with per-owner and per-holder quotas. The plugin never
 draws randomness.
 
 The router supports fixed, scheduled, recurring, and piecewise traversal.

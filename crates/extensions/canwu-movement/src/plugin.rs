@@ -38,11 +38,11 @@ pub const MOVEMENT_INCIDENT_INGRESS: &str = "movement_incident_v1";
 pub const MOVEMENT_LEG_DUE_INGRESS: &str = "movement_leg_due_v1";
 /// Plugin-scheduled wake that publishes delayed remote reports.
 pub const MOVEMENT_REPORT_WAKE_INGRESS: &str = "movement_report_wake_v1";
-/// BLAKE3 of `canwu-movement plugin semantic hash 0.20.0: DelayLeg holds a
-/// departure or an arrival and may re-time later legs; RevokeBooking; booking
-/// replacement; superseded dues are cancelled`.
+/// BLAKE3 of `canwu-movement plugin semantic hash 0.21.0: closed and replaced
+/// bookings leave their execution; 64 kept bookings per execution, 16384 per
+/// runtime`.
 pub const MOVEMENT_SEMANTIC_HASH: &str =
-    "b211c92a573cc1a95cbad10619ac872e2f619c04bc03bdde34c1e7c62b39abbc";
+    "e01d702be298b1ec989796b7d9c41fb5998cf57aeb4ba621a3092ce991d5826f";
 
 /// BLAKE3 of `canwu-movement movement_report knowledge schema 0.20.0:
 /// MovementLegHoldV1 kind, scheduled_at, retime_later_legs;

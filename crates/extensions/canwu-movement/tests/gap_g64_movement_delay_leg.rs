@@ -20,12 +20,12 @@
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundaryRequest,
     BoundarySystemContract, Canwu, CanwuError, CanwuRun, CapacityBooking, CapacityBookingId,
-    CapacityBookingStatus, CommandAttemptOutcome, CommandEnvelope, CommandRequest,
-    CommandRequestId, DomainRecord, DomainRecordClass, DomainRecordDraft, DomainRecordKind,
-    DomainRecordLifecycle, DomainRecordMutation, DomainRecordRef, DomainRecordSchema,
-    DomainRecordType, DomainRecordVersionRef, DomainRecordVersionSource, DomainReference,
-    DomainReferenceSchema, DomainReferenceTarget, DomainReferenceTargetKind, DomainValueKindClass,
-    EntityRef, IngressClass, IngressPayload, Issuer, ItineraryRevision, ItineraryRevisionId,
+    CommandAttemptOutcome, CommandEnvelope, CommandRequest, CommandRequestId, DomainRecord,
+    DomainRecordClass, DomainRecordDraft, DomainRecordKind, DomainRecordLifecycle,
+    DomainRecordMutation, DomainRecordRef, DomainRecordSchema, DomainRecordType,
+    DomainRecordVersionRef, DomainRecordVersionSource, DomainReference, DomainReferenceSchema,
+    DomainReferenceTarget, DomainReferenceTargetKind, DomainValueKindClass, EntityRef,
+    IngressClass, IngressPayload, Issuer, ItineraryRevision, ItineraryRevisionId,
     ItineraryRevisionReason, KnowledgeHistoryView, KnowledgeHolderRef, KnowledgeQuery,
     LegExecutionId, LegExecutionStatus, MAX_KNOWLEDGE_PAGE_SIZE, MovementInitiative, MovementOrder,
     MovementOrderId, MovementSubject, MovementSubjectRole, PayloadSchema, PersonId,
@@ -766,7 +766,8 @@ fn gap_g64_movement_delay_leg() {
         two.legs[1].failure_reason.as_deref(),
         Some("capacity_unavailable")
     );
-    assert_eq!(two.bookings[0].status, CapacityBookingStatus::Expired);
+    // The expired booking left the execution with the leg it failed.
+    assert!(two.bookings.is_empty() && state.bookings.is_empty());
     assert_eq!(two.state, TransportExecutionState::ReplanPending);
     assert_eq!(host.hold(2), None);
 

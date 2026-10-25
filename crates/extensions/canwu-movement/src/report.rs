@@ -91,6 +91,11 @@ pub struct MovementReportDetailV1 {
     pub revisions: Vec<MovementRevisionObservationV1>,
     pub failures: Vec<MovementLegFailureV1>,
     pub handoffs: Vec<Handoff>,
+    /// The bookings the execution keeps: requested and confirmed ones, those
+    /// the leg under way consumed, and those lost for a leg that has not
+    /// departed, until replaced. A closed booking leaves the list in the
+    /// boundary that closes it, so a report shows it only if one was
+    /// published while it was kept.
     pub bookings: Vec<CapacityBooking>,
     /// The latest hold on the current leg, until the held due settles or
     /// the leg departs, arrives, or fails.

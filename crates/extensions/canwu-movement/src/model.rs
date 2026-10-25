@@ -4,8 +4,8 @@ use canwu_api::{
     CapacityBookingStatus, CommandId, DomainRecord, DomainRecordClass, DomainRecordDraft,
     DomainRecordKind, DomainRecordLifecycle, DomainRecordType, DomainRecordVersionRef,
     DomainValueKindClass, ErrorCode, Handoff, IngressId, ItineraryRevision, ItineraryRevisionId,
-    KnowledgeHolderRef, LegExecutionId, LegExecutionStatus, MovementOrder, MovementOrderId,
-    ReconciliationOutcome, RoutePlan, RoutingNodeRef, SimDuration, SimTime,
+    KnowledgeHolderRef, LegExecution, LegExecutionId, LegExecutionStatus, MovementOrder,
+    MovementOrderId, ReconciliationOutcome, RoutePlan, RoutingNodeRef, SimDuration, SimTime,
     TransportCapacityPoolV1, TransportError, TransportExecution, TransportExecutionId,
     TransportExecutionState, TypedDomainRecordRef,
 };
@@ -31,7 +31,14 @@ pub struct MovementLimitsV1 {
     pub legs_per_execution: usize,
     pub revisions_per_execution: usize,
     pub handoffs_per_execution: usize,
+    /// Bookings one execution keeps at once: those that ask for or hold
+    /// capacity, those the leg under way consumed, and those lost for a leg
+    /// that has not departed and not yet replaced. A closed booking leaves
+    /// the execution ([`MovementState::validate`]), so it does not count, and
+    /// an execution may book again any number of times over its life.
     pub bookings_per_execution: usize,
+    /// Bookings the whole runtime keeps at once, across its executions.
+    pub bookings_per_runtime: usize,
     pub report_holders_per_boundary: usize,
     pub reports_per_boundary: usize,
     pub orders_per_runtime: usize,
@@ -62,7 +69,8 @@ impl MovementLimitsV1 {
         legs_per_execution: 64,
         revisions_per_execution: 8,
         handoffs_per_execution: 16,
-        bookings_per_execution: 16,
+        bookings_per_execution: 64,
+        bookings_per_runtime: 16_384,
         report_holders_per_boundary: 64,
         reports_per_boundary: 1_024,
         orders_per_runtime: 1_024,
@@ -343,9 +351,11 @@ pub struct MovementBookingRequestV1 {
     pub tie_break: String,
     /// A booking of the same leg that this one replaces, once. A requested
     /// one is cancelled and a confirmed one released when the replacement
-    /// is admitted; a failed, expired, or revoked one stays as it is. A
-    /// replaced booking no longer counts when the leg departs, so a lost
-    /// booking can be requested again without a reroute.
+    /// is admitted; a failed, expired, or revoked one keeps its status. The
+    /// replaced booking then leaves the execution, so it no longer counts
+    /// when the leg departs or against
+    /// [`MovementLimitsV1::bookings_per_execution`], and a lost booking can
+    /// be requested again without a reroute, as often as it is lost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<CapacityBookingId>,
 }
@@ -488,7 +498,9 @@ pub struct MovementBookingBindingV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allocation: Option<CapacityBookingAllocationEvidenceV1>,
     /// The booking of the same leg this one replaced
-    /// ([`MovementBookingRequestV1::replaces`]).
+    /// ([`MovementBookingRequestV1::replaces`]). The replaced booking has
+    /// left the runtime; its identity stays reserved while this binding is
+    /// kept, so no new booking can take it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<CapacityBookingId>,
 }
@@ -610,7 +622,8 @@ pub struct MovementState {
     pub retired_orders: BTreeSet<MovementOrderId>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub retired_executions: BTreeSet<TransportExecutionId>,
-    /// Pool capacity consumed by retired executions' bookings.
+    /// Pool capacity consumed by bookings that have left the runtime: closed
+    /// when their leg arrived or failed, or retired with their execution.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub retired_consumption: BTreeMap<String, u64>,
 }
@@ -703,15 +716,18 @@ impl MovementState {
     /// Validates every movement invariant: order and execution pairing, leg
     /// continuity, one active itinerary revision, bookings that start no
     /// earlier than their leg's planned departure and last no longer than
-    /// the leg, revocations and replacements, matching pool counters, pending
-    /// due work and holds (a departed leg's arrival at its scheduled or held
-    /// time, a held departure at its `until`), a non-negative schedule shift,
-    /// terminal closure, one active movement per subject, and bounded
-    /// collections.
+    /// the leg, revocations and replacements, an execution that keeps no
+    /// closed booking (a released, cancelled, or replaced one, one consumed
+    /// by a leg that is no longer under way, or one lost for a leg that can
+    /// no longer depart), matching pool counters, pending due work and holds
+    /// (a departed leg's arrival at its scheduled or held time, a held
+    /// departure at its `until`), a non-negative schedule shift, terminal
+    /// closure, one active movement per subject, and bounded collections.
     pub fn validate(&self) -> Result<(), MovementError> {
         let limits = MovementLimitsV1::CURRENT;
         if self.orders.len() > limits.orders_per_runtime
             || self.pools.len() > limits.pools_per_runtime
+            || self.bookings.len() > limits.bookings_per_runtime
             || self.operation_outcomes.len() > limits.operation_outcomes_per_runtime
         {
             return Err(MovementError::new(
@@ -846,6 +862,11 @@ impl MovementState {
                     "exactly a revoked booking records its bounded revocation reason",
                 ));
             }
+            if !execution_keeps_booking(execution, leg, booking.status) {
+                return Err(MovementError::state(
+                    "an execution keeps only the bookings that still bear on its legs",
+                ));
+            }
             match (booking.status, &binding.allocation) {
                 (CapacityBookingStatus::Requested, None) => {}
                 (CapacityBookingStatus::Requested, Some(_)) | (_, None)
@@ -898,24 +919,17 @@ impl MovementState {
                 "every execution booking needs exactly one binding",
             ));
         }
-        // A replacement names an earlier booking of its own leg, which holds
-        // no capacity once replaced; no booking is replaced twice.
+        // A replaced booking leaves the runtime when it is replaced, and no
+        // booking is replaced twice, so a replacement names a booking the
+        // runtime no longer keeps, and only one replacement names it.
         let mut replaced = BTreeSet::new();
         for binding in self.bookings.values() {
             let Some(original) = binding.replaces else {
                 continue;
             };
-            let valid = self.bookings.get(&original).is_some_and(|earlier| {
-                earlier.execution == binding.execution
-                    && earlier.leg == binding.leg
-                    && earlier.admitted_sequence < binding.admitted_sequence
-                    && self
-                        .booking_of(earlier)
-                        .is_some_and(|booking| booking_is_lost_or_closed(booking.status))
-            });
-            if !valid || !replaced.insert(original) {
+            if self.bookings.contains_key(&original) || !replaced.insert(original) {
                 return Err(MovementError::state(
-                    "a replacement names an earlier booking of its leg that holds no capacity, once",
+                    "a replacement names a booking that has left the runtime, once",
                 ));
             }
         }
@@ -1370,17 +1384,38 @@ pub(crate) fn scheduled_arrival(
         .ok_or_else(|| MovementError::invalid("leg arrival time overflows"))
 }
 
-/// Whether a booking holds no capacity and asks for none: returned, or lost
-/// (failed, expired, or revoked).
-pub(crate) const fn booking_is_lost_or_closed(status: CapacityBookingStatus) -> bool {
-    matches!(
-        status,
-        CapacityBookingStatus::Released
-            | CapacityBookingStatus::Cancelled
-            | CapacityBookingStatus::Failed
-            | CapacityBookingStatus::Expired
-            | CapacityBookingStatus::Revoked
-    )
+/// Whether an execution keeps a booking of `leg` in `status`: one that asks
+/// for or holds capacity (`Requested`, `Confirmed`), one the leg under way
+/// consumed, and one lost (failed, expired, or revoked) for a leg of the
+/// active revision that has not departed, whose departure it fails unless it
+/// is replaced. Any other booking is closed and leaves the execution
+/// (downstream gap G-83): a released or cancelled one, one consumed by a leg
+/// that arrived or failed, and one lost for a leg that failed, belongs to a
+/// superseded revision, or whose execution closed. A replaced booking leaves
+/// when it is replaced, whatever its status.
+pub(crate) fn execution_keeps_booking(
+    execution: &TransportExecution,
+    leg: &LegExecution,
+    status: CapacityBookingStatus,
+) -> bool {
+    match status {
+        CapacityBookingStatus::Requested | CapacityBookingStatus::Confirmed => true,
+        CapacityBookingStatus::Consumed => leg.status == LegExecutionStatus::Departed,
+        CapacityBookingStatus::Failed
+        | CapacityBookingStatus::Expired
+        | CapacityBookingStatus::Revoked => {
+            !execution.state.is_terminal()
+                && execution.active_itinerary_revision == Some(leg.itinerary_revision)
+                && matches!(
+                    leg.status,
+                    LegExecutionStatus::Planned
+                        | LegExecutionStatus::Booked
+                        | LegExecutionStatus::Loaded
+                        | LegExecutionStatus::Waiting
+                )
+        }
+        CapacityBookingStatus::Released | CapacityBookingStatus::Cancelled => false,
+    }
 }
 
 pub(crate) fn is_label(value: &str, limit: usize) -> bool {

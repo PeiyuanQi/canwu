@@ -6,8 +6,8 @@ use crate::model::{
     MovementBookingBindingV1, MovementBookingRequestV1, MovementError, MovementErrorCode,
     MovementLegDueKind, MovementLegDueV1, MovementLegHoldV1, MovementLimitsV1,
     MovementObserverGrant, MovementObserverRole, MovementOperation, MovementOrderRecordV1,
-    MovementOrderRequestV1, MovementPoolOfferV1, MovementState, is_label, planned_duration,
-    route_leg, scheduled_arrival, validate_plan, within_time_bound,
+    MovementOrderRequestV1, MovementPoolOfferV1, MovementState, execution_keeps_booking, is_label,
+    planned_duration, route_leg, scheduled_arrival, validate_plan, within_time_bound,
 };
 use canwu_api::{
     BoundaryId, CanwuError, CapacityBookingId, CapacityBookingRequestV1, CapacityBookingStatus,
@@ -18,7 +18,6 @@ use canwu_api::{
     TransportCapacityPoolV1, TransportExecution, TransportExecutionId, TransportExecutionState,
     allocate_capacity_bookings, delivery_completion_operation_key,
 };
-use std::collections::BTreeSet;
 
 /// Read access the lifecycle needs from the settlement view. Every answer is
 /// a function of current state, never of retained evidence, so a sealed run
@@ -223,7 +222,12 @@ impl MovementState {
                 }
                 self.reconcile(*execution, outcome, at)
             }
+        }?;
+        // Whatever the operation closed leaves the execution.
+        if let Some(execution) = operation.execution() {
+            self.remove_closed_bookings(execution)?;
         }
+        Ok(())
     }
 
     /// Owners and operators act on an execution; incidents carry application
@@ -561,18 +565,8 @@ impl MovementState {
             .remove(&execution_id)
             .ok_or_else(|| MovementError::state("execution disappeared"))?;
         self.orders.remove(&order_id);
-        for booking in &execution.bookings {
-            let binding = self
-                .bookings
-                .remove(&booking.id)
-                .ok_or_else(|| MovementError::state("booking binding disappeared"))?;
-            if booking.status == CapacityBookingStatus::Consumed {
-                let retired = self.retired_consumption.entry(binding.pool).or_default();
-                *retired = retired
-                    .checked_add(booking.quantity)
-                    .ok_or_else(|| MovementError::state("retired consumption overflow"))?;
-            }
-        }
+        // Its bookings left when it closed (`execution_keeps_booking`).
+        debug_assert!(execution.bookings.is_empty());
         self.observation_heads
             .retain(|head| head.execution != execution_id);
         self.operation_outcomes
@@ -711,20 +705,12 @@ impl MovementState {
         let mut waiting_until = None;
         let mut unavailable = false;
         let mut consume = Vec::new();
-        let bindings = self
+        // A replaced booking has left the execution; its replacement counts.
+        for binding in self
             .bookings
             .values()
             .filter(|binding| binding.execution == execution_id && binding.leg == leg_id)
-            .collect::<Vec<_>>();
-        // A replaced booking no longer counts: its replacement does.
-        let replaced = bindings
-            .iter()
-            .filter_map(|binding| binding.replaces)
-            .collect::<BTreeSet<_>>();
-        for binding in bindings {
-            if replaced.contains(&binding.booking) {
-                continue;
-            }
+        {
             let booking = execution
                 .bookings
                 .iter()
@@ -1256,7 +1242,14 @@ impl MovementState {
                 "a booking must request its pool resource",
             ));
         }
-        if self.bookings.contains_key(&booking.id) {
+        // An identity is taken while its booking is kept, and while the
+        // replacement that took its place is kept.
+        if self.bookings.contains_key(&booking.id)
+            || self
+                .bookings
+                .values()
+                .any(|binding| binding.replaces == Some(booking.id))
+        {
             return Err(MovementError::new(
                 MovementErrorCode::Conflict,
                 "capacity booking identity is already used",
@@ -1266,9 +1259,7 @@ impl MovementState {
             .executions
             .get(&booking.execution)
             .ok_or_else(|| MovementError::new(MovementErrorCode::NotFound, "unknown execution"))?;
-        if execution.state == TransportExecutionState::ArrivalPending
-            || execution.bookings.len() >= limits.bookings_per_execution
-        {
+        if execution.state == TransportExecutionState::ArrivalPending {
             return Err(MovementError::state(
                 "the execution cannot book more capacity",
             ));
@@ -1320,8 +1311,22 @@ impl MovementState {
                 "a booking window must lie inside its leg's planned window, moved by the holds that re-time it",
             ));
         }
+        // A replaced booking leaves the execution first, so a replacement
+        // takes its place under the bound.
         if let Some(original) = request.replaces {
             self.replace_booking(booking.execution, request.leg, original, at)?;
+        }
+        let kept = self
+            .executions
+            .get(&booking.execution)
+            .map_or(0, |execution| execution.bookings.len());
+        if kept >= limits.bookings_per_execution
+            || self.bookings.len() >= limits.bookings_per_runtime
+        {
+            return Err(MovementError::new(
+                MovementErrorCode::LimitExceeded,
+                "the execution or the runtime keeps as many bookings as it may",
+            ));
         }
         self.execution_mut(booking.execution)?
             .request_booking(booking.clone())?;
@@ -1348,8 +1353,8 @@ impl MovementState {
     /// Lets a new booking of `leg` take the place of `original`, a booking of
     /// the same leg that no other booking replaced: a requested original is
     /// cancelled and a confirmed one released; a failed, expired, or revoked
-    /// one is left as it is. The original then no longer counts when the leg
-    /// departs.
+    /// one keeps its status. The original then leaves the execution, so it no
+    /// longer counts when the leg departs or against the booking bound.
     fn replace_booking(
         &mut self,
         execution_id: TransportExecutionId,
@@ -1357,23 +1362,27 @@ impl MovementState {
         original: CapacityBookingId,
         at: SimTime,
     ) -> Result<(), MovementError> {
-        let binding = self
+        let Some(binding) = self
             .bookings
             .get(&original)
             .filter(|binding| binding.execution == execution_id && binding.leg == leg)
-            .ok_or_else(|| {
-                MovementError::invalid("a replacement names an earlier booking of the same leg")
-            })?;
-        if self
-            .bookings
-            .values()
-            .any(|other| other.replaces == Some(original))
-        {
-            return Err(MovementError::new(
-                MovementErrorCode::Conflict,
-                "the booking is already replaced",
+        else {
+            // A replaced booking has left; the replacement that took its
+            // place still names it.
+            if self.bookings.values().any(|other| {
+                other.execution == execution_id
+                    && other.leg == leg
+                    && other.replaces == Some(original)
+            }) {
+                return Err(MovementError::new(
+                    MovementErrorCode::Conflict,
+                    "the booking is already replaced",
+                ));
+            }
+            return Err(MovementError::invalid(
+                "a replacement names an earlier booking of the same leg",
             ));
-        }
+        };
         let pool = binding.pool.clone();
         let booking = self
             .booking_of(binding)
@@ -1395,6 +1404,66 @@ impl MovementState {
         let quantity = booking.quantity;
         if let Some(target) = target {
             self.transition_booking(execution_id, original, &pool, quantity, target, at)?;
+        }
+        self.remove_booking(execution_id, original)
+    }
+
+    /// Moves every closed booking out of an execution
+    /// ([`crate::model::execution_keeps_booking`]), so the execution keeps
+    /// only the bookings that still bear on its legs (downstream gap G-83).
+    pub(crate) fn remove_closed_bookings(
+        &mut self,
+        execution_id: TransportExecutionId,
+    ) -> Result<(), MovementError> {
+        let Some(execution) = self.executions.get(&execution_id) else {
+            return Ok(());
+        };
+        let mut closed = Vec::new();
+        for booking in &execution.bookings {
+            let binding = self
+                .bookings
+                .get(&booking.id)
+                .ok_or_else(|| MovementError::state("booking has no binding"))?;
+            let leg = execution
+                .legs
+                .iter()
+                .find(|leg| leg.id == binding.leg)
+                .ok_or_else(|| MovementError::state("booking binds a missing leg"))?;
+            if !execution_keeps_booking(execution, leg, booking.status) {
+                closed.push(booking.id);
+            }
+        }
+        for booking in closed {
+            self.remove_booking(execution_id, booking)?;
+        }
+        Ok(())
+    }
+
+    /// Moves one booking and its binding out of the runtime. A consumed
+    /// booking's quantity stays counted in its pool's `consumed` through
+    /// `retired_consumption`; the runtime versions that held the booking stay
+    /// in the record's history.
+    fn remove_booking(
+        &mut self,
+        execution_id: TransportExecutionId,
+        booking_id: CapacityBookingId,
+    ) -> Result<(), MovementError> {
+        let execution = self.execution_mut(execution_id)?;
+        let position = execution
+            .bookings
+            .iter()
+            .position(|booking| booking.id == booking_id)
+            .ok_or_else(|| MovementError::state("booking disappeared"))?;
+        let booking = execution.bookings.remove(position);
+        let binding = self
+            .bookings
+            .remove(&booking_id)
+            .ok_or_else(|| MovementError::state("booking binding disappeared"))?;
+        if booking.status == CapacityBookingStatus::Consumed {
+            let retired = self.retired_consumption.entry(binding.pool).or_default();
+            *retired = retired
+                .checked_add(booking.quantity)
+                .ok_or_else(|| MovementError::state("retired consumption overflow"))?;
         }
         Ok(())
     }
@@ -1719,6 +1788,7 @@ impl MovementState {
             .order_mut(due.execution)
             .map(|order| order.pending_due = None)
             .and_then(|()| fallback.fail_leg(due.execution, due.leg, "due_settlement_failed", at))
+            .and_then(|()| fallback.remove_closed_bookings(due.execution))
             .and_then(|()| fallback.validate());
         if failed.is_ok() {
             *self = fallback;
@@ -1739,7 +1809,8 @@ impl MovementState {
                 self.depart(due.execution, Some(due.leg), false, at, scheduled)
             }
             MovementLegDueKind::Arrival => self.arrive(due.execution, Some(due.leg), at, scheduled),
-        }
+        }?;
+        self.remove_closed_bookings(due.execution)
     }
 }
 

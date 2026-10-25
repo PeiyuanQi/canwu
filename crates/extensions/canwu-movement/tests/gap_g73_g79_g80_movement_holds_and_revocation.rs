@@ -363,6 +363,11 @@ fn rejected(outcome: &MovementOperationOutcomeV1) -> Option<MovementErrorCode> {
 }
 
 fn latest_report(canwu: &Canwu, person: u64, execution: u64) -> MovementReportV1 {
+    reports(canwu, person, execution).pop().unwrap()
+}
+
+/// Every movement report `person` received about `execution`, in order.
+fn reports(canwu: &Canwu, person: u64, execution: u64) -> Vec<MovementReportV1> {
     canwu
         .viewer_for_actor(PersonId::new(person))
         .unwrap()
@@ -377,9 +382,7 @@ fn latest_report(canwu: &Canwu, person: u64, execution: u64) -> MovementReportV1
         .into_iter()
         .map(|record| serde_json::from_value::<MovementReportV1>(record.payload).unwrap())
         .filter(|report| report.execution == TransportExecutionId(execution))
-        .collect::<Vec<_>>()
-        .pop()
-        .unwrap()
+        .collect()
 }
 
 #[test]
@@ -510,11 +513,13 @@ fn gap_g73_g80_holds_retime_later_legs_without_a_revision() {
             (Some(t(62)), Some(t(72))),
         ]
     );
-    assert_eq!(host.booking_status(1, 2), CapacityBookingStatus::Consumed);
-    assert_eq!(
-        host.state().executions[&TransportExecutionId(1)].state,
-        TransportExecutionState::Settled
-    );
+    // The settled execution keeps no booking; the pool still counts the one
+    // its third leg consumed.
+    let state = host.state();
+    let settled = &state.executions[&TransportExecutionId(1)];
+    assert_eq!(settled.state, TransportExecutionState::Settled);
+    assert!(settled.bookings.is_empty());
+    assert_eq!(state.pools["pool.ferry"].consumed, 1);
     assert!(host.queued_dues(1).is_empty());
     // The owner's report keeps the shift after the holds have ended.
     let report = latest_report(&host.canwu, 5, 1);
@@ -629,7 +634,8 @@ fn gap_g79_revoked_booking_is_replaced_by_its_owner() {
     assert_eq!(host.booking_status(1, 4), CapacityBookingStatus::Confirmed);
 
     // At 10 the replaced lot and the requisition depart on their bookings;
-    // the lot whose revoked booking was not replaced fails its leg.
+    // the lot whose revoked booking was not replaced fails its leg. The
+    // replaced booking left its execution when it was replaced.
     host.run_until(11);
     let state = host.state();
     assert_eq!(
@@ -637,7 +643,14 @@ fn gap_g79_revoked_booking_is_replaced_by_its_owner() {
         Some(t(10))
     );
     assert_eq!(host.booking_status(1, 4), CapacityBookingStatus::Consumed);
-    assert_eq!(host.booking_status(1, 1), CapacityBookingStatus::Revoked);
+    assert_eq!(
+        state.executions[&TransportExecutionId(1)]
+            .bookings
+            .iter()
+            .map(|booking| booking.id)
+            .collect::<Vec<_>>(),
+        vec![CapacityBookingId(4)]
+    );
     assert_eq!(host.booking_status(3, 3), CapacityBookingStatus::Consumed);
     let failed = &state.executions[&TransportExecutionId(2)];
     assert_eq!(failed.legs[0].status, LegExecutionStatus::Failed);
@@ -647,17 +660,21 @@ fn gap_g79_revoked_booking_is_replaced_by_its_owner() {
     );
     assert_eq!(failed.state, TransportExecutionState::ReplanPending);
 
-    // The owner's report shows why its first booking was revoked.
-    let report = latest_report(&host.canwu, 5, 1);
-    let bookings = report.detail.unwrap().bookings;
-    assert_eq!(
-        bookings
-            .iter()
-            .find(|item| item.id == CapacityBookingId(1))
-            .and_then(|item| item.revocation.as_ref())
-            .map(|revocation| revocation.reason.as_str()),
-        Some("displaced_by_requisition")
-    );
+    // The owner's report showed why its first booking was revoked until the
+    // booking was replaced.
+    let revoked = reports(&host.canwu, 5, 1)
+        .into_iter()
+        .filter_map(|report| {
+            report
+                .detail?
+                .bookings
+                .into_iter()
+                .find(|item| item.id == CapacityBookingId(1))?
+                .revocation
+                .map(|revocation| revocation.reason)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(revoked, vec!["displaced_by_requisition".to_owned()]);
 
     let replayed = Canwu::replay_from_journal(&plugins, &host.canwu.replay_journal()).unwrap();
     assert_eq!(movement_state(&replayed).unwrap().unwrap().1, host.state());

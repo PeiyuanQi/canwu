@@ -65,8 +65,9 @@ otherwise). Operations are:
   window must lie inside the leg's planned window moved by the holds that
   re-time it. A request may name a booking of the same leg it `replaces`,
   once: a requested one is cancelled, a confirmed one released, and a failed,
-  expired, or revoked one left as it is; the replaced booking no longer
-  counts when the leg departs.
+  expired, or revoked one left as it is; the replaced booking then leaves the
+  execution, so it no longer counts when the leg departs, and a lost lot can
+  be booked again in place as often as it is lost.
 - `RevokeBooking`: the pool's custodian, or an application incident, revokes
   a confirmed booking on the pool, with a bounded reason. The booking becomes `Revoked` (its `revocation`
   records when and why) and its quantity returns to the pool. When its leg is
@@ -129,12 +130,25 @@ was revoked, and not replaced, fails with `capacity_unavailable` and waits
 for a reroute. A confirmed booking whose window has not opened delays the departure
 until it opens.
 
+An execution keeps only the bookings that still bear on its legs: requested
+and confirmed ones, those the leg under way consumed, and those lost (failed,
+expired, or revoked) for a leg of the active revision that has not departed,
+until they are replaced. Every other booking is closed and leaves the
+execution, with its binding, in the operation or due settlement that closed
+it: a replaced one at once, a consumed one when its leg arrives or fails, a
+released or cancelled one, and a lost one when its leg fails, a reroute
+supersedes its revision, or the execution closes. A consumed booking's
+quantity stays counted in its pool's `consumed` (through
+`retired_consumption`), and the runtime versions that held a closed booking
+stay in the record's history. A replaced booking's identity stays taken while
+its replacement is kept.
+
 ## Reports
 
 `canwu.movement/movement_report` knowledge records carry a `MovementReportV1`
 projected for one holder. The owner and operator see the current execution,
-including its state, revision reasons, handoffs, bookings and their
-revocations, failure reasons, the hold on the current leg
+including its state, revision reasons, handoffs, the bookings it keeps and
+their revocations, failure reasons, the hold on the current leg
 (`MovementLegHoldV1`: which due it holds, the due it replaced, `until`,
 reason, whether it re-times the later legs, and when it was set), and the
 schedule shift. A delayed remote observer sees only coarse progress as it
@@ -150,8 +164,9 @@ living person holders.
 A closed execution is retired at the first lifecycle settlement after every
 observer has received its final report (or has died) and the longest observer
 delay has passed, and in any case once `max_report_delay_minutes` (the bound
-on a remote observer's delay) has passed since it closed. Retirement removes the execution, its order, bookings,
-report heads, and outcomes from the runtime; the order and execution
+on a remote observer's delay) has passed since it closed. Retirement removes the execution, its order,
+report heads, and outcomes from the runtime (its bookings left when it
+closed); the order and execution
 identities stay reserved and consumed pool capacity stays counted. Reports
 already published remain in holders' knowledge, and the domain-record history
 keeps every earlier runtime version. Outcomes that no live execution needs are
@@ -159,10 +174,12 @@ pruned after `outcome_retention_minutes`, which bounds how long an exact retry
 of such an operation stays a no-op.
 
 `MovementLimitsV1::CURRENT` bounds payload size, labels, planned times,
-subjects, observers, legs, revisions, handoffs, bookings, reports per boundary,
-and the orders, pools, and operation outcomes one runtime holds, with
-per-owner order and per-holder outcome quotas and headroom reserved for
-incidents. When the budget
+subjects, observers, legs, revisions, handoffs, the bookings an execution keeps
+at once (64, however many it books over its life), reports per boundary, and
+the orders, pools, kept bookings (16,384), and operation outcomes one runtime
+holds, with per-owner order and per-holder outcome quotas and headroom
+reserved for incidents. A request past either booking bound is a recorded
+`LimitExceeded` rejection; a replacement takes its original's place. When the budget
 is spent, commands are refused at admission and an operation that still
 reaches settlement emits `canwu.movement.operation_dropped.v1`; a report too
 large to publish emits `canwu.movement.report_withheld.v1`. Neither is lost

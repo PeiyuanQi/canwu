@@ -459,7 +459,10 @@ languages):
 - **The custodian learns booking identities from the host.** Pool
   custodians receive no movement report (E-43); the host reads the runtime
   to name the bookings it revokes.
-- **Replacements count against `bookings_per_execution` (16).**
+- **Replacements count against `bookings_per_execution` (16).** Closed in
+  0.21.0: a replaced or closed booking leaves its execution, and the bound
+  counts only the bookings kept at once
+  ([kept bookings](movement-kept-bookings.md)).
 - **Withdrawal cost.** A boundary that replaces a future due reads the
   plugin's cancellable ingress once, which walks the run's pending ingress
   queue (about one entry per live execution for movement, plus every other
