@@ -2394,9 +2394,10 @@ pub struct CheckpointJournal {
 ///
 /// This opt-in runtime preserves current authoritative state, deterministic
 /// commitments, idempotency, and continuation behavior while retaining only
-/// the evidence appended since the most recent seal. Every returned segment is
-/// part of the permanent replay record and must be stored contiguously by the
-/// caller. A restored runtime retains its whole supplied prefix, so its first
+/// the evidence appended since the most recent seal or continuation restore.
+/// Every returned segment is part of the permanent replay record and must be
+/// stored contiguously by the caller. A runtime restored from a checkpoint
+/// and its journal retains its whole supplied prefix, so its first
 /// seal starts at the zero cut and replaces every earlier segment for later
 /// checkpoints.
 ///
@@ -2427,7 +2428,8 @@ impl CompactedSimulation {
         self.simulation.evidence_cursor()
     }
 
-    /// The cut through sealed evidence; see [`Simulation::sealed_evidence_cursor`].
+    /// Where this run's last seal ended; see
+    /// [`Simulation::sealed_evidence_cursor`].
     #[must_use]
     pub fn sealed_evidence_cursor(&self) -> Option<EvidenceCursor> {
         self.simulation.sealed_evidence_cursor()
@@ -2555,25 +2557,29 @@ impl CompactedSimulation {
             .domain_record_page(kind, after, limit, expected_revision)
     }
 
-    /// The retained event tail, after the last seal.
+    /// The retained event tail, after the last seal or
+    /// continuation restore.
     #[must_use]
     pub fn events(&self) -> &[SimEvent] {
         self.simulation.events()
     }
 
-    /// The retained accepted-command tail, after the last seal.
+    /// The retained accepted-command tail, after the last seal or
+    /// continuation restore.
     #[must_use]
     pub fn command_log(&self) -> &[CommandRecord] {
         self.simulation.command_log()
     }
 
-    /// The retained command-attempt tail, after the last seal.
+    /// The retained command-attempt tail, after the last seal or
+    /// continuation restore.
     #[must_use]
     pub fn command_attempts(&self) -> &[CommandAttemptRecord] {
         self.simulation.command_attempts()
     }
 
-    /// The retained ingress tail, after the last seal.
+    /// The retained ingress tail, after the last seal or
+    /// continuation restore.
     #[must_use]
     pub fn ingress_log(&self) -> &[IngressRecord] {
         self.simulation.ingress_log()
@@ -2586,7 +2592,8 @@ impl CompactedSimulation {
         self.simulation.pending_ingress()
     }
 
-    /// The retained draw tail, after the last seal.
+    /// The retained draw tail, after the last seal or
+    /// continuation restore.
     #[must_use]
     pub fn random_draws(&self) -> &[RandomDrawRecord] {
         self.simulation.random_draws()
@@ -4536,13 +4543,20 @@ impl Simulation {
         EvidenceCursor::from_evidence(&self.state.evidence)
     }
 
-    /// The cut through the evidence this run no longer retains: where its
-    /// last seal ended, or the settled cut of the continuation checkpoint it
-    /// was restored from. `None` while it retains all its evidence.
+    /// Where this run's last seal ended: the cut through the evidence it
+    /// moved into sealed segments since it was created or restored. `None`
+    /// until it seals: it has never sealed, it was restored with its whole
+    /// journal (whose first seal starts again at the zero cut), or it was
+    /// restored from a continuation checkpoint and has not sealed since. A
+    /// continuation restore holds no sealed segment, so its base is not a
+    /// seal; [`super::ContinuationBase::cut`] says where its history begins.
     #[must_use]
     pub fn sealed_evidence_cursor(&self) -> Option<EvidenceCursor> {
-        let cut = self.state.evidence.archived;
-        (cut != EvidenceCursor::default()).then_some(cut)
+        // Only a seal adds a segment header, every seal adds one, and no
+        // restore carries one, so the headers are this run's own seals and
+        // the archived cut is where the last of them ended.
+        let evidence = &self.state.evidence;
+        (!evidence.archived_segment_headers.is_empty()).then_some(evidence.archived)
     }
 
     fn checkpoint_with_paged_payloads(

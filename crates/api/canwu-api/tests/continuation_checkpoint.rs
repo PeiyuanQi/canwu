@@ -12,9 +12,9 @@
 //! runs restored from a continuation checkpoint take the same inputs and must
 //! agree on every receipt, checkpoint hash, and state hash, and write
 //! byte-equal continuation checkpoints. Each answers `sealed_evidence_cursor`
-//! as its kind and its seals say: `None` while it retains all its evidence,
-//! the end of its last sealed segment, or the settled cut it was restored
-//! from. The scenario runs on a 1 MiB thread,
+//! as its own seals say: `None` until it seals after it is created or
+//! restored, a continuation restore included, then the end of its last
+//! sealed segment. The scenario runs on a 1 MiB thread,
 //! so a debug build proves the runtime fits the smallest common thread
 //! stack.
 
@@ -725,7 +725,7 @@ impl Run {
         }
     }
 
-    /// The cut through the evidence the run no longer retains.
+    /// Where the run's last seal ended.
     fn sealed_cut(&self) -> Option<canwu_api::EvidenceCursor> {
         match self {
             Self::Unsealed(run) => run.sealed_evidence_cursor(),
@@ -808,9 +808,9 @@ fn lockstep() {
     let unsealed = Canwu::new_with_plugins(1601, scenario(), &plugins).expect("fixture starts");
     let sealed = unsealed.fork().into_compacted().expect("compact copy");
     let mut runs = vec![Run::Unsealed(unsealed), Run::Compact(sealed)];
-    // What each run answers for `sealed_evidence_cursor`: `None` while it
-    // retains all its evidence, then the end of its last sealed segment or
-    // the settled cut it was restored from.
+    // What each run answers for `sealed_evidence_cursor`: `None` until it
+    // seals after it is created or restored, then the end of its last sealed
+    // segment. A continuation restore's base is not a seal.
     let mut cuts: Vec<Option<canwu_api::EvidenceCursor>> = vec![None, None];
     let mut sealed_pinned_cancellation = false;
     let mut known_versions_seen = false;
@@ -969,13 +969,14 @@ fn lockstep() {
                 ErrorCode::EvidenceUnavailable
             );
             // A continuation restore no longer retains what precedes its
-            // base: its sealed cut is the checkpoint's settled cut.
+            // base, but it sealed none of it: it answers `None` until its
+            // own first seal.
             assert_eq!(
                 restored.continuation_base().map(|base| base.cut),
                 Some(checkpoint.settled_cut)
             );
             runs.push(Run::Compact(restored));
-            cuts.push(Some(checkpoint.settled_cut));
+            cuts.push(None);
             // A full save of the same run restores and joins the lockstep.
             let Run::Unsealed(unsealed) = &runs[0] else {
                 unreachable!("the first run is unsealed");
@@ -997,7 +998,7 @@ fn lockstep() {
                 Some(settled)
             );
             runs.push(Run::Compact(restored));
-            cuts.push(Some(settled));
+            cuts.push(None);
         }
         let answered: Vec<_> = runs.iter().map(Run::sealed_cut).collect();
         assert_eq!(answered, cuts, "sealed evidence cursors at day {d}");

@@ -292,9 +292,8 @@ pub trait CanwuRun {
     /// How many items each evidence journal holds, sealed and retained
     /// together.
     fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError>;
-    /// The cut through the evidence the run no longer retains (where its
-    /// last seal ended), or `None` while it retains all of it; see
-    /// [`CompactedCanwu::sealed_evidence_cursor`].
+    /// Where the run's last seal ended, or `None` until it seals after it is
+    /// created or restored; see [`CompactedCanwu::sealed_evidence_cursor`].
     fn sealed_evidence_cursor(&self) -> Option<EvidenceCursor>;
     /// The boundaries of the half-open window `from..to`.
     fn boundaries_between(&self, from: SimTime, to: SimTime) -> Result<BoundaryWindow, CanwuError>;
@@ -881,9 +880,8 @@ impl Canwu {
         self.simulation.evidence_cursor()
     }
 
-    /// The cut through the evidence this run no longer retains, or `None`
-    /// while it retains all its evidence, as a run of this handle does; a
-    /// run seals through [`CompactedCanwu`]. See
+    /// Where this run's last seal ended: always `None` on this handle, which
+    /// never seals; a run seals through [`CompactedCanwu`]. See
     /// [`CompactedCanwu::sealed_evidence_cursor`].
     #[must_use]
     pub fn sealed_evidence_cursor(&self) -> Option<EvidenceCursor> {
@@ -1725,7 +1723,7 @@ fn explain_event(source: &dyn ViewerSource, event_id: EventId) -> Explanation {
 }
 
 /// Finds an event in a retained, ID-ordered event tail, which starts after
-/// the last seal in a compact runtime.
+/// the last seal or continuation restore in a compact runtime.
 fn event_by_id(events: &[SimEvent], event_id: EventId) -> Option<&SimEvent> {
     let first = events.first()?.id.get();
     let index = usize::try_from(event_id.get().checked_sub(first)?).ok()?;
@@ -1902,11 +1900,13 @@ impl CompactedCanwu {
         self.simulation.evidence_cursor()
     }
 
-    /// The cut through the evidence this run no longer retains: the end of
-    /// its last sealed segment, or the settled cut of the continuation
-    /// checkpoint it was restored from. `None` while it retains all its
-    /// evidence: it has never sealed, or it was restored with its whole
-    /// journal (whose first seal starts again at the zero cut).
+    /// Where this run's last seal ended: the end of the last segment it
+    /// sealed since it was created or restored. `None` until it seals: it
+    /// has never sealed, it was restored with its whole journal (whose first
+    /// seal starts again at the zero cut), or it was restored from a
+    /// continuation checkpoint and has not sealed since. A continuation
+    /// restore holds no sealed segment, so its base is not a seal;
+    /// [`Self::continuation_base`] says where its history begins.
     #[must_use]
     pub fn sealed_evidence_cursor(&self) -> Option<EvidenceCursor> {
         self.simulation.sealed_evidence_cursor()
@@ -2048,32 +2048,36 @@ impl CompactedCanwu {
             .domain_record_page(kind, after, limit, expected_revision)
     }
 
-    /// The retained event tail, after the last seal.
+    /// The retained event tail, after the last seal or
+    /// continuation restore.
     #[must_use]
     pub fn events(&self) -> &[SimEvent] {
         self.simulation.events()
     }
 
-    /// The retained accepted-command tail, after the last seal.
+    /// The retained accepted-command tail, after the last seal or
+    /// continuation restore.
     #[must_use]
     pub fn commands(&self) -> &[CommandRecord] {
         self.simulation.command_log()
     }
 
-    /// The retained boundary tail, after the last seal.
+    /// The retained boundary tail, after the last seal or
+    /// continuation restore.
     #[must_use]
     pub fn boundaries(&self) -> &[BoundaryRecord] {
         self.simulation.boundaries()
     }
 
-    /// The retained command-attempt tail, after the last seal.
+    /// The retained command-attempt tail, after the last seal or
+    /// continuation restore.
     #[must_use]
     pub fn command_attempts(&self) -> &[CommandAttemptRecord] {
         self.simulation.command_attempts()
     }
 
-    /// The retained ingress tail, after the last seal. Queued ingress from
-    /// before the seal or the restore is listed by
+    /// The retained ingress tail, after the last seal or continuation
+    /// restore. Queued ingress from before the seal or the restore is listed by
     /// [`Self::pending_ingress`].
     #[must_use]
     pub fn ingress_log(&self) -> &[IngressRecord] {
@@ -2090,7 +2094,8 @@ impl CompactedCanwu {
         self.simulation.pending_ingress()
     }
 
-    /// The retained random-draw tail, after the last seal.
+    /// The retained random-draw tail, after the last seal or
+    /// continuation restore.
     #[must_use]
     pub fn random_draws(&self) -> &[RandomDrawRecord] {
         self.simulation.random_draws()
@@ -2134,8 +2139,10 @@ impl CompactedCanwu {
         self.simulation.checkpoint()
     }
 
-    /// Clones the retained evidence after `start`, which must not precede this
-    /// runtime's last sealed cut.
+    /// Clones the retained evidence after `start`, which must not precede the
+    /// first evidence this runtime retains: where its last seal ended, or,
+    /// before it seals, the base of the continuation checkpoint it was
+    /// restored from.
     ///
     /// A checkpoint of current state restores from the host's prefix followed
     /// by this segment from that prefix's end, omitted when it is empty. The

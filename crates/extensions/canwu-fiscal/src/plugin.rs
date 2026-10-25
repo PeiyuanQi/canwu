@@ -2117,17 +2117,20 @@ fn archive_candidates<H: CanwuRun + ?Sized>(
 /// result is a function of the run's fiscal records, its sealed cut, and
 /// the stored index alone.
 ///
-/// A run that seals its evidence ([`CanwuRun::sealed_evidence_cursor`] is
-/// `Some`) cannot archive a book that cites a version a boundary established
-/// after that cut: the book's declaration of the version ends when it is
-/// archived, so the version must already be in a sealed segment. Such a
-/// book is refused with [`FiscalArchiveError::UnsealedCitations`]; seal,
-/// then archive. The cut is the run's own, so a host cannot pass a wrong
-/// one. A run that retains all its evidence (a `Canwu`, a never-sealed
-/// `CompactedCanwu`, or one restored from a checkpoint and its journal until
-/// its next seal) refuses none, and its archived books' citations reach a
-/// sealed segment only at its next seal: seal before each continuation
-/// checkpoint, or those versions are lost to the saved run.
+/// A run that has sealed its evidence ([`CanwuRun::sealed_evidence_cursor`]
+/// is `Some`) cannot archive a book that cites a version a boundary
+/// established after its last seal ended: the book's declaration of the
+/// version ends when it is archived, so the version must already be in a
+/// sealed segment. Such a book is refused with
+/// [`FiscalArchiveError::UnsealedCitations`]; seal, then archive. The cut is
+/// the run's own, so a host cannot pass a wrong one. A run that has not
+/// sealed since it was created or restored (a `Canwu`, a never-sealed
+/// `CompactedCanwu`, one restored from a checkpoint and its journal, or one
+/// restored from a continuation checkpoint, until its next seal) refuses
+/// none: a continuation restore holds no sealed segment, so its base is not
+/// a seal. Such a run's archived books' citations reach a sealed segment
+/// only at its next seal: a host that keeps segments seals before each
+/// continuation checkpoint, or those versions are in no segment it keeps.
 ///
 /// It refuses, as [`FiscalArchiveError::Backpressure`], while the archive
 /// head holds [`crate::MAX_FISCAL_ARCHIVE_PENDING_HANDLES`] retention

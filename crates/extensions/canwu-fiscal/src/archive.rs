@@ -79,9 +79,10 @@ pub enum FiscalArchiveError {
     /// The state holds no closed book and no receipt to archive.
     NothingToArchive,
     /// A selected book cites an evidence version a boundary established after
-    /// the run's last sealed evidence cut. Seal first, then archive, so that
-    /// every citation of an archived book is in a sealed segment once the
-    /// book's declaration of it ends.
+    /// the run's last seal ended ([`canwu_api::CanwuRun::sealed_evidence_cursor`]).
+    /// Seal first, then archive, so that every citation of an archived book
+    /// is in a sealed segment once the book's declaration of it ends. A run
+    /// that has not sealed since it was created or restored refuses none.
     UnsealedCitations {
         scope_binding_id: String,
         accounting_cycle_id: String,

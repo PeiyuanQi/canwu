@@ -9,10 +9,12 @@
 //! raises the office watermark. No new book is made at or below either
 //! watermark. Commits are prepared, stored, verified, and queued by the host;
 //! they settle before every other fiscal packet, a stale or duplicate commit
-//! ends as a no-op, and an acknowledgement retires its handle once. A book
-//! whose citations a seal has not covered is refused at preparation, and a
-//! sealed run archives exactly as its unsealed fork, a restore from its
-//! sealed segments, and its exact replay do.
+//! ends as a no-op, and an acknowledgement retires its handle once. On a run
+//! that has sealed, a book whose citations its last seal has not covered is
+//! refused at preparation; a run restored from a continuation checkpoint has
+//! sealed nothing until it seals. A sealed run archives exactly as its
+//! unsealed fork, a restore from its sealed segments, and its exact replay
+//! do.
 
 mod support;
 
@@ -816,6 +818,162 @@ fn a_book_citing_evidence_newer_than_the_last_seal_is_refused_until_it_is_sealed
             .snapshot_with_segments(segments)
             .expect("the full snapshot")
     );
+}
+
+/// Renews the auditor's commission on a compact run and closes a book of
+/// `cycle` whose one assessment cites the renewed version as its quote.
+/// Returns the quote.
+fn close_quoted_book(
+    run: &mut CompactedCanwu,
+    scope: &str,
+    cycle: &str,
+) -> canwu_api::DomainRecordVersionRef {
+    run.enqueue_plugin_ingress(renewal_at(run.time(), AUDITOR_COMMISSION))
+        .expect("commission renewal ingress");
+    run.advance_canonical(canwu_api::SimDuration::minutes(1))
+        .expect("the renewal settles");
+    let quote = current_commission(&*run, AUDITOR_COMMISSION);
+    let (open, shut) = (format!("quoted.{cycle}"), format!("close.{cycle}"));
+    submit_sealed(
+        run,
+        by_principal([draft(
+            &open,
+            TREASURY_AUTHORITY,
+            FiscalAction::OpenAssessment {
+                assessment_id: format!("quoted.assessment.{cycle}"),
+                rule_id: RULE.to_owned(),
+                scope_binding_id: scope.to_owned(),
+                accounting_cycle_id: cycle.to_owned(),
+                quantity: 100,
+                unit: "grain".to_owned(),
+                payment_form: FiscalPaymentForm::Grain,
+                commutation_quote: Some(quote.clone()),
+            },
+        )]),
+    );
+    submit_sealed(run, by_principal([close(&shut, scope, cycle)]));
+    let settled = FiscalSettledAction::from_events(run.events());
+    for action in [&open, &shut] {
+        assert!(
+            settled.iter().any(|outcome| outcome.action_id == *action
+                && outcome.disposition == FiscalActionDisposition::Applied),
+            "{action} applies"
+        );
+    }
+    quote
+}
+
+/// Prepares, queues, settles, and acknowledges one archive commit of every
+/// closed book on a compact run.
+fn archive_compact(run: &mut CompactedCanwu, store: &MemoryArchiveStore) {
+    let prepared = prepare_fiscal_archive(&*run, 64, store).expect("an archive batch");
+    let receipt = enqueue_fiscal_archive(run, &prepared, store).expect("the commit is queued");
+    run.advance_canonical(canwu_api::SimDuration::minutes(1))
+        .expect("the commit settles");
+    finalize_fiscal_archive_retention(run, store, &receipt).expect("finalized");
+    run.advance_canonical(canwu_api::SimDuration::minutes(1))
+        .expect("the acknowledgement settles");
+}
+
+/// A run restored from a continuation checkpoint holds no sealed segment,
+/// so its base is not a seal (downstream gap G-91): it archives a closed
+/// book citing a version established after the restore, and the
+/// continuation checkpoint it writes after the commit restores. Once the
+/// restored run seals, its own cut applies: a book citing a version newer
+/// than that seal is refused until a later seal covers it.
+#[test]
+fn a_continuation_restored_run_archives_citations_newer_than_its_base_until_it_seals() {
+    let fixture = Fixture::new();
+    let plugins = fixture.plugins();
+    let mut canwu = fixture.runtime(scenario(|_| {}));
+    canwu
+        .settle_boundary(BoundaryRequest::at(canwu.time()))
+        .expect("a quiet boundary");
+    let (checkpoint, hash) = canwu
+        .continuation_checkpoint()
+        .expect("a continuation checkpoint");
+    let base = checkpoint.settled_cut;
+    let mut restored =
+        CompactedCanwu::from_continuation_checkpoint_verified(checkpoint, &hash, &plugins)
+            .expect("the save restores");
+    assert_eq!(
+        restored.continuation_base().map(|base| base.cut),
+        Some(base)
+    );
+    assert_eq!(
+        restored.sealed_evidence_cursor(),
+        None,
+        "a continuation restore is not a seal"
+    );
+
+    let scope = treasury_scope(0);
+    let quote = close_quoted_book(&mut restored, &scope, "2026");
+    assert!(
+        matches!(
+            quote.established_by,
+            canwu_api::DomainRecordVersionSource::BoundaryChange { boundary, .. }
+                if boundary.get() > base.boundary_count
+        ),
+        "the quote is newer than the restore's base"
+    );
+    let store = MemoryArchiveStore::default();
+    archive_compact(&mut restored, &store);
+    let state = sealed_fiscal_state(&restored);
+    assert!(state.books().next().is_none(), "the book is archived");
+    let record = restored
+        .typed_domain_record(&canwu_fiscal::fiscal_ledger_reference(&scope))
+        .expect("the scope's ledger record");
+    assert!(
+        !record.payload.to_string().contains(&quote.record.id),
+        "the archived book's quote is no longer declared"
+    );
+
+    // The next save, which no longer carries the quote, restores, and the
+    // archived book is read from the store through the restored head.
+    let (checkpoint, hash) = restored
+        .continuation_checkpoint()
+        .expect("the checkpoint after the commit");
+    let mut again =
+        CompactedCanwu::from_continuation_checkpoint_verified(checkpoint, &hash, &plugins)
+            .expect("the save after the commit restores");
+    assert_eq!(again.checkpoint_hash(), restored.checkpoint_hash());
+    let Some(FiscalArchivedRecordV1::Book(archived)) = archived_fiscal_record(
+        &sealed_fiscal_state(&again),
+        &store,
+        &book_key(&scope, "2026"),
+    )
+    .expect("an archive lookup") else {
+        panic!("the archived book resolves");
+    };
+    assert!(
+        archived
+            .book
+            .assessments
+            .values()
+            .any(|assessment| assessment.commutation_quote.as_ref() == Some(&quote)),
+        "the archived book keeps its citation"
+    );
+
+    // Once the restored run has sealed, a citation newer than its own seal
+    // is refused until a later seal covers it.
+    let evidence = MemoryEvidenceArchive::default();
+    again
+        .settle_boundary(BoundaryRequest::at(again.time()))
+        .expect("a quiet boundary");
+    let earlier = seal(&mut again, &evidence);
+    assert_eq!(again.sealed_evidence_cursor(), Some(earlier.end));
+    close_quoted_book(&mut again, &scope, "2027");
+    assert_eq!(
+        prepare_fiscal_archive(&again, 64, &store).expect_err("the quote is newer than the seal"),
+        FiscalArchiveError::UnsealedCitations {
+            scope_binding_id: scope.clone(),
+            accounting_cycle_id: "2027".to_owned(),
+        }
+    );
+    let segment = seal(&mut again, &evidence);
+    assert_eq!(again.sealed_evidence_cursor(), Some(segment.end));
+    archive_compact(&mut again, &store);
+    assert!(sealed_fiscal_state(&again).books().next().is_none());
 }
 
 /// A run that closes, archives, and publishes across a seal does so exactly

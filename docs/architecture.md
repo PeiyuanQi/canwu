@@ -1609,12 +1609,13 @@ is read by key through the head directory, one page per level, and one blob.
 The helpers read only the records a commit needs (the root, the archive
 head, a partial read of every ledger, and the ledgers and offices of the
 books the commit takes), never the whole fiscal state. A commit may cite
-only records whose evidence lies at or below the run's sealed cut, which the
-helpers read from the run itself (`sealed_evidence_cursor`), so a host
-cannot pass a wrong cut; a run that retains all its evidence refuses
-nothing, so a sealing host seals at each save, before it writes a
-continuation checkpoint, if every archived citation is to lie in a sealed
-segment.
+only records whose evidence lies at or below the run's sealed cut (where
+its last seal ended), which the helpers read from the run itself
+(`sealed_evidence_cursor`), so a host cannot pass a wrong cut; a run that
+has not sealed since it was created or restored refuses nothing (a
+continuation restore holds no sealed segment, so its base is not a seal),
+so a sealing host seals at each save, before it writes a continuation
+checkpoint, if every archived citation is to lie in a sealed segment.
 
 An observer's report is held by the observer's knowledge holder, which may be
 a government with no actor, as one summary record and, per hot cycle slot (64

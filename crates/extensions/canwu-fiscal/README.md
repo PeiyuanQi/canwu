@@ -385,18 +385,19 @@ objects, and every reference to one names its scope: `GrantRemission`,
   enough to see whether it holds a closed book, and the ledgers and offices
   of the books a commit may take; finalizing reads the archive head. On a
   run that has sealed evidence (its `sealed_evidence_cursor` is `Some`), a
-  book citing an evidence version established after the run's last sealed
-  cut is refused at preparation (`FiscalArchiveError::UnsealedCitations`)
+  book citing an evidence version established after the run's last seal
+  ended is refused at preparation (`FiscalArchiveError::UnsealedCitations`)
   until a seal covers it: seal, then archive. The cut is the run's own; a
-  host cannot pass a wrong one. A run that retains all its evidence (a
-  `Canwu`, a `CompactedCanwu` that has never sealed, or one restored from a
-  checkpoint and its journal, until its next seal) refuses nothing, and the
-  versions its archived books cited reach a sealed segment only at its next
-  seal. So every archived citation is in a sealed segment only if the host
-  seals before it writes a continuation checkpoint: seal at each save. A
-  host that saves without sealing archives freely in that session and, once
-  restored (its cut is then the checkpoint's settled cut), sees the same
-  kind of citation refused. Preparation refuses
+  host cannot pass a wrong one. A run that has not sealed since it was
+  created or restored (a `Canwu`, a `CompactedCanwu` that has never sealed,
+  or one restored from a checkpoint and its journal or from a continuation
+  checkpoint, until its next seal) refuses nothing, and the versions its
+  archived books cited reach a sealed segment only at its next seal. A
+  continuation restore holds no sealed segment, so its base is not a seal:
+  a host that saves only by continuation checkpoint and never seals
+  archives freely in every session. So every archived citation is in a
+  sealed segment only if the host seals before it writes a continuation
+  checkpoint: a host that keeps segments seals at each save. Preparation refuses
   (`FiscalArchiveError::Backpressure`) while the archive head holds
   `MAX_FISCAL_ARCHIVE_PENDING_HANDLES` (64) unacknowledged retention handles,
   of applied or stale commits.
