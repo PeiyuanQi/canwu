@@ -60,7 +60,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
   definition={`flowchart TB
     Cmd["MilitaryCommandV1<br/>规范化命令输入"] --> Admit["准入<br/>静态检查、持有人"]
     Admit --> Apply["military_apply_v1 包"]
-    Wake["按你的节奏运行的唤醒系统，<br/>或可信的 Step 命令"] --> StepPacket["military_step_v1 包"]
+    Wake["按你的节奏运行的唤醒系统、<br/>可信的 Step 命令，<br/>或你的定时战斗步"] --> StepPacket["战斗步包"]
     Apply --> Settle["第 7 阶段：settle-engagements-v1<br/>先应用命令，再推进战斗步"]
     StepPacket --> Settle
     Settle --> Records["force、engagement、steps、<br/>summary、siege、crossing"]
@@ -71,10 +71,10 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 <Steps>
 1. 你的游戏发送命令；准入阶段检查它的结构和报告持有人，并为同一时刻的下一个结算边界排入一个应用包。
-2. 只有接收了引擎战斗步包的结算边界才会推进战斗。使用 `with_step_cadence(Some(cadence))`（默认按日）时，唤醒系统在有到期工作时排入一个战斗步包；使用 `with_step_cadence(None)` 时，由你的游戏在发送输入之后发送 `Step { up_to }`，这不会额外增加结算边界。
-3. 第 7 阶段，结算系统按准入顺序应用本结算边界的命令，然后推进到 `up_to` 为止到期的每一场交战、每一个围城日和每一批渡河。
+2. 只有接收了战斗步包的结算边界才会推进战斗。使用 `with_step_cadence(Some(cadence))`（默认按日）时，唤醒系统在有到期工作时排入一个战斗步包，在同一时刻的下一个结算边界推进；使用 `with_step_cadence(None)` 时，由你的游戏在发送输入之后发送 `Step { up_to }`，在应用这些输入的结算边界推进。无论哪种方式，你的游戏都可以改为给本来就要结算的结算边界（例如下一个每日结算边界）排入一个定时战斗步（`timed_step_ingress(due_at)`）：由那个结算边界推进，推进本身不再增加结算边界。
+3. 第 7 阶段，结算系统按准入顺序应用本结算边界的命令，然后推进到此为止到期的每一场交战、每一个围城日和每一批渡河。
 4. 每个战斗步都从双方的组成部分、最近的输入、环境、该类型的规则和地点构造结算器的输入；调用结算器；按最大余数法（先按比例取整数部分，再把剩下的名额按余数从大到小分给各组成部分）把伤亡分配到各组成部分；应用溃退规则和追击；然后追加这个战斗步。
-5. 一方撤退或溃散时交战结束；某类型的 `max_minutes` 到期而无人溃退时，以 `Stalled` 结束。结束时写出一份只能创建一次的 `engagement_summary` 总结记录，如果你要求了，还会发送结果信号。
+5. 一方撤退或溃散时交战结束；交战的 `max_minutes`（该类型的时限，或你的游戏开战时指定的更短时限）到期而无人溃退时，以 `Stalled` 结束。结束时写出一份只能创建一次的 `engagement_summary` 总结记录，如果你要求了，还会发送结果信号。
 6. 第 13 阶段，报告系统在知识发布预算内向每一方的持有人发布持有人相对的报告。
 </Steps>
 
@@ -86,9 +86,9 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 ### 围城与渡河
 
-每个围城日都依据围城方人数和可能的水面控制计算合围程度，先架设火炮再轰击城墙，直到达到该等级的破城阈值；当下令攻城，或在 `storm_on: BreachOrGate` 下城墙破开或城门打开的当天，开启一次攻城交战。下令出城反击且守军的冷却时间已过时，开启一次出城反击；援军解围则是你针对围城方开启的一场交战。守军在城下溃退，围城即告陷落，仍留在城内的守军随之溃散；围城方溃散则围城解除。
+每个围城日都依据围城方人数和可能的水面控制计算合围程度，先架设火炮再轰击城墙，直到达到该等级的破城阈值；当下令攻城，或在 `storm_on: BreachOrGate` 下城墙破开或城门打开的当天，开启一次攻城交战。下令出城反击且守军的冷却时间已过时，开启一次出城反击；援军解围则是你针对围城方开启的一场交战。守军在城下溃退，围城即告陷落，仍留在城内的守军随之溃散；围城方溃散则围城解除。第二支部队可以用 `JoinSiege` 加入已被围的地点，如果攻城或出城反击正在进行，它也在自己一方加入这场交战；`ReviseSiege { release }` 则让任一方不在交战中的部队撤出围城，好让你把它放到别处。最后一支守军撤出后，围城在下一个围城日以 `Abandoned` 陷落；最后一支围城部队离开时，用 `LiftSiege` 结束围城。
 
-渡河作战每隔一个批次间隔发出一批人马。控制力足够高的拦截方按阈值或按一次定址抽样截住一批；被截住的一批打一场渡口之战后折返；登岸的一批可能在对岸与守军打一场滩头之战。渡河完成后由你的游戏移动这支部队。
+渡河作战每隔一个批次间隔发出一批人马。控制力足够高的拦截方按阈值或按一次定址抽样截住一批；被截住的一批打一场渡口之战后折返；登岸的一批可能在对岸与守军打一场滩头之战；对岸守军由渡河命令指定，后来抵达对岸的部队可以用 `ReviseCrossing { defenders }` 加入。渡河完成后由你的游戏移动这支部队。
 
 ### 命令失败时
 
@@ -96,7 +96,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 ## 知识与可见性
 
-每一方指定自己的报告持有人：人物、政府，或部队记录本身。持有人在命令准入时检查一次，在发布报告时再检查一次，所以已经去世的持有人会被跳过。进度报告（`engagement_report`）会取代该方上一份报告；结束报告（`engagement_outcome`）会保留。一方能准确看到自己的损失，而敌方的数字只按规则册的分档显示。
+每一方指定自己的报告持有人：人物、政府，或部队记录本身。持有人在命令准入时检查一次，在发布报告时再检查一次，所以已经去世的持有人会被跳过。进度报告（`engagement_report`）会取代该方上一份报告；结束报告（`engagement_outcome`）会保留。双方都没有指定持有人的交战、围城或渡河不会排入报告，所以自己依据记录撰写报告的游戏不必为报告系统付出任何开销。一方能准确看到自己的损失，而敌方的数字只按规则册的分档显示。
 
 ## 随机性、持久化与重放
 
@@ -129,3 +129,4 @@ cargo run -p canwu-military-reference --example military_starter
 - [事件系统](/architecture/events/)：准入顺序和零延迟数据包
 - [通过插件扩展](/developer/extensions/)：编写你自己的结算器，或替换这个插件的插件
 - [军事交战设计说明](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/military-engagements.md)：这个扩展实现的契约及其实现说明
+- [军事交战修订说明](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/military-engagement-revisions.md)：0.21.0 加入的定时战斗步、加入与撤出围城、修订对岸守军和更短的交战时限

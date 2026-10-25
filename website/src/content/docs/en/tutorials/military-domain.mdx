@@ -54,7 +54,7 @@ military_starter=complete engagements=3 signals=3 checkpoint=…
 `}
 />
 
-The starter's rulebook trusts the reference host's `System` issuer. Every command is a `MilitaryCommandV1` sent through canonical ingress with `military_command()`; a command that changes a record names that record's `expected_host_revision`. The engine steps only in a boundary that admits its step packet: here the default wake system schedules one on each daily calendar boundary that has work due. A host that prefers to drive stepping itself builds `MilitaryPlugin::new().with_step_cadence(None)` and sends `Step { up_to }` after its inputs.
+The starter's rulebook trusts the reference host's `System` issuer. Every command is a `MilitaryCommandV1` sent through canonical ingress with `military_command()`; a command that changes a record names that record's `expected_host_revision`. The engine steps only in a boundary that admits its step packet: here the default wake system schedules one on each daily calendar boundary that has work due. A host that prefers to drive stepping itself builds `MilitaryPlugin::new().with_step_cadence(None)` and sends `Step { up_to }` after its inputs, or queues a timed step (`timed_step_ingress`) for each daily boundary it settles anyway, so stepping adds no boundary.
 
 ## What the starter does
 
@@ -85,6 +85,7 @@ MilitaryCommandV1::OpenEngagement(Box::new(OpenEngagementV1 {
     ],
     inputs: [condition("field", 720), condition("camp", 680)],
     environment: environment(false),
+    max_minutes: None,
 }))
 ```
 

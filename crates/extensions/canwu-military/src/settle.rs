@@ -20,9 +20,9 @@ use crate::ids::{
 use crate::plugin::{
     CROSSING_WAVE_EVENT, CombatRegistryV1, ENGAGEMENT_CLOSED_EVENT, ENGAGEMENT_HELD_EVENT,
     ENGAGEMENT_OPENED_EVENT, MILITARY_APPLY_INGRESS, MILITARY_REJECTION_EVENT,
-    MILITARY_STEP_INGRESS, REPORT_DROPPED_EVENT, RetireItemV1, SIEGE_ENDED_EVENT, TERM_PURSUIT,
-    TERM_RESOLVER_CLAMPED, TERM_RESOLVER_FAILED, crossing_interception_stream, signal_target,
-    step_contingency_stream,
+    MILITARY_STEP_INGRESS, MILITARY_TIMED_STEP_INGRESS, REPORT_DROPPED_EVENT, RetireItemV1,
+    SIEGE_ENDED_EVENT, TERM_PURSUIT, TERM_RESOLVER_CLAMPED, TERM_RESOLVER_FAILED,
+    crossing_interception_stream, signal_target, step_contingency_stream,
 };
 use crate::report::{ReportItemV1, ReportSubjectV1};
 use crate::resolver::{
@@ -334,13 +334,19 @@ impl<'v, 'a> Run<'v, 'a> {
 
     /// Queues a report: a progress item replaces the subject's queued
     /// progress item and drops the oldest progress item past the cap; a
-    /// closing item is kept up to the queue's bound.
+    /// closing item is kept up to the queue's bound. A subject whose sides
+    /// name no holder queues nothing, so its steps leave the registry's
+    /// queue (and the report system) untouched.
     fn queue_report(
         &mut self,
         rulebook: &CombatRulebookV1,
         subject: ReportSubjectV1,
         closing: bool,
+        holders: [&[KnowledgeHolderRef]; 2],
     ) -> Result<(), CanwuError> {
+        if holders.iter().all(|side| side.is_empty()) {
+            return Ok(());
+        }
         let at = self.at;
         let limits = &rulebook.limits;
         let registry = self.registry_mut()?;
@@ -524,6 +530,11 @@ pub(crate) fn settle_engagements<R: StepResolver>(
             applies.push(decode_value::<AppliedCommandV1>(payload)?);
         } else if packet_type == MILITARY_STEP_INGRESS {
             steps.push((*id, decode_value::<StepPacketV1>(payload)?));
+        } else if packet_type == MILITARY_TIMED_STEP_INGRESS {
+            // The host's timed step carries no payload (the engine refuses
+            // any other at enqueue): it steps the work due by the boundary
+            // that admits it.
+            steps.push((*id, StepPacketV1 { up_to: context.at }));
         }
     }
     if applies.is_empty() && steps.is_empty() {
@@ -551,7 +562,9 @@ pub(crate) fn settle_engagements<R: StepResolver>(
 }
 
 /// The wake system (`wake-engagements-on-cadence-v1`, phase 7, the host's
-/// cadence): schedules a step packet, due at once, when work is due.
+/// cadence): schedules a step packet, due at once, when work is due and the
+/// boundary admitted no step packet of its own (a timed step the host
+/// queued for this instant steps the work already).
 pub(crate) fn wake_engagements(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
@@ -562,6 +575,19 @@ pub(crate) fn wake_engagements(
     let registry = record.decode_payload::<RegistryRecord>()?;
     if registry.earliest_due.is_none_or(|due| due > context.at) || !view.can_schedule_ingress() {
         return Ok(BoundaryProposal::default());
+    }
+    for id in &context.admitted_ingress {
+        if let Some(ingress) = view.ingress(*id)?
+            && let IngressPayload::Plugin {
+                plugin,
+                packet_type,
+                ..
+            } = &ingress.payload
+            && plugin == PLUGIN_NAME
+            && (packet_type == MILITARY_STEP_INGRESS || packet_type == MILITARY_TIMED_STEP_INGRESS)
+        {
+            return Ok(BoundaryProposal::default());
+        }
     }
     Ok(BoundaryProposal {
         directives: vec![BoundaryDirective::SchedulePluginIngress {
@@ -658,6 +684,8 @@ pub(crate) struct OpenSpec {
     pub inputs: [Option<(crate::ConditionInputV1, SimTime)>; 2],
     pub environment: Option<(crate::EnvironmentInputV1, SimTime)>,
     pub men_caps: [Option<u64>; 2],
+    /// The host's shorter duration; `None` takes the kind rule's.
+    pub max_minutes: Option<u32>,
     pub opened_at: SimTime,
 }
 
@@ -963,6 +991,11 @@ pub(crate) fn open_engagement(
         environment: Some(environment),
         forecast,
         opened_at: spec.opened_at,
+        // From 1 to the kind's (a rulebook's kind rule is never 0), so the
+        // record always passes activation.
+        max_minutes: spec.max_minutes.map_or(kind_rule.max_minutes, |minutes| {
+            minutes.min(kind_rule.max_minutes).max(1)
+        }),
         last_step_at: spec.opened_at,
         next_step_at: add_minutes(spec.opened_at, profile.step_minutes)?,
         steps_resolved: 0,
@@ -1589,10 +1622,7 @@ fn step_engagement<R: StepResolver>(
     let Some(profile) = rulebook.step_profiles.get(&engagement.profile).cloned() else {
         return Ok(());
     };
-    let max_minutes = rulebook
-        .kinds
-        .get(&engagement.kind)
-        .map_or(u32::MAX, |rule| rule.max_minutes);
+    let max_minutes = engagement.max_minutes;
     let step_minutes = i64::from(profile.step_minutes.max(1));
     let elapsed = minutes_between(engagement.last_step_at, up) / step_minutes;
     let count = elapsed.min(i64::from(profile.max_steps_per_boundary));
@@ -1675,7 +1705,12 @@ fn step_engagement<R: StepResolver>(
     }
     write_forces(run, &forces)?;
     run.put(&reference, &engagement)?;
-    run.queue_report(rulebook, ReportSubjectV1::Engagement(id.clone()), false)
+    run.queue_report(
+        rulebook,
+        ReportSubjectV1::Engagement(id.clone()),
+        false,
+        [&engagement.attacker.holders, &engagement.defender.holders],
+    )
 }
 
 /// Closes an engagement: its summary, its forces freed, its retirement and
@@ -1748,7 +1783,12 @@ pub(crate) fn close_engagement(
             );
         }
     }
-    run.queue_report(rulebook, ReportSubjectV1::Engagement(id.clone()), true)?;
+    run.queue_report(
+        rulebook,
+        ReportSubjectV1::Engagement(id.clone()),
+        true,
+        [&engagement.attacker.holders, &engagement.defender.holders],
+    )?;
     if let Some(siege) = engagement.siege.clone() {
         siege_after_fight(run, rulebook, &siege, &engagement, &close)?;
     }
@@ -1913,7 +1953,12 @@ pub(crate) fn end_siege(
             queue_retire(registry, retire, siege_reference(&siege.id).into_untyped());
         }
     }
-    run.queue_report(rulebook, ReportSubjectV1::Siege(siege.id.clone()), true)?;
+    run.queue_report(
+        rulebook,
+        ReportSubjectV1::Siege(siege.id.clone()),
+        true,
+        [&siege.holders[0], &siege.holders[1]],
+    )?;
     run.emit(
         SIEGE_ENDED_EVENT,
         format!("siege {} ended {status:?} by {cause:?}", siege.id),
@@ -1991,7 +2036,12 @@ fn advance_siege(
     }
     if days > 0 && siege.is_open() {
         run.put(&reference, &siege)?;
-        run.queue_report(rulebook, ReportSubjectV1::Siege(id.clone()), false)?;
+        run.queue_report(
+            rulebook,
+            ReportSubjectV1::Siege(id.clone()),
+            false,
+            [&siege.holders[0], &siege.holders[1]],
+        )?;
     }
     Ok(())
 }
@@ -2179,6 +2229,7 @@ fn open_siege_fight(
             inputs: [Some(besieging), Some(defending)],
             environment: Some(environment),
             men_caps: [None, None],
+            max_minutes: None,
             opened_at: day,
         }
     } else {
@@ -2197,6 +2248,7 @@ fn open_siege_fight(
             inputs: [Some(defending), Some(besieging)],
             environment: Some(environment),
             men_caps: [None, None],
+            max_minutes: None,
             opened_at: day,
         }
     };
@@ -2241,6 +2293,7 @@ pub(crate) fn finish_crossing(
         rulebook,
         ReportSubjectV1::Crossing(crossing.id.clone()),
         true,
+        [&crossing.holders[0], &crossing.holders[1]],
     )?;
     run.put(&crossing_reference(&crossing.id), crossing)
 }
@@ -2273,7 +2326,12 @@ fn advance_crossing(
     }
     if waves > 0 && crossing.is_open() {
         run.put(&reference, &crossing)?;
-        run.queue_report(rulebook, ReportSubjectV1::Crossing(id.clone()), false)?;
+        run.queue_report(
+            rulebook,
+            ReportSubjectV1::Crossing(id.clone()),
+            false,
+            [&crossing.holders[0], &crossing.holders[1]],
+        )?;
     }
     Ok(())
 }
@@ -2393,6 +2451,7 @@ fn crossing_wave(
                     inputs: [Some(theirs), Some(own)],
                     environment: crossing.environment.clone(),
                     men_caps: [None, Some(wave)],
+                    max_minutes: None,
                     opened_at: at,
                 },
             )?;
@@ -2430,6 +2489,7 @@ fn crossing_wave(
                     inputs: [Some(own), Some(theirs)],
                     environment: crossing.environment.clone(),
                     men_caps: [Some(crossing.landed), None],
+                    max_minutes: None,
                     opened_at: at,
                 },
             )?;

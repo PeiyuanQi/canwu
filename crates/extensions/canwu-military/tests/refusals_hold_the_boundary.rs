@@ -52,6 +52,7 @@ fn open(
         holders,
         inputs: [condition("field", 700), condition("camp", 700)],
         environment: environment(false),
+        max_minutes: None,
     }
 }
 
@@ -293,6 +294,7 @@ fn refused_commands_are_recorded_and_the_boundary_stands() {
                 assault: None,
                 sortie: false,
                 storm_on: None,
+                release: Vec::new(),
             })),
         )],
     );
@@ -347,6 +349,7 @@ fn refused_commands_are_recorded_and_the_boundary_stands() {
                 assault: None,
                 sortie: true,
                 storm_on: None,
+                release: Vec::new(),
             })),
         )],
     );
@@ -366,6 +369,7 @@ fn refused_commands_are_recorded_and_the_boundary_stands() {
                 assault: None,
                 sortie: true,
                 storm_on: None,
+                release: Vec::new(),
             })),
         )],
     );

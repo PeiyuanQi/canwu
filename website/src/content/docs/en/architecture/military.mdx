@@ -60,7 +60,7 @@ In brief: every number that decides a fight is a parameter of your rulebook. You
   definition={`flowchart TB
     Cmd["MilitaryCommandV1<br/>canonical command ingress"] --> Admit["Admission<br/>static checks, holders"]
     Admit --> Apply["military_apply_v1 packet"]
-    Wake["Wake system on your cadence,<br/>or the trusted Step command"] --> StepPacket["military_step_v1 packet"]
+    Wake["Wake system on your cadence,<br/>the trusted Step command,<br/>or your timed step"] --> StepPacket["Step packet"]
     Apply --> Settle["Phase 7: settle-engagements-v1<br/>apply commands, then step"]
     StepPacket --> Settle
     Settle --> Records["force, engagement, steps,<br/>summary, siege, crossing"]
@@ -71,10 +71,10 @@ In brief: every number that decides a fight is a parameter of your rulebook. You
 
 <Steps>
 1. Your game sends a command; admission checks its shape and its report holders and queues an apply packet for the next boundary at the same instant.
-2. A fight steps only in a boundary that admits the engine's step packet. With `with_step_cadence(Some(cadence))` (daily by default) the wake system schedules one whenever work is due; with `with_step_cadence(None)` your game sends `Step { up_to }` after its inputs, which adds no boundary of its own.
-3. In phase 7 the settle system applies the boundary's commands in admission order, then steps every engagement, siege day, and crossing wave due by `up_to`.
+2. A fight steps only in a boundary that admits a step packet. With `with_step_cadence(Some(cadence))` (daily by default) the wake system schedules one whenever work is due, stepped in the next boundary at the same instant; with `with_step_cadence(None)` your game sends `Step { up_to }` after its inputs, stepped in the boundary that applies them. Either way your game may instead queue a timed step (`timed_step_ingress(due_at)`) for a boundary it settles anyway, such as the next daily one: that boundary steps, and stepping adds no boundary of its own.
+3. In phase 7 the settle system applies the boundary's commands in admission order, then steps every engagement, siege day, and crossing wave due by then.
 4. Each step builds the resolver's input from the sides' components, their latest inputs, the environment, the kind's rule, and the site; calls the resolver; splits casualties over components by largest remainder (each component takes the whole part of its proportional share, and the places left over go to the largest fractional remainders); applies the break rule and pursuit; and appends the step.
-5. A side that withdraws or routs closes the engagement; a kind's `max_minutes` without a break closes it `Stalled`. The close writes a create-only `engagement_summary` record and, if you asked for one, sends the outcome signal.
+5. A side that withdraws or routs closes the engagement; its `max_minutes` without a break (the kind's, or a shorter time your game named when it opened the fight) closes it `Stalled`. The close writes a create-only `engagement_summary` record and, if you asked for one, sends the outcome signal.
 6. In phase 13 the report system publishes each side's holder-relative report within the knowledge budget.
 </Steps>
 
@@ -86,9 +86,9 @@ The engine owns everything around the call: it clamps the outcome to the ruleboo
 
 ### Sieges and crossings
 
-A siege day computes investment from the besiegers' men and any naval control, emplaces guns and then bombards the walls toward the grade's breach threshold, and opens an assault when ordered or, with `storm_on: BreachOrGate`, the day a breach or a gate opens. A sortie opens when ordered and the defenders' cooldown has passed; a relief is an engagement you open against the besiegers. Defenders breaking at the wall make the siege fall and disperse the defenders still there; besiegers routed lift it.
+A siege day computes investment from the besiegers' men and any naval control, emplaces guns and then bombards the walls toward the grade's breach threshold, and opens an assault when ordered or, with `storm_on: BreachOrGate`, the day a breach or a gate opens. A sortie opens when ordered and the defenders' cooldown has passed; a relief is an engagement you open against the besiegers. Defenders breaking at the wall make the siege fall and disperse the defenders still there; besiegers routed lift it. A second column joins an invested place with `JoinSiege`, and enters on its side any assault or sortie under way; `ReviseSiege { release }` lets a force on either side that is not fighting leave, so you can place it elsewhere. A siege whose last defender leaves falls `Abandoned` at its next siege day, and `LiftSiege` ends one whose last besieger leaves.
 
-A crossing sends one wave per wave interval. An interceptor whose control is high enough catches a wave by threshold or by a keyed draw; a caught wave fights a ferry fight and turns back; a landed wave may fight a bridgehead fight against the defenders on the far bank. Your game moves the force when the crossing completes.
+A crossing sends one wave per wave interval. An interceptor whose control is high enough catches a wave by threshold or by a keyed draw; a caught wave fights a ferry fight and turns back; a landed wave may fight a bridgehead fight against the defenders on the far bank, which the order names and `ReviseCrossing { defenders }` revises when a force reaches that bank later. Your game moves the force when the crossing completes.
 
 ### When a command fails
 
@@ -96,7 +96,7 @@ A command that fails admission is a rejected command attempt. A command that fai
 
 ## Knowledge and visibility
 
-Each side names its report holders: people, governments, or the force records themselves. Holders are checked when the command is admitted and again when a report is published, so a holder who has died is skipped. Progress reports (`engagement_report`) supersede the side's last; closing reports (`engagement_outcome`) are kept. A side sees its own losses exactly and the enemy's as bands from the rulebook's cuts.
+Each side names its report holders: people, governments, or the force records themselves. Holders are checked when the command is admitted and again when a report is published, so a holder who has died is skipped. Progress reports (`engagement_report`) supersede the side's last; closing reports (`engagement_outcome`) are kept. A fight, siege, or crossing whose sides name no holder queues no report, so a game that writes its own reports from the records pays the report system nothing. A side sees its own losses exactly and the enemy's as bands from the rulebook's cuts.
 
 ## Randomness, persistence, and replay
 
@@ -129,3 +129,4 @@ The walkthrough [Run the engagement engine](/en/tutorials/military-domain/) expl
 - [Event system](/en/architecture/events/): admission order and zero-delay packets
 - [Extend with plugins](/en/developer/extensions/): writing your own resolver, or a plugin that replaces this one
 - [Military engagements design](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/military-engagements.md): the contract this extension implements, with its implementation notes
+- [Military engagement revisions](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/military-engagement-revisions.md): the timed step, siege joins and releases, revised crossing defenders, and shorter fights added in 0.21.0

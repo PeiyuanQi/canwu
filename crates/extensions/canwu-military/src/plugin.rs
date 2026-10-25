@@ -20,8 +20,8 @@ use canwu_api::{
     DomainRecordLifecycle, DomainRecordMutationPolicy, DomainRecordRef, DomainRecordSchema,
     DomainRecordType, ErrorCode, IngressClass, KnowledgeHolderPolicy,
     KnowledgePublicationReservation, KnowledgeWriteGrant, PayloadSchema, PluginActionDescriptor,
-    PluginIngressDescriptor, PluginIngressTarget, PluginRegistrar, RandomStreamKey, SimTime,
-    SimulationPlugin, StateKey, StateVisibility, SystemCadence,
+    PluginIngressDescriptor, PluginIngressRequest, PluginIngressTarget, PluginRegistrar,
+    RandomStreamKey, SimTime, SimulationPlugin, StateKey, StateVisibility, SystemCadence,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -33,6 +33,9 @@ pub const MILITARY_COMMAND: &str = "military_command_v1";
 pub const MILITARY_APPLY_INGRESS: &str = "military_apply_v1";
 /// The internal packet that steps the work due by its `up_to`.
 pub const MILITARY_STEP_INGRESS: &str = "military_step_v1";
+/// The host's timed step: public plugin ingress with no payload that steps
+/// the work due by the boundary that admits it ([`timed_step_ingress`]).
+pub const MILITARY_TIMED_STEP_INGRESS: &str = "military_timed_step_v1";
 
 /// A command refused in phase 7: a recorded rejection; the boundary stands.
 pub const MILITARY_REJECTION_EVENT: &str = "canwu.military.command_rejected.v1";
@@ -50,7 +53,7 @@ pub const TERM_RESOLVER_CLAMPED: &str = "canwu.military:resolver-clamped";
 pub const TERM_RESOLVER_FAILED: &str = "canwu.military:resolver-failed";
 pub const TERM_PURSUIT: &str = "canwu.military:pursuit";
 
-pub(crate) const PLUGIN_VERSION: &str = "0.20.0";
+pub(crate) const PLUGIN_VERSION: &str = "0.21.0";
 pub(crate) const SETTLE_SYSTEM: &str = "settle-engagements-v1";
 pub(crate) const WAKE_SYSTEM: &str = "wake-engagements-on-cadence-v1";
 pub(crate) const PUBLISH_SYSTEM: &str = "publish-engagement-reports-v1";
@@ -198,10 +201,14 @@ impl<R: StepResolver> MilitaryPlugin<R> {
     /// Chooses who produces the step packet. With `Some(cadence)` the wake
     /// system (`wake-engagements-on-cadence-v1`, phase 7) schedules a step
     /// packet, due at once, in every boundary of `cadence` whose registry
-    /// has work due, so the next boundary at the same instant steps it. With
-    /// `None` the host drives stepping with the trusted `Step { up_to }`
-    /// command, sent after its inputs in one admission order, which adds no
-    /// boundary. Registration refuses `SystemCadence::EventDriven`.
+    /// has work due and which admitted no step packet, so the next boundary
+    /// at the same instant steps it. With `None` the host drives stepping
+    /// itself with the trusted `Step { up_to }` command, sent after its
+    /// inputs in one admission order and stepped in the cut that applies
+    /// them. Under either choice the host may queue a timed step
+    /// ([`timed_step_ingress`]) for a boundary it already settles, which
+    /// steps there and adds no boundary. Registration refuses
+    /// `SystemCadence::EventDriven`.
     #[must_use]
     pub fn with_step_cadence(mut self, cadence: Option<SystemCadence>) -> Self {
         self.step_cadence = cadence;
@@ -393,6 +400,15 @@ impl<R: StepResolver> SimulationPlugin for MilitaryPlugin<R> {
             class: IngressClass::ScheduledSystem,
             payload_schema: PayloadSchema::Any,
         })?;
+        // The host queues this one on its run handle, due at a boundary it
+        // settles; a payload other than null is refused at enqueue.
+        registrar.register_ingress(PluginIngressDescriptor {
+            name: MILITARY_TIMED_STEP_INGRESS.to_owned(),
+            description: "Step the engagements, sieges, and crossings due by this boundary"
+                .to_owned(),
+            class: IngressClass::ScheduledSystem,
+            payload_schema: PayloadSchema::Null,
+        })?;
 
         let step_target = PluginIngressTarget {
             target_plugin: PLUGIN_NAME.to_owned(),
@@ -412,7 +428,9 @@ impl<R: StepResolver> SimulationPlugin for MilitaryPlugin<R> {
                     BoundaryPhase::DomainDeltaProposal,
                     cadence,
                 );
-                contract.reads = vec![kind_key::<RegistryRecord>()];
+                let mut reads = vec![kind_key::<RegistryRecord>(), StateKey::core_ingress()];
+                reads.sort();
+                contract.reads = reads;
                 contract.plugin_ingress_targets = vec![step_target.clone()];
                 contract.visibility = StateVisibility::SameBoundary;
                 Some(contract)
@@ -477,6 +495,26 @@ pub fn military_command(command: &MilitaryCommandV1) -> Result<Command, CanwuErr
         payload: serde_json::to_value(command)
             .map_err(|error| CanwuError::new(ErrorCode::InvalidPayload, error.to_string()))?,
     })
+}
+
+/// The host's timed step, for its run handle's `enqueue_plugin_ingress`:
+/// due at `due_at`, it is admitted by the boundary at that instant (a daily
+/// calendar boundary the host settles anyway), whose settle system applies
+/// the apply packets that boundary admitted and then steps the engagements,
+/// sieges, and crossings due by it. Queued for an instant with no other
+/// ingress it causes a boundary of its own, as any queued ingress does; a
+/// command admitted by the same boundary applies in the next cut, after the
+/// step. Its draws cite it as their evidence. Only a run handle queues it
+/// (a restricted viewer cannot); it carries no issuer, and the host may
+/// withdraw it before it is due with `cancel_plugin_ingress`.
+#[must_use]
+pub fn timed_step_ingress(due_at: SimTime) -> PluginIngressRequest {
+    PluginIngressRequest::new(
+        PLUGIN_NAME,
+        MILITARY_TIMED_STEP_INGRESS,
+        due_at,
+        serde_json::Value::Null,
+    )
 }
 
 /// The initial-scenario records that install `rulebook` and `forces`: the
@@ -561,6 +599,15 @@ fn validate_records<R: StepResolver>(records: &[DomainRecord]) -> Result<(), Can
         } else if kind.matches_type::<EngagementRecord>() {
             let engagement: EngagementStateV1 = record.decode_payload::<EngagementRecord>()?;
             engagement.validate()?;
+            if rulebook
+                .kinds
+                .get(&engagement.kind)
+                .is_none_or(|rule| engagement.max_minutes > rule.max_minutes)
+            {
+                return Err(invalid(
+                    "an engagement runs longer than its kind rule allows",
+                ));
+            }
             for side in [&engagement.attacker, &engagement.defender] {
                 if side.forces.len() > limits.forces_per_side as usize
                     || side.holders.len() > limits.holders_per_side as usize
@@ -584,9 +631,17 @@ fn validate_records<R: StepResolver>(records: &[DomainRecord]) -> Result<(), Can
         } else if kind.matches_type::<SiegeRecord>() {
             let siege: SiegeStateV1 = record.decode_payload::<SiegeRecord>()?;
             siege.validate()?;
+            if siege.besiegers.len() > limits.forces_per_side as usize
+                || siege.defenders.len() > limits.forces_per_side as usize
+            {
+                return Err(invalid("a siege side exceeds the limits"));
+            }
         } else if kind.matches_type::<CrossingRecord>() {
             let crossing: CrossingStateV1 = record.decode_payload::<CrossingRecord>()?;
             crossing.validate()?;
+            if crossing.defenders.len() > limits.forces_per_side as usize {
+                return Err(invalid("a crossing's defenders exceed the limits"));
+            }
         }
     }
     if active_forces != registry.force_count {

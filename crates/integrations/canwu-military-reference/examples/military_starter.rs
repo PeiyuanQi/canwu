@@ -217,6 +217,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ],
                         inputs: [condition("field", 720), condition("camp", 680)],
                         environment: environment(false),
+                        max_minutes: None,
                     })),
                 )?);
             }
@@ -266,6 +267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     expected_host_revision: state.host_revision,
                     interceptor: None,
                     night: Some(true),
+                    defenders: None,
                 },
             )?);
         }

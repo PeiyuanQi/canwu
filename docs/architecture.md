@@ -1465,12 +1465,14 @@ signal; it owns no doctrine, catalogue, control, or store. Every number that
 decides a fight is a parameter of the host's versioned, hashed
 `CombatRulebookV1`; a force stands at a host `EntityRef` the host places, and
 the plugin owns only its battle state. A fight steps only in a boundary that
-admits the plugin's step packet, which the optional wake system or the host's
-trusted `Step` command produces; each step is written with every per-step
-quantity, and a closed fight leaves a create-only summary. The plugin writes
-only its own records: a fallen site is a fact in the summary, never an
-occupation. See the
-[military engagements proposal](proposals/military-engagements.md).
+admits a step packet, which the optional wake system, the host's trusted
+`Step` command, or a timed step the host queues for a boundary it already
+settles (public plugin ingress, so it adds no boundary) produces; each step
+is written with every per-step quantity, and a closed fight leaves a
+create-only summary. The plugin writes only its own records: a fallen site
+is a fact in the summary, never an occupation. See the
+[military engagements proposal](proposals/military-engagements.md) and its
+0.21.0 [revisions](proposals/military-engagement-revisions.md).
 
 `canwu-economy-reference` composes these packages with routing and transport in
 a runnable synthetic grain loop. It also provides detached, holder-bound local

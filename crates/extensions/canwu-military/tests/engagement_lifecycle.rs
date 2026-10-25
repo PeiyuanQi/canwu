@@ -104,6 +104,7 @@ fn script(host: &mut Host, day: i64) {
                     holders: [vec![person(1), force_holder("red-1")], vec![government(2)]],
                     inputs: [condition("field", 700), condition("camp", 700)],
                     environment: environment(false),
+                    max_minutes: None,
                 })),
             ),
             (
@@ -176,6 +177,7 @@ fn script(host: &mut Host, day: i64) {
                         expected_host_revision: crossing.host_revision,
                         interceptor: None,
                         night: Some(true),
+                        defenders: None,
                     },
                 ),
             ]
@@ -230,6 +232,7 @@ fn script(host: &mut Host, day: i64) {
                         holders: [vec![government(2)], vec![person(1)]],
                         inputs: [condition("field", 600), condition("camp", 750)],
                         environment: environment(false),
+                        max_minutes: None,
                     })),
                 ),
             ]

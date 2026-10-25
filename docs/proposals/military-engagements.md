@@ -15,6 +15,14 @@ mechanics in Canwu, the historical content and policy in the host. It changes
 compatibility work with 0.19.0 records, hashes, or the 0.19.0 crate's public
 API. It supersedes `military-domain-design.md`.
 
+Extended in 0.21.0 by
+[military engagement revisions](military-engagement-revisions.md)
+(downstream gaps G-85 to G-90): a subject with no report holder queues no
+report, a fight may be opened shorter than its kind, `JoinSiege` and
+`ReviseSiegeV1.release` change a siege's sides, `ReviseCrossing` revises the
+defenders, and a host may queue a timed step; where that proposal and the
+sections below differ, it states the 0.21.0 contract.
+
 "Today" means 0.19.0 as it is on `main`.
 
 ## Contents

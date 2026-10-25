@@ -82,6 +82,10 @@ pub struct OpenEngagementV1 {
     pub holders: [Vec<KnowledgeHolderRef>; 2],
     pub inputs: [ConditionInputV1; 2],
     pub environment: EnvironmentInputV1,
+    /// How long the fight may run before it closes `Stalled`: `None` takes
+    /// the kind rule's `max_minutes`; a value must be from 1 to the kind
+    /// rule's (a one-day fight of a kind whose rule runs several days).
+    pub max_minutes: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -116,6 +120,12 @@ pub struct ReviseSiegeV1 {
     /// Orders one sortie once the defenders' cooldown has passed.
     pub sortie: bool,
     pub storm_on: Option<StormRule>,
+    /// Releases these forces from the siege, from either side: each leaves
+    /// its side's list and its siege role, free to be placed. A force in a
+    /// fight is refused, and so is a release that would leave no besieger
+    /// (`LiftSiege` ends a siege). A siege left with no defender at the site
+    /// falls `Abandoned` at its next siege day.
+    pub release: Vec<ForceId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -172,6 +182,17 @@ pub enum MilitaryCommandV1 {
         side: Side,
         forces: Vec<ForceId>,
     },
+    /// Adds free forces at the site to an open siege: the besiegers
+    /// (`Attacker`) or the defenders (`Defender`). While the siege's assault
+    /// or sortie is in progress the forces also enter it on their side (the
+    /// besiegers are an assault's attackers and a sortie's defenders), as
+    /// `JoinEngagement` would, and its host revision advances.
+    JoinSiege {
+        siege: SiegeId,
+        expected_host_revision: u64,
+        side: Side,
+        forces: Vec<ForceId>,
+    },
     SupplyInput {
         target: InputTargetV1,
         expected_host_revision: u64,
@@ -202,13 +223,20 @@ pub enum MilitaryCommandV1 {
         expected_host_revision: u64,
         interceptor: Option<InterceptorRevisionV1>,
         night: Option<bool>,
+        /// The forces that resist the next landings, checked as
+        /// `OrderCrossing` checks its own: each at the far bank, not the
+        /// crossing force, within the side limit. A fight in progress keeps
+        /// its sides.
+        defenders: Option<Vec<ForceId>>,
     },
     CancelCrossing {
         crossing: CrossingId,
         expected_host_revision: u64,
     },
     /// From a trusted issuer: steps the work due by `up_to` in the next
-    /// boundary at once, after the apply packets admitted with it.
+    /// boundary at once, after the apply packets admitted with it. A host
+    /// that steps at a boundary it already settles queues a timed step
+    /// instead ([`crate::timed_step_ingress`]), which adds no boundary.
     Step {
         up_to: SimTime,
     },
@@ -509,12 +537,18 @@ fn static_checks(command: &MilitaryCommandV1) -> Result<(), CanwuError> {
             disjoint_sides(&open.attackers, &open.defenders)?;
             distinct_holders(&open.holders)?;
         }
-        MilitaryCommandV1::JoinEngagement { forces, .. } => {
+        MilitaryCommandV1::JoinEngagement { forces, .. }
+        | MilitaryCommandV1::JoinSiege { forces, .. } => {
             if forces.is_empty() {
                 return Err(payload("a join names no forces"));
             }
             disjoint_sides(forces, &[])?;
         }
+        MilitaryCommandV1::ReviseSiege(revise) => disjoint_sides(&revise.release, &[])?,
+        MilitaryCommandV1::ReviseCrossing {
+            defenders: Some(defenders),
+            ..
+        } => disjoint_sides(defenders, &[])?,
         MilitaryCommandV1::InvestSite(invest) => {
             if invest.besiegers.is_empty() {
                 return Err(payload("a siege needs besiegers"));
@@ -647,6 +681,27 @@ fn check_holders(
 fn single_owner(forces: &[ForceStateV1]) -> Result<(), CanwuError> {
     if forces.windows(2).any(|pair| pair[0].owner != pair[1].owner) {
         return Err(payload("a side has forces of more than one owner"));
+    }
+    Ok(())
+}
+
+/// A crossing's defenders, as an order or a revision names them: within the
+/// side limit, not the crossing force, each registered and at the far bank.
+fn check_defenders(
+    run: &Run<'_, '_>,
+    rulebook: &CombatRulebookV1,
+    crossing_force: &ForceId,
+    to: &EntityRef,
+    defenders: &[ForceId],
+) -> Result<(), CanwuError> {
+    check_side_size(rulebook, defenders)?;
+    if defenders.contains(crossing_force) {
+        return Err(payload("a force cannot defend against its own crossing"));
+    }
+    for id in defenders {
+        if !load_force(run, id)?.location.is_at(to) {
+            return Err(payload(format!("defender {id} is not at the far bank")));
+        }
     }
     Ok(())
 }
@@ -795,6 +850,12 @@ pub(crate) fn apply(
             *side,
             forces,
         ),
+        MilitaryCommandV1::JoinSiege {
+            siege,
+            expected_host_revision,
+            side,
+            forces,
+        } => join_siege(run, issuer, siege, *expected_host_revision, *side, forces),
         MilitaryCommandV1::SupplyInput {
             target,
             expected_host_revision,
@@ -892,10 +953,44 @@ pub(crate) fn apply(
             expected_host_revision,
             interceptor,
             night,
+            defenders,
         } => {
             let rulebook = require_rulebook(run)?;
             let mut state = open_crossing(run, crossing)?;
             check_revision(state.host_revision, *expected_host_revision, "the crossing")?;
+            if let Some(defenders) = defenders {
+                check_defenders(run, &rulebook, &state.force, &state.to, defenders)?;
+                // The order named the defenders, so the crossing force's
+                // controller may name them again; a defender's controller
+                // speaks for its own bank (as for an interceptor) and drops
+                // only the forces it controls.
+                let ordered = trusted(&rulebook, issuer)
+                    || controls(&rulebook, issuer, &load_force(run, &state.force)?);
+                if !ordered {
+                    if !controls_any(
+                        run,
+                        &rulebook,
+                        issuer,
+                        state.defenders.iter().chain(defenders),
+                    )? {
+                        return Err(authority(
+                            "the issuer controls neither the crossing force nor a defender",
+                        ));
+                    }
+                    // A force no longer registered may be dropped by anyone
+                    // who speaks for the bank.
+                    for removed in state.defenders.iter().filter(|id| !defenders.contains(id)) {
+                        if let Some(force) = run.get(&force_reference(removed))?
+                            && !controls(&rulebook, issuer, &force)
+                        {
+                            return Err(authority(format!(
+                                "the issuer does not control {removed}, which it would remove"
+                            )));
+                        }
+                    }
+                }
+                state.defenders.clone_from(defenders);
+            }
             if let Some(revision) = interceptor {
                 let mut controllers: Vec<&ForceId> =
                     state.interceptor.iter().map(|input| &input.force).collect();
@@ -1050,6 +1145,14 @@ fn open_command(
         .kinds
         .get(&open.kind)
         .ok_or_else(|| payload("the engagement kind has no rule"))?;
+    if let Some(minutes) = open.max_minutes
+        && (minutes == 0 || minutes > kind_rule.max_minutes)
+    {
+        return Err(over(format!(
+            "a fight of {minutes} minutes is outside 1 to the kind rule's {}",
+            kind_rule.max_minutes
+        )));
+    }
     let profile = open
         .profile
         .clone()
@@ -1148,6 +1251,7 @@ fn open_command(
             ],
             environment: Some((open.environment.clone(), at)),
             men_caps: [None, None],
+            max_minutes: open.max_minutes,
             opened_at: at,
         },
     )
@@ -1196,6 +1300,159 @@ fn join_engagement(
     crate::settle::join_side(run, &rulebook, &mut state, side, joining)?;
     state.host_revision += 1;
     run.put(&reference, &state)
+}
+
+/// The owner of a side: that of its first force still registered.
+fn side_owner(run: &Run<'_, '_>, forces: &[ForceId]) -> Result<Option<EntityRef>, CanwuError> {
+    for id in forces {
+        if let Some(force) = run.get(&force_reference(id))? {
+            return Ok(Some(force.owner));
+        }
+    }
+    Ok(None)
+}
+
+/// Adds free forces at the site to one side of an open siege; the siege
+/// reads them from its next siege day that runs. When the siege's assault or
+/// sortie is in progress the forces also enter it on their side, as
+/// `JoinEngagement` would, within both side limits.
+fn join_siege(
+    run: &mut Run<'_, '_>,
+    issuer: &Issuer,
+    siege: &SiegeId,
+    expected: u64,
+    side: Side,
+    forces: &[ForceId],
+) -> Result<(), CanwuError> {
+    let rulebook = require_rulebook(run)?;
+    let mut state = open_siege(run, siege)?;
+    check_revision(state.host_revision, expected, "the siege")?;
+    let (listed, opposite) = match side {
+        Side::Attacker => (state.besiegers.clone(), state.defenders.clone()),
+        Side::Defender => (state.defenders.clone(), state.besiegers.clone()),
+    };
+    let mut all = listed.clone();
+    all.extend(forces.iter().cloned());
+    check_side_size(&rulebook, &all)?;
+    // The siege's fight in progress: the besiegers are an assault's
+    // attackers and a sortie's defenders.
+    let fight = match &state.engagement {
+        Some(id) => run
+            .get(&engagement_reference(id))?
+            .filter(|engagement| !engagement.is_closed()),
+        None => None,
+    };
+    // Only `open_siege_fight` sets `siege.engagement`: an assault or a sortie.
+    debug_assert!(fight.as_ref().is_none_or(|engagement| matches!(
+        engagement.kind,
+        EngagementKind::Assault | EngagementKind::Sortie
+    )));
+    let fight_side = match &fight {
+        Some(engagement) if engagement.kind == EngagementKind::Sortie => side.other(),
+        _ => side,
+    };
+    if let Some(engagement) = &fight {
+        let mut all = engagement.side(fight_side).forces.clone();
+        all.extend(forces.iter().cloned());
+        check_side_size(&rulebook, &all)?;
+    }
+    let owner = side_owner(run, &listed)?;
+    let opposing = side_owner(run, &opposite)?;
+    let mut joining = Vec::new();
+    for id in forces {
+        if state.besiegers.contains(id) || state.defenders.contains(id) {
+            return Err(payload(format!("force {id} is in the siege already")));
+        }
+        let force = load_force(run, id)?;
+        if !force.location.is_at(&state.site) || !force.is_free() {
+            return Err(payload(format!("force {id} is not free at the site")));
+        }
+        if !controls(&rulebook, issuer, &force) {
+            return Err(authority(format!("the issuer does not control {id}")));
+        }
+        if owner.as_ref().is_some_and(|owner| owner != &force.owner) {
+            return Err(payload("a side has forces of more than one owner"));
+        }
+        if opposing.as_ref() == Some(&force.owner) {
+            return Err(payload(format!(
+                "force {id} would face forces of its own owner"
+            )));
+        }
+        joining.push(force);
+    }
+    single_owner(&joining)?;
+    for force in &mut joining {
+        force.battle.siege_role = Some(match side {
+            Side::Attacker => SiegeRoleV1::Besieging {
+                siege: siege.clone(),
+            },
+            Side::Defender => SiegeRoleV1::Defending {
+                siege: siege.clone(),
+            },
+        });
+    }
+    match fight {
+        Some(mut engagement) => {
+            crate::settle::join_side(run, &rulebook, &mut engagement, fight_side, joining)?;
+            engagement.host_revision += 1;
+            run.put(&engagement_reference(&engagement.id.clone()), &engagement)?;
+        }
+        None => {
+            for force in joining {
+                run.put(&force_reference(&force.id.clone()), &force)?;
+            }
+        }
+    }
+    match side {
+        Side::Attacker => state.besiegers.extend(forces.iter().cloned()),
+        Side::Defender => state.defenders.extend(forces.iter().cloned()),
+    }
+    state.host_revision += 1;
+    run.put(&siege_reference(siege), &state)
+}
+
+/// Releases forces from a siege: each leaves its side and its siege role.
+fn release_from_siege(
+    run: &mut Run<'_, '_>,
+    rulebook: &CombatRulebookV1,
+    issuer: &Issuer,
+    state: &mut SiegeStateV1,
+    release: &[ForceId],
+) -> Result<(), CanwuError> {
+    if release.is_empty() {
+        return Ok(());
+    }
+    if state.besiegers.iter().all(|id| release.contains(id)) {
+        return Err(payload(
+            "a release would leave the siege without a besieger; LiftSiege ends it",
+        ));
+    }
+    for id in release {
+        if !state.besiegers.contains(id) && !state.defenders.contains(id) {
+            return Err(payload(format!("force {id} is not in the siege")));
+        }
+        let mut force = load_force(run, id)?;
+        if !controls(rulebook, issuer, &force) {
+            return Err(authority(format!("the issuer does not control {id}")));
+        }
+        if force.battle.engaged_in.is_some() {
+            return Err(payload(format!(
+                "force {id} is in a fight and cannot leave the siege"
+            )));
+        }
+        if force
+            .battle
+            .siege_role
+            .as_ref()
+            .is_some_and(|role| role.siege() == &state.id)
+        {
+            force.battle.siege_role = None;
+        }
+        run.put(&force_reference(id), &force)?;
+    }
+    state.besiegers.retain(|id| !release.contains(id));
+    state.defenders.retain(|id| !release.contains(id));
+    Ok(())
 }
 
 fn supply_input(
@@ -1446,6 +1703,11 @@ fn invest_site(
     }
     single_owner(&besiegers)?;
     single_owner(&defenders)?;
+    if let (Some(besieger), Some(defender)) = (besiegers.first(), defenders.first())
+        && besieger.owner == defender.owner
+    {
+        return Err(payload("besiegers and defenders have one owner"));
+    }
     let at = run.at;
     let state = SiegeStateV1 {
         schema_version: SCHEMA_VERSION,
@@ -1537,6 +1799,7 @@ fn revise_siege(
     {
         return Err(authority("the storm is the besiegers' order"));
     }
+    release_from_siege(run, &rulebook, issuer, &mut state, &revise.release)?;
     let at = run.at;
     if revise.sortie {
         if !is_trusted && !controls_any(run, &rulebook, issuer, state.defenders.iter())? {
@@ -1615,7 +1878,6 @@ fn order_crossing(
     if run.exists_any(crossing_reference(&order.id).as_untyped())? {
         return Err(payload(format!("crossing {} exists already", order.id)));
     }
-    check_side_size(&rulebook, &order.defenders)?;
     check_holders(&rulebook, &order.holders)?;
     for input in &order.inputs {
         check_condition(&rulebook, input)?;
@@ -1628,12 +1890,7 @@ fn order_crossing(
     if !controls(&rulebook, issuer, &force) {
         return Err(authority("the issuer does not control the crossing force"));
     }
-    for id in &order.defenders {
-        let defender = load_force(run, id)?;
-        if !defender.location.is_at(&order.to) {
-            return Err(payload(format!("defender {id} is not at the far bank")));
-        }
-    }
+    check_defenders(run, &rulebook, &order.force, &order.to, &order.defenders)?;
     if let Some(interceptor) = &order.interceptor {
         if interceptor.force == order.force {
             return Err(payload("a force cannot intercept its own crossing"));

@@ -212,6 +212,10 @@ pub struct EngagementStateV1 {
     pub environment: Option<(EnvironmentInputV1, SimTime)>,
     pub forecast: ForecastV1,
     pub opened_at: SimTime,
+    /// A fight that has not broken this many minutes after it opened closes
+    /// `Stalled`: the kind rule's `max_minutes`, or the shorter duration the
+    /// host named when it opened the fight.
+    pub max_minutes: u32,
     pub last_step_at: SimTime,
     pub next_step_at: SimTime,
     pub steps_resolved: u32,
@@ -248,6 +252,7 @@ impl EngagementStateV1 {
     pub fn validate(&self) -> Result<(), CanwuError> {
         validate_id(self.id.as_str(), "engagement")?;
         if self.schema_version != SCHEMA_VERSION
+            || self.max_minutes == 0
             || self.attacker.forces.is_empty()
             || self.defender.forces.is_empty()
         {

@@ -54,7 +54,7 @@ military_starter=complete engagements=3 signals=3 checkpoint=…
 `}
 />
 
-起步示例的规则册信任参考宿主的 `System` 签发方。每条命令都是一个 `MilitaryCommandV1`，通过 `military_command()` 经规范化输入发送；修改记录的命令要写明该记录的 `expected_host_revision`。引擎只在接收了战斗步包的结算边界推进战斗：这里由默认的唤醒系统在每个有到期工作的每日日历结算边界排入一个战斗步包。想自己驱动推进的宿主可以构造 `MilitaryPlugin::new().with_step_cadence(None)`，并在发送输入之后发送 `Step { up_to }`。
+起步示例的规则册信任参考宿主的 `System` 签发方。每条命令都是一个 `MilitaryCommandV1`，通过 `military_command()` 经规范化输入发送；修改记录的命令要写明该记录的 `expected_host_revision`。引擎只在接收了战斗步包的结算边界推进战斗：这里由默认的唤醒系统在每个有到期工作的每日日历结算边界排入一个战斗步包。想自己驱动推进的宿主可以构造 `MilitaryPlugin::new().with_step_cadence(None)`，并在发送输入之后发送 `Step { up_to }`；也可以为自己本来就要结算的每日结算边界排入一个定时战斗步（`timed_step_ingress`），这样推进不会额外增加结算边界。
 
 ## 起步示例做了什么
 
@@ -85,6 +85,7 @@ MilitaryCommandV1::OpenEngagement(Box::new(OpenEngagementV1 {
     ],
     inputs: [condition("field", 720), condition("camp", 680)],
     environment: environment(false),
+    max_minutes: None,
 }))
 ```
 
