@@ -3076,9 +3076,52 @@ impl CompactedSimulation {
         self.simulation.knowledge()
     }
 
+    /// See [`Simulation::knowledge_heads`]: a holder's current records of
+    /// one kind from the committed ledger's index, as a boundary system
+    /// reads them.
+    pub fn knowledge_heads(
+        &self,
+        holder: &canwu_core::KnowledgeHolderRef,
+        kind: &canwu_core::KnowledgeRecordKind,
+        subjects: &[super::KnowledgeSubject],
+    ) -> Result<super::KnowledgeHeads, CanwuError> {
+        self.simulation.knowledge_heads(holder, kind, subjects)
+    }
+
+    /// See [`Simulation::knowledge_current_records`]: the holder-relative
+    /// views of a holder's current records of one kind, newest first.
+    pub fn knowledge_current_records<'a>(
+        &'a self,
+        holder: &'a canwu_core::KnowledgeHolderRef,
+        kind: &'a canwu_core::KnowledgeRecordKind,
+        subjects: &'a [super::KnowledgeSubject],
+    ) -> impl Iterator<Item = super::KnowledgeRecordView> + 'a {
+        self.simulation
+            .knowledge_current_records(holder, kind, subjects)
+    }
+
     #[must_use]
     pub fn domain_record(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
         self.simulation.domain_record(reference)
+    }
+
+    /// See [`Simulation::domain_record_shared`]: the run's own shared copy
+    /// of a record's current version.
+    #[must_use]
+    pub fn domain_record_shared(
+        &self,
+        reference: &DomainRecordRef,
+    ) -> Option<std::sync::Arc<DomainRecord>> {
+        self.simulation.domain_record_shared(reference)
+    }
+
+    /// See [`Simulation::domain_records_of_kind`]: the current records of
+    /// one kind, in reference order.
+    pub fn domain_records_of_kind(
+        &self,
+        kind: &super::DomainRecordKind,
+    ) -> impl Iterator<Item = &DomainRecord> + '_ {
+        self.simulation.domain_records_of_kind(kind)
     }
 
     /// See [`Simulation::replay_stable_domain_record_version`]: the body and

@@ -43,6 +43,7 @@ fn restricted_viewer_has_no_raw_admin_snapshot_surface() {
         ("viewer-domain-leak", "domain_records"),
         ("viewer-boundary-leak", "boundaries"),
         ("viewer-ingress-leak", "pending_ingress"),
+        ("viewer-knowledge-leak", "knowledge_current_records"),
     ] {
         let output = compile_fixture(&["--features", feature]);
         assert!(

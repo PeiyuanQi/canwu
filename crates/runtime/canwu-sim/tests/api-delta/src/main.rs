@@ -205,6 +205,16 @@ fn leak_pending_ingress(canwu: &canwu_api::Canwu) {
     let _ = viewer.pending_ingress();
 }
 
+#[cfg(feature = "viewer-knowledge-leak")]
+fn leak_current_knowledge_records(canwu: &canwu_api::Canwu) {
+    let viewer = canwu
+        .viewer()
+        .expect("fixture only checks the public type surface");
+    let holder = KnowledgeHolderRef::Person(PersonId::new(1));
+    let kind = KnowledgeRecordKind::new("fixture", "compile");
+    let _ = viewer.knowledge_current_records(&holder, &kind, &[]);
+}
+
 fn main() {
     let record = construct_record();
     assert_eq!(record.upper_exclusive, 10);
@@ -234,5 +244,9 @@ fn main() {
     #[cfg(feature = "viewer-ingress-leak")]
     {
         let _ = leak_pending_ingress;
+    }
+    #[cfg(feature = "viewer-knowledge-leak")]
+    {
+        let _ = leak_current_knowledge_records;
     }
 }

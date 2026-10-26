@@ -57,6 +57,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// Format of a hot terminal bucket ([`ResourceHotTerminalBucketV1`]). 2 since
 /// 0.20.0: the bucket declares its entries' exact evidence identity-only.
@@ -842,7 +843,9 @@ pub fn resource_live_bucket(key: &ResourceLiveRecordKeyV1, buckets: u32) -> u32 
 }
 
 /// The two bucket spaces: what parsing a stored bucket of either needs.
-trait BucketKey: Ord + Clone + DeserializeOwned {
+trait BucketKey: Ord + Clone + std::fmt::Debug + DeserializeOwned {
+    /// The decoded entry a bucket of this space holds.
+    type Entry: Clone + std::fmt::Debug;
     const FORMAT_VERSION: u32;
     /// Whether the bucket's identity-only declaration may name evidence.
     const DECLARES_EVIDENCE: bool;
@@ -851,6 +854,7 @@ trait BucketKey: Ord + Clone + DeserializeOwned {
 }
 
 impl BucketKey for ResourceTerminalRecordKeyV1 {
+    type Entry = ResourceHotTerminalEntryV1;
     const FORMAT_VERSION: u32 = RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION;
     const DECLARES_EVIDENCE: bool = true;
 
@@ -864,6 +868,7 @@ impl BucketKey for ResourceTerminalRecordKeyV1 {
 }
 
 impl BucketKey for ResourceLiveRecordKeyV1 {
+    type Entry = ResourceLiveEntryV1;
     const FORMAT_VERSION: u32 = RESOURCE_LIVE_BUCKET_FORMAT_VERSION;
     const DECLARES_EVIDENCE: bool = false;
 
@@ -1700,10 +1705,12 @@ fn invalid(message: impl Into<String>) -> CanwuError {
 /// grants, definitions, and unit revisions, which its ledgers count and its
 /// buckets hold.
 ///
-/// It encodes as that state does. Read a root through
-/// [`crate::resource_state`] (host application) or
-/// [`resource_root_in_view`] (boundary system or admission), which attach
-/// the bucketed records; the live root alone answers no question about them.
+/// It encodes as that state does. Read a root through a
+/// [`ResourceRootReader`] ([`ResourceRootReader::load_run`] in a host
+/// application, [`ResourceRootReader::load`] in a boundary system or
+/// admission), [`crate::resource_state`], or [`resource_root_in_view`], which
+/// attach the bucketed records; the live root alone answers no question
+/// about them.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct ResourceLiveRootV1(ResourceState);
@@ -1783,27 +1790,36 @@ fn bucket_record(reference: DomainRecordRef, payload: Value) -> Result<DomainRec
 }
 
 /// Where buckets are read: the simulation view of a boundary system or
-/// admission, or the host application's runtime.
-pub(crate) trait HotTerminalSource {
+/// admission, or the host application's runtime. A source is a handle whose
+/// records live for `'s`, so the work that reads it may own it.
+pub(crate) trait HotTerminalSource<'s> {
     fn hot_terminal_record(
         &self,
         reference: &DomainRecordRef,
-    ) -> Result<Option<&DomainRecord>, CanwuError>;
+    ) -> Result<Option<&'s DomainRecord>, CanwuError>;
 
     /// The references of every stored bucket, hot terminal and live, so a
     /// whole read visits the buckets that exist rather than every index.
     fn bucket_references(&self) -> Result<Vec<DomainRecordRef>, CanwuError>;
+
+    /// The run's own shared copy of a record ([`CanwuRun::domain_record_shared`]),
+    /// which a kept root holds to tell an unchanged record from a changed one,
+    /// or `None` from a source that keeps no shared copies (a view).
+    fn shared_record(&self, _reference: &DomainRecordRef) -> Option<Arc<DomainRecord>> {
+        None
+    }
 }
 
 /// Records one page of a bucket listing reads.
 const BUCKET_LISTING_PAGE: usize = 4_096;
 
-impl HotTerminalSource for SimulationView<'_> {
+impl<'s> HotTerminalSource<'s> for &'s SimulationView<'_> {
     fn hot_terminal_record(
         &self,
         reference: &DomainRecordRef,
-    ) -> Result<Option<&DomainRecord>, CanwuError> {
-        self.domain_record(reference)
+    ) -> Result<Option<&'s DomainRecord>, CanwuError> {
+        let view: &'s SimulationView<'_> = self;
+        view.domain_record(reference)
     }
 
     fn bucket_references(&self) -> Result<Vec<DomainRecordRef>, CanwuError> {
@@ -1825,43 +1841,228 @@ impl HotTerminalSource for SimulationView<'_> {
 /// read as the source of a resource root's buckets.
 struct RunSource<'r, H: ?Sized>(&'r H);
 
-impl<H: CanwuRun + ?Sized> HotTerminalSource for RunSource<'_, H> {
+impl<'r, H: CanwuRun + ?Sized> HotTerminalSource<'r> for RunSource<'r, H> {
     fn hot_terminal_record(
         &self,
         reference: &DomainRecordRef,
-    ) -> Result<Option<&DomainRecord>, CanwuError> {
-        Ok(self.0.domain_record(reference))
+    ) -> Result<Option<&'r DomainRecord>, CanwuError> {
+        let run: &'r H = self.0;
+        Ok(run.domain_record(reference))
     }
 
     fn bucket_references(&self) -> Result<Vec<DomainRecordRef>, CanwuError> {
+        let kind = canwu_api::DomainRecordKind::for_type::<ResourceBucketRecord>();
         Ok(self
             .0
-            .domain_records()
-            .filter(|record| record.reference.kind.matches_type::<ResourceBucketRecord>())
+            .domain_records_of_kind(&kind)
             .map(|record| record.reference.clone())
             .collect())
+    }
+
+    fn shared_record(&self, reference: &DomainRecordRef) -> Option<Arc<DomainRecord>> {
+        run_shared_record(self.0, reference)
+    }
+}
+
+/// The run's shared copy of a record, only when it is the very allocation
+/// [`CanwuRun::domain_record`] reads: a run that answers with another copy
+/// (a fresh one per call, or one cached by version) offers nothing to reuse,
+/// so a kept root never vouches for content it did not read.
+fn run_shared_record<H: CanwuRun + ?Sized>(
+    run: &H,
+    reference: &DomainRecordRef,
+) -> Option<Arc<DomainRecord>> {
+    let read = run.domain_record(reference)?;
+    run.domain_record_shared(reference)
+        .filter(|shared| std::ptr::eq(Arc::as_ptr(shared), read))
+}
+
+/// What a [`ResourceRootReader`] reads: a boundary's view, or a run handle
+/// (behind a box, so a reader over any handle has one type).
+enum ReaderSource<'v, 'a> {
+    View(&'v SimulationView<'a>),
+    Run(Box<dyn HotTerminalSource<'v> + 'v>),
+}
+
+impl<'v> HotTerminalSource<'v> for ReaderSource<'v, '_> {
+    fn hot_terminal_record(
+        &self,
+        reference: &DomainRecordRef,
+    ) -> Result<Option<&'v DomainRecord>, CanwuError> {
+        match self {
+            Self::View(view) => view.hot_terminal_record(reference),
+            Self::Run(run) => run.hot_terminal_record(reference),
+        }
+    }
+
+    fn bucket_references(&self) -> Result<Vec<DomainRecordRef>, CanwuError> {
+        match self {
+            Self::View(view) => view.bucket_references(),
+            Self::Run(run) => run.bucket_references(),
+        }
+    }
+
+    fn shared_record(&self, reference: &DomainRecordRef) -> Option<Arc<DomainRecord>> {
+        match self {
+            Self::View(_) => None,
+            Self::Run(run) => run.shared_record(reference),
+        }
     }
 }
 
 /// One bucket as it was stored when the work read it: its version, and each
 /// entry's encoded value by key. An entry is decoded only when attached.
-struct StoredBucket<'s, K> {
+struct StoredBucket<'s, K: BucketKey> {
     version: Option<u64>,
     entries: BTreeMap<K, &'s Value>,
     /// The bucket's identity-only declaration as it was stored.
     declared: IdentityEvidenceDependenciesV1,
+    /// The run's own shared copy of the bucket record, when the source keeps
+    /// one: a kept root holds it to know the bucket again.
+    shared: Option<Arc<DomainRecord>>,
+    /// Entries of this very record decoded by an earlier reader, with their
+    /// encoded sizes, taken instead of decoding them again.
+    decoded: BTreeMap<K, (K::Entry, u64)>,
 }
 
-/// A hot terminal record attached by the work, as it was stored.
+impl<K: BucketKey> StoredBucket<'_, K> {
+    /// A bucket that is not stored.
+    fn absent() -> Self {
+        Self {
+            version: None,
+            entries: BTreeMap::new(),
+            declared: empty_declaration(),
+            shared: None,
+            decoded: BTreeMap::new(),
+        }
+    }
+
+    /// What a kept root keeps of this bucket: the record, the parsed keys,
+    /// the declaration, and the kept decodes of entries not attached (the
+    /// attached ones are kept with the state).
+    fn keep(self) -> KeptBucket<K> {
+        let record = match (self.version, self.shared) {
+            (None, _) => KeptRecord::Absent,
+            (Some(_), Some(shared)) => KeptRecord::Shared(shared),
+            (Some(_), None) => KeptRecord::Unshared,
+        };
+        KeptBucket {
+            record,
+            version: self.version,
+            keys: self.entries.into_keys().collect(),
+            declared: self.declared,
+            decoded: self.decoded,
+        }
+    }
+}
+
+/// A bucket record as a kept root saw it.
+#[derive(Clone, Debug)]
+enum KeptRecord {
+    /// No such bucket was stored.
+    Absent,
+    /// The run's own copy of the stored record.
+    Shared(Arc<DomainRecord>),
+    /// A stored record whose source kept no shared copy: never reused.
+    Unshared,
+}
+
+/// One bucket a reader read, kept so that a later reader of the same record
+/// neither parses nor decodes it again.
+#[derive(Clone, Debug)]
+struct KeptBucket<K: BucketKey> {
+    record: KeptRecord,
+    version: Option<u64>,
+    /// The record's keys, in the order of its entries.
+    keys: Vec<K>,
+    declared: IdentityEvidenceDependenciesV1,
+    decoded: BTreeMap<K, (K::Entry, u64)>,
+}
+
+impl<K: BucketKey> KeptBucket<K> {
+    /// Whether `source` holds the very record this bucket was read from, or
+    /// still no record where none was stored.
+    fn still_held<'s, S: HotTerminalSource<'s> + ?Sized>(&self, source: &S, bucket: u32) -> bool {
+        match (&self.record, source.shared_record(&K::reference(bucket))) {
+            (KeptRecord::Absent, None) => true,
+            (KeptRecord::Shared(kept), Some(now)) => Arc::ptr_eq(kept, &now),
+            _ => false,
+        }
+    }
+
+    /// The stored bucket again, from the record `source` holds, which
+    /// [`Self::still_held`] found to be the one it was read from.
+    fn restore<'s, S: HotTerminalSource<'s> + ?Sized>(
+        self,
+        source: &S,
+        bucket: u32,
+    ) -> Result<StoredBucket<'s, K>, CanwuError> {
+        let KeptRecord::Shared(shared) = self.record else {
+            return Ok(StoredBucket::absent());
+        };
+        let record = source
+            .hot_terminal_record(&K::reference(bucket))?
+            .ok_or_else(|| invalid("a kept resource bucket is no longer stored"))?;
+        let values = record
+            .payload
+            .get("entries")
+            .and_then(Value::as_array)
+            .filter(|values| values.len() == self.keys.len())
+            .ok_or_else(|| invalid("a kept resource bucket differs from its stored record"))?;
+        Ok(StoredBucket {
+            version: self.version,
+            entries: self.keys.into_iter().zip(values).collect(),
+            declared: self.declared,
+            shared: Some(shared),
+            decoded: self.decoded,
+        })
+    }
+}
+
+/// Reads bucket `bucket` of a space of `count` buckets: from `inherited`
+/// when a kept root read this very record, otherwise from `source`, counting
+/// a stored bucket it parses in `parsed`.
+fn read_bucket<'s, K: BucketKey, S: HotTerminalSource<'s> + ?Sized>(
+    source: &S,
+    bucket: u32,
+    count: u32,
+    inherited: &mut BTreeMap<u32, KeptBucket<K>>,
+    parsed: &mut usize,
+) -> Result<StoredBucket<'s, K>, CanwuError> {
+    if let Some(kept) = inherited.remove(&bucket) {
+        return kept.restore(source, bucket);
+    }
+    let reference = K::reference(bucket);
+    let Some(record) = source.hot_terminal_record(&reference)? else {
+        return Ok(StoredBucket::absent());
+    };
+    let (_, entries, declared) = stored_bucket_entries(record, count)?;
+    *parsed += 1;
+    Ok(StoredBucket {
+        version: Some(record.version),
+        entries,
+        declared,
+        shared: source.shared_record(&reference),
+        decoded: BTreeMap::new(),
+    })
+}
+
+/// A hot terminal record attached by the work, as it was stored, with its
+/// encoded size.
+#[derive(Clone, Debug)]
 struct AttachedEntry {
     bucket: u32,
     entry: ResourceHotTerminalEntryV1,
+    size: u64,
 }
 
-/// A live record attached by the work, as it was stored.
+/// A live record attached by the work, as it was stored, with its encoded
+/// size.
+#[derive(Clone, Debug)]
 struct AttachedLive {
     bucket: u32,
     entry: ResourceLiveEntryV1,
+    size: u64,
 }
 
 /// The keys of one stored bucket of a space with `count` buckets, with each
@@ -1986,10 +2187,43 @@ fn stored_hot_facts(
     Ok((Some(requester), policy))
 }
 
+/// The indexes of the buckets `source` stores: hot terminal, then live.
+fn stored_bucket_indexes<'s, S: HotTerminalSource<'s> + ?Sized>(
+    source: &S,
+) -> Result<(Vec<u32>, Vec<u32>), CanwuError> {
+    let mut hot = Vec::new();
+    let mut live = Vec::new();
+    for reference in source.bucket_references()? {
+        let (space, index) =
+            if let Some(index) = reference.id.strip_prefix(HOT_TERMINAL_BUCKET_PREFIX) {
+                (&mut hot, index)
+            } else if let Some(index) = reference.id.strip_prefix(LIVE_BUCKET_PREFIX) {
+                (&mut live, index)
+            } else {
+                return Err(invalid("a resource bucket record has an unknown identity"));
+            };
+        space.push(
+            index
+                .parse()
+                .map_err(|_| invalid("a resource bucket record has an unknown identity"))?,
+        );
+    }
+    Ok((hot, live))
+}
+
+/// What a work read, kept without its source ([`ResourceRootWork::keep`]).
+struct KeptWork {
+    state: ResourceState,
+    attached: BTreeMap<ResourceTerminalRecordKeyV1, AttachedEntry>,
+    live_attached: BTreeMap<ResourceLiveRecordKeyV1, AttachedLive>,
+    hot: BTreeMap<u32, KeptBucket<ResourceTerminalRecordKeyV1>>,
+    live: BTreeMap<u32, KeptBucket<ResourceLiveRecordKeyV1>>,
+}
+
 /// The resource root as one boundary system, admission, or host read works
 /// on it: the live root, with the bucketed records it reads attached.
-pub(crate) struct ResourceRootWork<'s, S: HotTerminalSource + ?Sized> {
-    source: &'s S,
+pub(crate) struct ResourceRootWork<'s, S: HotTerminalSource<'s>> {
+    source: S,
     pub(crate) live_version: u64,
     pub(crate) state: ResourceState,
     bucket_count: u32,
@@ -2001,24 +2235,52 @@ pub(crate) struct ResourceRootWork<'s, S: HotTerminalSource + ?Sized> {
     /// Hot terminal records an archive commit removed without attaching
     /// them, by bucket.
     archived: BTreeMap<ResourceTerminalRecordKeyV1, u32>,
+    /// Hot terminal buckets a kept root read whose records the source still
+    /// holds, not read again yet.
+    inherited: BTreeMap<u32, KeptBucket<ResourceTerminalRecordKeyV1>>,
+    /// Live buckets a kept root read whose records the source still holds.
+    live_inherited: BTreeMap<u32, KeptBucket<ResourceLiveRecordKeyV1>>,
+    /// Stored buckets this work parsed from the source.
+    parsed: usize,
 }
 
-impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
+impl<'s, S: HotTerminalSource<'s>> ResourceRootWork<'s, S> {
     /// The live root `live` read from `source`, with nothing attached.
-    pub(crate) fn new(source: &'s S, live: &DomainRecord) -> Result<Self, CanwuError> {
+    pub(crate) fn new(source: S, live: &DomainRecord) -> Result<Self, CanwuError> {
         let state = decode_live_root(live)?;
-        Ok(Self {
+        Ok(Self::resume(
             source,
-            live_version: live.version,
+            live.version,
+            state,
+            BTreeMap::new(),
+            BTreeMap::new(),
+        ))
+    }
+
+    /// The work over `state`, the live root of version `live_version` with
+    /// the `attached` and `live_attached` records attached.
+    fn resume(
+        source: S,
+        live_version: u64,
+        state: ResourceState,
+        attached: BTreeMap<ResourceTerminalRecordKeyV1, AttachedEntry>,
+        live_attached: BTreeMap<ResourceLiveRecordKeyV1, AttachedLive>,
+    ) -> Self {
+        Self {
+            source,
+            live_version,
             bucket_count: resource_hot_terminal_bucket_count(&state.limits),
             live_bucket_count: resource_live_bucket_count(&state.limits),
             state,
             buckets: BTreeMap::new(),
-            attached: BTreeMap::new(),
+            attached,
             live_buckets: BTreeMap::new(),
-            live_attached: BTreeMap::new(),
+            live_attached,
             archived: BTreeMap::new(),
-        })
+            inherited: BTreeMap::new(),
+            live_inherited: BTreeMap::new(),
+            parsed: 0,
+        }
     }
 
     fn bucket(
@@ -2026,24 +2288,13 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
         bucket: u32,
     ) -> Result<&StoredBucket<'s, ResourceTerminalRecordKeyV1>, CanwuError> {
         if !self.buckets.contains_key(&bucket) {
-            let source: &'s S = self.source;
-            let stored = match source
-                .hot_terminal_record(resource_hot_terminal_bucket_reference(bucket).as_untyped())?
-            {
-                None => StoredBucket {
-                    version: None,
-                    entries: BTreeMap::new(),
-                    declared: empty_declaration(),
-                },
-                Some(record) => {
-                    let (_, entries, declared) = stored_bucket_entries(record, self.bucket_count)?;
-                    StoredBucket {
-                        version: Some(record.version),
-                        entries,
-                        declared,
-                    }
-                }
-            };
+            let stored = read_bucket(
+                &self.source,
+                bucket,
+                self.bucket_count,
+                &mut self.inherited,
+                &mut self.parsed,
+            )?;
             self.buckets.insert(bucket, stored);
         }
         Ok(&self.buckets[&bucket])
@@ -2054,25 +2305,13 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
         bucket: u32,
     ) -> Result<&StoredBucket<'s, ResourceLiveRecordKeyV1>, CanwuError> {
         if !self.live_buckets.contains_key(&bucket) {
-            let source: &'s S = self.source;
-            let stored = match source
-                .hot_terminal_record(resource_live_bucket_reference(bucket).as_untyped())?
-            {
-                None => StoredBucket {
-                    version: None,
-                    entries: BTreeMap::new(),
-                    declared: empty_declaration(),
-                },
-                Some(record) => {
-                    let (_, entries, declared) =
-                        stored_bucket_entries(record, self.live_bucket_count)?;
-                    StoredBucket {
-                        version: Some(record.version),
-                        entries,
-                        declared,
-                    }
-                }
-            };
+            let stored = read_bucket(
+                &self.source,
+                bucket,
+                self.live_bucket_count,
+                &mut self.live_inherited,
+                &mut self.parsed,
+            )?;
             self.live_buckets.insert(bucket, stored);
         }
         Ok(&self.live_buckets[&bucket])
@@ -2234,13 +2473,22 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
         let Some(value) = self.bucket(bucket)?.entries.get(key).copied() else {
             return Ok(Vec::new());
         };
-        let entry = decode_canonical::<ResourceHotTerminalEntryV1>(value)?;
-        if &entry.key != key {
-            return Err(invalid(
-                "resource hot terminal entry differs from its stored key",
-            ));
-        }
-        let size = entry.encoded_len().map_err(resource_canwu_error)?;
+        let kept = self
+            .buckets
+            .get_mut(&bucket)
+            .and_then(|stored| stored.decoded.remove(key));
+        let (entry, size) = if let Some(kept) = kept {
+            kept
+        } else {
+            let entry = decode_canonical::<ResourceHotTerminalEntryV1>(value)?;
+            if &entry.key != key {
+                return Err(invalid(
+                    "resource hot terminal entry differs from its stored key",
+                ));
+            }
+            let size = entry.encoded_len().map_err(resource_canwu_error)?;
+            (entry, size)
+        };
         let references = entry.references();
         self.state
             .attach_hot_terminal(entry.clone())
@@ -2251,8 +2499,14 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
             .bytes
             .checked_sub(size)
             .ok_or_else(|| invalid("resource hot terminal ledger bytes are short"))?;
-        self.attached
-            .insert(key.clone(), AttachedEntry { bucket, entry });
+        self.attached.insert(
+            key.clone(),
+            AttachedEntry {
+                bucket,
+                entry,
+                size,
+            },
+        );
         Ok(references)
     }
 
@@ -2275,11 +2529,20 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
         let Some(value) = self.live_bucket(bucket)?.entries.get(key).copied() else {
             return Ok(Vec::new());
         };
-        let entry = decode_canonical::<ResourceLiveEntryV1>(value)?;
-        if &entry.key != key {
-            return Err(invalid("resource live entry differs from its stored key"));
-        }
-        let size = encoded_len(&entry).map_err(resource_canwu_error)?;
+        let kept = self
+            .live_buckets
+            .get_mut(&bucket)
+            .and_then(|stored| stored.decoded.remove(key));
+        let (entry, size) = if let Some(kept) = kept {
+            kept
+        } else {
+            let entry = decode_canonical::<ResourceLiveEntryV1>(value)?;
+            if &entry.key != key {
+                return Err(invalid("resource live entry differs from its stored key"));
+            }
+            let size = encoded_len(&entry).map_err(resource_canwu_error)?;
+            (entry, size)
+        };
         let references = entry.references();
         let mut ledger = std::mem::take(&mut self.state.live);
         let counted = ledger.count(&entry.payload, size, false);
@@ -2288,8 +2551,14 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
         self.state
             .attach_live(entry.clone())
             .map_err(resource_canwu_error)?;
-        self.live_attached
-            .insert(key.clone(), AttachedLive { bucket, entry });
+        self.live_attached.insert(
+            key.clone(),
+            AttachedLive {
+                bucket,
+                entry,
+                size,
+            },
+        );
         Ok(references)
     }
 
@@ -2369,24 +2638,31 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
 
     /// The indexes of the stored buckets: hot terminal, then live.
     fn stored_bucket_indexes(&self) -> Result<(Vec<u32>, Vec<u32>), CanwuError> {
-        let mut hot = Vec::new();
-        let mut live = Vec::new();
-        for reference in self.source.bucket_references()? {
-            let (space, index) =
-                if let Some(index) = reference.id.strip_prefix(HOT_TERMINAL_BUCKET_PREFIX) {
-                    (&mut hot, index)
-                } else if let Some(index) = reference.id.strip_prefix(LIVE_BUCKET_PREFIX) {
-                    (&mut live, index)
-                } else {
-                    return Err(invalid("a resource bucket record has an unknown identity"));
-                };
-            space.push(
-                index
-                    .parse()
-                    .map_err(|_| invalid("a resource bucket record has an unknown identity"))?,
-            );
+        stored_bucket_indexes(&self.source)
+    }
+
+    /// What the work read, without the source: the state, the attached
+    /// records, and every bucket it read or inherited.
+    fn keep(self) -> KeptWork {
+        let mut hot = self.inherited;
+        hot.extend(
+            self.buckets
+                .into_iter()
+                .map(|(bucket, stored)| (bucket, stored.keep())),
+        );
+        let mut live = self.live_inherited;
+        live.extend(
+            self.live_buckets
+                .into_iter()
+                .map(|(bucket, stored)| (bucket, stored.keep())),
+        );
+        KeptWork {
+            state: self.state,
+            attached: self.attached,
+            live_attached: self.live_attached,
+            hot,
+            live,
         }
-        Ok((hot, live))
     }
 
     /// Attaches every live record of the root.
@@ -2431,13 +2707,17 @@ impl<'s, S: HotTerminalSource + ?Sized> ResourceRootWork<'s, S> {
         }
         // Every stored entry is attached now, so each bucket's declaration
         // is checked against all of its entries.
+        let mut by_bucket = BTreeMap::<u32, Vec<&ResourceHotTerminalEntryV1>>::new();
+        for attached in self.attached.values() {
+            by_bucket
+                .entry(attached.bucket)
+                .or_default()
+                .push(&attached.entry);
+        }
         for (bucket, stored) in &self.buckets {
             check_hot_bucket_declaration(
                 &stored.declared,
-                self.attached
-                    .values()
-                    .filter(|attached| attached.bucket == *bucket)
-                    .map(|attached| &attached.entry),
+                by_bucket.get(bucket).into_iter().flatten().copied(),
             )?;
         }
         Ok(())
@@ -2726,8 +3006,8 @@ fn bucket_directive(
 }
 
 /// The resource root as a boundary system or command admission of another
-/// plugin reads it: the live root, with the bucketed records it asks for
-/// attached.
+/// plugin reads it, or a host application reads it from a run handle: the
+/// live root, with the bucketed records it asks for attached.
 ///
 /// [`Self::attach`] attaches the hot terminal records some keys name, and
 /// every record those name in turn (the closure of a demand, what a
@@ -2739,11 +3019,39 @@ fn bucket_directive(
 /// whole root would; a bucketed record it was not asked for is absent from
 /// its maps. Its ledgers ([`ResourceState::hot_terminal_records`],
 /// [`ResourceState::account_count`], [`ResourceState::total_account_balance`])
-/// count every record. Reading needs the `canwu.resource` `runtime` and
-/// `bucket` state keys ([`crate::resource_hot_terminal_state_key`]).
+/// count every record. Reading in a boundary needs the `canwu.resource`
+/// `runtime` and `bucket` state keys ([`crate::resource_hot_terminal_state_key`]).
+///
+/// A host reads the same way from a run handle with [`Self::load_run`]: for
+/// the same committed state and the same requests, the reader holds exactly
+/// the state a boundary system's reader built from
+/// [`Self::load`] holds before anything is staged in its boundary. That read
+/// is a trusted-host read of every custodian's ground truth: the host
+/// selects what belongs to an actor before anything reaches it (the
+/// holder-relative report is [`crate::resource_report`]).
+///
+/// [`Self::keep`] turns a reader into a [`KeptResourceRoot`] that borrows
+/// nothing, and [`Self::reattach`] repeats its requests on the run's current
+/// root, reading again only the buckets whose records changed.
 pub struct ResourceRootReader<'v, 'a> {
-    live: DomainRecord,
-    work: ResourceRootWork<'v, SimulationView<'a>>,
+    live: Arc<DomainRecord>,
+    /// Whether `live` is the run's own copy of the live root.
+    live_shared: bool,
+    work: ResourceRootWork<'v, ReaderSource<'v, 'a>>,
+    requests: RootRequests,
+    /// Whether a request failed: its state is then partial, and a re-attach
+    /// repeats every request instead of taking it.
+    failed: bool,
+}
+
+/// What a reader was asked to attach, as sets: the attached state is the
+/// closure of their union, whatever the order of the requests.
+#[derive(Clone, Debug, Default)]
+struct RootRequests {
+    all: bool,
+    terminal: BTreeSet<ResourceTerminalRecordKeyV1>,
+    live: BTreeSet<ResourceLiveRecordKeyV1>,
+    custodians: BTreeSet<KnowledgeHolderRef>,
 }
 
 impl<'v, 'a> ResourceRootReader<'v, 'a> {
@@ -2753,9 +3061,20 @@ impl<'v, 'a> ResourceRootReader<'v, 'a> {
         let Some(live) = view.typed_domain_record(&resource_runtime_reference())? else {
             return Ok(None);
         };
-        let live = live.clone();
-        let work = ResourceRootWork::new(view, &live)?;
-        Ok(Some(Self { live, work }))
+        let work = ResourceRootWork::new(ReaderSource::View(view), live)?;
+        Ok(Some(Self {
+            live: Arc::new(live.clone()),
+            live_shared: false,
+            work,
+            requests: RootRequests::default(),
+            failed: false,
+        }))
+    }
+
+    /// Notes a failed request, so that what this reader keeps is read again.
+    fn note<T>(&mut self, result: Result<T, CanwuError>) -> Result<T, CanwuError> {
+        self.failed |= result.is_err();
+        result
     }
 
     /// Attaches the hot terminal records `keys` name, with their closures. A
@@ -2764,7 +3083,10 @@ impl<'v, 'a> ResourceRootReader<'v, 'a> {
         &mut self,
         keys: impl IntoIterator<Item = ResourceTerminalRecordKeyV1>,
     ) -> Result<(), CanwuError> {
-        self.work.attach(keys)
+        let keys = keys.into_iter().collect::<Vec<_>>();
+        self.requests.terminal.extend(keys.iter().cloned());
+        let attached = self.work.attach(keys);
+        self.note(attached)
     }
 
     /// Attaches the accounts, access grants, definitions, and unit revisions
@@ -2774,13 +3096,25 @@ impl<'v, 'a> ResourceRootReader<'v, 'a> {
         &mut self,
         keys: impl IntoIterator<Item = ResourceLiveRecordKeyV1>,
     ) -> Result<(), CanwuError> {
-        self.work.attach_live(keys)
+        let keys = keys.into_iter().collect::<Vec<_>>();
+        self.requests.live.extend(keys.iter().cloned());
+        let attached = self.work.attach_live(keys);
+        self.note(attached)
     }
 
     /// Attaches every account `holder` holds, through the custodian index,
     /// and returns their identities. It reads the index and those accounts,
     /// not the other accounts of the root.
     pub fn attach_custodian_accounts(
+        &mut self,
+        holder: &KnowledgeHolderRef,
+    ) -> Result<BTreeSet<ResourceAccountId>, CanwuError> {
+        self.requests.custodians.insert(holder.clone());
+        let attached = self.attach_custodian_index(holder);
+        self.note(attached)
+    }
+
+    fn attach_custodian_index(
         &mut self,
         holder: &KnowledgeHolderRef,
     ) -> Result<BTreeSet<ResourceAccountId>, CanwuError> {
@@ -2802,6 +3136,22 @@ impl<'v, 'a> ResourceRootReader<'v, 'a> {
         Ok(accounts)
     }
 
+    /// Attaches every hot terminal and live record of the root, which makes
+    /// the state whole: the state [`crate::resource_state`] reads from a run,
+    /// and [`whole_resource_root_in_view`] in a boundary. It lists the stored
+    /// buckets by their record kind, decodes each, and checks that the
+    /// ledgers count exactly the stored entries, that each hot terminal
+    /// bucket declares what its entries cite, and that every hot terminal
+    /// reservation's demand is hot terminal too.
+    pub fn attach_all(&mut self) -> Result<(), CanwuError> {
+        self.requests.all = true;
+        let attached = self
+            .work
+            .attach_all()
+            .and_then(|()| check_demand_closures(&self.work.state));
+        self.note(attached)
+    }
+
     /// The live root record, whose version is the root's state revision.
     #[must_use]
     pub fn live_record(&self) -> &DomainRecord {
@@ -2819,6 +3169,259 @@ impl<'v, 'a> ResourceRootReader<'v, 'a> {
     pub fn into_state(self) -> ResourceState {
         self.work.state
     }
+
+    /// How many stored buckets this reader parsed and decoded from its
+    /// source. A reader from [`Self::reattach`] counts only the buckets whose
+    /// records changed since the kept root read them (or that it read for
+    /// the first time); one whose root did not change at all counts none.
+    ///
+    /// A diagnostic of decode work, not of all work (a re-attach after the
+    /// live root changed also attaches every kept record again), and it
+    /// depends on the host process's history (a fork or a reload shares or
+    /// copies records): it must never feed a simulation input.
+    #[must_use]
+    pub fn buckets_decoded(&self) -> usize {
+        self.work.parsed
+    }
+
+    /// What this reader read, kept without borrowing its source: the state,
+    /// the decoded records, its requests, and the run's own copy of every
+    /// record it read ([`canwu_api::CanwuRun::domain_record_shared`]).
+    /// Nothing is copied or decoded again. A kept root holds those copies, so
+    /// a record the run has since replaced stays in memory until the kept
+    /// root is dropped or re-attached.
+    ///
+    /// A reader over a view keeps no shared copy (a view has none), so a
+    /// re-attach of what it kept reads everything again, and so does one of
+    /// a reader whose request failed.
+    #[must_use]
+    pub fn keep(self) -> KeptResourceRoot {
+        let work = self.work.keep();
+        KeptResourceRoot {
+            live: self.live,
+            live_shared: self.live_shared,
+            failed: self.failed,
+            requests: self.requests,
+            state: work.state,
+            attached: work.attached,
+            live_attached: work.live_attached,
+            hot: work.hot,
+            live_buckets: work.live,
+        }
+    }
+
+    /// The live root record and the state, for the crate's own readers.
+    fn into_parts(self) -> (DomainRecord, ResourceState) {
+        (Arc::unwrap_or_clone(self.live), self.work.state)
+    }
+
+    /// Repeats `requests` on this reader.
+    fn replay(&mut self, requests: RootRequests) -> Result<(), CanwuError> {
+        if requests.all {
+            return self.attach_all();
+        }
+        self.attach(requests.terminal)?;
+        self.attach_live(requests.live)?;
+        for holder in &requests.custodians {
+            self.attach_custodian_accounts(holder)?;
+        }
+        Ok(())
+    }
+}
+
+impl<'r> ResourceRootReader<'r, 'r> {
+    /// The live root of a run, from either handle ([`canwu_api::Canwu`],
+    /// [`canwu_api::CompactedCanwu`], or any [`CanwuRun`]), with nothing
+    /// attached, or `None` without a resource root.
+    ///
+    /// The host-side reader: its requests read the live root and the buckets
+    /// of the records they name, as [`Self::load`] reads a view, never every
+    /// bucket. A trusted-host read: see the type's documentation.
+    pub fn load_run<H: CanwuRun + ?Sized>(run: &'r H) -> Result<Option<Self>, CanwuError> {
+        let Some((live, live_shared)) = run_live_root(run) else {
+            return Ok(None);
+        };
+        let work = ResourceRootWork::new(ReaderSource::Run(Box::new(RunSource(run))), &live)?;
+        Ok(Some(Self {
+            live,
+            live_shared,
+            work,
+            requests: RootRequests::default(),
+            failed: false,
+        }))
+    }
+
+    /// A reader of the run's current root that holds what a reader loaded
+    /// with [`Self::load_run`] and given `kept`'s requests holds, built from
+    /// `kept` as far as the run still holds the records `kept` read: or
+    /// `None` without a resource root.
+    ///
+    /// A record counts as unchanged only when the run holds the very copy
+    /// `kept` read: the allocation that [`CanwuRun::domain_record`] reads and
+    /// [`CanwuRun::domain_record_shared`] returns, compared with
+    /// [`Arc::ptr_eq`]. That is never true of a record a step rewrote, of a
+    /// fork that wrote it, or of another run such as a restored one,
+    /// whatever their version numbers. A run handle whose
+    /// `domain_record_shared` returns another copy than the one
+    /// `domain_record` reads (a fresh copy per call, or one cached by version)
+    /// is read correctly but offers nothing to reuse: every re-attach reads
+    /// everything again.
+    ///
+    /// When the live root and every bucket `kept` read are unchanged (and,
+    /// for a whole root, no bucket was added), the reader takes `kept`'s
+    /// state and decodes nothing. Otherwise it decodes the live root,
+    /// repeats the requests, and decodes only the buckets whose records
+    /// changed or that it reads for the first time, taking `kept`'s decoded
+    /// entries for the rest ([`Self::buckets_decoded`] counts the decodes).
+    /// That costs a decode of the live root and an attach of every record
+    /// the requests reach again, cloned from `kept`: a host that needs work
+    /// in proportion to what changed reads targeted records instead of a
+    /// whole root.
+    ///
+    /// A request that failed on the kept reader is repeated, so the re-attach
+    /// fails where a reader loaded afresh with the same requests fails.
+    pub fn reattach<H: CanwuRun + ?Sized>(
+        run: &'r H,
+        kept: KeptResourceRoot,
+    ) -> Result<Option<Self>, CanwuError> {
+        let Some((live, live_now_shared)) = run_live_root(run) else {
+            return Ok(None);
+        };
+        let source = RunSource(run);
+        let KeptResourceRoot {
+            live: kept_live,
+            live_shared,
+            failed,
+            requests,
+            state,
+            mut attached,
+            mut live_attached,
+            mut hot,
+            mut live_buckets,
+        } = kept;
+        let (hot_read, live_read) = (hot.len(), live_buckets.len());
+        hot.retain(|bucket, kept| kept.still_held(&source, *bucket));
+        live_buckets.retain(|bucket, kept| kept.still_held(&source, *bucket));
+        let unchanged = !failed
+            && live_shared
+            && live_now_shared
+            && Arc::ptr_eq(&kept_live, &live)
+            && hot.len() == hot_read
+            && live_buckets.len() == live_read
+            && (!requests.all || stored_buckets_are_kept(&source, &hot, &live_buckets)?);
+        let source = ReaderSource::Run(Box::new(source));
+        if unchanged {
+            let mut work =
+                ResourceRootWork::resume(source, live.version, state, attached, live_attached);
+            work.inherited = hot;
+            work.live_inherited = live_buckets;
+            return Ok(Some(Self {
+                live,
+                live_shared: live_now_shared,
+                work,
+                requests,
+                failed: false,
+            }));
+        }
+        // The kept decodes of attached records whose buckets are unchanged
+        // serve the repeated requests.
+        for (key, entry) in std::mem::take(&mut attached) {
+            if let Some(bucket) = hot.get_mut(&entry.bucket) {
+                bucket.decoded.insert(key, (entry.entry, entry.size));
+            }
+        }
+        for (key, entry) in std::mem::take(&mut live_attached) {
+            if let Some(bucket) = live_buckets.get_mut(&entry.bucket) {
+                bucket.decoded.insert(key, (entry.entry, entry.size));
+            }
+        }
+        let mut work = ResourceRootWork::new(source, &live)?;
+        // Bucket indexes name the same buckets only under the same counts,
+        // which a root keeps for its life; another root's are not reused.
+        if work.bucket_count == resource_hot_terminal_bucket_count(&state.limits)
+            && work.live_bucket_count == resource_live_bucket_count(&state.limits)
+        {
+            work.inherited = hot;
+            work.live_inherited = live_buckets;
+        }
+        let mut reader = Self {
+            live,
+            live_shared: live_now_shared,
+            work,
+            requests: RootRequests::default(),
+            failed: false,
+        };
+        reader.replay(requests)?;
+        Ok(Some(reader))
+    }
+}
+
+/// The run's live root, and whether it is the run's own shared copy
+/// ([`run_shared_record`]); a run that offers none is read through a copy.
+fn run_live_root<H: CanwuRun + ?Sized>(run: &H) -> Option<(Arc<DomainRecord>, bool)> {
+    let reference = resource_runtime_reference().into_untyped();
+    match run_shared_record(run, &reference) {
+        Some(shared) => Some((shared, true)),
+        None => run
+            .domain_record(&reference)
+            .map(|live| (Arc::new(live.clone()), false)),
+    }
+}
+
+/// Whether every bucket `source` stores is one of the kept `hot` and `live`
+/// buckets that hold a record: what a whole root's re-attach checks besides
+/// the kept buckets themselves, since a whole read reads every stored bucket.
+fn stored_buckets_are_kept<'s, S: HotTerminalSource<'s> + ?Sized>(
+    source: &S,
+    hot: &BTreeMap<u32, KeptBucket<ResourceTerminalRecordKeyV1>>,
+    live: &BTreeMap<u32, KeptBucket<ResourceLiveRecordKeyV1>>,
+) -> Result<bool, CanwuError> {
+    fn stored<K: BucketKey>(kept: Option<&KeptBucket<K>>) -> bool {
+        kept.is_some_and(|kept| matches!(kept.record, KeptRecord::Shared(_)))
+    }
+    let (stored_hot, stored_live) = stored_bucket_indexes(source)?;
+    Ok(stored_hot.iter().all(|bucket| stored(hot.get(bucket)))
+        && stored_live.iter().all(|bucket| stored(live.get(bucket))))
+}
+
+/// What a [`ResourceRootReader`] read, kept by a host between steps without
+/// borrowing the run: the state it read, the records it decoded, what it was
+/// asked to attach, and the run's own copy of each record it read.
+/// [`ResourceRootReader::reattach`] turns it into a reader of the run's
+/// current root that reads again only what changed.
+///
+/// It is host memory, never saved: it holds no state of the run that the run
+/// does not hold itself, and a restore or a new run makes every record new.
+#[derive(Clone, Debug)]
+pub struct KeptResourceRoot {
+    live: Arc<DomainRecord>,
+    /// Whether `live` is the run's own copy (a reader over a run).
+    live_shared: bool,
+    /// Whether a request of the kept reader failed.
+    failed: bool,
+    requests: RootRequests,
+    state: ResourceState,
+    attached: BTreeMap<ResourceTerminalRecordKeyV1, AttachedEntry>,
+    live_attached: BTreeMap<ResourceLiveRecordKeyV1, AttachedLive>,
+    hot: BTreeMap<u32, KeptBucket<ResourceTerminalRecordKeyV1>>,
+    live_buckets: BTreeMap<u32, KeptBucket<ResourceLiveRecordKeyV1>>,
+}
+
+impl KeptResourceRoot {
+    /// The live root record the reader read.
+    #[must_use]
+    pub fn live_record(&self) -> &DomainRecord {
+        &self.live
+    }
+
+    /// The state the reader read: the live root with the records it
+    /// attached, as it was when it was kept. Like the reader's, it is
+    /// every custodian's ground truth, a trusted-host read: the host selects
+    /// what belongs to an actor before anything reaches it.
+    #[must_use]
+    pub fn state(&self) -> &ResourceState {
+        &self.state
+    }
 }
 
 /// Reads the resource root in a boundary system or in command admission:
@@ -2833,7 +3436,7 @@ pub fn resource_root_in_view(
         return Ok(None);
     };
     reader.attach(keys)?;
-    Ok(Some((reader.live, reader.work.state)))
+    Ok(Some(reader.into_parts()))
 }
 
 /// Reads the whole resource root in a boundary system: the live root and
@@ -2853,17 +3456,14 @@ pub fn whole_resource_root_in_view(
 }
 
 /// Reads the whole resource root of a run, from either runtime handle: the
-/// live root record and the state with every bucketed record attached.
+/// live root record and the state with every bucketed record attached
+/// ([`ResourceRootReader::attach_all`]).
 pub(crate) fn whole_resource_root<H: CanwuRun + ?Sized>(
     canwu: &H,
 ) -> Result<Option<(DomainRecord, ResourceState)>, CanwuError> {
-    let Some(live) = canwu_api::typed_domain_record(canwu, &resource_runtime_reference()) else {
+    let Some(mut reader) = ResourceRootReader::load_run(canwu)? else {
         return Ok(None);
     };
-    let live = live.clone();
-    let source = RunSource(canwu);
-    let mut work = ResourceRootWork::new(&source, &live)?;
-    work.attach_all()?;
-    check_demand_closures(&work.state)?;
-    Ok(Some((live, work.state)))
+    reader.attach_all()?;
+    Ok(Some(reader.into_parts()))
 }

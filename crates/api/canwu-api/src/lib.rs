@@ -172,6 +172,7 @@ pub use canwu_transport::{
     delivery_completion_operation_key,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Main in-process API. All returned world values are detached snapshots.
 ///
@@ -324,6 +325,50 @@ pub trait CanwuRun {
         holder: KnowledgeHolderRef,
         query: &KnowledgeQuery,
     ) -> Result<KnowledgeQueryResult, CanwuError>;
+    /// The global IDs of a holder's current records of one kind, from the
+    /// committed ledger's index, as [`Canwu::knowledge_heads`] reads them:
+    /// what [`SimulationView::knowledge_heads`] returns in a boundary for the
+    /// same committed state. A trusted-host read of any holder.
+    fn knowledge_heads(
+        &self,
+        holder: &KnowledgeHolderRef,
+        kind: &KnowledgeRecordKind,
+        subjects: &[KnowledgeSubject],
+    ) -> Result<KnowledgeHeads, CanwuError>;
+    /// A holder's current records of one kind as holder-relative views,
+    /// newest first in publication order, as
+    /// [`Canwu::knowledge_current_records`] reads them. It returns any
+    /// holder's payloads: the host selects the records of the holder whose
+    /// actor it shows before anything reaches an actor.
+    fn knowledge_current_records<'a>(
+        &'a self,
+        holder: &'a KnowledgeHolderRef,
+        kind: &'a KnowledgeRecordKind,
+        subjects: &'a [KnowledgeSubject],
+    ) -> Box<dyn Iterator<Item = KnowledgeRecordView> + 'a>;
+    /// The run's own shared copy of a record's current version; see
+    /// [`Canwu::domain_record_shared`].
+    ///
+    /// The contract every implementation keeps: the answer is the very
+    /// allocation [`CanwuRun::domain_record`] reads for the same reference
+    /// (`std::ptr::eq(Arc::as_ptr(&shared), record)`), a write of the record
+    /// stores a new allocation, and an allocation never holds other content
+    /// while anyone keeps it. Readers that keep records between steps, such
+    /// as `canwu-resource`'s `ResourceRootReader::reattach`, check the first
+    /// point and reuse a kept decode only when the run still returns the
+    /// kept allocation. An implementation that returns a fresh copy on each
+    /// call, or one cached by version that `domain_record` does not read, is
+    /// read correctly but offers nothing to reuse: every re-attach reads
+    /// everything again. One that returned the allocation `domain_record`
+    /// reads for content that has since changed would break the third point,
+    /// and a re-attach would take decodes of content the run no longer holds.
+    fn domain_record_shared(&self, reference: &DomainRecordRef) -> Option<Arc<DomainRecord>>;
+    /// The current records of one kind, in reference order; see
+    /// [`Canwu::domain_records_of_kind`].
+    fn domain_records_of_kind(
+        &self,
+        kind: &DomainRecordKind,
+    ) -> Box<dyn Iterator<Item = &DomainRecord> + '_>;
 }
 
 macro_rules! impl_canwu_run {
@@ -403,6 +448,36 @@ macro_rules! impl_canwu_run {
                 query: &KnowledgeQuery,
             ) -> Result<KnowledgeQueryResult, CanwuError> {
                 Self::admin_query_knowledge(self, holder, query)
+            }
+            fn knowledge_heads(
+                &self,
+                holder: &KnowledgeHolderRef,
+                kind: &KnowledgeRecordKind,
+                subjects: &[KnowledgeSubject],
+            ) -> Result<KnowledgeHeads, CanwuError> {
+                Self::knowledge_heads(self, holder, kind, subjects)
+            }
+            fn knowledge_current_records<'a>(
+                &'a self,
+                holder: &'a KnowledgeHolderRef,
+                kind: &'a KnowledgeRecordKind,
+                subjects: &'a [KnowledgeSubject],
+            ) -> Box<dyn Iterator<Item = KnowledgeRecordView> + 'a> {
+                Box::new(Self::knowledge_current_records(
+                    self, holder, kind, subjects,
+                ))
+            }
+            fn domain_record_shared(
+                &self,
+                reference: &DomainRecordRef,
+            ) -> Option<Arc<DomainRecord>> {
+                Self::domain_record_shared(self, reference)
+            }
+            fn domain_records_of_kind(
+                &self,
+                kind: &DomainRecordKind,
+            ) -> Box<dyn Iterator<Item = &DomainRecord> + '_> {
+                Box::new(Self::domain_records_of_kind(self, kind))
             }
         }
     };
@@ -634,6 +709,63 @@ impl Canwu {
         self.simulation.knowledge()
     }
 
+    /// The global IDs of a holder's current records of one schema kind that
+    /// carry every one of `subjects`: what [`SimulationView::knowledge_heads`]
+    /// returns in a boundary system for the same committed state, before
+    /// anything is staged in its boundary.
+    ///
+    /// At most [`KnowledgeLimitsV1::relations_per_record`] IDs, ascending,
+    /// the newest when more match ([`KnowledgeHeads::truncated`]). The read
+    /// walks the holder's index of current records, never its whole ledger,
+    /// and computes no read cut or projection hash, unlike
+    /// [`Canwu::admin_query_knowledge`].
+    ///
+    /// A trusted-host read: it answers for any holder. The host shows a
+    /// holder's records only to that holder's actor; player-facing reads go
+    /// through a restricted [`CanwuViewer`].
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::KnowledgeLimitExceeded`] when `subjects` lists more than
+    /// [`KnowledgeLimitsV1::relations_per_record`] subjects.
+    pub fn knowledge_heads(
+        &self,
+        holder: &KnowledgeHolderRef,
+        kind: &KnowledgeRecordKind,
+        subjects: &[KnowledgeSubject],
+    ) -> Result<KnowledgeHeads, CanwuError> {
+        self.simulation.knowledge_heads(holder, kind, subjects)
+    }
+
+    /// A holder's current records of one schema kind that carry every one of
+    /// `subjects`, newest first in publication order (descending global
+    /// record ID, not `learned_at`), each as the holder-relative
+    /// [`KnowledgeRecordView`] a knowledge page returns.
+    ///
+    /// They are the records a [`KnowledgeHistoryView::CurrentHeads`] page of
+    /// [`Canwu::admin_query_knowledge`] or
+    /// [`SimulationView::knowledge_records`] returns at the same committed
+    /// state when it names every schema version of the kind and those
+    /// subjects; sorting them by `(learned_at, id)` gives the page's order. The iterator reads the
+    /// holder's index of current records as it is consumed and computes no
+    /// read cut or projection hash, so a caller pays for the records it
+    /// takes. A caller that needs a cursor bound to a read cut pages with
+    /// [`Canwu::admin_query_knowledge`].
+    ///
+    /// A trusted-host read: it returns any holder's payloads. The host
+    /// selects the records of the holder whose actor it shows before
+    /// anything reaches an actor; player-facing reads go through a
+    /// restricted [`CanwuViewer`].
+    pub fn knowledge_current_records<'a>(
+        &'a self,
+        holder: &'a KnowledgeHolderRef,
+        kind: &'a KnowledgeRecordKind,
+        subjects: &'a [KnowledgeSubject],
+    ) -> impl Iterator<Item = KnowledgeRecordView> + 'a {
+        self.simulation
+            .knowledge_current_records(holder, kind, subjects)
+    }
+
     #[must_use]
     pub fn events(&self) -> &[SimEvent] {
         self.simulation.events()
@@ -681,6 +813,35 @@ impl Canwu {
     #[must_use]
     pub fn domain_record(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
         self.simulation.domain_record(reference)
+    }
+
+    /// The current version of one domain record as the run's own shared
+    /// copy, which a host may keep after the run moves on without copying
+    /// the record.
+    ///
+    /// It is the very allocation [`Canwu::domain_record`] reads. Every write
+    /// of a record stores a new allocation, and a run and its forks share the
+    /// allocation of a record no write has touched since. While a host keeps
+    /// a copy, [`Arc::ptr_eq`] with the copy the run holds now is true exactly
+    /// when the record is the one the host kept (another run, a restored one
+    /// included, or a fork that wrote the record holds another allocation),
+    /// so a host can tell an unchanged record from a changed one without
+    /// comparing payloads or trusting version numbers, which a diverged fork
+    /// reuses. A trusted-host read, as [`Canwu::domain_record`] is.
+    #[must_use]
+    pub fn domain_record_shared(&self, reference: &DomainRecordRef) -> Option<Arc<DomainRecord>> {
+        self.simulation.domain_record_shared(reference)
+    }
+
+    /// The current domain records of one kind, in reference order, without
+    /// copying them: a search for the first and the records of the kind,
+    /// not every record of the run as [`Canwu::domain_records`] walks. A
+    /// trusted-host read.
+    pub fn domain_records_of_kind(
+        &self,
+        kind: &DomainRecordKind,
+    ) -> impl Iterator<Item = &DomainRecord> + '_ {
+        self.simulation.domain_records_of_kind(kind)
     }
 
     /// Returns whether an exact domain-record version exists in current or retained evidence.
@@ -2311,9 +2472,57 @@ impl CompactedCanwu {
         self.simulation.knowledge()
     }
 
+    /// A holder's current records of one kind by global ID, from the
+    /// committed ledger's index, as [`Canwu::knowledge_heads`] reads them. A
+    /// trusted-host read of any holder.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::KnowledgeLimitExceeded`] when `subjects` lists more than
+    /// [`KnowledgeLimitsV1::relations_per_record`] subjects.
+    pub fn knowledge_heads(
+        &self,
+        holder: &KnowledgeHolderRef,
+        kind: &KnowledgeRecordKind,
+        subjects: &[KnowledgeSubject],
+    ) -> Result<KnowledgeHeads, CanwuError> {
+        self.simulation.knowledge_heads(holder, kind, subjects)
+    }
+
+    /// A holder's current records of one kind as holder-relative views,
+    /// newest first in publication order, as
+    /// [`Canwu::knowledge_current_records`] reads them. It returns any
+    /// holder's payloads: the host selects the records of the holder whose
+    /// actor it shows before anything reaches an actor.
+    pub fn knowledge_current_records<'a>(
+        &'a self,
+        holder: &'a KnowledgeHolderRef,
+        kind: &'a KnowledgeRecordKind,
+        subjects: &'a [KnowledgeSubject],
+    ) -> impl Iterator<Item = KnowledgeRecordView> + 'a {
+        self.simulation
+            .knowledge_current_records(holder, kind, subjects)
+    }
+
     #[must_use]
     pub fn domain_record(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
         self.simulation.domain_record(reference)
+    }
+
+    /// The run's own shared copy of a record's current version, as
+    /// [`Canwu::domain_record_shared`] reads it.
+    #[must_use]
+    pub fn domain_record_shared(&self, reference: &DomainRecordRef) -> Option<Arc<DomainRecord>> {
+        self.simulation.domain_record_shared(reference)
+    }
+
+    /// The current domain records of one kind, in reference order, as
+    /// [`Canwu::domain_records_of_kind`] reads them.
+    pub fn domain_records_of_kind(
+        &self,
+        kind: &DomainRecordKind,
+    ) -> impl Iterator<Item = &DomainRecord> + '_ {
+        self.simulation.domain_records_of_kind(kind)
     }
 
     /// The body and establishment time of a record's committed current

@@ -36,10 +36,14 @@ reads: inside a boundary the published `SimulationView::knowledge_heads` and `Re
 the downstream moves its boundary systems to them. Until fixed, CM keeps decoded reads on the host and returns a kept
 copy only when the records equal what is read now (`Deviation (Canwu 0.21, G-92 / G-93)`).
 
-| Id | Crate | Gap | Smallest missing call |
-| --- | --- | --- | --- |
-| G-92 | `canwu-api` (with `canwu-knowledge`) | A host has no indexed read of a holder's current records: `CompactedCanwu::admin_query_knowledge` and `CanwuViewer::query_knowledge` build the read cut's `holder_projection_root` from every record of the holder's history and hash it, and `query_records` validates the whole ledger before filtering, so every desk question costs O(ledger) (about 1.3 ms at month 13, growing). | Host parity for `knowledge_heads(holder, kind, subjects)` on `CompactedCanwu` / `CanwuRun` (or a current-heads page by kind), the projection hash computed only when a caller asks for a cursor. |
-| G-93 | `canwu-resource` | A host cannot read a few named accounts or records of the resource root: `ResourceRootReader::load` takes only a `SimulationView`, and every host helper in `query.rs` calls `resource_state`, which walks every domain record to list the buckets and decodes the root and all of them (1,508 buckets, 296 KB, about 5 ms at month 14), again after any root change. | (a) `ResourceRootReader` over `CanwuRun` (`load`, `attach_live`, `attach`, `attach_custodian_accounts`) with the `query.rs` helpers on it; (b) an incremental re-attach from a previously decoded root that re-reads only the buckets whose versions changed. |
+Both are **implemented in 0.22.0 (unreleased)**, in the worktree `.worktrees/g22-host-reads` (branch `g22/host-reads`,
+uncommitted): `docs/proposals/host-side-targeted-reads.md` and the draft "Unreleased (0.22.0)" entry of
+`docs/versioning.md`. Delete the rows when 0.22.0 is released.
+
+| Id | Crate | Gap | Smallest missing call | State |
+| --- | --- | --- | --- | --- |
+| G-92 | `canwu-api` (with `canwu-knowledge`) | A host has no indexed read of a holder's current records: `CompactedCanwu::admin_query_knowledge` and `CanwuViewer::query_knowledge` build the read cut's `holder_projection_root` from every record of the holder's history and hash it, and `query_records` validates the whole ledger before filtering, so every desk question costs O(ledger) (about 1.3 ms at month 13, growing). | Host parity for `knowledge_heads(holder, kind, subjects)` on `CompactedCanwu` / `CanwuRun` (or a current-heads page by kind), the projection hash computed only when a caller asks for a cursor. | Implemented in 0.22.0 (unreleased): `knowledge_heads` and `knowledge_current_records` (views, newest first) on `Canwu`, `CompactedCanwu`, and `CanwuRun`, from the index, no read cut or hash; `admin_query_knowledge` stays for a cursor-bound page. |
+| G-93 | `canwu-resource` | A host cannot read a few named accounts or records of the resource root: `ResourceRootReader::load` takes only a `SimulationView`, and every host helper in `query.rs` calls `resource_state`, which walks every domain record to list the buckets and decodes the root and all of them (1,508 buckets, 296 KB, about 5 ms at month 14), again after any root change. | (a) `ResourceRootReader` over `CanwuRun` (`load`, `attach_live`, `attach`, `attach_custodian_accounts`) with the `query.rs` helpers on it; (b) an incremental re-attach from a previously decoded root that re-reads only the buckets whose versions changed. | Implemented in 0.22.0 (unreleased): `ResourceRootReader::load_run` and `attach_all`; `resource_state` and eleven helpers read through it; `keep` / `KeptResourceRoot` / `reattach`, a changed bucket told by the run's shared record copy (`domain_record_shared`, `Arc::ptr_eq`), not its version. |
 
 G-91 (a continuation restore counted as a seal for the fiscal archive's citation check) is closed by 0.21.0
 (`docs/proposals/fiscal-archive-after-continuation-restore.md`).
@@ -111,7 +115,9 @@ own leases) and E-37's publication-budget overshoot (the application's publisher
 ## 5. Next steps
 
 1. **G-92 and G-93** (§3), the rows the downstream filed against 0.21.0 (it adopted 0.21.0 in CM 0.90.0; its ledger,
-   implementation document `59`, holds the evidence and the checks its interim relies on at each pin move).
+   implementation document `59`, holds the evidence and the checks its interim relies on at each pin move):
+   implemented in 0.22.0 (unreleased) and independently reviewed ("ready after fixes"; the fixes are in the
+   worktree, recorded in the proposal's review record); next integration and the release.
 2. Then the §4.2 limits by downstream need: **E-50** first if the downstream runs cross-plugin completions through a
    long campaign (the cap of 1,024 ended participants); **E-49** if a host wants malformed correspondence commands
    recorded rather than validated before sending; E-41's force-supply deferral if a host runs the reference economy

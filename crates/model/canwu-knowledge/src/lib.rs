@@ -733,7 +733,7 @@ fn validate_cursor(
     Ok(())
 }
 
-fn to_view(
+pub(crate) fn to_view(
     holder: &KnowledgeHolderRef,
     entry: &HolderEntry,
     body: &KnowledgeRecordBody,

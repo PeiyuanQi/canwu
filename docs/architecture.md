@@ -1052,7 +1052,20 @@ records with `attach_live` or `attach_custodian_accounts`, or
 `whole_resource_root_in_view`, and declares the read of
 `resource_hot_terminal_state_key()` beside the live root's; a reader of a
 consumption follows `ResourceConsumption::fulfillment` to its fulfillment
-without a search; the host's `resource_state` reads the whole root. A
+without a search. A host reads the same way from a run handle with
+`ResourceRootReader::load_run`: for the same committed state and requests it
+holds what a boundary's reader holds. `resource_state` and its `attach_all`
+read the whole root, listing the buckets by record kind; the host helpers
+that name their records (`resource_allocation_leg`,
+`resource_operation_outcome`, `resource_access_grant_status`, and the
+others) read the live root and those records only, without the whole root's
+integrity checks. A host keeps a reader between steps with
+`ResourceRootReader::keep` (a `KeptResourceRoot`, host memory that borrows
+nothing and is never saved) and `ResourceRootReader::reattach` repeats its
+requests on the run's current root, decoding only the buckets whose records
+the run no longer shares with it (`domain_record_shared`, compared by
+allocation, never by version), and nothing when nothing changed; a request
+that failed is repeated, so a re-attach fails where a fresh read fails. A
 finished lease (released or expired, its reserved report published or given
 up)
 leaves the root at once; its receipts stay hot terminal records until an
@@ -1955,7 +1968,14 @@ settlement admits it. A publishing system finds those records with
 current records of one schema kind, selected by typed subjects, from committed
 state and the boundary being settled. It returns at most 64 IDs, the newest
 when more match, and does not depend on retained evidence, so a sealed run
-supersedes the same records as its exact replay.
+supersedes the same records as its exact replay. A host reads the same from
+the run handles: `knowledge_heads` answers what the view answers for the same
+committed state before anything is staged in a boundary, and
+`knowledge_current_records` iterates those current records newest first in
+publication order as the holder-relative views a `CurrentHeads` page returns,
+from the index, without a read cut or a projection hash. Both are
+trusted-host reads of any holder; a page bound to a cursor stays
+`admin_query_knowledge`.
 `knowledge_changes_by_correlation` and its prefix form scan retained boundary
 evidence and must not drive a decision that has to replay exactly.
 
@@ -2599,7 +2619,15 @@ evidence reads, the retained-tail journal reads, and `pending_ingress`, every
 record still queued, the pinned ones included); the methods that promise
 full history (`snapshot`, `replay_journal`, the checkpoint journal) stay on
 `Canwu`. `canwu_api::CanwuRun`, implemented by both, is the read-and-ingress
-contract that extension host helpers take.
+contract that extension host helpers take. Besides the current-state reads it
+holds the trusted host reads of the knowledge index (`knowledge_heads`,
+`knowledge_current_records`), the records of one kind in reference order
+(`domain_records_of_kind`), and the run's own shared copy of a record
+(`domain_record_shared`): the very allocation `domain_record` reads, replaced
+by every write and shared by forks, so a host that keeps it tells an
+unchanged record from a changed one by `Arc::ptr_eq`, never by a version
+number, which a diverged fork reuses. An implementation that returns another
+copy is read correctly but lets a kept reader reuse nothing.
 
 Sealing is fail-closed but works with work in flight. A seal moves events,
 commands, and command attempts up to the boundary admission cursors and

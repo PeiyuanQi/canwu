@@ -1619,11 +1619,11 @@ fn packet_operation_keys(packet_type: &str, payload: &Value) -> Vec<crate::Resou
 }
 
 /// Settles `admitted` on `work` and proposes what changed.
-fn settle_lifecycle_on<S: crate::HotTerminalSource + ?Sized>(
+fn settle_lifecycle_on<'s, S: crate::HotTerminalSource<'s>>(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
     admitted: &[IngressId],
-    work: &mut crate::ResourceRootWork<'_, S>,
+    work: &mut crate::ResourceRootWork<'s, S>,
 ) -> Result<BoundaryProposal, CanwuError> {
     let mut settlement = LifecycleSettlement::default();
     for ingress_id in admitted {
@@ -2925,10 +2925,10 @@ fn materialize_resource_reports(
     Ok(proposal)
 }
 
-fn materialize_reports_on<S: crate::HotTerminalSource + ?Sized>(
+fn materialize_reports_on<'s, S: crate::HotTerminalSource<'s>>(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
-    work: &mut crate::ResourceRootWork<'_, S>,
+    work: &mut crate::ResourceRootWork<'s, S>,
 ) -> Result<BoundaryProposal, CanwuError> {
     let state = &mut work.state;
     let mut changed = false;

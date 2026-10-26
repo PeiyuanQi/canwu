@@ -5,7 +5,7 @@ use crate::{
     ResourceFulfillmentId, ResourceFulfillmentVersionV1, ResourceOperationKey,
     ResourceOperationOutcome, ResourceOperationOutcomeId, ResourceOperationOutcomeVersionV1,
     ResourceReportGrantId, ResourceReportId, ResourceRevision, ResourceScopeId, ResourceState,
-    canonical_digest,
+    ResourceTerminalRecordKeyV1, canonical_digest,
 };
 use canwu_api::{
     Canwu, CanwuError, DomainRecord, DomainRecordVersionRef, ErrorCode, EvidenceRef,
@@ -248,100 +248,174 @@ pub struct ResourceObservationWitnessV1 {
 }
 
 /// The whole resource root of a run: its live root record and the state
-/// with every hot terminal record attached from its bucket. Reading it costs
-/// time in proportion to the hot terminal backlog. Takes either runtime
-/// handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+/// with every bucketed record attached ([`crate::ResourceRootReader::attach_all`]).
+/// Reading it costs time in proportion to the hot terminal backlog and the
+/// number of accounts; a host that reads a few named records reads them with
+/// [`crate::ResourceRootReader::load_run`], and one that reads the whole root
+/// again after a step keeps the reader ([`crate::ResourceRootReader::keep`])
+/// and re-attaches it. Takes either runtime handle, [`canwu_api::Canwu`] or
+/// [`canwu_api::CompactedCanwu`].
 pub fn resource_state<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &H,
 ) -> Result<Option<(DomainRecord, ResourceState)>, CanwuError> {
     crate::whole_resource_root(canwu)
 }
 
-/// The current allocation leg with this ID. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+/// Answers `read` from the run's resource root with only what `attach`
+/// names attached ([`crate::ResourceRootReader::load_run`]), or `None`
+/// without a resource root. `read` must look only at the live root and the
+/// records `attach` names, so that it answers as on the whole root. With the
+/// `verify-targeted-reads` feature, which Canwu's own test runs enable and
+/// applications leave off, it reads the whole root as well and panics on a
+/// different answer.
+fn targeted_read<H, T>(
+    canwu: &H,
+    attach: impl FnOnce(&mut crate::ResourceRootReader<'_, '_>) -> Result<(), CanwuError>,
+    read: impl Fn(&ResourceState) -> T,
+) -> Result<Option<T>, CanwuError>
+where
+    H: canwu_api::CanwuRun + ?Sized,
+    T: PartialEq + std::fmt::Debug,
+{
+    let Some(mut reader) = crate::ResourceRootReader::load_run(canwu)? else {
+        return Ok(None);
+    };
+    attach(&mut reader)?;
+    let answer = read(reader.state());
+    #[cfg(feature = "verify-targeted-reads")]
+    if let Ok(Some((_, whole))) = resource_state(canwu) {
+        assert_eq!(
+            answer,
+            read(&whole),
+            "a resource host read answered differently on the named records than on the whole root"
+        );
+    }
+    Ok(Some(answer))
+}
+
+/// The current allocation leg with this ID. It reads the live root and the
+/// leg's bucket, not the whole root. Takes either runtime handle,
+/// [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
 #[must_use]
 pub fn resource_allocation_leg<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &H,
     id: &ResourceAllocationLegId,
 ) -> Option<ResourceAllocationLegVersionV1> {
-    resource_state(canwu).ok().flatten().and_then(|(_, state)| {
-        state
-            .allocation_legs
-            .get(id)
-            .map(ResourceAllocationLegVersionV1::from)
-    })
+    targeted_read(
+        canwu,
+        |reader| reader.attach([ResourceTerminalRecordKeyV1::AllocationLeg(id.clone())]),
+        |state| {
+            state
+                .allocation_legs
+                .get(id)
+                .map(ResourceAllocationLegVersionV1::from)
+        },
+    )
+    .ok()
+    .flatten()
+    .flatten()
 }
 
-/// An allocation leg at an exact state revision. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+/// An allocation leg at an exact state revision. It reads the live root and
+/// the leg's bucket. Takes either runtime handle, [`canwu_api::Canwu`] or
+/// [`canwu_api::CompactedCanwu`].
 pub fn exact_resource_allocation_leg<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &H,
     exact: &ResourceAllocationLegVersionV1,
 ) -> Result<ResourceAllocationLeg, CanwuError> {
-    let (_, state) =
-        resource_state(canwu)?.ok_or_else(|| unavailable("resource runtime is absent"))?;
-    let leg = state
-        .allocation_legs
-        .get(&exact.id)
-        .ok_or_else(|| unavailable("resource allocation leg is unavailable"))?;
-    if leg.revision != exact.revision
-        || leg.account != exact.account
-        || leg.account_revision != exact.account_revision
-        || leg.resource_revision != exact.resource_revision
-        || leg.unit_revision != exact.unit_revision
-        || leg.quantity != exact.quantity
-        || leg.semantic_digest != exact.semantic_digest
-    {
-        return Err(invalid("resource allocation exact binding differs"));
-    }
-    Ok(leg.clone())
+    targeted_read(
+        canwu,
+        |reader| reader.attach([ResourceTerminalRecordKeyV1::AllocationLeg(exact.id.clone())]),
+        |state| {
+            let leg = state
+                .allocation_legs
+                .get(&exact.id)
+                .ok_or_else(|| unavailable("resource allocation leg is unavailable"))?;
+            if leg.revision != exact.revision
+                || leg.account != exact.account
+                || leg.account_revision != exact.account_revision
+                || leg.resource_revision != exact.resource_revision
+                || leg.unit_revision != exact.unit_revision
+                || leg.quantity != exact.quantity
+                || leg.semantic_digest != exact.semantic_digest
+            {
+                return Err(invalid("resource allocation exact binding differs"));
+            }
+            Ok(leg.clone())
+        },
+    )?
+    .ok_or_else(|| unavailable("resource runtime is absent"))?
 }
 
-/// The current consumption with this ID. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+/// The current consumption with this ID. It reads the live root and the
+/// consumption's bucket. Takes either runtime handle, [`canwu_api::Canwu`]
+/// or [`canwu_api::CompactedCanwu`].
 #[must_use]
 pub fn resource_consumption<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &H,
     id: &ResourceConsumptionId,
 ) -> Option<ResourceConsumptionVersionV1> {
-    resource_state(canwu).ok().flatten().and_then(|(_, state)| {
-        state
-            .consumptions
-            .get(id)
-            .map(ResourceConsumptionVersionV1::from)
-    })
+    targeted_read(
+        canwu,
+        |reader| reader.attach([ResourceTerminalRecordKeyV1::Consumption(id.clone())]),
+        |state| {
+            state
+                .consumptions
+                .get(id)
+                .map(ResourceConsumptionVersionV1::from)
+        },
+    )
+    .ok()
+    .flatten()
+    .flatten()
 }
 
-/// A consumption at an exact state revision. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+/// A consumption at an exact state revision. It reads the live root and the
+/// consumption's bucket. Takes either runtime handle, [`canwu_api::Canwu`]
+/// or [`canwu_api::CompactedCanwu`].
 pub fn exact_resource_consumption<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &H,
     exact: &ResourceConsumptionVersionV1,
 ) -> Result<ResourceConsumption, CanwuError> {
-    let (_, state) =
-        resource_state(canwu)?.ok_or_else(|| unavailable("resource runtime is absent"))?;
-    let consumption = state
-        .consumptions
-        .get(&exact.id)
-        .ok_or_else(|| unavailable("resource consumption is unavailable"))?;
-    if consumption.revision != exact.revision
-        || consumption.account != exact.account
-        || consumption.allocation_leg != exact.allocation_leg
-        || consumption.quantity != exact.quantity
-        || consumption.consumer_evidence != exact.consumer_evidence
-        || consumption.semantic_digest != exact.semantic_digest
-    {
-        return Err(invalid("resource consumption exact binding differs"));
-    }
-    Ok(consumption.clone())
+    targeted_read(
+        canwu,
+        |reader| reader.attach([ResourceTerminalRecordKeyV1::Consumption(exact.id.clone())]),
+        |state| {
+            let consumption = state
+                .consumptions
+                .get(&exact.id)
+                .ok_or_else(|| unavailable("resource consumption is unavailable"))?;
+            if consumption.revision != exact.revision
+                || consumption.account != exact.account
+                || consumption.allocation_leg != exact.allocation_leg
+                || consumption.quantity != exact.quantity
+                || consumption.consumer_evidence != exact.consumer_evidence
+                || consumption.semantic_digest != exact.semantic_digest
+            {
+                return Err(invalid("resource consumption exact binding differs"));
+            }
+            Ok(consumption.clone())
+        },
+    )?
+    .ok_or_else(|| unavailable("resource runtime is absent"))?
 }
 
-/// The hot outcome of an operation key. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+/// The hot outcome of an operation key. It reads the live root and the
+/// outcome's bucket. Takes either runtime handle, [`canwu_api::Canwu`] or
+/// [`canwu_api::CompactedCanwu`].
 #[must_use]
 pub fn resource_operation_outcome<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &H,
     operation_key: &ResourceOperationKey,
 ) -> Option<ResourceOperationOutcomeVersionV1> {
-    resource_state(canwu)
-        .ok()
-        .flatten()
-        .and_then(|(_, state)| state.outcomes.get(operation_key).map(Into::into))
+    targeted_read(
+        canwu,
+        |reader| reader.attach([ResourceTerminalRecordKeyV1::Outcome(operation_key.clone())]),
+        |state| state.outcomes.get(operation_key).map(Into::into),
+    )
+    .ok()
+    .flatten()
+    .flatten()
 }
 
 /// The hot outcome with this operation ID. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
@@ -359,7 +433,9 @@ pub fn resource_operation_outcome_by_id<H: canwu_api::CanwuRun + ?Sized>(
     })
 }
 
-/// The completion certificate of a lease. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+/// The completion certificate of a lease. It reads the live root, which
+/// holds every unfinished lease. Takes either runtime handle,
+/// [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
 ///
 /// A lease leaves the root when it finishes (completed, released, expired,
 /// or aborted, with any report it reserved published), so this finds only an
@@ -370,13 +446,18 @@ pub fn resource_completion_certificate<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &H,
     acquisition: &crate::CompletionLeaseAcquisitionId,
 ) -> Option<crate::CompletionLeaseActivationCertificateV1> {
-    resource_state(canwu)
-        .ok()
-        .flatten()
-        .and_then(|(_, state)| state.completion_leases.certificate(acquisition).cloned())
+    targeted_read(
+        canwu,
+        |_| Ok(()),
+        |state| state.completion_leases.certificate(acquisition).cloned(),
+    )
+    .ok()
+    .flatten()
+    .flatten()
 }
 
-/// A completion capacity grant. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+/// A completion capacity grant. It reads the live root. Takes either runtime
+/// handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
 ///
 /// A lease leaves the root when it finishes (completed, released, expired,
 /// or aborted, with any report it reserved published), so this finds only an
@@ -387,13 +468,19 @@ pub fn resource_completion_grant<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &H,
     grant: &crate::CompletionCapacityGrantId,
 ) -> Option<crate::CompletionCapacityGrantV1> {
-    resource_state(canwu)
-        .ok()
-        .flatten()
-        .and_then(|(_, state)| state.completion_leases.grants.get(grant).cloned())
+    targeted_read(
+        canwu,
+        |_| Ok(()),
+        |state| state.completion_leases.grants.get(grant).cloned(),
+    )
+    .ok()
+    .flatten()
+    .flatten()
 }
 
-/// The status of a completion lease acquisition. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+/// The status of a completion lease acquisition. It reads the live root.
+/// Takes either runtime handle, [`canwu_api::Canwu`] or
+/// [`canwu_api::CompactedCanwu`].
 ///
 /// A lease leaves the root when it finishes (completed, released, expired,
 /// or aborted, with any report it reserved published), so this finds only an
@@ -404,12 +491,17 @@ pub fn resource_completion_status<H: canwu_api::CanwuRun + ?Sized>(
     holder: &KnowledgeHolderRef,
     acquisition: &crate::CompletionLeaseAcquisitionId,
 ) -> Result<crate::CompletionLeaseStatusDtoV1, CanwuError> {
-    let (_, state) =
-        resource_state(canwu)?.ok_or_else(|| unavailable("resource runtime is absent"))?;
-    state
-        .completion_leases
-        .status_for(holder, acquisition)
-        .map_err(resource_error)
+    targeted_read(
+        canwu,
+        |_| Ok(()),
+        |state| {
+            state
+                .completion_leases
+                .status_for(holder, acquisition)
+                .map_err(resource_error)
+        },
+    )?
+    .ok_or_else(|| unavailable("resource runtime is absent"))?
 }
 
 /// Holder-bound view of one access grant and its cap accounting, readable only
@@ -424,32 +516,39 @@ pub struct ResourceAccessGrantStatusDtoV1 {
     pub remaining_quantity: u64,
 }
 
-/// The status of an access grant. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+/// The status of an access grant. It reads the live root and the grant's
+/// live bucket. Takes either runtime handle, [`canwu_api::Canwu`] or
+/// [`canwu_api::CompactedCanwu`].
 pub fn resource_access_grant_status<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &H,
     holder: &KnowledgeHolderRef,
     grant: &crate::ResourceAccessGrantId,
 ) -> Result<ResourceAccessGrantStatusDtoV1, CanwuError> {
-    let (_, state) =
-        resource_state(canwu)?.ok_or_else(|| unavailable("resource runtime is absent"))?;
-    let record = state
-        .access_grants
-        .get(grant)
-        .ok_or_else(|| unavailable("resource access grant is unavailable"))?;
-    if &record.grant.grantor_custodian != holder && &record.grant.grantee != holder {
-        return Err(CanwuError::new(
-            ErrorCode::InvalidAuthority,
-            "resource access grant status is readable only by its grantor or grantee",
-        ));
-    }
-    Ok(ResourceAccessGrantStatusDtoV1 {
-        grant: record.grant.clone(),
-        revision: record.revision,
-        status: record.status,
-        reserved_quantity: record.reserved_quantity,
-        debited_quantity: record.debited_quantity,
-        remaining_quantity: record.remaining(),
-    })
+    targeted_read(
+        canwu,
+        |reader| reader.attach_live([crate::ResourceLiveRecordKeyV1::AccessGrant(grant.clone())]),
+        |state| {
+            let record = state
+                .access_grants
+                .get(grant)
+                .ok_or_else(|| unavailable("resource access grant is unavailable"))?;
+            if &record.grant.grantor_custodian != holder && &record.grant.grantee != holder {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "resource access grant status is readable only by its grantor or grantee",
+                ));
+            }
+            Ok(ResourceAccessGrantStatusDtoV1 {
+                grant: record.grant.clone(),
+                revision: record.revision,
+                status: record.status,
+                reserved_quantity: record.reserved_quantity,
+                debited_quantity: record.debited_quantity,
+                remaining_quantity: record.remaining(),
+            })
+        },
+    )?
+    .ok_or_else(|| unavailable("resource runtime is absent"))?
 }
 
 /// A completion certificate at an exact state revision. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
@@ -475,28 +574,39 @@ pub fn exact_resource_completion_certificate<H: canwu_api::CanwuRun + ?Sized>(
     Ok(persisted.clone())
 }
 
-/// An operation outcome at an exact state revision. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+/// An operation outcome at an exact state revision. It reads the live root
+/// and the outcome's bucket. Takes either runtime handle,
+/// [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
 pub fn exact_resource_operation_outcome<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &H,
     exact: &ResourceOperationOutcomeVersionV1,
 ) -> Result<ResourceOperationOutcome, CanwuError> {
-    let (_, state) =
-        resource_state(canwu)?.ok_or_else(|| unavailable("resource runtime is absent"))?;
-    let outcome = state
-        .outcomes
-        .get(&exact.operation_key)
-        .ok_or_else(|| unavailable("resource operation outcome is unavailable"))?;
-    if outcome.id != exact.id
-        || outcome.revision != exact.revision
-        || outcome.status != exact.status
-        || outcome.quantity != exact.quantity
-        || outcome.remainder != exact.remainder
-        || outcome.result_ref != exact.result_ref
-        || outcome.semantic_digest != exact.semantic_digest
-    {
-        return Err(invalid("resource operation exact outcome binding differs"));
-    }
-    Ok(outcome.clone())
+    targeted_read(
+        canwu,
+        |reader| {
+            reader.attach([ResourceTerminalRecordKeyV1::Outcome(
+                exact.operation_key.clone(),
+            )])
+        },
+        |state| {
+            let outcome = state
+                .outcomes
+                .get(&exact.operation_key)
+                .ok_or_else(|| unavailable("resource operation outcome is unavailable"))?;
+            if outcome.id != exact.id
+                || outcome.revision != exact.revision
+                || outcome.status != exact.status
+                || outcome.quantity != exact.quantity
+                || outcome.remainder != exact.remainder
+                || outcome.result_ref != exact.result_ref
+                || outcome.semantic_digest != exact.semantic_digest
+            {
+                return Err(invalid("resource operation exact outcome binding differs"));
+            }
+            Ok(outcome.clone())
+        },
+    )?
+    .ok_or_else(|| unavailable("resource runtime is absent"))?
 }
 
 /// The latest fulfillment of a demand. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
@@ -514,28 +624,35 @@ pub fn latest_resource_fulfillment<H: canwu_api::CanwuRun + ?Sized>(
     })
 }
 
-/// A fulfillment at an exact state revision. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+/// A fulfillment at an exact state revision. It reads the live root and the
+/// fulfillment's bucket. Takes either runtime handle, [`canwu_api::Canwu`]
+/// or [`canwu_api::CompactedCanwu`].
 pub fn exact_resource_fulfillment<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &H,
     exact: &ResourceFulfillmentVersionV1,
 ) -> Result<crate::ResourceFulfillment, CanwuError> {
-    let (_, state) =
-        resource_state(canwu)?.ok_or_else(|| unavailable("resource runtime is absent"))?;
-    let fulfillment = state
-        .fulfillments
-        .get(&exact.id)
-        .ok_or_else(|| unavailable("resource fulfillment is unavailable"))?;
-    if fulfillment.revision != exact.revision
-        || fulfillment.demand != exact.demand
-        || fulfillment.consumed_quantity != exact.consumed_quantity
-        || fulfillment.remainder != exact.remainder
-        || fulfillment.status != exact.status
-        || fulfillment.operation_key != exact.operation_key
-        || fulfillment.semantic_digest != exact.semantic_digest
-    {
-        return Err(invalid("resource fulfillment exact binding differs"));
-    }
-    Ok(fulfillment.clone())
+    targeted_read(
+        canwu,
+        |reader| reader.attach([ResourceTerminalRecordKeyV1::Fulfillment(exact.id.clone())]),
+        |state| {
+            let fulfillment = state
+                .fulfillments
+                .get(&exact.id)
+                .ok_or_else(|| unavailable("resource fulfillment is unavailable"))?;
+            if fulfillment.revision != exact.revision
+                || fulfillment.demand != exact.demand
+                || fulfillment.consumed_quantity != exact.consumed_quantity
+                || fulfillment.remainder != exact.remainder
+                || fulfillment.status != exact.status
+                || fulfillment.operation_key != exact.operation_key
+                || fulfillment.semantic_digest != exact.semantic_digest
+            {
+                return Err(invalid("resource fulfillment exact binding differs"));
+            }
+            Ok(fulfillment.clone())
+        },
+    )?
+    .ok_or_else(|| unavailable("resource runtime is absent"))?
 }
 
 /// The holder-relative resource report. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].

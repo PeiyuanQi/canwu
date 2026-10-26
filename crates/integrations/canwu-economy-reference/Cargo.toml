@@ -22,5 +22,9 @@ canwu-technology.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+# Checks every targeted resource read against the whole root in these tests.
+canwu-resource = { path = "../../extensions/canwu-resource", features = ["verify-targeted-reads"] }
+
 [lints]
 workspace = true

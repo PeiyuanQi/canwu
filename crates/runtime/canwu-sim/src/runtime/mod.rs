@@ -1967,6 +1967,80 @@ impl Simulation {
         &self.state.current.knowledge
     }
 
+    /// The global IDs of a holder's current records of one schema kind that
+    /// carry every one of `subjects`, from the committed ledger: what
+    /// [`SimulationView::knowledge_heads`] returns in a boundary system for
+    /// the same committed state before anything is staged in its boundary.
+    ///
+    /// The same bound and order apply: at most
+    /// [`KnowledgeLimitsV1::relations_per_record`] IDs, ascending, the newest
+    /// when more match ([`KnowledgeHeads::truncated`]). The read walks the
+    /// holder's index of current records, never its whole ledger, and
+    /// computes no read cut or projection hash.
+    ///
+    /// A trusted-host read: it answers for any holder. Show a holder's
+    /// records only to that holder's actor; player-facing reads go through
+    /// a restricted viewer.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::KnowledgeLimitExceeded`] when `subjects` lists more than
+    /// [`KnowledgeLimitsV1::relations_per_record`] subjects, as the view
+    /// refuses.
+    pub fn knowledge_heads(
+        &self,
+        holder: &canwu_core::KnowledgeHolderRef,
+        kind: &canwu_core::KnowledgeRecordKind,
+        subjects: &[KnowledgeSubject],
+    ) -> Result<KnowledgeHeads, CanwuError> {
+        let limit = KnowledgeLimitsV1::CURRENT.relations_per_record;
+        if subjects.len() > limit {
+            return Err(CanwuError::new(
+                ErrorCode::KnowledgeLimitExceeded,
+                "knowledge head subject filter exceeds the record relation limit",
+            ));
+        }
+        Ok(knowledge::current_heads_at_cut(
+            holder,
+            kind,
+            subjects,
+            &self.state.current.knowledge.records,
+            None,
+            limit,
+        ))
+    }
+
+    /// A holder's current records of one schema kind that carry every one of
+    /// `subjects`, newest first in publication order (descending global
+    /// record ID, not `learned_at`), each as the holder-relative view a
+    /// knowledge page returns ([`HolderLedger::current_record_views`]).
+    ///
+    /// They are the records a `CurrentHeads` page of
+    /// [`SimulationView::knowledge_records`] returns at the same committed
+    /// state when it names every schema version of the kind and those
+    /// subjects; sorting them by `(learned_at, id)` gives the page's order. The iterator reads the
+    /// holder's index of current records lazily and computes no read cut or
+    /// projection hash, so a caller pays for the records it takes; a caller
+    /// that needs a cursor bound to a read cut pages with the admin query.
+    ///
+    /// A trusted-host read: it returns any holder's payloads. The host
+    /// selects the records of the holder whose actor it shows before
+    /// anything reaches an actor.
+    pub fn knowledge_current_records<'a>(
+        &'a self,
+        holder: &'a canwu_core::KnowledgeHolderRef,
+        kind: &'a canwu_core::KnowledgeRecordKind,
+        subjects: &'a [KnowledgeSubject],
+    ) -> impl Iterator<Item = KnowledgeRecordView> + 'a {
+        self.state
+            .current
+            .knowledge
+            .records
+            .get(holder)
+            .into_iter()
+            .flat_map(move |ledger| ledger.current_record_views(kind, subjects))
+    }
+
     /// The retention a registered knowledge schema declares, or `None` for a
     /// schema this run does not register.
     #[must_use]
@@ -2032,6 +2106,43 @@ impl Simulation {
     #[must_use]
     pub fn domain_record(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
         self.state.current.domain_records.get(reference)
+    }
+
+    /// The current version of one domain record as the run's own shared
+    /// copy, which a host may keep after the run moves on without copying
+    /// the record.
+    ///
+    /// It is the very allocation [`Simulation::domain_record`] reads. Every
+    /// write of a record stores a new allocation, and the run and its forks
+    /// share the allocation of a record no write has touched since. While a
+    /// host keeps a copy, [`Arc::ptr_eq`] with the copy the run holds now is
+    /// therefore true exactly when the record is the one the host kept
+    /// (another run, or a fork that wrote it, holds another allocation), so a
+    /// host can tell an unchanged record from a changed one without comparing
+    /// payloads or trusting version numbers.
+    #[must_use]
+    pub fn domain_record_shared(&self, reference: &DomainRecordRef) -> Option<Arc<DomainRecord>> {
+        records::DomainRecordRead::get_shared(&self.state.current.domain_records, reference)
+    }
+
+    /// The current domain records of one kind, in reference order, read
+    /// from the store's ordered keys: the records of the kind and a search
+    /// for the first, not every record of the run.
+    pub fn domain_records_of_kind(
+        &self,
+        kind: &DomainRecordKind,
+    ) -> impl Iterator<Item = &DomainRecord> + '_ {
+        let kind = kind.clone();
+        records::DomainRecordRead::range_from(
+            &self.state.current.domain_records,
+            DomainRecordRef {
+                kind: kind.clone(),
+                id: String::new(),
+            },
+            false,
+        )
+        .take_while(move |(reference, _)| reference.kind == kind)
+        .map(|(_, record)| record)
     }
 
     /// Returns whether an exact domain-record version exists in current or retained evidence.

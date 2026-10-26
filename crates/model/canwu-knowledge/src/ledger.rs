@@ -5,7 +5,7 @@
 use crate::encoding::{self, IndexKey};
 use crate::{
     HolderEntry, KnowledgeBodyDigest, KnowledgeLedgerError, KnowledgeRecord, KnowledgeRecordBody,
-    KnowledgeSubject,
+    KnowledgeRecordView, KnowledgeSubject,
 };
 use canwu_core::{
     HolderKnowledgeRecordId, KnowledgeHolderRef, KnowledgeRecordId, KnowledgeRecordKind,
@@ -808,6 +808,33 @@ impl HolderLedger {
         narrowest
     }
 
+    /// The holder's current records of `kind` that carry every one of
+    /// `subjects`, as [`Self::current_records`] selects them and in its
+    /// order, newest first in publication order (descending global record
+    /// ID, not `learned_at`), each as the holder-relative view a knowledge
+    /// page returns: the holder's local ID, and relations named by the
+    /// holder's local IDs (a relation to an entry that has left the holder
+    /// is not named).
+    ///
+    /// It reads the index as [`Self::current_records`] does, never the
+    /// holder's superseded records, and computes no read cut, so a caller
+    /// that takes `n` views pays for those and for the candidates skipped
+    /// before them. They are the records a `CurrentHeads` page names when it
+    /// lists every schema version of `kind` and `subjects`, and sorting them
+    /// by `(learned_at, id)` gives that page's order.
+    pub fn current_record_views<'a>(
+        &'a self,
+        kind: &'a KnowledgeRecordKind,
+        subjects: &'a [KnowledgeSubject],
+    ) -> impl Iterator<Item = KnowledgeRecordView> + 'a {
+        let mut records = self.current_records(kind, subjects);
+        std::iter::from_fn(move || {
+            records.next_entry().map(|stored| {
+                crate::to_view(&self.holder, &stored.entry, &stored.shared.body, self)
+            })
+        })
+    }
+
     fn assemble(&self, stored: &StoredEntry) -> KnowledgeRecord {
         KnowledgeRecord::assemble(&self.holder, &stored.entry, &stored.shared.body)
     }
@@ -1187,10 +1214,9 @@ impl CandidateCheck<'_> {
     }
 }
 
-impl<'a> Iterator for CurrentRecords<'a> {
-    type Item = &'a KnowledgeRecordBody;
-
-    fn next(&mut self) -> Option<Self::Item> {
+impl<'a> CurrentRecords<'a> {
+    /// The next matching entry of the holder, newest first.
+    fn next_entry(&mut self) -> Option<&'a StoredEntry> {
         let ledger = self.ledger;
         let candidates = self.candidates.as_mut()?;
         for Reverse(id) in candidates.by_ref() {
@@ -1198,10 +1224,18 @@ impl<'a> Iterator for CurrentRecords<'a> {
                 continue;
             };
             if self.check.admits(&stored.shared) {
-                return Some(stored.shared.body.as_ref());
+                return Some(stored.as_ref());
             }
         }
         None
+    }
+}
+
+impl<'a> Iterator for CurrentRecords<'a> {
+    type Item = &'a KnowledgeRecordBody;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_entry().map(|stored| stored.shared.body.as_ref())
     }
 }
 

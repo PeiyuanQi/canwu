@@ -11,6 +11,7 @@ viewer-admin-leak = []
 viewer-boundary-leak = []
 viewer-domain-leak = []
 viewer-ingress-leak = []
+viewer-knowledge-leak = []
 viewer-journal-leak = []
 
 [dependencies]

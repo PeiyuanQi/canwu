@@ -522,6 +522,7 @@ version = "0.21.0"
 dependencies = [
  "blake3",
  "canwu-api",
+ "canwu-resource",
  "serde",
  "serde_json",
 ]

@@ -12,11 +12,27 @@ rust-version.workspace = true
 publish = ["crates-io"]
 description = "Conserved resource accounts, allocation, transfer, and fulfillment extension for Canwu"
 
+[features]
+# A check for Canwu's own test runs, off by default and never needed by an
+# application: every host helper that reads only the records it names
+# (`resource_allocation_leg` and the others that read through
+# `ResourceRootReader::load_run`) also reads the whole root and panics when the
+# two answers differ, so each such call costs a whole-root read. Canwu's test
+# runs enable it through the dev-dependencies below and in the dependents that
+# call these helpers (`canwu-production`, `canwu-economy-reference`,
+# `canwu-force-supply-reference`), so `cargo test --workspace` and
+# `cargo test -p <any of them>` check every targeted read; a published build
+# leaves it off (path-only dev-dependencies are not published).
+verify-targeted-reads = []
+
 [dependencies]
 blake3.workspace = true
 canwu-api.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+canwu-resource = { path = ".", features = ["verify-targeted-reads"] }
 
 [lints]
 workspace = true
