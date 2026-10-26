@@ -6,23 +6,42 @@ runtime migration for pre-8 data. Applications that need old
 records must keep the old engine or run an explicit, application-owned export
 outside the Canwu runtime.
 
-## Unreleased (0.22.0)
+## Current contract
 
-Draft for the next release; the release step folds it into the contract
-below. It comes from one package, with its own proposal:
+The workspace version is `0.22.0`. A live `SimulationSnapshot` has:
+
+- snapshot format `9`;
+- commitment format `8`;
+- checkpoint/evidence-journal format `6`;
+- paged-checkpoint envelope format `7` and continuation checkpoint format `4`;
+- state revision format `3`;
+- admission cursor format `3`;
+- exact replay revision format `3`;
+- a declared `RunManifest`, a declared or `CompatibilityV1` run
+  configuration, and canonical `initial_scenario`;
+- a non-zero `authority_root_seed`, derived independently from the simulation
+  random streams.
+
+Typed loading and strict JSON loading reject any other engine or contract
+version. Strict JSON loading also rejects unknown fields at every nested
+object and rejects a wire value whose canonical re-encoding changes shape.
+
+Version 0.22.0 is a pre-1.0 minor release. Its changes come from one
+package, with its own proposal:
 
 - [host-side targeted reads](proposals/host-side-targeted-reads.md)
   (`canwu-knowledge`, `canwu-sim`, `canwu-api`, `canwu-resource`: downstream
   gaps G-92 and G-93).
 
-What is added:
+What changed, in one list:
 
 - **Current knowledge records on the run handles.** `knowledge_heads(holder,
   kind, subjects)` on `Simulation`, `CompactedSimulation`, `Canwu`,
   `CompactedCanwu`, and `CanwuRun` returns, from the committed ledger, what
   `SimulationView::knowledge_heads` returns in a boundary for the same
-  committed state (at most `relations_per_record` global IDs, ascending, the
-  newest when more match; `KnowledgeLimitExceeded` past that many subjects).
+  committed state (at most 64 (`KnowledgeLimitsV1::relations_per_record`)
+  global IDs, ascending, the newest when more match; `KnowledgeLimitExceeded`
+  past that many subjects).
   `knowledge_current_records(holder, kind, subjects)` iterates the same
   current records, newest first, as the holder-relative
   `KnowledgeRecordView`s a `CurrentHeads` page returns; sorting them by
@@ -56,10 +75,11 @@ What is added:
   `resource_state` or `validate_resource_runtime`.
 - **The `verify-targeted-reads` feature** of `canwu-resource`, off by
   default: each of those helpers also reads the whole root and panics when
-  the answers differ, which makes it cost a whole-root read. Canwu's own test
-  runs enable it (a path-only dev-dependency of `canwu-resource` on itself,
-  and of `canwu-production`, `canwu-economy-reference`, and
-  `canwu-force-supply-reference`, none published), so
+  the answers differ, so each such call costs a whole-root read. Canwu's own
+  test runs enable it (a path-only dev-dependency of `canwu-resource` on
+  itself and of `canwu-production`, `canwu-economy-reference`, and
+  `canwu-force-supply-reference`; Cargo does not publish path-only
+  dev-dependencies), so
   `cargo test --workspace` checks every targeted read; an application
   leaves it off and meets no such panic.
 - **Incremental re-attach.** `ResourceRootReader::keep` turns a reader into
@@ -77,18 +97,24 @@ What is added:
   fails. `ResourceRootReader::buckets_decoded` reports how many buckets a
   reader decoded: a diagnostic that depends on the host process's history
   (forks share records, a reload copies them) and must never feed a
-  simulation input. Measured in a debug build on a root of 1,644 buckets
-  (review of the package): a whole read 65 ms; `load_run` with one attach
+  simulation input. Measured once in a debug build on a root of 1,644 buckets
+  (indicative, not a guarantee): a whole read 65 ms; `load_run` with one attach
   0.13 ms; a re-attach with nothing changed 5.4 ms; after a step that
   changed 2 buckets, 22 ms. Release builds were not measured.
 
 Formats: none change. No snapshot, checkpoint, journal, record, schema,
 plugin descriptor, semantic hash, or format number; the reads are outside
 every boundary and change no state. No `&mut self` method is added to
-`Canwu`, so `gated!` is unchanged.
+`Canwu`, so `gated!` is unchanged. As with any version change, the engine
+version in every checkpoint hash changes, first-party plugins that take
+their plugin version from the crate version report a new one, and the exact
+engine-version check rejects 0.21.0 saves; retain the 0.21.0 engine to
+read them.
 
 Upgrading from 0.21.0:
 
+- **Pin `=0.22.0`** for `canwu-api` and every extension. Nothing earlier
+  loads.
 - An implementation of `CanwuRun` outside `canwu-api` adds
   `knowledge_heads`, `knowledge_current_records`, `domain_record_shared`, and
   `domain_records_of_kind` (the iterators boxed, as `domain_records` is).
@@ -101,10 +127,15 @@ Upgrading from 0.21.0:
   holder with payloads, and the resource reader is every custodian's ground
   truth. A host selects what belongs to an actor before anything reaches it;
   actors keep `CanwuViewer::query_knowledge` and `resource_report`.
+- A host that used one of the eleven helpers to detect a corrupt resource
+  root calls `resource_state` or `validate_resource_runtime`; the helpers now
+  answer from the records they name.
 - A host that kept decoded resource roots, or a holder's current records,
   by comparing the records they were read from replaces that with
   `keep` / `reattach` and the knowledge reads. A kept root is host memory and
   is never saved: after a restore everything is read again.
+- **Saves.** Write a fresh continuation checkpoint, snapshot, or checkpoint
+  journal with 0.22.0; nothing from 0.21.0 loads.
 
 Known limits:
 
@@ -116,26 +147,6 @@ Known limits:
   `exact_resource_completion_certificate`, `resource_report`,
   `resource_observation_witness`, and the validation helpers still read the
   whole root.
-
-## Current contract
-
-The workspace version is `0.21.0`. A live `SimulationSnapshot` has:
-
-- snapshot format `9`;
-- commitment format `8`;
-- checkpoint/evidence-journal format `6`;
-- paged-checkpoint envelope format `7` and continuation checkpoint format `4`;
-- state revision format `3`;
-- admission cursor format `3`;
-- exact replay revision format `3`;
-- a declared `RunManifest`, a declared or `CompatibilityV1` run
-  configuration, and canonical `initial_scenario`;
-- a non-zero `authority_root_seed`, derived independently from the simulation
-  random streams.
-
-Typed loading and strict JSON loading reject any other engine or contract
-version. Strict JSON loading also rejects unknown fields at every nested
-object and rejects a wire value whose canonical re-encoding changes shape.
 
 Version 0.21.0 is a pre-1.0 minor release. Its changes come from the
 packages that close every downstream gap filed against 0.20.0, each with its

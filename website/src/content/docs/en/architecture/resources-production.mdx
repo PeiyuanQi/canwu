@@ -211,6 +211,12 @@ A trusted host can read the whole resource root with `resource_state` and valida
 
 The economy reference also builds two detached read models for decision-making, the [local scarcity projection](/en/reference/terminology/) and the [price-pressure projection](/en/reference/terminology/). Building them changes no state; [Scarcity and price](/en/tutorials/cases/production-economy/#scarcity-and-price) in the grain case describes both.
 
+A trusted host that needs only a few accounts or records does not have to read the whole root. `ResourceRootReader::load_run(run)` reads the live root of any `CanwuRun`; `attach`, `attach_live`, and `attach_custodian_accounts` bring in only what they name, as in a boundary, and `attach_all` brings in the whole root.
+
+For the same committed state and requests it holds what `ResourceRootReader::load(view)` holds. `resource_state` lists the buckets by record kind instead of walking every record, and queries such as `resource_allocation_leg`, `exact_resource_allocation_leg`, `resource_consumption`, `resource_operation_outcome`, `resource_access_grant_status`, and `resource_completion_status` read only the live root and the records they name. They no longer run the whole root's integrity checks: a malformed bucket they do not read no longer turns an answer into `None` or an error, so a host that relies on a query to detect corruption calls `resource_state` or `validate_resource_runtime`.
+
+A host that rereads after every step turns its reader into a `KeptResourceRoot` with `keep`, which borrows nothing, and calls `ResourceRootReader::reattach(run, kept)`, which decodes only the buckets whose records the run no longer shares with it. A [kept resource root](/en/reference/terminology/) is host memory and is never saved. All of this is a trusted-host read of every custodian's ground truth; an actor still sees only `resource_report` and the holder report grants above.
+
 ## Randomness, persistence, and replay
 
 `canwu-resource`, `canwu-force-supply-reference`, and `canwu-economy-reference` draw no random numbers. Allocation order comes from data: priority, due time, tie-break key, admission sequence, and ID.

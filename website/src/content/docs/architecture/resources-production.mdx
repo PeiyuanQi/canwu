@@ -211,6 +211,12 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 经济参考实现还提供两个供决策使用的独立读取模型：[本地稀缺度投影](/reference/terminology/)和[价格压力投影](/reference/terminology/)。生成它们不会改变任何状态；粮食案例的[稀缺度与价格](/tutorials/cases/production-economy/#稀缺度与价格)一节介绍了这两个投影。
 
+只需要几个账户或几条记录的受信任的上层应用，不必读取整个资源根。`ResourceRootReader::load_run(run)` 读取任意 `CanwuRun` 的活动根；`attach`、`attach_live` 和 `attach_custodian_accounts` 只挂载它们点名的内容，与在边界里一样，`attach_all` 则挂载整个资源根。
+
+对同一份已提交状态和同样的请求，它读到的内容与 `ResourceRootReader::load(view)` 读到的相同。`resource_state` 按记录种类列出各个桶，而不是遍历每一条记录；`resource_allocation_leg`、`exact_resource_allocation_leg`、`resource_consumption`、`resource_operation_outcome`、`resource_access_grant_status`、`resource_completion_status` 等查询只读取活动根和它们点名的记录。它们不再运行整个资源根的完整性检查：自己没有读到的损坏的桶，不会再让答案变成 `None` 或错误，所以依赖查询来发现损坏的上层应用应当调用 `resource_state` 或 `validate_resource_runtime`。
+
+每一步之后都要重新读取的上层应用，可以用 `keep` 把读取方变成不借用运行的 `KeptResourceRoot`，再调用 `ResourceRootReader::reattach(run, kept)`：它只解码运行已不再与之共享记录的桶。[已读资源根](/reference/terminology/)只存在于上层应用的内存中，从不保存。这些都是对所有保管人真值的受信任的上层应用读取；角色看到的仍然只有 `resource_report` 和上文的持有人报告授权。
+
 ## 随机性、持久化与重放
 
 `canwu-resource`、`canwu-force-supply-reference` 和 `canwu-economy-reference` 不抽取随机数。分配顺序来自数据：优先级、到期时间、平局决胜键、准入序号和 ID。

@@ -46,7 +46,7 @@ resource simulation:
 
 ```toml
 [dependencies]
-canwu-resource = { version = "=0.21.0", optional = true }
+canwu-resource = { version = "=0.22.0", optional = true }
 
 [features]
 resource = ["dep:canwu-resource"]
@@ -113,6 +113,19 @@ Adapter packets bind `provider_plugin`, an exact
 `DomainRecordVersionRef`, and the operation request. The resource plugin checks
 the cited record body, owner, configured evidence kind, and request-specific
 source field before settlement.
+
+### Host reads
+
+A trusted host reads a few records of the resource root with
+`ResourceRootReader::load_run(&run)` plus `attach`, `attach_live`, and
+`attach_custodian_accounts`, or the whole root with `attach_all`; `keep` and
+`reattach` read again after a step and decode only the buckets whose records
+the run no longer shares. `resource_state` and the eleven query helpers listed
+in the 0.22.0 entry of `docs/versioning.md` (`resource_consumption` and
+`resource_operation_outcome` among them) read only the records they name.
+The optional `verify-targeted-reads` feature is for Canwu's own tests: it
+makes each helper also read the whole root and panic on a different answer.
+Leave it off in an application.
 
 ## Account loss, exchange, and local acceptance
 

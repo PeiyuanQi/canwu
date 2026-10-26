@@ -147,6 +147,44 @@ with a machine-validated payload and declared core/component access.
   from the factors as `DecisionOptionEvaluation::bias`; the ticket's part is
   outside the policy's hash, so one controller serves every ticket.
 
+## Read named records as a host (0.22.0)
+
+- Use these trusted-host reads when a host needs a few records between steps
+  and a whole read (`admin_query_knowledge`, `resource_state`, a walk of
+  `domain_records`) costs more than the answer. They return any holder's or
+  custodian's payloads and `CanwuViewer` has no such call, so select what
+  belongs to an actor before showing it; actor-facing reads stay
+  `CanwuViewer::query_knowledge` and `resource_report`.
+- A holder's current records: `run.knowledge_heads(&holder, &kind, &subjects)`
+  returns the global IDs (at most 64, ascending, the newest when more match;
+  more than 64 subjects is `KnowledgeLimitExceeded`), and
+  `run.knowledge_current_records(&holder, &kind, &subjects)` iterates the
+  holder-relative `KnowledgeRecordView`s newest first in publication order
+  (sort by `(learned_at, id)` for a page's order). Both are on `Canwu`,
+  `CompactedCanwu`, and `CanwuRun`; neither hashes the holder's history, so
+  keep `admin_query_knowledge` for a page bound to a cursor.
+- Records by kind: `domain_records_of_kind(&kind)` iterates the current
+  records of one kind in reference order. `domain_record_shared(&reference)`
+  returns the run's own `Arc<DomainRecord>`; a run and its forks share the
+  copy of a record no write has touched, so `Arc::ptr_eq` tells whether a
+  record you kept is unchanged.
+- The resource root: `ResourceRootReader::load_run(&run)` reads the live root
+  of any `CanwuRun`; name what you need with `attach`, `attach_live`, and
+  `attach_custodian_accounts(holder)` (`attach_all` for the whole root).
+  `resource_state` and the eleven query helpers listed in the 0.22.0 entry of
+  `docs/versioning.md` (`resource_consumption`, `resource_operation_outcome`,
+  `resource_access_grant_status`, and others) read only the records they name
+  and no longer run the whole root's integrity checks; call `resource_state`
+  or `validate_resource_runtime` to detect a corrupt root.
+- To read again after every step, `reader.keep()` gives a `KeptResourceRoot`
+  (host memory that borrows nothing and is never saved) and
+  `ResourceRootReader::reattach(&run, kept)` decodes only the buckets whose
+  records the run no longer shares. It still attaches every record its
+  requests reach, so a host that needs work in proportion to what changed
+  reads the named records instead. After a restore, read everything again.
+- To implement `CanwuRun` yourself, read "Upgrading from 0.21.0" in the
+  0.22.0 entry of `docs/versioning.md`.
+
 ## Save, seal, and continue (0.16.0 contract; 0.20.0 writes continuation format 4)
 
 - Save a run the player will continue with

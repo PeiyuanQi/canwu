@@ -217,12 +217,14 @@ draft.supersedes = heads.records;
 | 绑定到人物或机构的玩家或智能体 | `CanwuViewer::query_knowledge` | 自己的账本，形式为 `KnowledgeRecordView`，不含来源证据 |
 | 研究主体或开发者主体 | `CanwuViewer::query_holder_knowledge`、`CanwuViewer::audit_knowledge_record` | 任意现存持有人的账本；审计调用返回一条带 `origin` 的完整 `KnowledgeRecord` |
 | 公开主体 | 无 | `query_knowledge` 以 `InvalidKnowledgeAuthority` 失败 |
-| 受信任的上层应用代码 | `Canwu::admin_query_knowledge`、`Canwu::knowledge` | 任意持有人的账本，或完整的 `KnowledgeSnapshot` |
+| 受信任的上层应用代码 | `Canwu::admin_query_knowledge`、`Canwu::knowledge`，以及只读当前记录时的 `knowledge_heads` 和 `knowledge_current_records` | 任意持有人的账本，或完整的 `KnowledgeSnapshot` |
 | 边界系统或命令处理器 | `SimulationView::knowledge_records` | 视图读取切面上任意持有人的账本；系统契约必须声明 `StateKey::core_knowledge()` 读取 |
 
 用 `Canwu::viewer()` 打开查看器，它遵循本次运行的观察策略；角色席位也可以用 `viewer_for_actor`。[安全读取与呈现状态](/developer/reading-state/)演示了两种用法，并说明如何构建客户端载荷。
 
 查询结果按 `learned_at` 排序。默认的 `KnowledgeHistoryView::CurrentHeads` 会隐藏已被后续记录取代的记录，`FullHistory` 则返回 schema 的[留存策略](#留存)保留下来的全部记录，结果中的 `retention` 说明各 schema 适用哪种策略。持有人本地记录号来自持有人自己的计数器并随条目保存，所以不会改变、不会重新开始，读取方也无法据此推断其他持有人有多少条事实。游标绑定持有人、查询和读取切面。持有人得知新内容后，读取切面随之变化，旧游标会以 `KnowledgeReadCutUnavailable` 失败；其他持有人收到新消息，这个游标仍然有效。
+
+只需要某个持有人在某一 schema 种类下当前记录的受信任的上层应用，不必分页读取整本账本。`Canwu`、`CompactedCanwu` 和任何 `CanwuRun` 上的 `knowledge_heads(holder, kind, subjects)`，对同一份已提交状态，返回边界里 `SimulationView::knowledge_heads` 返回的那些全局 ID（最多 64 个，升序，匹配更多时返回最新的；所列主体超过 64 个会以 `KnowledgeLimitExceeded` 失败）。`knowledge_current_records(holder, kind, subjects)` 则按发布顺序、最新在前，遍历同样的记录，形式是 `CurrentHeads` 页返回的持有人相对 `KnowledgeRecordView`。两者都读取持有人的当前记录索引，不对持有人的历史做哈希，所以开销随读到的记录数增长，而不随持有人账本的大小增长；需要绑定读取切面的游标时，仍然用 `admin_query_knowledge` 分页。它们会返回任意持有人的载荷，所以只供上层应用使用：`CanwuViewer` 没有这样的调用，记录要先由上层应用挑出属于该角色的部分，才能送到角色面前。
 
 `CanwuViewer::visible_changes_since(since)` 为之后每个受众包含该查看者的事件返回一个 `VisibleChange`（时间、摘要和来源事件）。每次知识发布都产生一个 `KnowledgePublished` 事件，列出它发给的全部持有人（`holders`，连同这条指令的 `record_count` 和 `entry_count`），其中每个持有人都是它的受众，客户端可以借此发现新知识，再去查询账本。研究主体和开发者主体能看到所有事件。其他受众类型见[事件系统](/architecture/events/)。
 

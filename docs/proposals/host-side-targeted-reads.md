@@ -1,6 +1,6 @@
 # Host-Side Targeted Reads
 
-Status: implemented in 0.22.0 (unreleased). It closes downstream gaps G-92
+Status: implemented in 0.22.0. It closes downstream gaps G-92
 (`canwu-api` with `canwu-knowledge`) and G-93 (`canwu-resource`): a host can
 read a few current knowledge records, or a few named accounts and records of
 the resource root, at the cost a boundary system pays for the same read. It
@@ -266,7 +266,7 @@ a corrupt root calls `validate_resource_runtime`.
 
 In this change: `docs/architecture.md` (the resource reader paragraph, the
 host knowledge reads, the `CanwuRun` contract), `docs/terminology.md` (rows
-below), `docs/versioning.md` (the unreleased entry), the rustdoc. For the
+below), `docs/versioning.md` (the 0.22.0 entry), the rustdoc. For the
 release pass, in both languages: the website term pages (the rows below);
 `architecture/resources-production.mdx` (the host reader, keep and
 re-attach, the helpers' lost integrity checks), `architecture/knowledge-information.mdx`
