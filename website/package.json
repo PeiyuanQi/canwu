@@ -11,14 +11,14 @@
     "preview": "cross-env ASTRO_TELEMETRY_DISABLED=1 astro preview"
   },
   "dependencies": {
-    "@astrojs/sitemap": "^3.7.3",
-    "@astrojs/starlight": "^0.41.7",
+    "@astrojs/sitemap": "^3.7.4",
+    "@astrojs/starlight": "^0.41.11",
     "@fortawesome/free-brands-svg-icons": "^7.3.1",
-    "astro": "^7.2.8",
-    "mermaid": "11.16.1"
+    "astro": "^7.4.2",
+    "mermaid": "12.2.0"
   },
   "devDependencies": {
-    "@astrojs/check": "^0.9.4",
+    "@astrojs/check": "^0.9.12",
     "cross-env": "^10.1.0",
     "typescript": "^5.9.2"
   }

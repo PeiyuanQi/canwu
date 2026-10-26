@@ -242,6 +242,10 @@ import { Icon } from "@astrojs/starlight/components";
             securityLevel: "strict",
             suppressErrorRendering: true,
             theme: document.documentElement.dataset.theme === "light" ? "neutral" : "dark",
+            // Mermaid 12 changed these defaults; keep the diagrams as drawn.
+            look: "classic",
+            layout: "dagre",
+            flowchart: { wrappingWidth: 200 },
             fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
             // Native SVG text avoids Chromium's stale compositing tiles when a
             // scrollable diagram containing foreignObject labels is resized.
