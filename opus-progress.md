@@ -9,7 +9,8 @@
 > proposal and in `docs/versioning.md`.
 >
 > 0.21.0 closes every row the downstream filed after adopting 0.20.0: G-91 (Medium, from its B33 fix) and G-83 to G-90
-> (Low, from its 0.20.0 adoption). No downstream row is open. What remains: the known limits the 0.18.0 to 0.21.0
+> (Low, from its 0.20.0 adoption). Since then the downstream filed **G-92 and G-93** (Medium, 2026-10-26, from its
+> day-cost package; §3). Also open: the known limits the 0.18.0 to 0.21.0
 > packages left on purpose (§4.2, engine findings E-34 to E-51), two limits the downstream met and worked around
 > (§4.3), and the decisions this run took for the owner to confirm (§6).
 
@@ -30,8 +31,18 @@ No row filed by the downstream ledger is open.
 
 ## 3. Medium
 
-No row filed by the downstream ledger is open. G-91 (a continuation restore counted as a seal for the fiscal archive's
-citation check) is closed by 0.21.0 (`docs/proposals/fiscal-archive-after-continuation-restore.md`).
+Filed 2026-10-26 by the downstream's W4 day-cost package (CM 0.90.4; full evidence in its `59`). Both are host-side
+reads: inside a boundary the published `SimulationView::knowledge_heads` and `ResourceRootReader` already serve, and
+the downstream moves its boundary systems to them. Until fixed, CM keeps decoded reads on the host and returns a kept
+copy only when the records equal what is read now (`Deviation (Canwu 0.21, G-92 / G-93)`).
+
+| Id | Crate | Gap | Smallest missing call |
+| --- | --- | --- | --- |
+| G-92 | `canwu-api` (with `canwu-knowledge`) | A host has no indexed read of a holder's current records: `CompactedCanwu::admin_query_knowledge` and `CanwuViewer::query_knowledge` build the read cut's `holder_projection_root` from every record of the holder's history and hash it, and `query_records` validates the whole ledger before filtering, so every desk question costs O(ledger) (about 1.3 ms at month 13, growing). | Host parity for `knowledge_heads(holder, kind, subjects)` on `CompactedCanwu` / `CanwuRun` (or a current-heads page by kind), the projection hash computed only when a caller asks for a cursor. |
+| G-93 | `canwu-resource` | A host cannot read a few named accounts or records of the resource root: `ResourceRootReader::load` takes only a `SimulationView`, and every host helper in `query.rs` calls `resource_state`, which walks every domain record to list the buckets and decodes the root and all of them (1,508 buckets, 296 KB, about 5 ms at month 14), again after any root change. | (a) `ResourceRootReader` over `CanwuRun` (`load`, `attach_live`, `attach`, `attach_custodian_accounts`) with the `query.rs` helpers on it; (b) an incremental re-attach from a previously decoded root that re-reads only the buckets whose versions changed. |
+
+G-91 (a continuation restore counted as a seal for the fiscal archive's citation check) is closed by 0.21.0
+(`docs/proposals/fiscal-archive-after-continuation-restore.md`).
 
 ## 4. Low
 
@@ -99,8 +110,8 @@ own leases) and E-37's publication-budget overshoot (the application's publisher
 
 ## 5. Next steps
 
-1. **Wait for the rows the downstream files against 0.21.0.** It adopted 0.21.0 in CM 0.90.0 and filed none (its
-   ledger, implementation document `59` §5.10, records each row's adoption at the `=0.21.0` pin).
+1. **G-92 and G-93** (§3), the rows the downstream filed against 0.21.0 (it adopted 0.21.0 in CM 0.90.0; its ledger,
+   implementation document `59`, holds the evidence and the checks its interim relies on at each pin move).
 2. Then the §4.2 limits by downstream need: **E-50** first if the downstream runs cross-plugin completions through a
    long campaign (the cap of 1,024 ended participants); **E-49** if a host wants malformed correspondence commands
    recorded rather than validated before sending; E-41's force-supply deferral if a host runs the reference economy
