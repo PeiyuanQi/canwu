@@ -1,6 +1,6 @@
 # Opus progress — downstream engine gaps / Opus 进度记录
 
-> Updated 2026-10-26 at Canwu **0.21.0** (tag `v0.21.0`, release commit `3e9da86` on `main`, published 2026-10-25); **0.22.0 is prepared on `release/0.22.0` and published by the owner**. This file is the to-do list of engine gaps that a downstream application has filed
+> Updated 2026-10-27 at Canwu **0.22.0** (tag `v0.22.0`, release commit `8459daa` on `main`, published 2026-10-27). This file is the to-do list of engine gaps that a downstream application has filed
 > against the published crates. The application is Celestial Mandate (CM); its gap ledger (implementation document `59`,
 > in the CM repository) gives each row its id (`G-nn`) and the full evidence. Priorities are the ledger's severities:
 > High, Medium, Low.
@@ -10,7 +10,7 @@
 >
 > 0.21.0 closes every row the downstream filed after adopting 0.20.0: G-91 (Medium, from its B33 fix) and G-83 to G-90
 > (Low, from its 0.20.0 adoption). Since then the downstream filed **G-92 and G-93** (Medium, 2026-10-26, from its
-> day-cost package; §3); 0.22.0, prepared on `release/0.22.0` and published by the owner, closes both. Also open: the known limits the 0.18.0 to 0.22.0
+> day-cost package); 0.22.0 closes both. Also open: the known limits the 0.18.0 to 0.22.0
 > packages left on purpose (§4.2, engine findings E-34 to E-54 and E-56 to E-58; E-55 is fixed), two limits the downstream met and worked around
 > (§4.3), and the decisions this run took for the owner to confirm (§6).
 
@@ -18,10 +18,10 @@
 
 | Item | State |
 | --- | --- |
-| Release | **0.22.0 is prepared on branch `release/0.22.0`** (the package commit `3c72411` plus the version bump to 0.22.0 and the release documentation: the folded 0.22.0 entry of `docs/versioning.md`, the version pins, and the term pages in both languages) and is **not yet published**; the owner publishes it. It closes G-92 and G-93 (`docs/proposals/host-side-targeted-reads.md`; §3). No format changes. Still to run before the tag: the full verification list and the pre-release tests, then the tag, the crates.io publish, and the website deploy. The last published release is 0.21.0 (2026-10-25): all 24 library crates on crates.io (one workspace publish from the tagged commit, every package dry-run first), the annotated tag `v0.21.0` on the release commit `3e9da86`, the GitHub release, and the website deployed from `main` (canwu.org shows `=0.21.0` in both languages). A registry-only consumer of `canwu-api`, `canwu-military`, and `canwu-military-reference-content` at `=0.21.0` builds and runs. Verification on the release tree: fmt, Clippy with warnings denied, the workspace tests (860 passed, 0 failed, 3 ignored), the debug client, the documentation build with warnings denied, the four public examples, the minimum Rust version (1.88), the performance-harness checks, the release-only `#[ignore]` scale tests in a release build (3 passed), the continuation gate across the workspace (green after the E-55 fix; 11 `canwu-economy-reference` tests failed before it, as on 0.20.0), and the website build. 0.20.0 (tag `v0.20.0`, `a82ffeb`) stays published and is not yanked; 0.19.0 was yanked on 2026-10-24. The downstream pins `=0.21.0` since CM 0.90.0 (2026-10-25): it adopted G-83 to G-91 (G-90 in part, since a day's orders still cost their two boundaries, E-51) and filed nothing; its next free ledger id is G-92. |
+| Release | **0.22.0 is published** (2026-10-27): all 24 library crates on crates.io (one workspace publish from the tagged commit, after a clean dry run), the annotated tag `v0.22.0` on the release commit `8459daa` (package commit `3c72411`), the GitHub release, and the website deployed from `main` (canwu.org shows `=0.22.0` in both languages). It closes G-92 and G-93 (`docs/proposals/host-side-targeted-reads.md`); no format change. Verification on the release commit: fmt, Clippy with warnings denied, the workspace tests (864 passed, 0 failed, 3 ignored), the debug client, the documentation build with warnings denied, the four public examples, the minimum Rust version (1.88), the performance-harness checks, the release-only `#[ignore]` scale tests in a release build (3 passed), the continuation gate across the workspace (864 passed; the expected panic), the package contents (`LICENSE` and `NOTICE` in all 24), and the website build. 0.21.0 (tag `v0.21.0`, `3e9da86`) and 0.20.0 stay published and are not yanked; 0.19.0 was yanked on 2026-10-24. The downstream pins `=0.21.0` (CM 0.90.6) and moves to `=0.22.0` as its next change set; its next free ledger id is G-94. |
 | Policy | **Same version only** (owner, 2026-10-14): Canwu crates depend only on the exact same version of each other (`=0.22.0` once released; `=0.21.0` is the last published release); nothing written by an earlier release is read; no migration. |
 | Proposals of 0.21.0 (all "implemented in 0.21.0") | `docs/proposals/`: `decision-ticket-option-bias.md` (G-84), `movement-kept-bookings.md` (G-83), `fiscal-archive-after-continuation-restore.md` (G-91), `military-engagement-revisions.md` (G-85 to G-90; extends `military-engagements.md`). The 0.20.0, 0.19.0, and 0.18.0 proposals are listed in their entries of `docs/versioning.md`. |
-| Branches and worktrees | `main`, and `release/0.22.0` (worktree `.worktrees/release-0.22.0`) until the owner publishes 0.22.0; delete both after publishing. |
+| Branches and worktrees | Only `main`, locally and on the remote; no 0.22.0 worktrees remain. |
 | Release procedure | `.agents/skills/canwu-contributor-release/SKILL.md` and `docs/releasing.md`. The orchestrator runs the full verification list once on the integrated release tree and the pre-release tests (the public examples, the performance-harness checks, the release-only `#[ignore]` scale tests in a release build, the continuation gate) before tagging (the counts go in the release row). |
 | What the adopter must know first | (1) Pin every Canwu crate at `=0.21.0`; nothing earlier loads (commitment format 8 and decision archive format 2 refuse 0.20.0 saves and archive blobs by their format as well as their engine version; a military payload at schema version 1 and a movement or military run by its semantic hash). (2) Read the "Upgrading from 0.20.0" notes of the 0.21.0 entry of `docs/versioning.md` and its "Known limits": `DecisionOption::bias` / `with_bias` (a per-ticket bias on the option, one controller per decision maker and class; struct literals add `bias: 0`); kept bookings (`bookings_per_execution` 64 kept at once, `bookings_per_runtime` 16,384, closed and replaced bookings leave the execution, `LimitExceeded` at the bound, a closed booking's final status from reports or the record history); a continuation restore is not a seal (`sealed_evidence_cursor()` is `None` until the restored run seals, so a continuation-only host archives in every session; a "not yet" arm for `UnsealedCitations` may stay); military `JoinSiege`, `ReviseSiegeV1::release`, `ReviseCrossing::defenders`, `OpenEngagementV1::max_minutes`, the timed step (`timed_step_ingress`, queued after each daily boundary instead of `Step`), no report queued for a subject without holders, `SCHEMA_VERSION` 2. (3) The 0.20.0, 0.19.0, and 0.18.0 notes still apply. (4) 0.22.0, once published: pin `=0.22.0`; an implementation of `CanwuRun` outside `canwu-api` adds four methods; the helpers listed in the 0.22.0 entry no longer run whole-root integrity checks (see "Upgrading from 0.21.0"). |
 
@@ -36,13 +36,8 @@ reads: inside a boundary the published `SimulationView::knowledge_heads` and `Re
 the downstream moves its boundary systems to them. Until fixed, CM keeps decoded reads on the host and returns a kept
 copy only when the records equal what is read now (`Deviation (Canwu 0.21, G-92 / G-93)`).
 
-Both are closed by **0.22.0, prepared on `release/0.22.0` and published by the owner**: `docs/proposals/host-side-targeted-reads.md`
-and the 0.22.0 entry of `docs/versioning.md`. Delete the rows when the owner has published 0.22.0.
-
-| Id | Crate | Gap | Smallest missing call | State |
-| --- | --- | --- | --- | --- |
-| G-92 | `canwu-api` (with `canwu-knowledge`) | A host has no indexed read of a holder's current records: `CompactedCanwu::admin_query_knowledge` and `CanwuViewer::query_knowledge` build the read cut's `holder_projection_root` from every record of the holder's history and hash it, and `query_records` validates the whole ledger before filtering, so every desk question costs O(ledger) (about 1.3 ms at month 13, growing). | Host parity for `knowledge_heads(holder, kind, subjects)` on `CompactedCanwu` / `CanwuRun` (or a current-heads page by kind), the projection hash computed only when a caller asks for a cursor. | Implemented in 0.22.0 (prepared on `release/0.22.0`, published by the owner): `knowledge_heads` and `knowledge_current_records` (views, newest first) on `Canwu`, `CompactedCanwu`, and `CanwuRun`, from the index, no read cut or hash; `admin_query_knowledge` stays for a cursor-bound page. |
-| G-93 | `canwu-resource` | A host cannot read a few named accounts or records of the resource root: `ResourceRootReader::load` takes only a `SimulationView`, and every host helper in `query.rs` calls `resource_state`, which walks every domain record to list the buckets and decodes the root and all of them (1,508 buckets, 296 KB, about 5 ms at month 14), again after any root change. | (a) `ResourceRootReader` over `CanwuRun` (`load`, `attach_live`, `attach`, `attach_custodian_accounts`) with the `query.rs` helpers on it; (b) an incremental re-attach from a previously decoded root that re-reads only the buckets whose versions changed. | Implemented in 0.22.0 (prepared on `release/0.22.0`, published by the owner): `ResourceRootReader::load_run` and `attach_all`; `resource_state` and eleven helpers read through it; `keep` / `KeptResourceRoot` / `reattach`, a changed bucket told by the run's shared record copy (`domain_record_shared`, `Arc::ptr_eq`), not its version. |
+No row filed by the downstream ledger is open. G-92 and G-93 (host-side knowledge and resource reads, filed 2026-10-26)
+are closed by 0.22.0 (`docs/proposals/host-side-targeted-reads.md`; the 0.22.0 entry of `docs/versioning.md`).
 
 G-91 (a continuation restore counted as a seal for the fiscal archive's citation check) is closed by 0.21.0
 (`docs/proposals/fiscal-archive-after-continuation-restore.md`).
@@ -116,11 +111,8 @@ own leases) and E-37's publication-budget overshoot (the application's publisher
 
 ## 5. Next steps
 
-1. **G-92 and G-93** (§3), the rows the downstream filed against 0.21.0 (it adopted 0.21.0 in CM 0.90.0; its ledger,
-   implementation document `59`, holds the evidence and the checks its interim relies on at each pin move):
-   implemented in 0.22.0, prepared on `release/0.22.0` and published by the owner, and independently reviewed ("ready after
-   fixes"; the fixes are in the package commit, recorded in the proposal's review record); next the owner's publish
-   (tag, crates.io, website).
+1. **Wait for the downstream's adoption of 0.22.0** (its ledger records each row's adoption at the `=0.22.0` pin) and
+   for the rows it files against 0.22.0.
 2. Then the §4.2 limits by downstream need: **E-50** first if the downstream runs cross-plugin completions through a
    long campaign (the cap of 1,024 ended participants); **E-49** if a host wants malformed correspondence commands
    recorded rather than validated before sending; E-41's force-supply deferral if a host runs the reference economy
