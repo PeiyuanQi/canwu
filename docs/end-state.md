@@ -135,9 +135,13 @@ entry, so a boundary has one publication budget of bodies, entries, and
 payload bytes that every publisher reads before it publishes, and a schema
 declares whether a superseded entry is kept or cleared at publication;
 held knowledge therefore stays bounded by what is current, not by the length
-of the run. Performance evidence must distinguish publication cost,
-snapshot growth, query cost, load/index-rebuild cost, replay throughput, and
-compact-archive cost. Recorded baselines are engineering evidence, not a
+of the run. A holder page seeks into its holder's page index and reads what
+it returns plus what its subject filter skips, and its read cut comes from a
+running hash, so a page costs the page whatever the holder's history; an
+entry that leaves its holder costs the commit a re-hash of the holder's
+views from the checkpoint before it. Performance evidence must distinguish
+publication cost, snapshot growth, query cost, load/index-rebuild cost,
+replay throughput, and compact-archive cost. Recorded baselines are engineering evidence, not a
 machine-independent service-level objective.
 
 The first authoritative implementation was the

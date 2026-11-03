@@ -271,6 +271,14 @@ impl SimulationView<'_> {
     /// This enforces the declared `canwu.core.knowledge` read and returns an
     /// owned projection, with the retention of the schemas it is about. It is
     /// not an actor-facing authorization API.
+    ///
+    /// A page costs its page, not the holder's history: it seeks past
+    /// `learned_after` and the cursor in the holder's page index of each
+    /// schema it names, reads the entries it returns plus those its subject
+    /// filter skips, and derives the read cut from the holder's running
+    /// projection hash without reading an entry. The records the settling
+    /// boundary staged for the holder are added for the read, at their own
+    /// cost.
     pub fn knowledge_records(
         &self,
         holder: KnowledgeHolderRef,

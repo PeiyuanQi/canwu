@@ -1,23 +1,27 @@
 //! Persistent holder ledgers: record bodies stored once, one entry for each
-//! holder that holds a body, the derived current-record index, and the
-//! chunked commitment.
+//! holder that holds a body, the derived current-record and page indexes, the
+//! running projection hash, and the chunked commitment.
 
 use crate::encoding::{self, IndexKey};
+use crate::projection::{PROJECTION_CHECKPOINT_VIEWS, ProjectionState};
 use crate::{
-    HolderEntry, KnowledgeBodyDigest, KnowledgeLedgerError, KnowledgeRecord, KnowledgeRecordBody,
-    KnowledgeRecordView, KnowledgeSubject,
+    HolderEntry, KnowledgeBodyDigest, KnowledgeLedgerError, KnowledgeQueryError, KnowledgeRecord,
+    KnowledgeRecordBody, KnowledgeRecordView, KnowledgeSubject,
 };
 use canwu_core::{
     HolderKnowledgeRecordId, KnowledgeHolderRef, KnowledgeRecordId, KnowledgeRecordKind,
+    KnowledgeSchemaId,
 };
+use canwu_time::SimTime;
 use im::{OrdMap, OrdSet};
 use serde::de::Error as _;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::ops::Index;
+use std::iter::Peekable;
+use std::ops::{Bound, Index};
 use std::sync::Arc;
 
 /// A current-record set, keyed newest first so that the newest-first walk is
@@ -47,6 +51,63 @@ impl<T> Bucket<T> {
 /// Entries per commitment chunk: chunk `i` of a holder covers its entries
 /// with local IDs from `256 i` up to, not including, `256 i + 256`.
 pub const KNOWLEDGE_COMMITMENT_CHUNK_ENTRIES: u64 = 256;
+
+/// A holder's page order: learned time, then the holder's local ID.
+pub(crate) type PageKey = (SimTime, u64);
+
+/// A page index key: the holder's index of the entry's schema, then the
+/// page order, so that each schema's entries are one contiguous range.
+type SchemaPageKey = (u32, SimTime, u64);
+
+/// The lowest page key of a schema.
+const fn schema_start(schema: u32) -> SchemaPageKey {
+    (schema, SimTime::from_minutes(i64::MIN), 0)
+}
+
+/// A holder's running projection hash; see [`crate::projection`].
+#[derive(Clone)]
+struct Projection {
+    /// The state after every [`PROJECTION_CHECKPOINT_VIEWS`]th view, under
+    /// the global ID of that view, newest first so that the checkpoint below
+    /// an ID is a forward seek. Those at or above `stale_from` are stale.
+    /// `None` until the first checkpoint, so a small holder allocates none.
+    checkpoints: Option<OrdMap<Reverse<KnowledgeRecordId>, Arc<ProjectionState>>>,
+    /// The state after every entry's view; valid while `stale_from` is
+    /// `None`.
+    tip: Arc<ProjectionState>,
+    /// The lowest global ID whose view entered, left, or changed since the
+    /// tip was computed.
+    stale_from: Option<KnowledgeRecordId>,
+}
+
+impl Projection {
+    fn new(holder: &KnowledgeHolderRef) -> Self {
+        Self {
+            checkpoints: None,
+            tip: Arc::new(ProjectionState::start(holder)),
+            stale_from: None,
+        }
+    }
+
+    fn stale_from(&mut self, id: KnowledgeRecordId) {
+        self.stale_from = Some(self.stale_from.map_or(id, |from| from.min(id)));
+    }
+
+    fn keep_checkpoint(&mut self, id: KnowledgeRecordId, state: Arc<ProjectionState>) {
+        self.checkpoints
+            .get_or_insert_with(OrdMap::new)
+            .insert(Reverse(id), state);
+    }
+
+    /// The last valid checkpoint below `from`.
+    fn checkpoint_below(&self, from: KnowledgeRecordId) -> Option<&ProjectionState> {
+        self.checkpoints
+            .as_ref()?
+            .range((Bound::Excluded(Reverse(from)), Bound::Unbounded))
+            .next()
+            .map(|(_, state)| state.as_ref())
+    }
+}
 
 /// A body with what the ledgers derive from it once, shared by every entry
 /// that holds it.
@@ -138,17 +199,26 @@ pub struct HolderLedgers {
 }
 
 /// One holder's entries, keyed by global record ID, with their stored local
-/// IDs and an index of the holder's current records.
+/// IDs, an index of the holder's current records, the holder's page index,
+/// and the running hash of its read cut's projection root.
 ///
 /// A record is current when no entry of this ledger names it in
 /// `supersedes`. The index files current records by schema kind and by
 /// subject under 16-byte digest keys, each with the exact kind or subject
 /// first filed under it, so a lookup compares its query with a key's exact
 /// value once; a ledger in which two different values ever shared a key
-/// compares every candidate's kind and subjects exactly instead. The index
-/// is derived from the entries alone, kept up to date by every insertion and
-/// removal through [`HolderLedgers`], rebuilt when the ledgers are decoded,
-/// and never encoded.
+/// compares every candidate's kind and subjects exactly instead.
+///
+/// The page index files every entry, and separately every current entry, by
+/// schema in a knowledge page's order, learned time then local ID, so a
+/// page seeks to its `learned_after` or cursor and reads forward. The ledger
+/// also keeps the set of relation targets it does not hold, so a page checks
+/// relation integrity without reading the entries, and the projection root
+/// of a read cut as a running hash (see [`HolderLedgers::refresh_commitment`]).
+///
+/// All of this is derived from the entries alone, kept up to date by every
+/// insertion and removal through [`HolderLedgers`], rebuilt when the ledgers
+/// are decoded, and never encoded.
 #[derive(Clone)]
 pub struct HolderLedger {
     holder: KnowledgeHolderRef,
@@ -170,6 +240,21 @@ pub struct HolderLedger {
     /// filed under one key of this ledger. It only selects how lookups
     /// compare, never what they return, and is not part of the content.
     key_collision: bool,
+    /// Each schema the holder has held, with its index in the page keys.
+    /// It never shrinks; an index only groups keys, never orders a page.
+    page_schemas: OrdMap<Arc<KnowledgeSchemaId>, u32>,
+    /// Every entry by schema, then in page order.
+    pages: OrdMap<SchemaPageKey, KnowledgeRecordId>,
+    /// Every current entry by schema, then in page order.
+    current_pages: OrdMap<SchemaPageKey, KnowledgeRecordId>,
+    /// The IDs some entry names in `supersedes` or `contradicts` that the
+    /// holder does not hold. Admission through
+    /// [`HolderLedgers::insert_publication`] keeps it empty, so it never
+    /// allocates there; the authoring path [`HolderLedgers::insert`] may
+    /// leave IDs in it.
+    dangling: BTreeSet<KnowledgeRecordId>,
+    /// The running hash of the read cut's projection root.
+    projection: Projection,
     /// Roots of the non-empty chunks, valid except for `stale_chunks`.
     chunk_roots: OrdMap<u64, [u8; 32]>,
     stale_chunks: OrdSet<u64>,
@@ -555,7 +640,18 @@ impl HolderLedgers {
         }))
     }
 
-    /// Recomputes the cached chunk and holder roots that changes left stale.
+    /// Recomputes the cached chunk and holder roots that changes left stale,
+    /// and each changed holder's running projection hash.
+    ///
+    /// The projection hash is the state of the hash of a read cut's holder
+    /// projection root (see [`crate::KnowledgeReadCut`]) after every entry's
+    /// view. An entry admitted above every global ID its holder holds
+    /// extends it when it is admitted; an entry that leaves, one admitted
+    /// below the highest held ID, or a relation that comes to resolve marks
+    /// it stale from that entry, and the refresh re-hashes the holder's
+    /// views from the last checkpoint (every 256 views) before the earliest
+    /// such entry. Until then a read cut is still exact: it hashes the same
+    /// views from that checkpoint without keeping the result.
     pub fn refresh_commitment(&mut self) {
         let stale = std::mem::take(&mut self.stale);
         for holder in &stale {
@@ -583,6 +679,16 @@ impl HolderLedgers {
         staged: &BTreeMap<KnowledgeRecordId, (Arc<KnowledgeRecordBody>, HolderEntry)>,
     ) -> Result<Self, KnowledgeLedgerError> {
         let mut merged = self.clone();
+        if staged.is_empty() {
+            return Ok(merged);
+        }
+        // The merged ledger's own projection hash is never read: a read cut
+        // takes the committed holder's. Marking it stale keeps the staged
+        // entries from extending it.
+        merged
+            .holder_entry(holder)
+            .projection
+            .stale_from(KnowledgeRecordId::new(0));
         for (id, (body, entry)) in staged {
             if *id != body.id || *id != entry.record || merged.bodies.contains_key(id) {
                 return Err(KnowledgeLedgerError::DuplicateRecordId);
@@ -619,6 +725,7 @@ impl HolderLedgers {
 impl HolderLedger {
     fn new(holder: KnowledgeHolderRef) -> Self {
         let holder_key = encoding::holder_key(&holder);
+        let projection = Projection::new(&holder);
         Self {
             holder,
             holder_key,
@@ -630,6 +737,11 @@ impl HolderLedger {
             heads: OrdMap::new(),
             subject_heads: OrdMap::new(),
             key_collision: false,
+            page_schemas: OrdMap::new(),
+            pages: OrdMap::new(),
+            current_pages: OrdMap::new(),
+            dangling: BTreeSet::new(),
+            projection,
             chunk_roots: OrdMap::new(),
             stale_chunks: OrdSet::new(),
             root: encoding::holder_root(1, std::iter::empty()),
@@ -868,20 +980,29 @@ impl HolderLedger {
         {
             return Err(KnowledgeLedgerError::UnresolvedRelation);
         }
+        // Entries that already name this ID, which only the authoring path
+        // admits, gain a resolved relation: their views change.
+        let first_namer = self.naming.get(&id).and_then(OrdSet::get_min).copied();
         for target in &entry.supersedes {
             let count = entry_or_default(&mut self.superseded, target);
             *count = count.saturating_add(1);
             if *count == 1
                 && let Some(target) = self.entries.get(target).cloned()
             {
-                self.unindex(&target.shared);
+                self.unindex(&target.shared, target.entry.local.get());
             }
         }
         for target in entry.supersedes.iter().chain(&entry.contradicts) {
             entry_or_default(&mut self.naming, target).insert(id);
+            if !self.entries.contains_key(target) {
+                self.dangling.insert(*target);
+            }
         }
+        self.dangling.remove(&id);
+        let key = self.page_key(&shared.body, local);
+        self.pages.insert(key, id);
         if !self.superseded.contains_key(&id) {
-            self.index(shared);
+            self.index(shared, local);
         }
         let leaf = encoding::leaf_hash(&entry, &shared.digest);
         self.by_local.insert(local, LocalSlot { record: id, leaf });
@@ -894,6 +1015,15 @@ impl HolderLedger {
         );
         self.next_local = next_local;
         self.stale_chunks.insert(chunk_of(local));
+        let appends = self.projection.stale_from.is_none()
+            && first_namer.is_none()
+            && self.projection.tip.last().is_none_or(|last| last < id);
+        if appends {
+            self.append_projection(id);
+        } else {
+            self.projection
+                .stale_from(first_namer.map_or(id, |namer| namer.min(id)));
+        }
         Ok(())
     }
 
@@ -902,9 +1032,12 @@ impl HolderLedger {
         let local = stored.entry.local.get();
         self.by_local.remove(&local);
         self.stale_chunks.insert(chunk_of(local));
+        self.projection.stale_from(id);
         if !self.superseded.contains_key(&id) {
-            self.unindex(&stored.shared);
+            self.unindex(&stored.shared, local);
         }
+        let key = self.page_key(&stored.shared.body, local);
+        self.pages.remove(&key);
         for target in &stored.entry.supersedes {
             let Some(count) = self.superseded.get_mut(target) else {
                 continue;
@@ -913,7 +1046,7 @@ impl HolderLedger {
             if *count == 0 {
                 self.superseded.remove(target);
                 if let Some(target) = self.entries.get(target).cloned() {
-                    self.index(&target.shared);
+                    self.index(&target.shared, target.entry.local.get());
                 }
             }
         }
@@ -927,6 +1060,7 @@ impl HolderLedger {
                 namers.remove(&id);
                 if namers.is_empty() {
                     self.naming.remove(target);
+                    self.dangling.remove(target);
                 }
             }
         }
@@ -934,6 +1068,9 @@ impl HolderLedger {
         // entries that named this one drop the name.
         self.superseded.remove(&id);
         if let Some(namers) = self.naming.remove(&id) {
+            if let Some(first) = namers.get_min() {
+                self.projection.stale_from(*first);
+            }
             for namer in &namers {
                 let Some(stored) = self.entries.get_mut(namer) else {
                     continue;
@@ -958,10 +1095,13 @@ impl HolderLedger {
     }
 
     /// Files a current record under its kind and subjects, noting a key
-    /// that already holds a different exact value.
-    fn index(&mut self, shared: &SharedBody) {
+    /// that already holds a different exact value, and in its schema's
+    /// current page order under its local ID.
+    fn index(&mut self, shared: &SharedBody, local: u64) {
         let id = shared.body.id;
         let body = shared.body.as_ref();
+        let key = self.page_key(body, local);
+        self.current_pages.insert(key, id);
         let mut collision = false;
         if let Some(bucket) = self.heads.get_mut(&shared.kind) {
             collision |= *bucket.exact != body.schema.kind;
@@ -984,8 +1124,10 @@ impl HolderLedger {
         self.key_collision |= collision;
     }
 
-    fn unindex(&mut self, shared: &SharedBody) {
+    fn unindex(&mut self, shared: &SharedBody, local: u64) {
         let id = shared.body.id;
+        let key = self.page_key(&shared.body, local);
+        self.current_pages.remove(&key);
         if let Some(bucket) = self.heads.get_mut(&shared.kind) {
             bucket.records.remove(&Reverse(id));
             if bucket.records.is_empty() {
@@ -1031,6 +1173,172 @@ impl HolderLedger {
             }
         }
         self.root = encoding::holder_root(self.next_local, self.chunk_roots.iter());
+        self.refresh_projection();
+    }
+
+    /// The page index key of an entry: the holder's index of its schema,
+    /// given to a schema the first time the holder holds it, then its page
+    /// order.
+    fn page_key(&mut self, body: &KnowledgeRecordBody, local: u64) -> SchemaPageKey {
+        let schema = if let Some(schema) = self.page_schemas.get(&body.schema) {
+            *schema
+        } else {
+            let schema = u32::try_from(self.page_schemas.len())
+                .expect("a holder holds fewer than 2^32 schemas");
+            self.page_schemas
+                .insert(Arc::new(body.schema.clone()), schema);
+            schema
+        };
+        (schema, body.learned_at, local)
+    }
+
+    /// Extends the fresh projection tip by the view of entry `id`, which
+    /// has the highest global ID the holder holds.
+    fn append_projection(&mut self, id: KnowledgeRecordId) {
+        let Self {
+            holder,
+            entries,
+            projection,
+            ..
+        } = self;
+        let Some(stored) = entries.get(&id) else {
+            // Never reached: the entry was just inserted. Were it missing,
+            // the refresh would re-hash rather than keep a wrong tip.
+            projection.stale_from(id);
+            return;
+        };
+        // The tip is copied only while an earlier copy of the ledgers, or a
+        // checkpoint, shares it.
+        let state = Arc::make_mut(&mut projection.tip);
+        state.absorb(
+            holder,
+            &stored.entry,
+            &stored.shared.body,
+            &|target| entries.get(target).map(|stored| stored.entry.local),
+            &mut Vec::new(),
+        );
+        if state.views().is_multiple_of(PROJECTION_CHECKPOINT_VIEWS) {
+            let tip = Arc::clone(&projection.tip);
+            projection.keep_checkpoint(id, tip);
+        }
+    }
+
+    /// The projection state after every entry's view, hashed from the last
+    /// checkpoint below `from` (or from the start), with `checkpoint` called
+    /// on each new checkpoint the walk passes.
+    fn replay_projection(
+        &self,
+        from: KnowledgeRecordId,
+        mut checkpoint: impl FnMut(KnowledgeRecordId, &ProjectionState),
+    ) -> ProjectionState {
+        let mut state = self
+            .projection
+            .checkpoint_below(from)
+            .map_or_else(|| ProjectionState::start(&self.holder), Clone::clone);
+        let start = state.last().map_or(Bound::Unbounded, Bound::Excluded);
+        let mut buffer = Vec::new();
+        for (id, stored) in self.entries.range((start, Bound::Unbounded)) {
+            state.absorb(
+                &self.holder,
+                &stored.entry,
+                &stored.shared.body,
+                &|target| self.local_of(target),
+                &mut buffer,
+            );
+            if state.views().is_multiple_of(PROJECTION_CHECKPOINT_VIEWS) {
+                checkpoint(*id, &state);
+            }
+        }
+        state
+    }
+
+    /// Re-hashes a stale projection from the last checkpoint before its
+    /// earliest change and keeps the result.
+    fn refresh_projection(&mut self) {
+        let Some(from) = self.projection.stale_from else {
+            return;
+        };
+        if let Some(checkpoints) = &mut self.projection.checkpoints {
+            let stale: Vec<_> = checkpoints
+                .keys()
+                .take_while(|Reverse(id)| *id >= from)
+                .copied()
+                .collect();
+            for key in &stale {
+                checkpoints.remove(key);
+            }
+        }
+        let mut kept = Vec::new();
+        let tip = self.replay_projection(from, |id, state| {
+            kept.push((id, Arc::new(state.clone())));
+        });
+        for (id, state) in kept {
+            self.projection.keep_checkpoint(id, state);
+        }
+        self.projection.tip = Arc::new(tip);
+        self.projection.stale_from = None;
+    }
+
+    /// The holder projection root of a read cut of this holder, as 0.22.0
+    /// computed it from every entry's view. A fresh projection reads no
+    /// entry; a stale one hashes the views from the last checkpoint before
+    /// its earliest change, without keeping them.
+    pub(crate) fn projection_root(&self) -> Result<String, KnowledgeQueryError> {
+        let root = match self.projection.stale_from {
+            None => self.projection.tip.root(),
+            Some(from) => self.replay_projection(from, |_, _| {}).root(),
+        };
+        root.ok_or(KnowledgeQueryError::Encoding)
+    }
+
+    /// Whether every relation of every entry names an entry the holder
+    /// holds and no entry has global ID zero: what 0.22.0 checked by
+    /// reading every entry on every page, read from what admission keeps.
+    pub(crate) fn is_consistent(&self) -> bool {
+        self.dangling.is_empty() && !self.entries.contains_key(&KnowledgeRecordId::new(0))
+    }
+
+    /// The holder's entries of `schemas` (every schema when `None`), every
+    /// one or only current ones, in page order from `after` on: a seek into
+    /// each schema's page index and a forward merge of them.
+    pub(crate) fn page_walk<'a>(
+        &'a self,
+        schemas: Option<&[&KnowledgeSchemaId]>,
+        current_only: bool,
+        after: Bound<PageKey>,
+    ) -> PageWalk<'a> {
+        let index = if current_only {
+            &self.current_pages
+        } else {
+            &self.pages
+        };
+        let line = |schema: u32| {
+            let start = match after {
+                Bound::Included((time, local)) => Bound::Included((schema, time, local)),
+                Bound::Excluded((time, local)) => Bound::Excluded((schema, time, local)),
+                Bound::Unbounded => Bound::Included(schema_start(schema)),
+            };
+            PageLine {
+                schema,
+                keys: index.range((start, Bound::Unbounded)).peekable(),
+            }
+        };
+        let lines = match schemas {
+            Some(schemas) => schemas
+                .iter()
+                .filter_map(|schema| self.page_schemas.get(*schema))
+                .map(|schema| line(*schema))
+                .collect(),
+            None => self
+                .page_schemas
+                .values()
+                .map(|schema| line(*schema))
+                .collect(),
+        };
+        PageWalk {
+            ledger: self,
+            lines,
+        }
     }
 
     fn fresh_root(&self) -> [u8; 32] {
@@ -1236,6 +1544,56 @@ impl<'a> Iterator for CurrentRecords<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next_entry().map(|stored| stored.shared.body.as_ref())
+    }
+}
+
+/// A holder's entries in page order, from [`HolderLedger::page_walk`]: a
+/// forward merge of one page index range per schema. Page keys are unique
+/// within a holder (local IDs are), so the merge never ties.
+pub(crate) struct PageWalk<'a> {
+    ledger: &'a HolderLedger,
+    lines: Vec<PageLine<'a>>,
+}
+
+/// One schema's range of a page index, read forward from a seek.
+struct PageLine<'a> {
+    schema: u32,
+    keys: Peekable<im::ordmap::Iter<'a, SchemaPageKey, KnowledgeRecordId>>,
+}
+
+impl PageLine<'_> {
+    /// The page key of the line's next entry, while it is of the schema.
+    fn peek(&mut self) -> Option<PageKey> {
+        self.keys
+            .peek()
+            .filter(|((schema, _, _), _)| *schema == self.schema)
+            .map(|((_, time, local), _)| (*time, *local))
+    }
+}
+
+impl<'a> Iterator for PageWalk<'a> {
+    type Item = (PageKey, &'a HolderEntry, &'a Arc<KnowledgeRecordBody>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let mut next: Option<(usize, PageKey)> = None;
+            for (line, keys) in self.lines.iter_mut().enumerate() {
+                if let Some(key) = keys.peek()
+                    && next.is_none_or(|(_, lowest)| key < lowest)
+                {
+                    next = Some((line, key));
+                }
+            }
+            let (line, key) = next?;
+            let (_, id) = self.lines[line].keys.next()?;
+            // The index holds only held entries; a miss would be skipped,
+            // never returned, and fails debug builds.
+            let stored = self.ledger.entries.get(id);
+            debug_assert!(stored.is_some(), "a page index key names a held entry");
+            if let Some(stored) = stored {
+                return Some((key, &stored.entry, &stored.shared.body));
+            }
+        }
     }
 }
 

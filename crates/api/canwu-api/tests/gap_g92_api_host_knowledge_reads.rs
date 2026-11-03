@@ -13,7 +13,10 @@
 //! newest first) on a full-history run, a run that seals every boundary, a
 //! run restored from a continuation checkpoint, and a run reloaded from a
 //! snapshot, and must read exactly what the probe then records. The subject
-//! filter takes up to 64 subjects, as in a boundary.
+//! filter takes up to 64 subjects, as in a boundary. Each run also pages
+//! two holders' full histories with `admin_query_knowledge` and continues
+//! the full run's cursor (G-94): the read cut, rebuilt on every restore, is
+//! the full run's, and so are the pages.
 
 #![allow(clippy::too_many_lines, clippy::unnecessary_wraps)]
 
@@ -21,13 +24,13 @@ use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundaryRequest,
     BoundarySystemContract, Canwu, CanwuError, CanwuRun, CompactedCanwu, DomainRecordClass,
     DomainRecordDraft, DomainRecordKind, DomainRecordMutation, DomainRecordRef, DomainRecordSchema,
-    EntityRef, ErrorCode, EventId, KnowledgeHistoryView, KnowledgeHolderRef, KnowledgeOrigin,
-    KnowledgePublicationGroup, KnowledgeQuery, KnowledgeRecordDraft, KnowledgeRecordKind,
-    KnowledgeRecordView, KnowledgeRetention, KnowledgeSchemaId, KnowledgeSubject,
-    KnowledgeSubjectSchema, KnowledgeSubjectTarget, KnowledgeSubjectTargetKind,
-    KnowledgeSupersession, KnowledgeWriteGrant, PayloadSchema, PersonId, PluginKnowledgeSchema,
-    PluginRegistrar, Scenario, SimDuration, SimTime, SimulationPlugin, SimulationView, StateKey,
-    StateVisibility, SystemCadence,
+    EntityRef, ErrorCode, EventId, KnowledgeCursor, KnowledgeHistoryView, KnowledgeHolderRef,
+    KnowledgeOrigin, KnowledgePublicationGroup, KnowledgeQuery, KnowledgeQueryResult,
+    KnowledgeRecordDraft, KnowledgeRecordKind, KnowledgeRecordView, KnowledgeRetention,
+    KnowledgeSchemaId, KnowledgeSubject, KnowledgeSubjectSchema, KnowledgeSubjectTarget,
+    KnowledgeSubjectTargetKind, KnowledgeSupersession, KnowledgeWriteGrant, PayloadSchema,
+    PersonId, PluginKnowledgeSchema, PluginRegistrar, Scenario, SimDuration, SimTime,
+    SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence,
 };
 use serde_json::{Value, json};
 
@@ -374,6 +377,43 @@ fn host_answers(run: &dyn CanwuRun) -> Value {
     json!({ "answers": answers })
 }
 
+/// A `FullHistory` page of three of `holder`'s records, after `after`, as
+/// a host pages it.
+fn history_page(
+    run: &dyn CanwuRun,
+    holder: &KnowledgeHolderRef,
+    after: Option<KnowledgeCursor>,
+) -> KnowledgeQueryResult {
+    run.admin_query_knowledge(
+        holder.clone(),
+        &KnowledgeQuery {
+            view: KnowledgeHistoryView::FullHistory,
+            limit: 3,
+            after,
+            ..KnowledgeQuery::default()
+        },
+    )
+    .expect("the host pages the holder")
+}
+
+/// Each holder's first `FullHistory` page on the full run and, when there
+/// is more, the page after its cursor.
+fn reference_pages(
+    run: &dyn CanwuRun,
+) -> Vec<(KnowledgeQueryResult, Option<KnowledgeQueryResult>)> {
+    [person(1), person(2)]
+        .iter()
+        .map(|holder| {
+            let first = history_page(run, holder, None);
+            let second = first
+                .next
+                .clone()
+                .map(|cursor| history_page(run, holder, Some(cursor)));
+            (first, second)
+        })
+        .collect()
+}
+
 #[test]
 fn host_knowledge_reads_answer_what_a_boundary_reads_in_every_run() {
     let mut runs = vec![
@@ -417,8 +457,26 @@ fn host_knowledge_reads_answer_what_a_boundary_reads_in_every_run() {
             runs.push(("reloaded", Run::Full(reloaded)));
         }
         let mut expected = None;
+        let pages = reference_pages(runs[0].1.handle());
         for (name, run) in &mut runs {
             let host = host_answers(run.handle());
+            // Every run derives the full run's read cut, so the full run's
+            // cursor continues on a sealed, a continuation-restored, and a
+            // reloaded run, to the same page.
+            for (holder, (first, second)) in [person(1), person(2)].iter().zip(&pages) {
+                assert_eq!(
+                    &history_page(run.handle(), holder, None),
+                    first,
+                    "{name}, day {day}: the first page or its read cut differs"
+                );
+                if let (Some(cursor), Some(second)) = (&first.next, second) {
+                    assert_eq!(
+                        &history_page(run.handle(), holder, Some(cursor.clone())),
+                        second,
+                        "{name}, day {day}: the full run's cursor does not continue"
+                    );
+                }
+            }
             run.settle(day);
             let probed = run
                 .handle()

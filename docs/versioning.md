@@ -26,6 +26,31 @@ Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
 
+For the release after 0.22.0 (not released; the workspace version stays
+0.22.0 until the owner releases), one package is implemented on a branch,
+with its own proposal and release notes text:
+
+- [bounded knowledge pages](proposals/bounded-knowledge-pages.md)
+  (`canwu-knowledge`: downstream gap G-94). A knowledge page
+  (`SimulationView::knowledge_records`, `admin_query_knowledge`,
+  `CanwuViewer::query_knowledge`) costs its page instead of the holder's
+  history: it seeks into a per-holder page index, relation integrity is
+  checked at admission, and the read cut comes from a running hash of the
+  unchanged root material. No public API, format, or hash changes.
+
+Known limits it leaves, for that release's entry:
+
+- A page that filters by subject reads the entries of its schemas and time
+  range that lack the subject.
+- A commit that retires or removes an entry re-hashes the holder's views
+  after the hash copy before it (one per 256 views), once per holder: an
+  old entry under a long history costs that history once. An existing body
+  given to a holder below its highest global ID costs the same.
+- An admission encodes and hashes its entry's view (about 3 µs more per
+  entry), decoding re-hashes every entry's view (median +14% on a measured
+  3.7 MB ledger), and memory grows by about 10% per entry and 9 KB per
+  holder.
+
 Version 0.22.0 is a pre-1.0 minor release. Its changes come from one
 package, with its own proposal:
 
@@ -140,7 +165,9 @@ Upgrading from 0.21.0:
 Known limits:
 
 - In a boundary, `SimulationView::knowledge_records` pages still hash the
-  holder's history; this release changes no `SimulationView` read.
+  holder's history; this release changes no `SimulationView` read. (Lifted
+  for the release after 0.22.0 by
+  [bounded knowledge pages](proposals/bounded-knowledge-pages.md), G-94.)
 - A kept root reuses decodes only of records it read through a run handle
   that the run still shares; one kept from a view reader re-reads everything.
 - `resource_operation_outcome_by_id`, `latest_resource_fulfillment`,

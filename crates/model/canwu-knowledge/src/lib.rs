@@ -8,10 +8,14 @@ use canwu_time::SimTime;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::sync::Arc;
 
 mod encoding;
+#[cfg(test)]
+mod equivalence;
 mod ledger;
+mod projection;
 
 pub use encoding::{KnowledgeBodyDigest, KnowledgeEncodingError};
 pub use ledger::{
@@ -414,16 +418,9 @@ fn query_records(
             retention: BTreeMap::new(),
         });
     };
-    if records.entries().any(|(entry, body)| {
-        entry.record != body.id
-            || body.id.get() == 0
-            || entry.local.get() == 0
-            || entry
-                .supersedes
-                .iter()
-                .chain(&entry.contradicts)
-                .any(|related| !records.contains_key(related))
-    }) {
+    // Admission keeps what this checks (every relation resolves within the
+    // holder, no entry has global ID zero), so it reads no entry.
+    if !records.is_consistent() {
         return Err(KnowledgeQueryError::InvalidLedger);
     }
     if let Some(cursor) = &query.after
@@ -434,37 +431,57 @@ fn query_records(
     {
         return Err(KnowledgeQueryError::InvalidCursor);
     }
-    let current_only = query.view == KnowledgeHistoryView::CurrentHeads;
-    let mut candidates = records
-        .entries()
-        .filter(|(entry, body)| {
-            (!current_only || records.is_current(&entry.record))
-                && (query.schemas.is_empty() || query.schemas.contains(&body.schema))
-                && query
-                    .subjects
-                    .iter()
-                    .all(|subject| body.subjects.contains(subject))
-                && query
-                    .learned_after
-                    .is_none_or(|time| body.learned_at > time)
-                && query
-                    .learned_at_or_before
-                    .is_none_or(|time| body.learned_at <= time)
-        })
-        .collect::<Vec<_>>();
     // Pages follow the holder's own order, learned time then local ID, so a
-    // cursor never depends on another holder's records.
-    candidates.sort_by_key(|(entry, body)| (body.learned_at, entry.local));
-
-    if let Some(cursor) = &query.after {
-        candidates.retain(|(entry, body)| {
-            (body.learned_at, entry.local) > (cursor.learned_at, cursor.record)
-        });
-    }
-
+    // cursor never depends on another holder's records. The page index is
+    // kept in that order: the page seeks past `learned_after` and the cursor
+    // and reads forward until it has one match more than the page, or passes
+    // `learned_at_or_before`.
+    let after_time = query
+        .learned_after
+        .map(|time| (time, u64::MAX))
+        .map(Bound::Excluded);
+    let after_cursor = query
+        .after
+        .as_ref()
+        .map(|cursor| Bound::Excluded((cursor.learned_at, cursor.record.get())));
+    let after = match (after_time, after_cursor) {
+        (Some(Bound::Excluded(time)), Some(Bound::Excluded(cursor))) => {
+            Bound::Excluded(time.max(cursor))
+        }
+        (Some(bound), None) | (None, Some(bound)) => bound,
+        _ => Bound::Unbounded,
+    };
+    let mut schemas: Vec<&KnowledgeSchemaId> = query.schemas.iter().collect();
+    schemas.sort_unstable();
+    schemas.dedup();
+    let current_only = query.view == KnowledgeHistoryView::CurrentHeads;
     let limit = usize::try_from(query.limit).unwrap_or(MAX_KNOWLEDGE_PAGE_SIZE as usize);
-    let has_more = candidates.len() > limit;
-    let page = candidates.into_iter().take(limit).collect::<Vec<_>>();
+    let mut page = Vec::new();
+    for ((learned_at, _), entry, body) in records.page_walk(
+        (!schemas.is_empty()).then_some(schemas.as_slice()),
+        current_only,
+        after,
+    ) {
+        visits::page_entry();
+        if query
+            .learned_at_or_before
+            .is_some_and(|time| learned_at > time)
+        {
+            break;
+        }
+        if query
+            .subjects
+            .iter()
+            .all(|subject| body.subjects.contains(subject))
+        {
+            page.push((entry, body));
+            if page.len() > limit {
+                break;
+            }
+        }
+    }
+    let has_more = page.len() > limit;
+    page.truncate(limit);
     let next = if has_more {
         page.last().map(|(entry, body)| KnowledgeCursor {
             holder: holder.clone(),
@@ -535,6 +552,11 @@ impl KnowledgeSnapshot {
     /// Queries the current settled holder projection using an engine-derived
     /// read cut. Callers cannot substitute a cross-holder or stale root.
     ///
+    /// The cut's projection root comes from the holder ledger's running hash
+    /// (see [`HolderLedgers::refresh_commitment`]), and the page seeks into
+    /// the holder's page index, so the read costs the page and the entries
+    /// its subject filter skips, not the holder's history.
+    ///
     /// # Errors
     ///
     /// Returns an error when the holder ledger is inconsistent or the query or
@@ -556,7 +578,10 @@ impl KnowledgeSnapshot {
     /// Queries an omniscient system view with a same-boundary holder overlay.
     /// The returned values are owned so no mutable runtime ledger is exposed.
     /// The settled ledgers are not copied: the overlay is applied to a clone
-    /// that shares their structure.
+    /// that shares their structure, at the cost of the staged entries. The
+    /// projection root is the settled holder's, as for
+    /// [`Self::query_current`], and the overlay root hashes the staged
+    /// entries alone.
     ///
     /// # Errors
     ///
@@ -588,34 +613,24 @@ impl KnowledgeSnapshot {
 }
 
 #[derive(Serialize)]
-struct HolderProjectionCutMaterial<'a> {
-    holder: &'a KnowledgeHolderRef,
-    full_history_views: Vec<KnowledgeRecordView>,
-}
-
-#[derive(Serialize)]
 struct HolderOverlayCutMaterial<'a> {
     holder: &'a KnowledgeHolderRef,
     visible_projected_records: Vec<KnowledgeRecordView>,
 }
 
+/// The holder projection root of a read cut: blake3 of every view of the
+/// holder's full history (see [`projection`]), kept by the holder's ledger
+/// as a running hash, so deriving it reads no entry.
 fn holder_projection_root(
     holder: &KnowledgeHolderRef,
     ledger: &HolderLedgers,
 ) -> Result<String, KnowledgeQueryError> {
-    let views = ledger.get(holder).map_or_else(Vec::new, |records| {
-        records
-            .entries()
-            .map(|(entry, body)| to_view(holder, entry, body, records))
-            .collect()
-    });
-    hash_material(
-        b"canwu.knowledge.holder-projection.v1",
-        &HolderProjectionCutMaterial {
-            holder,
-            full_history_views: views,
-        },
-    )
+    match ledger.get(holder) {
+        Some(records) => records.projection_root(),
+        None => projection::ProjectionState::start(holder)
+            .root()
+            .ok_or(KnowledgeQueryError::Encoding),
+    }
 }
 
 fn holder_overlay_root(
@@ -731,6 +746,48 @@ fn validate_cursor(
         return Err(KnowledgeQueryError::InvalidCursor);
     }
     Ok(())
+}
+
+/// Counts of the entries a read touches, for the cost tests; nothing outside
+/// tests.
+#[cfg(test)]
+pub(crate) mod visits {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Entries a page walk read, matching or not.
+        pub(crate) static PAGE_ENTRIES: Cell<u64> = const { Cell::new(0) };
+        /// Entry views hashed into a projection root.
+        pub(crate) static VIEWS_HASHED: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn page_entry() {
+        PAGE_ENTRIES.set(PAGE_ENTRIES.get() + 1);
+    }
+
+    pub(crate) fn view_hashed() {
+        VIEWS_HASHED.set(VIEWS_HASHED.get() + 1);
+    }
+
+    /// Zeroes both counts.
+    pub(crate) fn reset() {
+        PAGE_ENTRIES.set(0);
+        VIEWS_HASHED.set(0);
+    }
+
+    /// `(page entries, views hashed)` since the last reset.
+    pub(crate) fn counts() -> (u64, u64) {
+        (PAGE_ENTRIES.get(), VIEWS_HASHED.get())
+    }
+}
+
+#[cfg(not(test))]
+pub(crate) mod visits {
+    #[inline(always)]
+    pub(crate) const fn page_entry() {}
+
+    #[inline(always)]
+    pub(crate) const fn view_hashed() {}
 }
 
 pub(crate) fn to_view(

@@ -2022,11 +2022,29 @@ cut, and final record position, so a cursor cannot be reused against a changed
 query or a changed holder projection. Holder-local record IDs are stored
 with each entry, come from the holder's own counter, and hide unrelated
 global ledger gaps; a page is ordered by `(learned_at, local)`, so a cursor
-stays valid across the clearing of other entries. Read-cut roots and cursor
-bindings are derived during reads; no mutable query index is persisted or
-included in the authoritative state hash. Any future cache or secondary
-index must be rebuilt from the canonical ledger and remain outside
-authoritative commitments.
+stays valid across the clearing of other entries. A page
+(`SimulationView::knowledge_records`, `admin_query_knowledge`,
+`CanwuViewer::query_knowledge`) costs its page, not the holder's history.
+Each holder ledger keeps a page index: every entry, and separately every
+current entry, by schema in `(learned_at, local)` order. A page seeks past
+its `learned_after` and its cursor in the index of each schema it names
+(every schema when it names none), merges them forward, and stops at one
+match more than its limit or past `learned_at_or_before`; it reads the
+entries it returns plus those its subject filter skips. Relation integrity
+is checked when an entry is admitted: the ledger keeps the set of relation
+targets it does not hold, which admission keeps empty, and a page reads that
+set instead of every entry. The read cut's `holder_projection_root` keeps
+its material (blake3 over every view of the holder's full history in global
+ID order), so read cuts, cursors, and every record or hash that stores one
+are unchanged; each holder ledger keeps that hash's running state, extended
+by an entry admitted above the holder's highest global ID and re-hashed at
+the commit's refresh from the last checkpoint (every 256 views) before an
+entry that leaves, one admitted below that ID, or a relation that comes to
+resolve. Deriving the cut then reads no entry. The page index, the
+unresolved-target set, and the running hash are derived from the canonical
+ledger, rebuilt on decode, never persisted, and outside the authoritative
+state hash, as any future cache or secondary index must be. See
+[bounded knowledge pages](proposals/bounded-knowledge-pages.md).
 
 ## Person availability and creation
 

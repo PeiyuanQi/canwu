@@ -10,7 +10,8 @@
 >
 > 0.21.0 closes every row the downstream filed after adopting 0.20.0: G-91 (Medium, from its B33 fix) and G-83 to G-90
 > (Low, from its 0.20.0 adoption). Since then the downstream filed **G-92 and G-93** (Medium, 2026-10-26, from its
-> day-cost package); 0.22.0 closes both. Also open: the known limits the 0.18.0 to 0.22.0
+> day-cost package); 0.22.0 closes both. It then filed **G-94** (Medium, 2026-10-29: in-boundary knowledge pages cost
+> the holder's history), fixed on branch `claude/youthful-johnson-b38ta4` and awaiting release (§3). Also open: the known limits the 0.18.0 to 0.22.0
 > packages left on purpose (§4.2, engine findings E-34 to E-54 and E-56 to E-58; E-55 is fixed), two limits the downstream met and worked around
 > (§4.3), and the decisions this run took for the owner to confirm (§6).
 
@@ -31,13 +32,16 @@ No row filed by the downstream ledger is open.
 
 ## 3. Medium
 
-Filed 2026-10-26 by the downstream's W4 day-cost package (CM 0.90.4; full evidence in its `59`). Both are host-side
-reads: inside a boundary the published `SimulationView::knowledge_heads` and `ResourceRootReader` already serve, and
-the downstream moves its boundary systems to them. Until fixed, CM keeps decoded reads on the host and returns a kept
-copy only when the records equal what is read now (`Deviation (Canwu 0.21, G-92 / G-93)`).
+Filed 2026-10-29 by the downstream's ledger (full evidence in its `59`). It is an in-boundary read: 0.22.0's
+host-side `knowledge_heads` and `knowledge_current_records` (G-92) answer current heads, not a page bound to a cursor,
+which the four boundary systems need.
 
-No row filed by the downstream ledger is open. G-92 and G-93 (host-side knowledge and resource reads, filed 2026-10-26)
-are closed by 0.22.0 (`docs/proposals/host-side-targeted-reads.md`; the 0.22.0 entry of `docs/versioning.md`).
+| Id | Filed | Crate | Gap | State |
+| --- | --- | --- | --- | --- |
+| G-94 | 2026-10-29 (CM ledger, Medium) | `canwu-knowledge` via `SimulationView::knowledge_records` | An in-boundary knowledge page cost the holder's whole history whatever its `limit`, `learned_after`, or cursor: the read cut hashed every entry's view and the page checked and filtered every entry. Four CM boundary systems page this way (its ledger pages with `learned_after`: `Daily` p99 2.82 to 3.74 ms from campaign month 14 to 22); its performance claim past month 22 waits on it. | **Fixed on branch `claude/youthful-johnson-b38ta4`, awaiting release** (`docs/proposals/bounded-knowledge-pages.md`, with its release notes text; the next-release paragraph of `docs/versioning.md`). A page seeks into a per-holder page index; relation integrity is checked at admission; the read cut comes from a running hash of the unchanged root material, so no hash, format, or public API changes. On a 10,000-entry holder a `learned_after` page went from about 29 ms to 7 µs (release build). Costs moved to admissions, retirement commits, decode, and memory (the proposal's known limits). CM adopts it at its next pin move, after the owner releases it. |
+
+G-92 and G-93 (host-side knowledge and resource reads, filed 2026-10-26) are closed by 0.22.0
+(`docs/proposals/host-side-targeted-reads.md`; the 0.22.0 entry of `docs/versioning.md`).
 
 G-91 (a continuation restore counted as a seal for the fiscal archive's citation check) is closed by 0.21.0
 (`docs/proposals/fiscal-archive-after-continuation-restore.md`).
@@ -78,7 +82,7 @@ file and continue the earlier numbering. Severity is this file's suggestion; non
 | E-53 | Low | `canwu-decision` (0.21.0) | A trace records one bias per option and its ticket part is the bias on the ticket version the trace names (not recoverable for a deferring trace after a later `ReplaceOptions`, since hot history keeps only the latest version); only the shipped utility evaluator reads the ticket bias (rule, human, external, and LLM policies ignore it, `ExternalDecisionRequest` does not carry it); a policy built on `WeightedUtilityEvaluator` cannot opt out; the bias is unbounded (the host clamps when it drafts). | A per-version option record in hot history, or a two-part evaluation field, if a host needs the split after a re-bias. |
 | E-54 | Low | `canwu-fiscal`, `canwu-sim` (0.21.0) | A continuation-only host keeps no segment, so the versions its archived books cite are in nothing it holds once the books leave the run (the archived book names them by identity); a host that seals at each save archives, in its first session after a continuation restore and until its first seal there, books whose citations the next seal puts in a segment rather than one that already holds them. | Seal at each save before the continuation checkpoint (already the documented practice); an archive commit that carries cited bodies was rejected as larger than the gap. |
 | E-56 | Low | `canwu-resource` (0.22.0) | A re-attach after the live root changes (nearly every step that settles resource work) decodes the live root and the changed buckets but attaches every record its requests reach again from the kept decodes: O(attached records), not O(changed). Reuse needs the run's own record allocations: a kept root from a view reader, or from another process, re-reads everything. | A host that needs work in proportion to what changed reads targeted records. |
-| E-57 | Low | `canwu-sim`, `canwu-knowledge` (0.22.0) | The in-boundary `SimulationView::knowledge_records` pages still hash the holder's history; the package changes no `SimulationView` read (the ten pages the downstream lists). | Not proposed: a host reads current records with `knowledge_heads` and `knowledge_current_records`. |
+| E-57 | Low | `canwu-sim`, `canwu-knowledge` (0.22.0) | The in-boundary `SimulationView::knowledge_records` pages still hash the holder's history; the package changes no `SimulationView` read (the ten pages the downstream lists). | Filed downstream as G-94 (§3) and lifted on branch `claude/youthful-johnson-b38ta4`, awaiting release; delete this row when that release ships. |
 | E-58 | Low | `canwu-resource` (0.22.0) | `resource_operation_outcome_by_id`, `latest_resource_fulfillment`, `exact_resource_completion_certificate`, `resource_report`, `resource_observation_witness`, and the validators still read the whole root: no key names what they scan, or their checks read records no key reaches. | Not proposed. |
 
 ### 4.3 Limits the downstream met and worked around (not filed)
