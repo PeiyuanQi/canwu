@@ -1210,13 +1210,9 @@ impl HolderLedger {
         // The tip is copied only while an earlier copy of the ledgers, or a
         // checkpoint, shares it.
         let state = Arc::make_mut(&mut projection.tip);
-        state.absorb(
-            holder,
-            &stored.entry,
-            &stored.shared.body,
-            &|target| entries.get(target).map(|stored| stored.entry.local),
-            &mut Vec::new(),
-        );
+        state.absorb(holder, &stored.entry, &stored.shared.body, &|target| {
+            entries.get(target).map(|stored| stored.entry.local)
+        });
         if state.views().is_multiple_of(PROJECTION_CHECKPOINT_VIEWS) {
             let tip = Arc::clone(&projection.tip);
             projection.keep_checkpoint(id, tip);
@@ -1236,14 +1232,12 @@ impl HolderLedger {
             .checkpoint_below(from)
             .map_or_else(|| ProjectionState::start(&self.holder), Clone::clone);
         let start = state.last().map_or(Bound::Unbounded, Bound::Excluded);
-        let mut buffer = Vec::new();
         for (id, stored) in self.entries.range((start, Bound::Unbounded)) {
             state.absorb(
                 &self.holder,
                 &stored.entry,
                 &stored.shared.body,
                 &|target| self.local_of(target),
-                &mut buffer,
             );
             if state.views().is_multiple_of(PROJECTION_CHECKPOINT_VIEWS) {
                 checkpoint(*id, &state);

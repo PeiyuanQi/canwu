@@ -246,7 +246,7 @@ fn body(
         id: KnowledgeRecordId::new(id),
         schema,
         subjects,
-        payload: serde_json::json!({ "id": id, "text": "x".repeat(usize::try_from(id % 5).unwrap()) }),
+        payload: serde_json::json!({ "id": id, "text": "x".repeat(text_bytes(id)) }),
         as_of: id.is_multiple_of(3).then(|| minutes(id % 7)),
         learned_at,
         confidence_per_mille: u16::try_from(id % 1_000).unwrap(),
@@ -255,6 +255,18 @@ fn body(
             evidence: Vec::new(),
         },
     }
+}
+
+/// A few bytes of payload text, and for one body in 37 about 4 KiB (3,796
+/// to 4,396 bytes, exactly 4,096 among them), so a view's encoding crosses
+/// the projection hash's 4 KiB stream buffer at varying offsets.
+fn text_bytes(id: u64) -> usize {
+    let bytes = if id.is_multiple_of(37) {
+        3_796 + id / 37 % 7 * 100
+    } else {
+        id % 5
+    };
+    usize::try_from(bytes).unwrap()
 }
 
 fn held(ledgers: &HolderLedgers, holder: &KnowledgeHolderRef) -> Vec<KnowledgeRecordId> {

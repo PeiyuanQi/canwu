@@ -26,8 +26,12 @@ use canwu_core::{
 use canwu_time::SimTime;
 use serde::{Serialize, Serializer};
 use serde_json::Value;
+use std::io::{self, Write};
 
 const PROJECTION_DOMAIN: &[u8] = b"canwu.knowledge.holder-projection.v1";
+
+/// The stack buffer a view's encoding streams through into the hash.
+const STREAM_BUFFER_BYTES: usize = 4_096;
 
 /// Views between two kept copies of a holder's projection hash state. Tests
 /// use a short interval so that generated ledgers of a few hundred entries
@@ -69,19 +73,18 @@ impl ProjectionState {
     }
 
     /// Absorbs the view of the holder's next entry in global ID order.
-    /// `local_of` names the holder's local ID of a global ID it holds;
-    /// `buffer` is scratch space reused across calls.
+    /// `local_of` names the holder's local ID of a global ID it holds. The
+    /// view's encoding streams into the hash through a stack buffer, so a
+    /// view allocates nothing in proportion to its payload.
     pub(crate) fn absorb(
         &mut self,
         holder: &KnowledgeHolderRef,
         entry: &HolderEntry,
         body: &KnowledgeRecordBody,
         local_of: &dyn Fn(&KnowledgeRecordId) -> Option<HolderKnowledgeRecordId>,
-        buffer: &mut Vec<u8>,
     ) {
-        buffer.clear();
         if self.views > 0 {
-            buffer.push(b',');
+            self.hasher.update(b",");
         }
         let view = ViewMaterial {
             id: entry.local,
@@ -101,8 +104,13 @@ impl ProjectionState {
                 local_of,
             },
         };
-        self.encoding_failed |= serde_json::to_writer(&mut *buffer, &view).is_err();
-        self.hasher.update(buffer);
+        let mut stream = HashStream {
+            hasher: &mut self.hasher,
+            buffer: [0; STREAM_BUFFER_BYTES],
+            len: 0,
+        };
+        self.encoding_failed |= serde_json::to_writer(&mut stream, &view).is_err();
+        stream.finish();
         self.views += 1;
         self.last = Some(entry.record);
         crate::visits::view_hashed();
@@ -125,6 +133,41 @@ impl ProjectionState {
 
     pub(crate) const fn last(&self) -> Option<KnowledgeRecordId> {
         self.last
+    }
+}
+
+/// Streams bytes into a hasher through a stack buffer, as the body digest's
+/// writer does, so the encoding is never built on the heap.
+struct HashStream<'a> {
+    hasher: &'a mut blake3::Hasher,
+    buffer: [u8; STREAM_BUFFER_BYTES],
+    len: usize,
+}
+
+impl HashStream<'_> {
+    /// Hashes what is still buffered.
+    fn finish(self) {
+        self.hasher.update(&self.buffer[..self.len]);
+    }
+}
+
+impl Write for HashStream<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.len + bytes.len() > STREAM_BUFFER_BYTES {
+            self.hasher.update(&self.buffer[..self.len]);
+            self.len = 0;
+        }
+        if bytes.len() >= STREAM_BUFFER_BYTES {
+            self.hasher.update(bytes);
+        } else {
+            self.buffer[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+            self.len += bytes.len();
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
