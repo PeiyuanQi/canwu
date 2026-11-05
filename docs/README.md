@@ -35,6 +35,7 @@ coding agents.
 - [Calendar marks and keyed-draw retirement](proposals/calendar-marks-and-draw-retirement.md)
 - [Decision ticket option bias](proposals/decision-ticket-option-bias.md)
 - [Host-side targeted reads](proposals/host-side-targeted-reads.md)
+- [Bounded knowledge pages](proposals/bounded-knowledge-pages.md)
 - [End-state design](end-state.md)
 - [Reusable-engine conformance](engine-conformance.md)
 - [Versioning and compatibility](versioning.md)

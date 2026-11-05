@@ -150,8 +150,8 @@ with a machine-validated payload and declared core/component access.
 ## Read named records as a host (0.22.0)
 
 - Use these trusted-host reads when a host needs a few records between steps
-  and a whole read (`admin_query_knowledge`, `resource_state`, a walk of
-  `domain_records`) costs more than the answer. They return any holder's or
+  and a whole read (`resource_state`, a walk of `domain_records`) costs more
+  than the answer. They return any holder's or
   custodian's payloads and `CanwuViewer` has no such call, so select what
   belongs to an actor before showing it; actor-facing reads stay
   `CanwuViewer::query_knowledge` and `resource_report`.
@@ -161,8 +161,9 @@ with a machine-validated payload and declared core/component access.
   `run.knowledge_current_records(&holder, &kind, &subjects)` iterates the
   holder-relative `KnowledgeRecordView`s newest first in publication order
   (sort by `(learned_at, id)` for a page's order). Both are on `Canwu`,
-  `CompactedCanwu`, and `CanwuRun`; neither hashes the holder's history, so
-  keep `admin_query_knowledge` for a page bound to a cursor.
+  `CompactedCanwu`, and `CanwuRun`; neither computes a read cut, so page
+  with `admin_query_knowledge` when you need a cursor bound to one (since
+  0.22.1 a page costs its page, not the holder's history).
 - Records by kind: `domain_records_of_kind(&kind)` iterates the current
   records of one kind in reference order. `domain_record_shared(&reference)`
   returns the run's own `Arc<DomainRecord>`; a run and its forks share the
@@ -521,6 +522,14 @@ with a machine-validated payload and declared core/component access.
 - Declare `retention` on every `PluginKnowledgeSchema`: `Keep` for records
   whose history a holder may read, `RetireWhenSuperseded` for lines a newer
   record replaces. It is part of the plugin descriptor.
+- Page a holder inside a boundary with `view.knowledge_records(holder,
+  &query)` (0.22.1): a page seeks past `learned_after` and its cursor in the
+  holder's index of each schema it names, so it costs the page plus the
+  entries its subject filter skips, not the holder's history. Name the
+  schemas and lead with `learned_after` or the cursor; a subject filter alone
+  may still read most entries of its schemas. A commit that clears an entry
+  (retention) re-hashes the holder's later views once, so clearing an old
+  entry under a long `Keep` history costs that commit the history after it.
 - Reserve a share (0.18.0) when a plugin must publish whatever runs before
   it: register it through `KnowledgeReservedPlugin::new(&plugin,
   KnowledgePublicationReservation { records, holder_entries, payload_bytes

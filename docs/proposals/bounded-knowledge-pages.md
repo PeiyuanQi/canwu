@@ -1,7 +1,7 @@
 # Bounded Knowledge Pages
 
-Status: implemented on branch `claude/youthful-johnson-b38ta4`, for the
-release after 0.22.0 (not released; the workspace version stays 0.22.0). It
+Status: implemented in 0.22.1 (package commit `a3a4fc4`, from branch
+`claude/youthful-johnson-b38ta4`, and the release pass's fix `015cd3b`). It
 closes downstream gap G-94 (`canwu-knowledge`, read through `canwu-sim`'s
 `SimulationView::knowledge_records`): an in-boundary knowledge page costs
 the page and the entries it reads, not the holder's whole history. It
@@ -308,9 +308,8 @@ owner's to edit and deploy: the mirror of those paragraphs in
 `website/src/content/docs/architecture/knowledge-information.mdx` and
 `website/src/content/docs/en/architecture/knowledge-information.mdx` (a page
 costs its page, not the history; the read cut's running hash; the
-retirement and decode costs), which the release pass updates in both
-languages with the release notes below; until then the English page still
-implies that a cursor page costs the holder's history.
+retirement and decode costs), which the 0.22.1 release commit updates in
+both languages, with the 0.22.1 entry of `docs/versioning.md`.
 
 ## Terminology candidates
 
@@ -373,8 +372,22 @@ boundaries). Non-blocking findings and what was done:
 5. The cost test's retirement bound named the release interval while tests
    use 4. Fixed: the bound uses the interval in force.
 6. Minor costs (a buffer per admission, the schema lookup per admission, 9
-   KB per holder even when empty). Not changed; the memory is a stated
-   known limit.
+   KB per holder even when empty). Not changed in the package commit; the
+   memory is a stated known limit. The buffer is gone in 0.22.1 (below).
+
+The 0.22.1 release pass found one defect the package's checks had not run:
+the performance harness's allocation contract
+`a_publication_allocates_each_body_once` (a boundary publishing 64 bodies
+of 64,000 payload bytes allocates under 1.5 times the payload) failed, at
+16.6 MB for 4.1 MB, because each admission encoded its entry's view into a
+fresh heap buffer. Fixed in the release: the view's encoding streams into
+the projection hash through a 4 KiB stack buffer, as the body digest's
+writer does, so an admission allocates nothing in proportion to its
+payload; the root's bytes are unchanged. The equivalence generator now
+gives one body in 37 a payload of 3,796 to 4,396 bytes (exactly 4,096
+among them), so every equivalence test crosses the stream buffer, and a
+broken flush or direct write fails all three. One independent review of
+the fix: ready, nothing blocking.
 
 ## Hand-back
 

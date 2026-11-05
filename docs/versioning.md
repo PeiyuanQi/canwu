@@ -8,7 +8,7 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.22.0`. A live `SimulationSnapshot` has:
+The workspace version is `0.22.1`. A live `SimulationSnapshot` has:
 
 - snapshot format `9`;
 - commitment format `8`;
@@ -26,30 +26,72 @@ Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
 
-For the release after 0.22.0 (not released; the workspace version stays
-0.22.0 until the owner releases), one package is implemented on a branch,
-with its own proposal and release notes text:
+Version 0.22.1 is a pre-1.0 patch release. Its change comes from one
+package, with its own proposal:
 
 - [bounded knowledge pages](proposals/bounded-knowledge-pages.md)
-  (`canwu-knowledge`: downstream gap G-94). A knowledge page
-  (`SimulationView::knowledge_records`, `admin_query_knowledge`,
-  `CanwuViewer::query_knowledge`) costs its page instead of the holder's
-  history: it seeks into a per-holder page index, relation integrity is
-  checked at admission, and the read cut comes from a running hash of the
-  unchanged root material. No public API, format, or hash changes.
+  (`canwu-knowledge`, rustdoc in `canwu-sim`: downstream gap G-94).
 
-Known limits it leaves, for that release's entry:
+What changed:
+
+- **Knowledge pages cost the page.** A knowledge page
+  (`SimulationView::knowledge_records`, `admin_query_knowledge`,
+  `CanwuViewer::query_knowledge`) no longer reads the holder's whole
+  history. Each holder ledger keeps a page index by schema and
+  `(learned_at, local)`, a set of unresolved relation targets that
+  admission keeps empty, and the running hash of its read cut's projection
+  root; a page seeks past `learned_after` and its cursor and reads what it
+  returns plus what its subject filter skips, and deriving the cut reads no
+  entry. Every page, `next` cursor, read cut, and refusal is what 0.22.0
+  returned, and the root's material is unchanged byte for byte. Costs
+  moved: a commit that clears (retention) or removes an entry re-hashes
+  the holder's views after the hash copy before it (one copy per 256
+  views); an existing
+  body given to a holder below its highest global ID does the same; each
+  admission encodes and hashes its view (about 3 µs) and decoding re-hashes
+  every view; memory grows by about 10% per entry and 9 KB per holder. On a
+  10,000-entry holder a `learned_after` page went from about 29 ms to 7 µs
+  in a release build.
+
+Formats: none change. No public item is added, removed, or changed, and no
+snapshot, checkpoint, journal, record, schema, plugin descriptor, semantic
+hash, or format number changes. The read cut's `holder_projection_root` is
+byte-identical to 0.22.0's, so the read cuts that `canwu-correspondence`
+and `canwu-law` store are what 0.22.0 computes for the same run, and so is
+every record and evidence hash over them. No `&mut self` method is
+added to `Canwu`, so `gated!` is unchanged. As with any version change, the
+engine version in every checkpoint hash changes, first-party plugins that
+take their plugin version from the crate version report a new one, and the
+exact engine-version check rejects 0.22.0 saves; retain the 0.22.0 engine
+to read them.
+
+Upgrading from 0.22.0:
+
+- **Pin `=0.22.1`** for `canwu-api` and every extension. Nothing earlier
+  loads.
+- No code changes: pages answer as before, faster. A host or plugin that
+  kept its own cache of knowledge pages, or avoided a page only for its
+  cost, can page again.
+- **Saves.** Write a fresh continuation checkpoint, snapshot, or checkpoint
+  journal with 0.22.1; nothing from 0.22.0 loads.
+
+Known limits:
 
 - A page that filters by subject reads the entries of its schemas and time
-  range that lack the subject.
-- A commit that retires or removes an entry re-hashes the holder's views
-  after the hash copy before it (one per 256 views), once per holder: an
-  old entry under a long history costs that history once. An existing body
-  given to a holder below its highest global ID costs the same.
-- An admission encodes and hashes its entry's view (about 3 µs more per
-  entry), decoding re-hashes every entry's view (median +14% on a measured
-  3.7 MB ledger), and memory grows by about 10% per entry and 9 KB per
-  holder.
+  range that lack the subject; only schema, `learned_after`, the cursor,
+  `learned_at_or_before`, and `CurrentHeads` are seeks. A page that names no
+  schema seeks once per schema the holder has ever held.
+- A commit that clears or removes an entry re-hashes the holder's views
+  after the hash copy before it, once per holder, whether or not anything
+  pages the holder: clearing an old entry under a long `Keep` history costs
+  that history once, at that commit (0.22.0 paid it on every page). An
+  existing body given to a holder below its highest global ID costs the
+  same from that entry.
+- An admission above the holder's highest global ID encodes and hashes its
+  entry's view (about 3 µs more per entry), decoding re-hashes every
+  entry's view (median +14% on a measured 3.7 MB ledger) and load
+  validation's journal replay does it again for the ledger it rebuilds, and
+  memory grows by about 10% per entry and 9 KB per holder.
 
 Version 0.22.0 is a pre-1.0 minor release. Its changes come from one
 package, with its own proposal:
@@ -166,8 +208,8 @@ Known limits:
 
 - In a boundary, `SimulationView::knowledge_records` pages still hash the
   holder's history; this release changes no `SimulationView` read. (Lifted
-  for the release after 0.22.0 by
-  [bounded knowledge pages](proposals/bounded-knowledge-pages.md), G-94.)
+  in 0.22.1 by [bounded knowledge pages](proposals/bounded-knowledge-pages.md),
+  G-94.)
 - A kept root reuses decodes only of records it read through a run handle
   that the run still shares; one kept from a view reader re-reads everything.
 - `resource_operation_outcome_by_id`, `latest_resource_fulfillment`,
