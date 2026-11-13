@@ -69,6 +69,30 @@ future validation through the engine's payload-required continuation contract;
 after sealing, reconstruct with the committed provider segment before continuing
 authoritative work.
 
+A run restored from a continuation checkpoint, or a sealed run, is a
+`CompactedCanwu` without its earlier journal. Check it with
+`validate_technology_runtime_on(&run)`, which takes either handle through
+`TechnologyRestoreAccess`: it makes the same record, body, evidence,
+consumed-intent, and knowledge checks without reading any journal entry
+before the run's history cut. It does not replay provenance;
+`validate_technology_runtime` does, on a full `Canwu`.
+
+The plugin, and both validators, decide a cited record version the same way
+on every handle, so a sealed or continuation-restored run applies and
+rejects what its uninterrupted twin does. A version resolves through
+`replay_stable_domain_record_version` (its record's committed current
+version, or an initial-scenario version); otherwise it is accepted by its
+identity when a committed boundary established it, it is not version zero,
+its record is current, and it is older than the current version and comes
+from a boundary no later than the current version's. A new operation's exact
+citation must resolve replay-stably or be a body the plugin already holds
+for a current record; cite the current version. A record's payload
+continuation declares the versions it cites exactly and, for each cited
+program, execution intent, qualification, asset binding, implementation,
+adoption, or transmission version, what that body declares, so a body a
+rule reads through a superseded version stays with a sealed or restored
+run.
+
 Capacity exhaustion settles deterministically as explicit plugin rejection
 events. It does not leave admitted operations or knowledge publications queued
 to poison every later boundary.

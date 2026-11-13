@@ -3,9 +3,9 @@ use crate::model::{
     TechnologyExecutionIntentPayload, TechnologyIntentRequest, TechnologyIntentState,
     TechnologyLimitsV1, TechnologyOperation, TechnologyOperationPayload, TechnologyOperationStatus,
     TechnologyRecordChange, TechnologyRecordPayload, TechnologyResultEnvelope,
-    attach_payload_continuation,
+    attach_payload_continuation, declared_continuation,
 };
-use crate::query::{TechnologyEvidenceAccess, TechnologyRecordSet};
+use crate::query::{ReplayStableView, TechnologyEvidenceAccess, TechnologyRecordSet};
 use crate::schema::{
     ADOPTION_KNOWLEDGE, ATTEMPT_KNOWLEDGE, CAPABILITY_KNOWLEDGE, CLAIM_KNOWLEDGE,
     IMPLEMENTATION_KNOWLEDGE, technology_knowledge_schemas, technology_record_schemas,
@@ -30,10 +30,12 @@ pub const TECHNOLOGY_COMMAND: &str = "apply_technology_operation_v1";
 pub(crate) const TECHNOLOGY_COMMAND_INGRESS: &str = "technology_command_v1";
 pub const TECHNOLOGY_RESULT_INGRESS: &str = "technology_result_v1";
 const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// BLAKE3, lowercase hex, of `canwu-technology 0.20.0 semantics: domain-entity
-/// holders, operators, and sites referenced as domain records` (one line, one
-/// space after each comma and colon).
-const SEMANTIC_HASH: &str = "8b4703e2106176664e83721607e8e997bf7323347bb1d054142c4fc7604dce3a";
+/// BLAKE3, lowercase hex, of `canwu-technology 0.23.0 semantics: domain-entity
+/// holders, operators, and sites referenced as domain records, cited record
+/// versions read replay-stably, older versions of current records accepted by
+/// identity, payload continuations that also declare what each supersedable
+/// cited version declares` (one line, one space after each comma and colon).
+const SEMANTIC_HASH: &str = "adab965f78db6d88d2da20afd376f8bbd05dd0d237503d32168e4958abbad44d";
 pub(crate) const INPUT_HASH_DOMAIN: &str = "canwu.technology.operation-input.v1";
 pub(crate) const CONFLICT_HASH_DOMAIN: &str = "canwu.technology.operation-conflict.v1";
 pub(crate) const APPLY_SYSTEM: &str = "technology_operation_apply_v1";
@@ -275,7 +277,10 @@ fn apply_operations(
         };
         return Ok(capacity_rejection_proposal(new_operations, reason));
     }
-    for reduced in reduce_new_operations(view, &mut state, new_operations, context.at)? {
+    // The bodies current records declare load from the run, which keeps
+    // them on every handle; each decision reads replay-stably.
+    let access = ReplayStableView::new(view);
+    for reduced in reduce_new_operations(&access, &mut state, new_operations, context.at)? {
         if let Some(mutation) = reduced.mutation {
             directives.push(BoundaryDirective::MutateRecord {
                 mutation,
@@ -368,7 +373,13 @@ fn finalize_intents(
             result: result_version,
         };
         let id = intent_ref.record.id.clone();
-        let draft = TechnologyRecordPayload::ExecutionIntent(intent).draft(id)?;
+        // The consumed version cites what the pending one cites, plus the
+        // operation and its result, which no later version supersedes; it
+        // declares what the pending version declares, and those two.
+        let value = TechnologyRecordPayload::ExecutionIntent(intent);
+        let mut continuation = declared_continuation(&current)?;
+        continuation.extend(value.exact_versions());
+        let draft = value.draft(id, continuation)?;
         directives.push(BoundaryDirective::MutateRecord {
             mutation: DomainRecordMutation::Update {
                 record: draft,
@@ -609,7 +620,24 @@ pub(crate) fn reduce_new_operations(
         let conflicted = operation.conflicted();
         let canonical_input_hash = operation.summary_hash()?;
         let provider = operation.provider().map(str::to_owned);
-        let execution_intent = operation.execution_intent().cloned();
+        // The outcome record declares the intent it names, and loading
+        // follows that body, so a rejected outcome names the result's intent
+        // only when it is an execution intent the run keeps on every handle:
+        // held, or current. An applied result consumed its current intent.
+        let execution_intent = match operation.execution_intent() {
+            Some(intent) if status == TechnologyOperationStatus::Applied => Some(intent.clone()),
+            Some(intent)
+                if intent
+                    .record
+                    .kind
+                    .matches_type::<TechnologyExecutionIntent>()
+                    && (state.holds_exact_version(intent)
+                        || access.technology_domain_record_version_exists(intent)?) =>
+            {
+                Some(intent.clone())
+            }
+            _ => None,
+        };
         reduced.push(ReducedOperation {
             outcome: TechnologyOperationPayload {
                 id: operation.id,
@@ -1011,7 +1039,9 @@ fn prepare_change(
 ) -> Result<(DomainRecord, DomainRecordMutation), CanwuError> {
     let value = change_value(change);
     for reference in value.exact_versions() {
-        if !access.technology_domain_record_version_exists(&reference)? {
+        if !state.holds_exact_version(&reference)
+            && !access.technology_domain_record_version_exists(&reference)?
+        {
             return Err(invalid(format!(
                 "exact technology evidence {reference:?} is unavailable"
             )));
@@ -1100,7 +1130,10 @@ fn prepare_change(
     }
     let id = change_id(change);
     validate_identifier(id, "technology record")?;
-    let draft = value.draft(id)?;
+    let draft = value.draft(
+        id,
+        state.continuation_versions(access, value.exact_versions())?,
+    )?;
     let (version, mutation) = match change {
         TechnologyRecordChange::Create { .. } => {
             if let TechnologyRecordPayload::Transmission(transmission) = value {

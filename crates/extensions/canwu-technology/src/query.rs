@@ -4,7 +4,7 @@ use crate::model::{
     REFERENCE_EVALUATOR_V1, TechnicalClaim, TechnicalProgram, TechniqueRevision, TechniqueSpec,
     TechnologyExecutionIntent, TechnologyIntentRequest, TechnologyIntentState, TechnologyLimitsV1,
     TechnologyOperation, TechnologyOperationStatus, TransmissionOpportunity,
-    attach_payload_continuation,
+    attach_payload_continuation, continuation_versions, declared_continuation,
 };
 use crate::plugin::{
     APPLY_SYSTEM, AdmittedOperation, CAPACITY_REJECTION_EVENT, FINALIZE_SYSTEM, INPUT_HASH_DOMAIN,
@@ -13,11 +13,12 @@ use crate::plugin::{
 use crate::schema::technology_record_kinds;
 use canwu_api::{
     BoundaryId, BoundaryPhase, BoundaryRecord, Canwu, CanwuError, CauseRef, Command,
-    CommandAttemptId, CommandId, DomainRecord, DomainRecordClass, DomainRecordKind,
+    CommandAttemptId, CommandId, CompactedCanwu, DomainRecord, DomainRecordClass, DomainRecordKind,
     DomainRecordLifecycle, DomainRecordOperation, DomainRecordRef, DomainRecordType,
-    DomainRecordVersionRef, DomainRecordVersionSource, EntityRef, ErrorCode, EventId, EvidenceRef,
-    IngressId, IngressPayload, KnowledgeHolderRef, KnowledgeSubjectTarget, RandomDrawId,
-    SimulationView, StateVisibility, canonical_hash,
+    DomainRecordVersionRef, DomainRecordVersionSource, EntityRef, ErrorCode, EventId,
+    EvidenceCursor, EvidenceRef, IngressId, IngressPayload, IngressRecord, KnowledgeHolderRef,
+    KnowledgeSnapshot, KnowledgeSubjectTarget, RandomDrawId, SimTime, SimulationView,
+    StateVisibility, canonical_hash,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -85,14 +86,164 @@ impl TechnologyEvidenceAccess for Canwu {
     }
 
     fn technology_evidence_exists(&self, reference: &EvidenceRef) -> Result<bool, CanwuError> {
-        Ok(self.evidence_exists(reference))
+        if self.evidence_exists(reference) {
+            return Ok(true);
+        }
+        Ok(full_run_identity_boundary(self, reference)?.is_some())
     }
 
     fn technology_evidence_time(
         &self,
         reference: &EvidenceRef,
     ) -> Result<Option<canwu_api::SimTime>, CanwuError> {
-        Ok(self.evidence_time(reference))
+        if let Some(at) = self.evidence_time(reference) {
+            return Ok(Some(at));
+        }
+        Ok(full_run_identity_boundary(self, reference)?
+            .and_then(|boundary| self.evidence_time(&EvidenceRef::Boundary(boundary))))
+    }
+}
+
+/// A full run accepts what the plugin accepts on any handle: a cited record
+/// version it does not know passes by [`version_identity_boundary`].
+fn full_run_identity_boundary(
+    canwu: &Canwu,
+    reference: &EvidenceRef,
+) -> Result<Option<BoundaryId>, CanwuError> {
+    let EvidenceRef::DomainRecordVersion(version) = reference else {
+        return Ok(None);
+    };
+    version_identity_boundary(
+        version,
+        |boundary| Ok(canwu.evidence_exists(&EvidenceRef::Boundary(boundary))),
+        |record| canwu.current_domain_record_version(record),
+    )
+}
+
+/// The version identity rule that the technology plugin and both validators
+/// share. A cited record version that a run cannot resolve replay-stably is
+/// accepted by its identity when a committed boundary established it (its
+/// boundary ID and version are not zero), its record is current (deletion
+/// keeps a versioned tombstone, so a record a boundary wrote never leaves
+/// current state), the version precedes the current version, and the
+/// boundary that established the current version is no earlier than the
+/// cited one. A seal, a continuation restore, and exact replay all answer
+/// these reads alike, so every run handle decides a citation the same way.
+/// Returns the establishing boundary, whose time is the version's.
+pub(crate) fn version_identity_boundary(
+    cited: &DomainRecordVersionRef,
+    boundary_committed: impl FnOnce(BoundaryId) -> Result<bool, CanwuError>,
+    current_version: impl FnOnce(&DomainRecordRef) -> Result<Option<DomainRecordVersionRef>, CanwuError>,
+) -> Result<Option<BoundaryId>, CanwuError> {
+    let DomainRecordVersionSource::BoundaryChange { boundary, .. } = &cited.established_by else {
+        return Ok(None);
+    };
+    if cited.version == 0 || boundary.get() == 0 || !boundary_committed(*boundary)? {
+        return Ok(None);
+    }
+    let Some(current) = current_version(&cited.record)? else {
+        return Ok(None);
+    };
+    let precedes = cited.version < current.version
+        && match &current.established_by {
+            DomainRecordVersionSource::BoundaryChange {
+                boundary: current_boundary,
+                ..
+            } => boundary <= current_boundary,
+            DomainRecordVersionSource::InitialScenario => false,
+        };
+    Ok(precedes.then_some(*boundary))
+}
+
+/// The evidence reads the plugin decides an operation with. None depends on
+/// how much evidence a seal or a continuation restore kept, so a sealed, a
+/// restored, and an uninterrupted run decide alike, as exact replay does.
+///
+/// A cited record version resolves through
+/// [`SimulationView::replay_stable_domain_record_version`] (a committed
+/// current version or an initial-scenario version); an exact citation, whose
+/// body a rule reads, must resolve that way. A generic citation, or the time
+/// of an exact one a live record already holds, otherwise falls back to
+/// [`version_identity_boundary`]. Ordinal evidence (commands, events,
+/// ingress, boundaries, draws) answers from the journal counters and the
+/// time index, which a seal keeps.
+pub(crate) struct ReplayStableView<'a, 'v> {
+    view: &'a SimulationView<'v>,
+}
+
+impl<'a, 'v> ReplayStableView<'a, 'v> {
+    pub(crate) const fn new(view: &'a SimulationView<'v>) -> Self {
+        Self { view }
+    }
+
+    fn committed(&self, boundary: BoundaryId) -> Result<bool, CanwuError> {
+        self.view.evidence_exists(&EvidenceRef::Boundary(boundary))
+    }
+
+    /// The body and time of a version established by a committed boundary,
+    /// or by the scenario, that resolves replay-stably.
+    fn stable_version(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Result<Option<(DomainRecord, SimTime)>, CanwuError> {
+        if let DomainRecordVersionSource::BoundaryChange { boundary, .. } =
+            &reference.established_by
+            && !self.committed(*boundary)?
+        {
+            return Ok(None);
+        }
+        self.view.replay_stable_domain_record_version(reference)
+    }
+
+    fn version_time(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Result<Option<SimTime>, CanwuError> {
+        if let Some((_, at)) = self.stable_version(reference)? {
+            return Ok(Some(at));
+        }
+        let Some(boundary) = version_identity_boundary(
+            reference,
+            |boundary| self.committed(boundary),
+            |record| self.view.current_domain_record_version(record),
+        )?
+        else {
+            return Ok(None);
+        };
+        self.view.evidence_time(&EvidenceRef::Boundary(boundary))
+    }
+}
+
+impl TechnologyEvidenceAccess for ReplayStableView<'_, '_> {
+    fn technology_domain_record_version(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Result<Option<DomainRecord>, CanwuError> {
+        Ok(self.stable_version(reference)?.map(|(record, _)| record))
+    }
+
+    fn technology_domain_record_version_exists(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Result<bool, CanwuError> {
+        Ok(self.stable_version(reference)?.is_some())
+    }
+
+    fn technology_evidence_exists(&self, reference: &EvidenceRef) -> Result<bool, CanwuError> {
+        match reference {
+            EvidenceRef::DomainRecordVersion(version) => Ok(self.version_time(version)?.is_some()),
+            _ => self.view.evidence_exists(reference),
+        }
+    }
+
+    fn technology_evidence_time(
+        &self,
+        reference: &EvidenceRef,
+    ) -> Result<Option<canwu_api::SimTime>, CanwuError> {
+        match reference {
+            EvidenceRef::DomainRecordVersion(version) => self.version_time(version),
+            _ => self.view.evidence_time(reference),
+        }
     }
 }
 
@@ -173,6 +324,61 @@ impl TechnologyRecordSet {
         Ok(set)
     }
 
+    /// Loads the current technology records of a restored run and the exact
+    /// versions they cite, transitively, without reading its journal.
+    fn load_restored<H: TechnologyRestoreAccess + ?Sized>(
+        access: &RestoreCutAccess<'_, H>,
+    ) -> Result<Self, CanwuError> {
+        let mut records = BTreeMap::new();
+        for kind in technology_record_kinds() {
+            records.extend(
+                access
+                    .run
+                    .current_records_of_kind(&kind)
+                    .map(|record| (record.reference.clone(), record.clone())),
+            );
+        }
+        let mut set = Self {
+            records,
+            exact_records: BTreeMap::new(),
+        };
+        let references = exact_versions(&set)?;
+        set.hydrate(access, references)?;
+        Ok(set)
+    }
+
+    /// Whether the set holds the body of an exact version: one a current
+    /// record declares, one such a body cites, or one hydrated for an
+    /// earlier operation of this boundary. The run keeps these bodies on
+    /// every handle, so an operation may cite them again.
+    pub(crate) fn holds_exact_version(&self, reference: &DomainRecordVersionRef) -> bool {
+        self.exact_records.contains_key(reference)
+    }
+
+    /// The record versions the payload continuation of a new or updated
+    /// record citing `cited` declares ([`continuation_versions`]). Each cited
+    /// body is one the set holds, or else is read through `access`, as the
+    /// citation itself was checked.
+    pub(crate) fn continuation_versions(
+        &self,
+        access: &(impl TechnologyEvidenceAccess + ?Sized),
+        cited: Vec<DomainRecordVersionRef>,
+    ) -> Result<Vec<DomainRecordVersionRef>, CanwuError> {
+        continuation_versions(cited, |reference| {
+            if let Some(record) = self.exact_records.get(reference) {
+                return declared_continuation(record);
+            }
+            let record = access
+                .technology_domain_record_version(reference)?
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "exact technology evidence {reference:?} is unavailable"
+                    ))
+                })?;
+            declared_continuation(&record)
+        })
+    }
+
     pub fn insert(&mut self, record: DomainRecord) {
         self.records.insert(record.reference.clone(), record);
     }
@@ -234,10 +440,10 @@ impl TechnologyRecordSet {
                     record.reference.kind
                 )));
             }
-            validate_payload_continuation(record)?;
+            validate_payload_continuation(record, &self.exact_records)?;
         }
         for record in self.exact_records.values() {
-            validate_payload_continuation(record)?;
+            validate_payload_continuation(record, &self.exact_records)?;
         }
         self.validate_metrics()?;
         self.validate_revisions()?;
@@ -1293,6 +1499,9 @@ struct ProvenanceIndexes<'a> {
     event_cuts: BTreeMap<EventId, usize>,
     random_draw_cuts: BTreeMap<RandomDrawId, usize>,
     record_versions: BTreeMap<(DomainRecordRef, u64), DomainRecordVersionRef>,
+    /// Each record's boundary-established versions with the cut of their
+    /// boundary, in journal order.
+    record_history: BTreeMap<DomainRecordRef, Vec<(usize, DomainRecordVersionRef)>>,
 }
 
 impl<'a> ProvenanceIndexes<'a> {
@@ -1322,6 +1531,7 @@ impl<'a> ProvenanceIndexes<'a> {
             event_cuts: BTreeMap::new(),
             random_draw_cuts: BTreeMap::new(),
             record_versions: BTreeMap::new(),
+            record_history: BTreeMap::new(),
         };
         for (cut, boundary) in canwu.boundaries().iter().enumerate() {
             indexes.boundaries.insert(boundary.id, (cut, boundary));
@@ -1371,6 +1581,11 @@ impl<'a> ProvenanceIndexes<'a> {
                             .map_err(|_| invalid("technology change index overflowed"))?,
                     },
                 };
+                indexes
+                    .record_history
+                    .entry(change.current.reference.clone())
+                    .or_default()
+                    .push((cut, version.clone()));
                 indexes.record_versions.insert(
                     (change.current.reference.clone(), change.current.version),
                     version,
@@ -1452,6 +1667,102 @@ impl TechnologyEvidenceAccess for RestoreEvidenceAccess<'_> {
     }
 }
 
+/// The plugin's [`ReplayStableView`] at one replayed boundary, rebuilt from
+/// the full journal: a version resolves while it is the latest version of
+/// its record that an earlier boundary established, or from the scenario,
+/// and otherwise by [`version_identity_boundary`] against that latest
+/// version. The apply system sees no proposal of another system of its
+/// boundary, since the kernel extends the record overlay only after every
+/// phase-7 system has run; owner-authorized maintenance written earlier in
+/// the boundary is the one exception, which this replay does not model.
+struct ReplayStableRestoreAccess<'a> {
+    journal: RestoreEvidenceAccess<'a>,
+}
+
+impl ReplayStableRestoreAccess<'_> {
+    fn committed(&self, boundary: BoundaryId) -> bool {
+        self.journal
+            .indexes
+            .boundary_cuts
+            .get(&boundary)
+            .is_some_and(|established| *established < self.journal.cut)
+    }
+
+    /// The latest version of a record that a boundary before this cut
+    /// established; `None` when only the scenario established one.
+    fn committed_current(&self, record: &DomainRecordRef) -> Option<DomainRecordVersionRef> {
+        let history = self.journal.indexes.record_history.get(record)?;
+        let committed = history.partition_point(|(cut, _)| *cut < self.journal.cut);
+        committed
+            .checked_sub(1)
+            .and_then(|index| history.get(index))
+            .map(|(_, version)| version.clone())
+    }
+
+    fn stable_version(&self, reference: &DomainRecordVersionRef) -> Option<DomainRecord> {
+        let resolves = match &reference.established_by {
+            DomainRecordVersionSource::InitialScenario => true,
+            DomainRecordVersionSource::BoundaryChange { .. } => {
+                self.committed_current(&reference.record).as_ref() == Some(reference)
+            }
+        };
+        if resolves {
+            self.journal.indexes.canwu.domain_record_version(reference)
+        } else {
+            None
+        }
+    }
+
+    fn version_time(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Result<Option<SimTime>, CanwuError> {
+        let canwu = self.journal.indexes.canwu;
+        if self.stable_version(reference).is_some() {
+            return Ok(canwu.evidence_time(&EvidenceRef::DomainRecordVersion(reference.clone())));
+        }
+        let boundary = version_identity_boundary(
+            reference,
+            |boundary| Ok(self.committed(boundary)),
+            |record| Ok(self.committed_current(record)),
+        )?;
+        Ok(boundary.and_then(|boundary| canwu.evidence_time(&EvidenceRef::Boundary(boundary))))
+    }
+}
+
+impl TechnologyEvidenceAccess for ReplayStableRestoreAccess<'_> {
+    fn technology_domain_record_version(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Result<Option<DomainRecord>, CanwuError> {
+        Ok(self.stable_version(reference))
+    }
+
+    fn technology_domain_record_version_exists(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Result<bool, CanwuError> {
+        Ok(self.stable_version(reference).is_some())
+    }
+
+    fn technology_evidence_exists(&self, reference: &EvidenceRef) -> Result<bool, CanwuError> {
+        match reference {
+            EvidenceRef::DomainRecordVersion(version) => Ok(self.version_time(version)?.is_some()),
+            _ => self.journal.technology_evidence_exists(reference),
+        }
+    }
+
+    fn technology_evidence_time(
+        &self,
+        reference: &EvidenceRef,
+    ) -> Result<Option<canwu_api::SimTime>, CanwuError> {
+        match reference {
+            EvidenceRef::DomainRecordVersion(version) => self.version_time(version),
+            _ => self.journal.technology_evidence_time(reference),
+        }
+    }
+}
+
 fn exact_source_visible_at(
     reference: &DomainRecordVersionRef,
     boundary_cuts: &BTreeMap<BoundaryId, usize>,
@@ -1475,9 +1786,13 @@ fn validate_operation_provenance(
 ) -> Result<(), CanwuError> {
     let mut state = initial_technology_state(records, indexes.canwu.boundaries());
     for (cut, boundary) in indexes.canwu.boundaries().iter().enumerate() {
+        // The plugin loads the bodies current records declare from the
+        // run, and decides operations through its replay-stable reads.
         let access = RestoreEvidenceAccess { indexes, cut };
         let references = exact_versions(&state)?;
+        state.exact_records.clear();
         state.hydrate(&access, references)?;
+        let access = ReplayStableRestoreAccess { journal: access };
         for reference in evidence_refs(&state)? {
             if !access.technology_evidence_exists(&reference)? {
                 return Err(invalid(format!(
@@ -1951,7 +2266,19 @@ fn validate_finalizer_change(
         .get(boundary)
         .map(|(_, record)| *record)
         .ok_or_else(|| invalid("technology intent finalizer boundary is unavailable"))?;
-    let index = usize::try_from(*change_index)
+    validate_finalizer_change_in(boundary, *change_index, consumed, pending, pending_record)
+}
+
+/// The finalizer check on the boundary record that established the consumed
+/// version, shared by the full-journal and the restore validators.
+fn validate_finalizer_change_in(
+    boundary: &BoundaryRecord,
+    change_index: u64,
+    consumed: &DomainRecordVersionRef,
+    pending: &DomainRecordVersionRef,
+    pending_record: &DomainRecord,
+) -> Result<(), CanwuError> {
+    let index = usize::try_from(change_index)
         .map_err(|_| invalid("technology intent finalizer index overflowed"))?;
     let change = boundary
         .record_changes
@@ -2117,6 +2444,498 @@ fn decode_json<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// The reads [`validate_technology_runtime_on`] makes of one run, implemented
+/// for both run handles, [`Canwu`] and [`CompactedCanwu`].
+///
+/// Each method answers as the handle method it names. All but two read
+/// committed state, kept record bodies, or evidence identities and times,
+/// which a seal or a continuation restore keeps; the two journal reads,
+/// [`Self::retained_ingress`] and [`Self::retained_boundary`], answer only
+/// for entries the run still retains, after [`Self::history_cut`], and the
+/// validator asks them for nothing at or before that cut. A wrapper, such as
+/// one that counts what the validator reads, forwards every method to the
+/// handle it wraps. These are trusted-host reads of ground truth: do not
+/// pass them, or a wrapper around them, to a player, agent, observer, or
+/// remote client.
+pub trait TechnologyRestoreAccess {
+    /// The committed simulation time ([`Canwu::time`]).
+    fn committed_time(&self) -> SimTime;
+    /// The current records of one kind, in reference order
+    /// ([`Canwu::domain_records_of_kind`]).
+    fn current_records_of_kind(
+        &self,
+        kind: &DomainRecordKind,
+    ) -> Box<dyn Iterator<Item = &DomainRecord> + '_>;
+    /// The exact identity of a record's current version
+    /// ([`Canwu::current_domain_record_version`]).
+    fn current_record_version(
+        &self,
+        reference: &DomainRecordRef,
+    ) -> Result<Option<DomainRecordVersionRef>, CanwuError>;
+    /// The body of one exact record version, `None` when the run does not
+    /// hold it ([`Canwu::domain_record_version`]).
+    fn record_version_body(&self, reference: &DomainRecordVersionRef) -> Option<DomainRecord>;
+    /// Whether the run knows an exact record version, with or without its
+    /// body ([`Canwu::domain_record_version_evidence_exists`]).
+    fn record_version_known(&self, reference: &DomainRecordVersionRef) -> bool;
+    /// Whether an evidence identity exists ([`Canwu::evidence_exists`]).
+    fn evidence_known(&self, reference: &EvidenceRef) -> bool;
+    /// When evidence became authoritative ([`Canwu::evidence_time`]).
+    fn evidence_established_at(&self, reference: &EvidenceRef) -> Option<SimTime>;
+    /// The committed knowledge ([`Canwu::knowledge`]).
+    fn committed_knowledge(&self) -> &KnowledgeSnapshot;
+    /// Where the run's retained journal begins: for each journal, how many
+    /// entries the run no longer holds because a seal moved them out or they
+    /// precede the continuation checkpoint it was restored from. Zero for a
+    /// run that holds its journal from the scenario.
+    fn history_cut(&self) -> Result<EvidenceCursor, CanwuError>;
+    /// One ingress record of the retained journal, after the history cut;
+    /// `None` for any other ID.
+    fn retained_ingress(&self, id: IngressId) -> Option<&IngressRecord>;
+    /// One boundary record of the retained journal, after the history cut;
+    /// `None` for any other ID.
+    fn retained_boundary(&self, id: BoundaryId) -> Option<&BoundaryRecord>;
+}
+
+macro_rules! impl_technology_restore_access {
+    ($handle:ty) => {
+        impl TechnologyRestoreAccess for $handle {
+            fn committed_time(&self) -> SimTime {
+                <$handle>::time(self)
+            }
+
+            fn current_records_of_kind(
+                &self,
+                kind: &DomainRecordKind,
+            ) -> Box<dyn Iterator<Item = &DomainRecord> + '_> {
+                Box::new(<$handle>::domain_records_of_kind(self, kind))
+            }
+
+            fn current_record_version(
+                &self,
+                reference: &DomainRecordRef,
+            ) -> Result<Option<DomainRecordVersionRef>, CanwuError> {
+                <$handle>::current_domain_record_version(self, reference)
+            }
+
+            fn record_version_body(
+                &self,
+                reference: &DomainRecordVersionRef,
+            ) -> Option<DomainRecord> {
+                <$handle>::domain_record_version(self, reference)
+            }
+
+            fn record_version_known(&self, reference: &DomainRecordVersionRef) -> bool {
+                <$handle>::domain_record_version_evidence_exists(self, reference)
+            }
+
+            fn evidence_known(&self, reference: &EvidenceRef) -> bool {
+                <$handle>::evidence_exists(self, reference)
+            }
+
+            fn evidence_established_at(&self, reference: &EvidenceRef) -> Option<SimTime> {
+                <$handle>::evidence_time(self, reference)
+            }
+
+            fn committed_knowledge(&self) -> &KnowledgeSnapshot {
+                <$handle>::knowledge(self)
+            }
+
+            fn history_cut(&self) -> Result<EvidenceCursor, CanwuError> {
+                retained_history_cut(
+                    <$handle>::evidence_cursor(self)?,
+                    [
+                        self.events().len(),
+                        self.commands().len(),
+                        self.command_attempts().len(),
+                        self.ingress_log().len(),
+                        self.boundaries().len(),
+                        self.random_draws().len(),
+                    ],
+                )
+            }
+
+            fn retained_ingress(&self, id: IngressId) -> Option<&IngressRecord> {
+                let tail = self.ingress_log();
+                tail.binary_search_by_key(&id, |record| record.id)
+                    .ok()
+                    .map(|index| &tail[index])
+            }
+
+            fn retained_boundary(&self, id: BoundaryId) -> Option<&BoundaryRecord> {
+                let tail = self.boundaries();
+                tail.binary_search_by_key(&id, |record| record.id)
+                    .ok()
+                    .map(|index| &tail[index])
+            }
+        }
+    };
+}
+
+impl_technology_restore_access!(Canwu);
+impl_technology_restore_access!(CompactedCanwu);
+
+/// The cut below a run's retained journals: each journal's count, sealed and
+/// retained together, less what the run retains.
+fn retained_history_cut(
+    total: EvidenceCursor,
+    [
+        events,
+        commands,
+        command_attempts,
+        ingress,
+        boundaries,
+        random_draws,
+    ]: [usize; 6],
+) -> Result<EvidenceCursor, CanwuError> {
+    let below = |count: u64, retained: usize| {
+        u64::try_from(retained)
+            .ok()
+            .and_then(|retained| count.checked_sub(retained))
+            .ok_or_else(|| invalid("a retained journal is longer than its evidence cursor"))
+    };
+    Ok(EvidenceCursor {
+        event_count: below(total.event_count, events)?,
+        command_count: below(total.command_count, commands)?,
+        command_attempt_count: below(total.command_attempt_count, command_attempts)?,
+        ingress_count: below(total.ingress_count, ingress)?,
+        boundary_count: below(total.boundary_count, boundaries)?,
+        random_draw_count: below(total.random_draw_count, random_draws)?,
+    })
+}
+
+/// Checks restored technology state on either run handle without reading
+/// any journal entry at or before the run's history cut, so it validates a
+/// [`CompactedCanwu`] restored from a continuation checkpoint, or one that
+/// sealed, as well as a full [`Canwu`].
+///
+/// It checks:
+///
+/// - every live technology record's own invariants, as each boundary that
+///   applies an operation does: the shared total and per-kind lifetime caps,
+///   size and collection limits, the canonical payload continuation of each
+///   record and of each exact version it cites, references, time windows,
+///   and evaluations recomputed from their evidence;
+/// - the body of every exact version a live record cites, and of every
+///   exact version those bodies cite in turn. The kernel keeps the bodies
+///   that current records declare in their payload continuation, which
+///   names what each supersedable cited version declares too; a body it no
+///   longer holds is refused, as the boundary that applies an operation
+///   refuses it;
+/// - every generic evidence citation, and the causal time cut of each
+///   observation, claim, and assessment. A record version the run does not
+///   know is accepted by its identity under the rule the plugin applies at
+///   every boundary: a committed boundary established it, its record is
+///   current (a deleted record keeps a versioned tombstone), and it precedes
+///   the current version, which a boundary no earlier than the cited one
+///   established. Its time is its establishing boundary's;
+/// - each consumed [`crate::TechnologyExecutionIntent`]: consumed at most
+///   once, naming the applied operation and the result established by the
+///   same boundary, the pending version just before it, and the result its
+///   request authorized; each applied provider operation consumed its
+///   intent. The provider ingress envelope, and the finalizer's change in
+///   the consuming boundary, are each checked as
+///   [`validate_technology_runtime`] checks them when the run still retains
+///   that journal entry;
+/// - every published technology knowledge record's binding, and its payload
+///   against the body of the version it cites, or against that version's
+///   identity when the run keeps only the identity.
+///
+/// It does not replay provenance; [`validate_technology_runtime`] does, on a
+/// full [`Canwu`], whose history cut is zero. Before the cut it cannot tell a
+/// forged provider ingress or finalizer change from a real one: what the run
+/// held there is covered by the continuation hash the host stored, or by the
+/// sealed segments. No handle tells a forged version identity that obeys the
+/// rule from a real one; the plugin accepts it alike on every handle.
+pub fn validate_technology_runtime_on<H: TechnologyRestoreAccess + ?Sized>(
+    run: &H,
+) -> Result<(), CanwuError> {
+    let access = RestoreCutAccess {
+        run,
+        cut: run.history_cut()?,
+    };
+    let records = TechnologyRecordSet::load_restored(&access)?;
+    records.validate(run.committed_time())?;
+    records.validate_temporal_evidence(&access)?;
+    validate_restored_consumed_intents(&access, &records)?;
+    for reference in exact_versions(&records)? {
+        if !run.record_version_known(&reference) {
+            return Err(invalid(format!(
+                "exact technology evidence {reference:?} is unavailable"
+            )));
+        }
+    }
+    for reference in evidence_refs(&records)? {
+        if !access.technology_evidence_exists(&reference)? {
+            return Err(invalid(format!(
+                "technology evidence {reference:?} is unavailable"
+            )));
+        }
+    }
+    validate_technology_knowledge_bindings(run.committed_knowledge(), |version| {
+        access.knowledge_evidence(version)
+    })
+}
+
+/// Evidence reads of a run for the restore validator; the history cut bounds
+/// its journal reads.
+struct RestoreCutAccess<'a, H: ?Sized> {
+    run: &'a H,
+    cut: EvidenceCursor,
+}
+
+impl<H: TechnologyRestoreAccess + ?Sized> RestoreCutAccess<'_, H> {
+    /// The establishing boundary of a record version the run does not know,
+    /// accepted by [`version_identity_boundary`] as the plugin accepts it.
+    fn accepted_by_identity(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Result<Option<BoundaryId>, CanwuError> {
+        version_identity_boundary(
+            reference,
+            |boundary| Ok(self.run.evidence_known(&EvidenceRef::Boundary(boundary))),
+            |record| self.run.current_record_version(record),
+        )
+    }
+
+    fn version_exists(&self, reference: &DomainRecordVersionRef) -> Result<bool, CanwuError> {
+        Ok(self.run.record_version_known(reference)
+            || self.accepted_by_identity(reference)?.is_some())
+    }
+
+    /// The body a knowledge binding is checked against, `None` for a version
+    /// the run knows by identity only. The kernel keeps the identity of
+    /// every version that committed knowledge cites, so knowledge accepts no
+    /// version by the identity rule alone.
+    fn knowledge_evidence(
+        &self,
+        version: &DomainRecordVersionRef,
+    ) -> Result<Option<DomainRecord>, CanwuError> {
+        if let Some(body) = self.run.record_version_body(version) {
+            return Ok(Some(body));
+        }
+        if self.run.record_version_known(version) {
+            return Ok(None);
+        }
+        Err(invalid(
+            "technology knowledge exact record body is unavailable",
+        ))
+    }
+}
+
+impl<H: TechnologyRestoreAccess + ?Sized> TechnologyEvidenceAccess for RestoreCutAccess<'_, H> {
+    fn technology_domain_record_version(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Result<Option<DomainRecord>, CanwuError> {
+        Ok(self.run.record_version_body(reference))
+    }
+
+    fn technology_domain_record_version_exists(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Result<bool, CanwuError> {
+        self.version_exists(reference)
+    }
+
+    fn technology_evidence_exists(&self, reference: &EvidenceRef) -> Result<bool, CanwuError> {
+        match reference {
+            EvidenceRef::DomainRecordVersion(version) => self.version_exists(version),
+            reference => Ok(self.run.evidence_known(reference)),
+        }
+    }
+
+    fn technology_evidence_time(
+        &self,
+        reference: &EvidenceRef,
+    ) -> Result<Option<SimTime>, CanwuError> {
+        if let Some(at) = self.run.evidence_established_at(reference) {
+            return Ok(Some(at));
+        }
+        if let EvidenceRef::DomainRecordVersion(version) = reference
+            && let Some(boundary) = self.accepted_by_identity(version)?
+        {
+            return Ok(self
+                .run
+                .evidence_established_at(&EvidenceRef::Boundary(boundary)));
+        }
+        Ok(None)
+    }
+}
+
+/// The consumed-intent checks of [`validate_consumed_intents`] that need no
+/// journal entry at or before the history cut, and the ingress and
+/// finalizer checks for the entries after it.
+#[allow(clippy::too_many_lines)]
+fn validate_restored_consumed_intents<H: TechnologyRestoreAccess + ?Sized>(
+    access: &RestoreCutAccess<'_, H>,
+    records: &TechnologyRecordSet,
+) -> Result<(), CanwuError> {
+    let run = access.run;
+    let operations = records.decoded::<TechnologyOperation>()?;
+    let mut consumed = BTreeMap::new();
+    for (reference, intent) in records.decoded::<TechnologyExecutionIntent>()? {
+        let TechnologyIntentState::Consumed {
+            ingress,
+            operation,
+            result,
+        } = &intent.state
+        else {
+            continue;
+        };
+        let current_ref = run
+            .current_record_version(&reference)?
+            .ok_or_else(|| invalid("current technology record is unavailable"))?;
+        let EvidenceRef::Ingress(ingress_id) = ingress else {
+            return Err(invalid(
+                "consumed technology intent has a non-ingress cause",
+            ));
+        };
+        if !same_boundary_source(&current_ref, operation)
+            || !same_boundary_source(&current_ref, result)
+        {
+            return Err(invalid(
+                "technology intent consumption, operation, and result are not atomic",
+            ));
+        }
+        let operation_record = run
+            .record_version_body(operation)
+            .ok_or_else(|| invalid("consuming technology operation is unavailable"))?;
+        let outcome = operation_record.decode_payload::<TechnologyOperation>()?;
+        let result_record = run
+            .record_version_body(result)
+            .ok_or_else(|| invalid("consumed technology result is unavailable"))?;
+        let pending = outcome.execution_intent.as_ref().ok_or_else(|| {
+            invalid("consuming technology operation names no exact execution intent")
+        })?;
+        if pending.record != current_ref.record
+            || pending.version.checked_add(1) != Some(current_ref.version)
+        {
+            return Err(invalid(
+                "technology intent consumption was not written by the exact phase-12 finalizer",
+            ));
+        }
+        let pending_record = run
+            .record_version_body(pending)
+            .ok_or_else(|| invalid("pending technology intent version is unavailable"))?;
+        let mut expected_pending = intent.clone();
+        expected_pending.state = TechnologyIntentState::Pending;
+        validate_consumed_operation_cause(&outcome, ingress)?;
+        if pending_record.decode_payload::<TechnologyExecutionIntent>()? != expected_pending
+            || outcome.status != TechnologyOperationStatus::Applied
+            || outcome.provider.as_ref() != Some(&intent.provider)
+            || outcome.result.as_ref() != Some(&result.record)
+            || result_record.reference != result.record
+        {
+            return Err(invalid(
+                "consumed technology intent does not reproduce its ingress, operation, and result",
+            ));
+        }
+        validate_intent_result_payload(pending, &intent, &result_record)?;
+        if ingress_id.get() > access.cut.ingress_count {
+            let ingress_record = run
+                .retained_ingress(*ingress_id)
+                .ok_or_else(|| invalid("consumed technology provider ingress is unavailable"))?;
+            validate_consumed_ingress(
+                ingress_record,
+                &outcome,
+                &intent,
+                pending,
+                result,
+                &result_record,
+            )?;
+        }
+        if let DomainRecordVersionSource::BoundaryChange {
+            boundary,
+            change_index,
+        } = &current_ref.established_by
+            && boundary.get() > access.cut.boundary_count
+        {
+            let boundary_record = run
+                .retained_boundary(*boundary)
+                .ok_or_else(|| invalid("technology intent finalizer boundary is unavailable"))?;
+            validate_finalizer_change_in(
+                boundary_record,
+                *change_index,
+                &current_ref,
+                pending,
+                &pending_record,
+            )?;
+        }
+        // Each intent record maps to its own pending version, so no key
+        // repeats here: a second consumption shows as a second applied
+        // operation naming the same pending version, refused below.
+        consumed.insert(pending.clone(), (operation.clone(), result.clone()));
+    }
+    for (reference, outcome) in operations {
+        if outcome.status == TechnologyOperationStatus::Applied
+            && let Some(intent) = &outcome.execution_intent
+        {
+            let Some((operation, result)) = consumed.get(intent) else {
+                return Err(invalid(
+                    "applied provider operation did not consume its exact intent",
+                ));
+            };
+            if operation.record != reference || outcome.result.as_ref() != Some(&result.record) {
+                return Err(invalid(
+                    "consumed technology intent points to another operation or result",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The provider ingress a consumed intent cites, retained after the history
+/// cut, must be the result packet that produced its operation and result.
+fn validate_consumed_ingress(
+    ingress: &IngressRecord,
+    outcome: &crate::model::TechnologyOperationPayload,
+    intent: &crate::model::TechnologyExecutionIntentPayload,
+    pending: &DomainRecordVersionRef,
+    result: &DomainRecordVersionRef,
+    result_record: &DomainRecord,
+) -> Result<(), CanwuError> {
+    let IngressPayload::Plugin {
+        plugin,
+        packet_type,
+        payload,
+        ..
+    } = &ingress.payload
+    else {
+        return Err(invalid("consumed technology cause is not plugin ingress"));
+    };
+    let envelope: crate::model::TechnologyResultEnvelope =
+        decode_json(payload, "consumed technology result ingress")?;
+    if plugin != crate::PLUGIN_NAME
+        || packet_type != crate::TECHNOLOGY_RESULT_INGRESS
+        || envelope.id != outcome.id
+        || envelope.provider != intent.provider
+        || envelope.execution_intent.as_ref() != Some(pending)
+        || change_id(&envelope.change) != result.record.id
+        || change_value(&envelope.change).reference(change_id(&envelope.change)) != result.record
+        || decode_runtime_payload(result_record)?.as_ref() != Some(change_value(&envelope.change))
+    {
+        return Err(invalid(
+            "consumed technology intent does not reproduce its ingress, operation, and result",
+        ));
+    }
+    Ok(())
+}
+
+/// Checks restored technology state on a run that holds its whole journal
+/// from the scenario: the full-journal mode.
+///
+/// It makes the checks of [`validate_technology_runtime_on`], with every
+/// journal entry available, and also replays provenance: it indexes the
+/// whole journal, recomputes each boundary's operation outcomes from its
+/// admitted ingress starting from the scenario's technology records, with
+/// the plugin's replay-stable reads at each boundary, and checks that the
+/// evidence each record cites was available at each causal cut, by the
+/// version identity rule where the plugin accepts it that way.
+/// It therefore needs the full [`Canwu`]; a run restored from a continuation
+/// checkpoint, or one that sealed, holds no journal before its cut and is
+/// checked with [`validate_technology_runtime_on`].
 pub fn validate_technology_runtime(canwu: &Canwu) -> Result<(), CanwuError> {
     let records = TechnologyRecordSet::load_host(canwu)?;
     records.validate(canwu.time())?;
@@ -2132,7 +2951,7 @@ pub fn validate_technology_runtime(canwu: &Canwu) -> Result<(), CanwuError> {
         }
     }
     for reference in evidence_refs(&records)? {
-        if !canwu.evidence_exists(&reference) {
+        if !canwu.technology_evidence_exists(&reference)? {
             return Err(invalid(format!(
                 "technology evidence {reference:?} is unavailable"
             )));
@@ -2157,6 +2976,21 @@ fn validate_technology_knowledge(canwu: &Canwu) -> Result<(), CanwuError> {
 fn validate_technology_knowledge_records(
     knowledge: &canwu_api::KnowledgeSnapshot,
     mut resolve_version: impl FnMut(&DomainRecordVersionRef) -> Option<DomainRecord>,
+) -> Result<(), CanwuError> {
+    validate_technology_knowledge_bindings(knowledge, |version| {
+        resolve_version(version)
+            .map(Some)
+            .ok_or_else(|| invalid("technology knowledge exact record body is unavailable"))
+    })
+}
+
+/// Checks each technology knowledge binding. `resolve_version` returns the
+/// body of the cited exact version to compare the payload against, `None`
+/// when a restored run knows that version by identity only, or an error when
+/// the version is unavailable.
+fn validate_technology_knowledge_bindings(
+    knowledge: &canwu_api::KnowledgeSnapshot,
+    mut resolve_version: impl FnMut(&DomainRecordVersionRef) -> Result<Option<DomainRecord>, CanwuError>,
 ) -> Result<(), CanwuError> {
     let mut total = 0usize;
     for (holder, records) in &knowledge.records {
@@ -2212,8 +3046,9 @@ fn validate_technology_knowledge_records(
                     "technology knowledge holder, schema, subject, or version binding is invalid",
                 ));
             }
-            let exact = resolve_version(version)
-                .ok_or_else(|| invalid("technology knowledge exact record body is unavailable"))?;
+            let Some(exact) = resolve_version(version)? else {
+                continue;
+            };
             let exact_payload = decode_runtime_payload(&exact)?.ok_or_else(|| {
                 invalid("technology knowledge cites a non-publishable record kind")
             })?;
@@ -2358,9 +3193,26 @@ fn exact_versions_in_record(
     Ok(values)
 }
 
-fn validate_payload_continuation(record: &DomainRecord) -> Result<(), CanwuError> {
+/// Checks a record's payload continuation against the canonical one: an
+/// operation or catalog record declares the versions it cites, and a runtime
+/// record [`continuation_versions`], from the cited bodies in `held`.
+fn validate_payload_continuation(
+    record: &DomainRecord,
+    held: &BTreeMap<DomainRecordVersionRef, DomainRecord>,
+) -> Result<(), CanwuError> {
+    let cited = exact_versions_in_record(record)?;
+    let declared =
+        if record.reference.kind.matches_type::<TechnologyOperation>() {
+            cited
+        } else {
+            continuation_versions(cited, |reference| {
+                declared_continuation(held.get(reference).ok_or_else(|| {
+                    invalid(format!("record version {reference:?} is unavailable"))
+                })?)
+            })?
+        };
     let mut expected = record.payload.clone();
-    attach_payload_continuation(&mut expected, exact_versions_in_record(record)?)?;
+    attach_payload_continuation(&mut expected, declared)?;
     if expected != record.payload {
         return Err(invalid(format!(
             "technology record {} has a noncanonical payload continuation",
@@ -2558,21 +3410,22 @@ mod tests {
         let draft = TechnologyRecordPayload::TechnicalProgram(TechnicalProgramPayload {
             sponsor: KnowledgeHolderRef::Person(PersonId::new(1)),
             site: EntityRef::Territory(TerritoryId::new(1)),
-            revision: Some(revision),
+            revision: Some(revision.clone()),
             mode: ProgramMode::Investigation,
             status: ProgramStatus::Active,
             requirements: vec![],
             started_at: canwu_api::SimTime::EPOCH,
             due_at: None,
         })
-        .draft("program")
+        .draft("program", vec![revision])
         .expect("program draft");
         let mut record = record_from_draft(draft);
-        validate_payload_continuation(&record).expect("generated continuation should validate");
+        validate_payload_continuation(&record, &BTreeMap::new())
+            .expect("generated continuation should validate");
         record.payload[PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD] =
             serde_json::to_value(PayloadRequiredEvidenceContinuationV1::completed())
                 .expect("completed continuation");
-        assert!(validate_payload_continuation(&record).is_err());
+        assert!(validate_payload_continuation(&record, &BTreeMap::new()).is_err());
     }
 
     #[test]
@@ -2737,7 +3590,7 @@ mod tests {
                 asserted_at: canwu_api::SimTime::EPOCH,
             },
         );
-        let exact = record_from_draft(value.draft("claim").expect("claim draft"));
+        let exact = record_from_draft(value.draft("claim", Vec::new()).expect("claim draft"));
         let version = DomainRecordVersionRef {
             record: exact.reference.clone(),
             version: 1,
