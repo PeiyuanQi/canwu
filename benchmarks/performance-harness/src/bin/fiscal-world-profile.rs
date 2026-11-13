@@ -1187,6 +1187,7 @@ fn record_evidence(
                     scope_binding_id: scope_id(scope),
                     request_id: format!("request.{scope:06}"),
                     quantity: 600,
+                    parts: Vec::new(),
                     unit: "grain".to_owned(),
                     payment_form: FiscalPaymentForm::Grain,
                     execution_kind: FiscalExecutionKind::Collect,

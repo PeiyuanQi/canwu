@@ -156,11 +156,19 @@ fn validate_execution_result(
 }
 
 /// Queues a reference adapter execution result. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+///
+/// The reference adapter records the evidence of one request of one scope:
+/// a result with `parts` (aggregated evidence) is refused here.
 pub fn enqueue_reference_execution_result<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &mut H,
     due_at: SimTime,
     evidence: &ReferenceFiscalExecutionEvidence,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
+    if !evidence.parts.is_empty() {
+        return Err(invalid(
+            "the reference adapter records per-scope execution results only",
+        ));
+    }
     let payload = serde_json::to_value(evidence)
         .map_err(|error| invalid(format!("execution evidence could not be encoded: {error}")))?;
     canwu.enqueue_plugin_ingress(PluginIngressRequest::new(

@@ -31,14 +31,14 @@ pub use content::compile_fiscal_content;
 pub use derive::{assemble_fiscal_reports, compute_projection, jurisdiction_candidates};
 pub use model::*;
 pub use plugin::{
-    APPLY_FISCAL_ACTION_COMMAND, FISCAL_ACTION_INGRESS, FISCAL_ACTION_SETTLED_EVENT,
-    FISCAL_ARCHIVE_COMMIT_INGRESS, FISCAL_ARCHIVE_MAINTENANCE_EVENT,
+    APPLY_FISCAL_ACTION_COMMAND, APPLY_FISCAL_ACTION_SET_COMMAND, FISCAL_ACTION_INGRESS,
+    FISCAL_ACTION_SETTLED_EVENT, FISCAL_ARCHIVE_COMMIT_INGRESS, FISCAL_ARCHIVE_MAINTENANCE_EVENT,
     FISCAL_ARCHIVE_RETENTION_INGRESS, FISCAL_EXECUTION_RECEIPTS_INGRESS,
     FISCAL_HISTORICAL_CONTEXT_INGRESS, FISCAL_INGRESS_REJECTED_EVENT, FISCAL_REPORT_DRAIN_INGRESS,
     FiscalArchiveIngressReceiptV1, FiscalPlugin, PLUGIN_NAME, enqueue_execution_receipts,
     enqueue_fiscal_archive, finalize_fiscal_archive_retention, fiscal_action_command,
-    fiscal_action_target, fiscal_historical_context_ingress, fiscal_recent_outcome,
-    fiscal_target_revision, prepare_fiscal_archive,
+    fiscal_action_set_command, fiscal_action_target, fiscal_historical_context_ingress,
+    fiscal_recent_outcome, fiscal_target_revision, prepare_fiscal_archive,
 };
 pub use projection::{load_fiscal_catalog, load_fiscal_state};
 pub use records::{

@@ -29,12 +29,12 @@ use crate::model::{
     FiscalOfficeCycle, FiscalPartitionKey, FiscalRebinding, FiscalReceiptDisposition,
     FiscalRemission, FiscalReportQueueEntry, FiscalScopeLedger, FiscalState,
     MAX_FISCAL_ACTIONS_PER_BOUNDARY, MAX_FISCAL_ACTIONS_PER_RECORD_PER_BOUNDARY,
-    MAX_FISCAL_EVIDENCE_PER_RECORD, MAX_FISCAL_EXECUTION_RECEIPTS_PER_BOOK,
-    MAX_FISCAL_HOT_BOOKS_PER_LEDGER, MAX_FISCAL_HOT_CYCLES_PER_OFFICE,
-    MAX_FISCAL_LEDGER_RECORD_BYTES, MAX_FISCAL_LEDGER_WRITES_PER_BOUNDARY,
-    MAX_FISCAL_PARTITION_KEYS, MAX_FISCAL_RECORD_BYTES, add_adoption_counts, invalid,
-    validate_identifier, validate_jurisdiction, validate_ledger, validate_observer,
-    validate_office,
+    MAX_FISCAL_EVIDENCE_PARTS, MAX_FISCAL_EVIDENCE_PER_RECORD,
+    MAX_FISCAL_EXECUTION_RECEIPTS_PER_BOOK, MAX_FISCAL_HOT_BOOKS_PER_LEDGER,
+    MAX_FISCAL_HOT_CYCLES_PER_OFFICE, MAX_FISCAL_LEDGER_RECORD_BYTES,
+    MAX_FISCAL_LEDGER_WRITES_PER_BOUNDARY, MAX_FISCAL_PARTITION_KEYS, MAX_FISCAL_RECORD_BYTES,
+    add_adoption_counts, invalid, validate_identifier, validate_jurisdiction, validate_ledger,
+    validate_observer, validate_office,
 };
 use crate::plugin::{
     FISCAL_ACTION_SETTLED_EVENT, FISCAL_ARCHIVE_COMMIT_INGRESS, FISCAL_ARCHIVE_MAINTENANCE_EVENT,
@@ -45,8 +45,9 @@ use crate::plugin::{
 use crate::records::{FiscalIndexOwner, fiscal_root_reference};
 use crate::working::{Touch, Working};
 use canwu_api::{
-    BoundaryContext, BoundaryDirective, BoundaryProposal, CanwuError, CommandId, EntityRef,
-    ErrorCode, IngressId, KnowledgeHolderRef, SimTime, SimulationView,
+    BoundaryContext, BoundaryDirective, BoundaryProposal, CanwuError, CommandId,
+    DomainRecordVersionRef, EntityRef, ErrorCode, IngressId, KnowledgeHolderRef, SimTime,
+    SimulationView,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -246,6 +247,9 @@ struct Settlement<'a, 'v> {
     /// outcome out of the ring within the boundary.
     settled: BTreeMap<FiscalActionTarget, BTreeSet<String>>,
     events: Vec<SettledEvent>,
+    /// The aggregated evidence versions the boundary's receipts cited, read
+    /// once each.
+    cited: CitedEvidenceCache,
     /// The serialized bytes of each working office without its cycle
     /// bookkeeping, for the budget of an action that changes only that.
     office_base_bytes: std::cell::RefCell<BTreeMap<String, usize>>,
@@ -277,6 +281,7 @@ pub(crate) fn settle_fiscal_packets(
         overwrites: BoundaryOverwrites::default(),
         settled: BTreeMap::new(),
         events: Vec::new(),
+        cited: BTreeMap::new(),
         office_base_bytes: std::cell::RefCell::new(BTreeMap::new()),
     };
     for packet in packets {
@@ -998,6 +1003,7 @@ impl Settlement<'_, '_> {
         let mut copy = self.working.copy(&touch);
         match settle_execution_receipt(
             self.view,
+            &mut self.cited,
             &mut copy,
             packet.clone(),
             ingress,
@@ -1415,12 +1421,102 @@ struct ValidatedExecutionEvidence {
     external_operations: BTreeSet<FiscalExternalOperationRef>,
 }
 
+/// What one cited evidence version claims. Aggregated evidence, which a
+/// receipt of every scope it names cites, is read and decoded once per
+/// boundary however many receipts cite it.
+pub(crate) struct CitedEvidence {
+    claim: FiscalExecutionEvidence,
+    established_at: SimTime,
+    /// The parts of aggregated evidence by scope, each with the request it
+    /// settles and its quantity; `None` for the evidence of one request.
+    parts: Option<BTreeMap<String, (String, u64)>>,
+}
+
+/// What a boundary's receipts cited as aggregated evidence, by version:
+/// what each claims, or the reason it settles no receipt. An answer depends
+/// only on the version and on the view the settlement system reads, which
+/// does not change while it runs, so one answer serves every receipt of the
+/// boundary. Per-scope evidence, which one receipt of the boundary at most
+/// can settle, is read for each receipt and not kept.
+pub(crate) type CitedEvidenceCache =
+    BTreeMap<DomainRecordVersionRef, Result<CitedEvidence, &'static str>>;
+
+/// Reads and decodes one cited evidence version, and says whether it decoded
+/// as aggregated evidence. The version must be the current version of its
+/// record ([`FISCAL_RECEIPT_EVIDENCE_NOT_CURRENT`]) and decode as
+/// [`FiscalExecutionEvidence`], and aggregated evidence must name no scope or
+/// request of its own, list at most [`MAX_FISCAL_EVIDENCE_PARTS`] parts, at
+/// most one per scope, and sum them to its quantity
+/// ([`FISCAL_RECEIPT_CLAIM_MISMATCH`] otherwise).
+fn cite_evidence(
+    view: &SimulationView<'_>,
+    evidence: &DomainRecordVersionRef,
+) -> (Result<CitedEvidence, &'static str>, bool) {
+    // An earlier version's body and time can depend on what a seal kept, so
+    // the receipt would settle differently in a compact run than in its
+    // exact replay.
+    let Some((record, established_at)) = view
+        .replay_stable_domain_record_version(evidence)
+        .ok()
+        .flatten()
+    else {
+        return (Err(FISCAL_RECEIPT_EVIDENCE_NOT_CURRENT), false);
+    };
+    let Ok(claim) = FiscalExecutionEvidence::deserialize(&record.payload) else {
+        return (Err(FISCAL_RECEIPT_CLAIM_MISMATCH), false);
+    };
+    if claim.parts.is_empty() {
+        let cited = CitedEvidence {
+            claim,
+            established_at,
+            parts: None,
+        };
+        return (Ok(cited), false);
+    }
+    (aggregate(claim, established_at), true)
+}
+
+/// Checks the parts of aggregated evidence and keys them by scope.
+fn aggregate(
+    mut claim: FiscalExecutionEvidence,
+    established_at: SimTime,
+) -> Result<CitedEvidence, &'static str> {
+    if claim.parts.len() > MAX_FISCAL_EVIDENCE_PARTS
+        || !claim.scope_binding_id.is_empty()
+        || !claim.request_id.is_empty()
+    {
+        return Err(FISCAL_RECEIPT_CLAIM_MISMATCH);
+    }
+    let mut parts = BTreeMap::new();
+    let mut total = 0_u64;
+    for part in std::mem::take(&mut claim.parts) {
+        total = total
+            .checked_add(part.quantity)
+            .ok_or(FISCAL_RECEIPT_CLAIM_MISMATCH)?;
+        if parts
+            .insert(part.scope_binding_id, (part.request_id, part.quantity))
+            .is_some()
+        {
+            return Err(FISCAL_RECEIPT_CLAIM_MISMATCH);
+        }
+    }
+    if total != claim.quantity {
+        return Err(FISCAL_RECEIPT_CLAIM_MISMATCH);
+    }
+    Ok(CitedEvidence {
+        claim,
+        established_at,
+        parts: Some(parts),
+    })
+}
+
 /// Settles one execution receipt in the book of its request, or refuses it
 /// with its reason. A receipt whose ID a hot receipt of the scope already has
 /// with the same request and evidence is a resend and changes nothing. A
 /// recorded receipt advances its ledger's revision and its book's.
 fn settle_execution_receipt(
     view: &SimulationView<'_>,
+    cited: &mut CitedEvidenceCache,
     state: &mut FiscalState,
     packet: FiscalExecutionReceiptPacket,
     ingress_id: IngressId,
@@ -1469,6 +1565,7 @@ fn settle_execution_receipt(
     }
     let evidence = validate_execution_evidence(
         view,
+        cited,
         &state.root.execution_evidence_kinds,
         ledger,
         book,
@@ -1510,10 +1607,12 @@ fn settle_execution_receipt(
 }
 
 /// Checks a receipt's evidence against its request and its scope's hot
-/// receipts, and derives what the receipt records.
+/// receipts, and derives what the receipt records: the quantity each cited
+/// version claims for the receipt's scope (its own, or its part's), summed.
 #[allow(clippy::too_many_lines)]
 fn validate_execution_evidence(
     view: &SimulationView<'_>,
+    cited: &mut CitedEvidenceCache,
     approved: &BTreeSet<canwu_api::DomainRecordKind>,
     ledger: &FiscalScopeLedger,
     book: &FiscalCycleBook,
@@ -1570,21 +1669,32 @@ fn validate_execution_evidence(
                 "one external execution result cannot settle multiple fiscal receipts",
             ));
         }
-        // An earlier version's body and time can depend on what a seal kept,
-        // so the receipt would settle differently in a compact run than in
-        // its exact replay.
-        let not_current = || {
-            Refused::new(
-                FISCAL_RECEIPT_EVIDENCE_NOT_CURRENT,
-                "fiscal execution receipt must cite the current version of its external evidence",
-            )
+        let single;
+        let answer = if cited.contains_key(evidence) {
+            &cited[evidence]
+        } else {
+            match cite_evidence(view, evidence) {
+                (answer, true) => cited.entry(evidence.clone()).or_insert(answer),
+                (answer, false) => {
+                    single = answer;
+                    &single
+                }
+            }
         };
-        let (record, established_at) = view
-            .replay_stable_domain_record_version(evidence)
-            .map_err(|_| not_current())?
-            .ok_or_else(not_current)?;
-        let claim =
-            FiscalExecutionEvidence::deserialize(&record.payload).map_err(|_| mismatch())?;
+        let CitedEvidence {
+            claim,
+            established_at,
+            parts,
+        } = match answer {
+            Ok(cited) => cited,
+            Err(FISCAL_RECEIPT_EVIDENCE_NOT_CURRENT) => {
+                return Err(Refused::new(
+                    FISCAL_RECEIPT_EVIDENCE_NOT_CURRENT,
+                    "fiscal execution receipt must cite the current version of its external evidence",
+                ));
+            }
+            Err(_) => return Err(mismatch()),
+        };
         let operation = FiscalExternalOperationRef {
             evidence_kind: evidence.record.kind.clone(),
             external_operation_id: claim.external_operation_id.clone(),
@@ -1601,32 +1711,40 @@ fn validate_execution_evidence(
                 "external fiscal operation was repeated within one receipt",
             ));
         }
+        // The scope, request, and quantity the version claims for this
+        // receipt: its own, or those of the part naming the receipt's scope.
+        let (claimed_scope, claimed_request, quantity) = match parts {
+            None => (&claim.scope_binding_id, &claim.request_id, claim.quantity),
+            Some(parts) => {
+                let (request_id, quantity) =
+                    parts.get(&packet.scope_binding_id).ok_or_else(mismatch)?;
+                (&packet.scope_binding_id, request_id, *quantity)
+            }
+        };
         if claim.id != evidence.record.id
             || claim.id.trim().is_empty()
             || claim.external_operation_id.trim().is_empty()
-            || claim.scope_binding_id != packet.scope_binding_id
-            || claim.request_id != request.id
+            || *claimed_scope != packet.scope_binding_id
+            || *claimed_request != request.id
             || claim.unit != request.unit
             || claim.payment_form != request.payment_form
             || claim.execution_kind != request.kind
             || claim.resource != request.resource
             || claim.source != request.source
             || claim.target != request.target
-            || claim.disposition.counts_as_fulfillment() == (claim.quantity == 0)
+            || claim.disposition.counts_as_fulfillment() == (quantity == 0)
             || disposition.is_some_and(|value| value != claim.disposition)
-            || established_at < request.requested_at
+            || *established_at < request.requested_at
         {
             return Err(mismatch());
         }
         disposition = Some(claim.disposition);
-        evidenced_quantity = evidenced_quantity
-            .checked_add(claim.quantity)
-            .ok_or_else(|| {
-                Refused::new(
-                    FISCAL_RECEIPT_QUANTITY_EXCEEDED,
-                    "fiscal execution evidence quantity overflowed",
-                )
-            })?;
+        evidenced_quantity = evidenced_quantity.checked_add(quantity).ok_or_else(|| {
+            Refused::new(
+                FISCAL_RECEIPT_QUANTITY_EXCEEDED,
+                "fiscal execution evidence quantity overflowed",
+            )
+        })?;
     }
     let disposition = disposition.ok_or_else(mismatch)?;
     let fulfilled = book

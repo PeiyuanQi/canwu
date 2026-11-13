@@ -461,9 +461,16 @@ with a machine-validated payload and declared core/component access.
   interpretation dated inside its window).
 - World-scale fiscal use: send actions as `FiscalActionBatch` values (up to
   4,096 entries, `fiscal_action_command`), each entry naming its target's
-  current revision from `fiscal_target_revision`; send receipts in
+  current revision from `fiscal_target_revision`; a person acting for
+  several offices at one instant sends their batches as one
+  `FiscalActionBatchSet` (up to 64 batches, `fiscal_action_set_command`),
+  settled in one round, and may decide it in his own name (a controller
+  with `DecisionAuthority::Actor` and that same person as command subject;
+  only a set admits it); send receipts in
   `fiscal_execution_receipts_v1` packets of up to 4,096 through
-  `enqueue_execution_receipts`; close cycles with `CloseAccountingCycle` and
+  `enqueue_execution_receipts`, and for one operation across several scopes
+  write one aggregated `FiscalExecutionEvidence` (`parts`, one per scope)
+  cited by one receipt per scope; close cycles with `CloseAccountingCycle` and
   archive closed books in batches with
   `prepare_fiscal_archive(&run, book_limit, &store)`,
   `enqueue_fiscal_archive(&mut run, &prepared, &store)`, and
@@ -497,7 +504,7 @@ with a machine-validated payload and declared core/component access.
   cycle's figures from old records). These three knobs are plugin identity:
   choose them before the first boundary. Reports are `fiscal_report` schema
   version 6 (0.18.0, a compact part payload that `FiscalReportPart`
-  decodes); the plugin is `0.5.0-experimental`.
+  decodes); the plugin is `0.6.0-experimental`.
 
 ## Publish knowledge from a plugin (0.17.0)
 
