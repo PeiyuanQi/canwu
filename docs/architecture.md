@@ -526,6 +526,33 @@ onto `DecisionTicket` and `DecisionTrace`. A ticket that the engine cancelled
 because its controller can no longer act continues as a new ticket for an
 available controller that names the cancelled ticket as its parent.
 
+A declared run's human seat (`RunConfiguration::seat_binding`) is named at
+run start, and the run configuration and its manifest never change. A host
+moves the seat to another existing person, when the seat's person dies and
+an heir takes it, with a seat rebinding: `rebind_seat(SeatRebindingRequest)`
+queues canonical host ingress (`IngressPayload::SeatRebinding`, command
+class, priority 0, due at the current time, under the run's revision). The
+call refuses, queuing nothing, a run with direct command history, a
+read-only run, another seat, a malformed request, a second queued rebinding
+of the seat, and a stale time or revision. The boundary that admits it
+decides it before any other ingress it admits, from the committed state: an
+unknown person (`ActorNotFound`), a dead or missing one (`IssuerUnavailable`),
+a stale revision, or the binding already in force is a recorded rejection;
+otherwise the new binding is in force from that boundary, and the seat's
+open tickets whose assigned controller is bound to the seat and acts for
+the previous person are cancelled with `seat_rebound` through the same
+cancellation as the availability sweep, ready to continue by seat
+succession. A detained or captive person may hold the seat; the command
+gates refuse their commands until they are free.
+`BoundaryRecord::seat_rebindings` records each outcome.
+`seat_binding()` returns the binding in force (the last applied rebinding's,
+else the configuration's), which the human-only command gate, the
+actor-bound viewer, and load validation of every command attempt read; a
+replay-purpose run is read-only and keeps its configured binding. It persists
+as `SimulationSnapshot::rebound_seat`, bound by the checkpoint hash; a full
+snapshot or checkpoint journal must rebuild it from its boundaries, and a
+continuation checkpoint, which holds no history, checks its shape.
+
 An open ticket keeps its ID while its deadline or controller changes.
 `ExtendDeadline { ticket_id, expected_version, deadline }` moves a ticket's
 deadline later: the ticket must have a deadline, and the new one must be later
@@ -2455,12 +2482,15 @@ boundary being settled when its time is in the window, and each distinct due
 time still queued in the window in the canonical ingress and scheduled-work
 queues. Each `BoundarySummary` carries the boundary's time, canonical cadences,
 host calendar marks, and admitted or queued ingress counted by class, kind
-(command, plugin packet type, calendar, decision, or maintenance), and origin
+(command, plugin packet type, calendar, decision, maintenance, or seat
+rebinding), and origin
 (`BoundaryIngressOrigin`: ordinary host ingress, work a boundary system or
 command handler scheduled,
 work recorded with an event as its cause, or engine and host-labelled work by
 name), without payloads, so a host application can count sources it does not
-own and classify them by its own rules. Grouping by the kind of cause rather
+own and classify them by its own rules; a seat rebinding is of the command
+class, so a host that sets apart player commands filters on kind, not class.
+Grouping by the kind of cause rather
 than the exact causing boundary or command keeps a summary's groups bounded by
 the registered packet types. A system declares how far back it reads as
 `BoundarySystemContract::boundary_schedule_horizon` (at most
@@ -2929,7 +2959,8 @@ marks of the boundary being settled. The core still keeps no calendar: the
 host names its calendars and computes their periods. Decision hosts use
 `enqueue_decision` for
 controller/ticket/option lifecycle changes, or `drive_decision` to evaluate a
-bound policy and enqueue an authoritative resolution. Accepted and expected-rejected command attempts are
+bound policy and enqueue an authoritative resolution, and `rebind_seat` to
+move the run's seat to another person. Accepted and expected-rejected command attempts are
 persisted, hashed, admitted at a boundary, restored by save/load, and regenerated
 by exact replay. Exact retries return the original outcome without new
 mutation while the attempt is inside the run's request outcome retention
@@ -3005,7 +3036,8 @@ only observation or trace policy cannot change simulation-result identity or
 RNG state. The checkpoint remains a save-container commitment and additionally
 binds the exact full run-manifest hash, so differently authorized or observable
 runs cannot masquerade as the same save even when their simulated state is
-identical. Use
+identical; it also binds the rebound seat binding while one is in force, which
+like the run configuration stays out of the authoritative state hash. Use
 `ReplayJournal` and `replay_from_journal` for exact replay: the journal freezes
 engine and snapshot versions, root seed, canonical initial scenario, authority
 root, run manifest, run configuration, plugin descriptors, the plugin-registration

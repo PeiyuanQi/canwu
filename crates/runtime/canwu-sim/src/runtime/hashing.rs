@@ -253,6 +253,11 @@ struct CheckpointHashMaterialV4<'a> {
     revision_format_version: u32,
     state_revision: u64,
     replay_revision_format_version: u32,
+    /// The rebound seat binding, save identity beside the manifest-bound run
+    /// configuration. Omitted while the configuration's own binding is in
+    /// force, so the material of a run that never rebinds is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rebound_seat: Option<&'a super::SeatBinding>,
 }
 
 pub(super) fn state_hash(material: &StateHashMaterial<'_>) -> Result<String, CanwuError> {
@@ -915,6 +920,7 @@ pub(super) fn checkpoint_hash_for_commitments(
     revision_format_version: u32,
     state_revision: u64,
     replay_revision_format_version: u32,
+    rebound_seat: Option<&super::SeatBinding>,
 ) -> Result<String, CanwuError> {
     if commitment_format_version != COMMITMENT_FORMAT_VERSION {
         return Err(CanwuError::new(
@@ -941,6 +947,7 @@ pub(super) fn checkpoint_hash_for_commitments(
             revision_format_version,
             state_revision,
             replay_revision_format_version,
+            rebound_seat,
         },
     )
 }
@@ -958,6 +965,7 @@ pub(super) fn snapshot_checkpoint_hash(
             snapshot.revision_format_version,
             snapshot.state_revision,
             snapshot.replay_revision_format_version,
+            snapshot.rebound_seat.as_ref(),
         ),
         0 => {
             if snapshot.commitment_roots.is_some() {
@@ -1120,6 +1128,8 @@ pub(super) fn compute_boundary_hash_with(
         transition_manifests: Option<&'a [super::PendingTransitionManifest]>,
         #[serde(skip_serializing_if = "Option::is_none")]
         transition_audits: Option<&'a [super::TransitionAuditRecord]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        seat_rebindings: Option<&'a [super::BoundarySeatRebinding]>,
         emissions: &'a [BoundaryEmission],
         state_hash: &'a Option<String>,
         previous_hash: &'a str,
@@ -1196,6 +1206,8 @@ pub(super) fn compute_boundary_hash_with(
                 .then_some(record.transition_manifests.as_slice()),
             transition_audits: (!record.transition_audits.is_empty())
                 .then_some(record.transition_audits.as_slice()),
+            seat_rebindings: (!record.seat_rebindings.is_empty())
+                .then_some(record.seat_rebindings.as_slice()),
             emissions: &record.emissions,
             state_hash: &record.state_hash,
             previous_hash: &record.previous_hash,

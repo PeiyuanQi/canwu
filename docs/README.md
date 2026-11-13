@@ -36,6 +36,7 @@ coding agents.
 - [Decision ticket option bias](proposals/decision-ticket-option-bias.md)
 - [Host-side targeted reads](proposals/host-side-targeted-reads.md)
 - [Bounded knowledge pages](proposals/bounded-knowledge-pages.md)
+- [Seat rebinding](proposals/seat-rebinding.md)
 - [End-state design](end-state.md)
 - [Reusable-engine conformance](engine-conformance.md)
 - [Versioning and compatibility](versioning.md)

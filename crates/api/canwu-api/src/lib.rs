@@ -130,6 +130,10 @@ pub use canwu_sim::{
 };
 // How long a tracked command request's exact outcome answers a retry (E-28).
 pub use canwu_sim::{DEFAULT_REQUEST_OUTCOME_RETENTION, MAX_REQUEST_OUTCOME_RETENTION};
+// Moving the run's seat to another existing person while it runs.
+pub use canwu_sim::{
+    BoundarySeatRebinding, SEAT_REBOUND_REASON, SeatRebindingOutcome, SeatRebindingRequest,
+};
 // The boundaries of a window of simulated time (gap G-60).
 pub use canwu_sim::{
     BoundaryIngressCount, BoundaryIngressKind, BoundaryIngressOrigin, BoundarySummary,
@@ -613,6 +617,14 @@ impl Canwu {
     #[must_use]
     pub const fn run_configuration(&self) -> &RunConfigurationSnapshot {
         self.simulation.run_configuration()
+    }
+
+    /// The seat binding in force: the binding of the last applied seat
+    /// rebinding ([`Self::rebind_seat`]), or else the run configuration's own
+    /// binding. `None` for a run without a declared seat binding.
+    #[must_use]
+    pub fn seat_binding(&self) -> Option<&SeatBinding> {
+        self.simulation.seat_binding()
     }
 
     #[must_use]
@@ -1283,6 +1295,42 @@ impl Canwu {
             .enqueue_decision(due_at, priority, request))
     }
 
+    /// Queues a rebinding of the run's seat to another existing person at the
+    /// current instant.
+    ///
+    /// The next boundary decides it before any other ingress it admits and
+    /// records the outcome in [`BoundaryRecord::seat_rebindings`] and
+    /// [`BoundaryReceipt::seat_rebindings`]. An applied rebinding puts the new
+    /// binding in force from that boundary ([`Self::seat_binding`]): human
+    /// commands must then match it, the actor-bound [`Self::viewer`] follows
+    /// it, and the seat's open tickets that acted for the previous person are
+    /// cancelled with [`SEAT_REBOUND_REASON`]. A rebinding to an unknown,
+    /// dead, or missing person, at a stale revision, or to the binding already
+    /// in force is a recorded rejection ([`SeatRebindingOutcome::Rejected`])
+    /// that changes nothing else. A detained or captive person may hold the
+    /// seat; the command gates refuse their commands until they are free.
+    ///
+    /// The call fails, queuing nothing, before the runtime is ready; after
+    /// direct command history
+    /// ([`ErrorCode::MixedCommandIngress`]); in a read-only run
+    /// ([`ErrorCode::InteractionReadOnly`]); in a run without a declared seat
+    /// binding, for another seat, or for a seat bound to an institution
+    /// without a person ([`ErrorCode::InvalidAuthority`]); for
+    /// non-canonical controller or permission-profile IDs
+    /// ([`ErrorCode::InvalidPayload`]); while another rebinding of the seat is
+    /// queued ([`ErrorCode::IdempotencyConflict`]); and for an expected time or
+    /// revision that is not the current one
+    /// ([`ErrorCode::SimulationTimeConflict`],
+    /// [`ErrorCode::SimulationRevisionConflict`]). Repeating a queued request
+    /// returns its receipt.
+    pub fn rebind_seat(
+        &mut self,
+        request: SeatRebindingRequest,
+    ) -> Result<IngressReceipt, CanwuError> {
+        gated!(self, "rebind_seat", [request], |sim| sim
+            .rebind_seat(request))
+    }
+
     pub fn drive_decision(
         &mut self,
         due_at: SimTime,
@@ -1651,6 +1699,7 @@ trait ViewerSource {
     fn source_entity_exists(&self, entity: &EntityRef) -> bool;
     fn source_latest_boundary_id(&self) -> Option<BoundaryId>;
     fn source_run_configuration(&self) -> &RunConfigurationSnapshot;
+    fn source_seat_binding(&self) -> Option<&SeatBinding>;
 }
 
 impl ViewerSource for Simulation {
@@ -1681,6 +1730,9 @@ impl ViewerSource for Simulation {
     fn source_run_configuration(&self) -> &RunConfigurationSnapshot {
         self.run_configuration()
     }
+    fn source_seat_binding(&self) -> Option<&SeatBinding> {
+        self.seat_binding()
+    }
 }
 
 impl ViewerSource for CompactedSimulation {
@@ -1710,6 +1762,9 @@ impl ViewerSource for CompactedSimulation {
     }
     fn source_run_configuration(&self) -> &RunConfigurationSnapshot {
         self.run_configuration()
+    }
+    fn source_seat_binding(&self) -> Option<&SeatBinding> {
+        self.seat_binding()
     }
 }
 
@@ -1749,9 +1804,8 @@ fn viewer_for_actor(
         Some(configuration)
             if configuration.observation == ObservationPolicy::ActorBound
                 && configuration.seat == SeatPolicy::CharacterBound
-                && configuration
-                    .seat_binding
-                    .as_ref()
+                && source
+                    .source_seat_binding()
                     .and_then(|binding| binding.actor)
                     == Some(actor) =>
         {
@@ -1791,9 +1845,8 @@ fn declared_observation_principal(
     };
     match configuration.observation {
         ObservationPolicy::ActorBound => match configuration.seat {
-            SeatPolicy::CharacterBound => configuration
-                .seat_binding
-                .as_ref()
+            SeatPolicy::CharacterBound => source
+                .source_seat_binding()
                 .and_then(|binding| binding.actor)
                 .map(ObservationPrincipal::Person)
                 .ok_or_else(|| {
@@ -1802,9 +1855,8 @@ fn declared_observation_principal(
                         "character-bound observation lacks an actor binding",
                     )
                 }),
-            SeatPolicy::InstitutionBound => configuration
-                .seat_binding
-                .as_ref()
+            SeatPolicy::InstitutionBound => source
+                .source_seat_binding()
                 .and_then(|binding| binding.institution.clone())
                 .map(ObservationPrincipal::Institution)
                 .ok_or_else(|| {
@@ -2124,6 +2176,14 @@ impl CompactedCanwu {
     #[must_use]
     pub const fn run_configuration(&self) -> &RunConfigurationSnapshot {
         self.simulation.run_configuration()
+    }
+
+    /// The seat binding in force: the binding of the last applied seat
+    /// rebinding ([`Self::rebind_seat`]), or else the run configuration's own
+    /// binding. `None` for a run without a declared seat binding.
+    #[must_use]
+    pub fn seat_binding(&self) -> Option<&SeatBinding> {
+        self.simulation.seat_binding()
     }
 
     /// The run's type schema.
@@ -2729,6 +2789,14 @@ impl CompactedCanwu {
         request: DecisionIngressRequest,
     ) -> Result<IngressReceipt, CanwuError> {
         self.simulation.enqueue_decision(due_at, priority, request)
+    }
+
+    /// See [`Canwu::rebind_seat`].
+    pub fn rebind_seat(
+        &mut self,
+        request: SeatRebindingRequest,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.rebind_seat(request)
     }
 
     pub fn drive_decision(

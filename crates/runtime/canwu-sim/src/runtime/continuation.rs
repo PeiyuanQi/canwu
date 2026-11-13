@@ -1450,6 +1450,7 @@ impl ContinuationCheckpoint {
                 IngressPayload::Plugin { .. }
                 | IngressPayload::Calendar { .. }
                 | IngressPayload::Maintenance { .. }
+                | IngressPayload::SeatRebinding { .. }
                 | IngressPayload::PluginCancellation { .. } => true,
             }
         });

@@ -287,6 +287,7 @@ sidebar:
 | [决策票据](/tutorials/cases/warlord-aid-decision/) | decision ticket | `DecisionTicket` | 请求一个控制者从带版本的当前有效选项中选择的持久化对象。 |
 | [前序票据](/tutorials/cases/warlord-aid-decision/) | parent ticket | `DecisionTicket::parent_ticket` | 新票据所接续的终态票据：可以是同一决策者的票据（例如为另一控制者重新开启的已取消票据），也可以是经席位继任接续的票据。该关联会复制到新票据的决策轨迹上。 |
 | [席位继任](/tutorials/cases/warlord-aid-decision/) | seat succession | `DecisionControllerBinding::seat_id`, `DecisionTicket::parent_ticket` | 从终态票据到新票据的接续关系：新票据的指定控制者与原票据的控制者绑定同一个非空席位，因此继任者可以接续前任的决策，而不必是同一决策者。 |
+| [席位改绑](/architecture/decisions/) | seat rebinding | `rebind_seat`, `SeatRebindingRequest` | 上层应用输入，在运行继续时把运行的席位交给另一个已有人物。从收下它的边界起，席位相关的检查跟随新人物，该席位上代表旧人物行事的控制者的开启票据以 `seat_rebound` 取消。 |
 | [决策选项](/tutorials/cases/warlord-aid-decision/) | decision option | `DecisionOption` | 决策票据提供的一个候选选择。 |
 | [决策尝试](/tutorials/cases/warlord-aid-decision/) | decision attempt | `DecisionAttemptRecord` | 一条已准入决策请求的权威记录，写明该请求被接受还是被拒绝。请求可以是注册控制者，也可以是开启票据、替换票据选项、为票据展期、改派票据、解决票据或取消票据。 |
 | [展期](/architecture/decisions/) | deadline extension | `DecisionMutation::ExtendDeadline` | 在票据 ID 不变的前提下把开启票据的截止时间推后，按票据版本校验。 |

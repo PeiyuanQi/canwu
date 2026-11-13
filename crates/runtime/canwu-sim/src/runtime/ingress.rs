@@ -415,6 +415,12 @@ pub enum IngressPayload {
     Maintenance {
         request: Box<MaintenanceIngressRequest>,
     },
+    /// A host rebinding of the run's seat to another existing person, queued
+    /// by [`Simulation::rebind_seat`] and decided at the start of the
+    /// boundary that admits it.
+    SeatRebinding {
+        request: Box<super::SeatRebindingRequest>,
+    },
     /// Terminal withdrawal of one still-pending plugin ingress item, recorded
     /// strictly before that item's due time.
     ///
@@ -1845,6 +1851,7 @@ impl Simulation {
     ) -> Result<(), CanwuError> {
         validate_command_ingress_policy(
             &self.state.metadata.run_configuration,
+            self.seat_binding(),
             issuer,
             authority,
             admission,

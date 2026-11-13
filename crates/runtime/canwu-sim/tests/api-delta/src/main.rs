@@ -109,6 +109,7 @@ fn exercise_information_flow_api_delta() {
         allocations: Vec::new(),
         created_persons: Vec::new(),
         transition_audits: Vec::new(),
+        seat_rebindings: Vec::new(),
     };
     let event = EventKind::from_fields(
         "knowledge_published",

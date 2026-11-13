@@ -121,6 +121,10 @@ impl Simulation {
                 .set_ingress_status(*id, super::PluginIngressStatus::Admitted);
         }
         let admitted_ingress_index: HashSet<_> = admitted_ingress.iter().copied().collect();
+        // A seat rebinding takes effect from the start of the boundary that
+        // admits it, so every command this boundary admits meets the binding
+        // it leaves in force.
+        let seat_rebindings = self.apply_seat_rebindings(&admitted_ingress)?;
         let mut maintenance_changes = Vec::new();
         let mut maintenance_record_changes = Vec::new();
         let mut calendar_marks = Vec::new();
@@ -159,7 +163,7 @@ impl Simulation {
                     request.cadences.extend(cadences);
                     calendar_marks.extend(marks);
                 }
-                IngressPayload::Plugin { .. } => {}
+                IngressPayload::Plugin { .. } | IngressPayload::SeatRebinding { .. } => {}
                 IngressPayload::PluginCancellation { .. } => {
                     return Err(CanwuError::new(
                         ErrorCode::InvalidSnapshot,
@@ -977,6 +981,7 @@ impl Simulation {
             evaluation_traces,
             transition_manifests: transition_evidence.registered,
             transition_audits: transition_evidence.audits.clone(),
+            seat_rebindings: seat_rebindings.clone(),
             emissions: emissions.clone(),
             state_hash: Some(state_hash),
             previous_hash,
@@ -1031,6 +1036,7 @@ impl Simulation {
                 .map(super::CreatedPerson::from)
                 .collect(),
             transition_audits: transition_evidence.audits,
+            seat_rebindings,
         })
     }
 

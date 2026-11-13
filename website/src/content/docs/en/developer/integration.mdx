@@ -202,6 +202,23 @@ A cancelled ticket stays cancelled. To continue the decision, open a new ticket 
 
 The parent must be a terminal ticket that is still in hot decision history, meaning it has not been moved to the decision archive; an archived parent is rejected with `TicketNotFound`. A parent with a different decision maker and a different seat is rejected. You cannot open a ticket for a decision maker who is still unavailable.
 
+### Hand the run's seat to an heir
+
+A run with a declared run configuration names the person in the player's seat once, at the start, with its `SeatBinding`, and the run configuration never changes. When that person dies and an heir takes the seat, move the seat to another existing person with a *seat rebinding*:
+
+```rust
+let request = SeatRebindingRequest::new("seat.realm", heir, canwu.revision(), canwu.time())
+    .with_controller("controller.heir");
+canwu.rebind_seat(request)?;
+```
+
+The request must name the current time and revision, and it is queued as host input. The boundary that admits it decides it before the other input it admits, and records the outcome in `BoundaryRecord::seat_rebindings`.
+
+- **Applied.** The new binding is in force from that boundary: an `Issuer::Human` command must match the new person, the previous person's commands are refused with `InvalidAuthority`, and the actor-bound viewer (`viewer`) follows the new person. The seat's open tickets whose controller acts for the previous person are cancelled with `seat_rebound`; continue them by seat succession, as above.
+- **Recorded rejection.** An unknown person (`ActorNotFound`), a dead or missing one (`IssuerUnavailable`), a stale revision, or an unchanged binding is refused and recorded, and nothing else in the run changes. A detained or captive person may take the seat, but their commands are refused as unavailable until they are free.
+
+`canwu.seat_binding()` returns the binding in force; `run_configuration().seat_binding` stays the one from the start. The binding in force is saved with snapshots and continuation checkpoints and bound by the checkpoint hash. Restore a continuation checkpoint with `from_continuation_checkpoint_verified` and the continuation hash you stored with it; checking only the state hash does not protect the seat binding. A read-only run, or one that has processed commands directly, cannot rebind, and a seat has at most one queued rebinding at a time.
+
 ## Limit evaluation traces
 
 Boundary systems in phases 7 and 12 can record [evaluation traces](/en/architecture/settlement/#evaluation-traces): term-by-term breakdowns of how a rule produced a number. Players read them through the [actor-relative view](/en/developer/reading-state/#explain-a-rule-result). The run configuration limits traces for all systems in one boundary together:

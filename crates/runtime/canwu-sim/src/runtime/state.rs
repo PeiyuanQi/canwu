@@ -472,6 +472,7 @@ pub(super) fn ingress_command_request(record: &IngressRecord) -> Option<CommandR
         IngressPayload::Plugin { .. }
         | IngressPayload::Calendar { .. }
         | IngressPayload::Maintenance { .. }
+        | IngressPayload::SeatRebinding { .. }
         | IngressPayload::PluginCancellation { .. } => None,
     }
 }
@@ -1403,6 +1404,9 @@ pub(super) struct RuntimeMetadata {
     pub(super) commitment_cache: Option<Box<RuntimeCommitmentCache>>,
     pub(super) plugin_registration_closed: bool,
     pub(super) replay_revision_format_version: u32,
+    /// The seat binding of the last applied seat rebinding; `None` while the
+    /// run configuration's own binding is in force.
+    pub(super) rebound_seat: Option<Arc<super::SeatBinding>>,
 }
 
 /// A live record's current version with the time it became authoritative.

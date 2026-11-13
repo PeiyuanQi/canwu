@@ -676,6 +676,10 @@ pub struct BoundaryRecord {
     /// Manifests settled at this, their ready boundary, in manifest-ID order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transition_audits: Vec<crate::TransitionAuditRecord>,
+    /// Seat rebindings this boundary admitted, decided in admission order
+    /// before any other ingress it admitted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seat_rebindings: Vec<crate::BoundarySeatRebinding>,
     pub emissions: Vec<BoundaryEmission>,
     #[serde(default)]
     /// Untagged legacy full-state hash or a `v1:` incremental state commitment.
@@ -710,4 +714,7 @@ pub struct BoundaryReceipt {
     /// Transition manifests settled at this boundary, in manifest-ID order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transition_audits: Vec<crate::TransitionAuditRecord>,
+    /// Seat rebindings this boundary admitted, in admission order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seat_rebindings: Vec<crate::BoundarySeatRebinding>,
 }

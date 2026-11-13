@@ -202,6 +202,23 @@ BoundaryDirective::SetPersonAvailability {
 
 前序票据必须已经终止，并且仍在热决策历史中（即尚未移入决策归档）；已归档的前序票据会以 `TicketNotFound` 拒绝。决策者不同、席位也不同的前序票据会被拒绝。决策者仍不可用时，不能为其开启新票据。
 
+### 把运行的席位交给继任者
+
+声明了运行配置的运行，在开局时用 `SeatBinding` 指定玩家席位由哪个人物担任，运行配置之后不再改变。席位上的人物死亡、由继任者接任时，用**席位改绑**把席位交给另一个已有人物：
+
+```rust
+let request = SeatRebindingRequest::new("seat.realm", heir, canwu.revision(), canwu.time())
+    .with_controller("controller.heir");
+canwu.rebind_seat(request)?;
+```
+
+请求必须对应当前时间和当前修订版本，并作为上层应用输入排队；收下它的结算边界会先于该边界的其他输入裁决它，裁决结果记在 `BoundaryRecord::seat_rebindings` 中。
+
+- **改绑成功。** 新绑定从这个结算边界起生效：`Issuer::Human` 命令要与新人物一致，旧人物的命令以 `InvalidAuthority` 拒绝，绑定人物的查看器（`viewer`）也跟随新人物。该席位上代表旧人物行事的控制者，其未关闭票据以 `seat_rebound` 取消，可按上文的席位继任接续。
+- **记录在案的拒绝。** 人物不存在（`ActorNotFound`）、已死亡或失踪（`IssuerUnavailable`）、预期修订版本已过时，或绑定没有变化时，改绑被拒绝并记录，运行的其他状态不变。被拘押或被俘的人物可以接任席位，但在获释之前，命令会因人物不可用而被拒绝。
+
+`canwu.seat_binding()` 返回当前生效的绑定；`run_configuration().seat_binding` 仍是开局时的绑定。生效的绑定随存档和接续检查点保存，并由检查点哈希约束。恢复接续检查点时，要用 `from_continuation_checkpoint_verified` 并传入保存时得到的接续哈希；只核对状态哈希保护不了席位绑定。只读运行和已直接处理过命令的运行不能改绑；同一席位同时只能有一个排队中的改绑。
+
 ## 限制评估轨迹数量
 
 第 7 和第 12 阶段的边界系统可以记录[评估轨迹](/architecture/settlement/#评估轨迹)，逐项说明一条规则如何算出某个数值。玩家通过[角色相对视图](/developer/reading-state/#解释规则结果)读取。运行配置对同一结算边界内所有系统的轨迹合计设限：

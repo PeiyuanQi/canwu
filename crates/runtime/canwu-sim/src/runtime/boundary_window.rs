@@ -50,6 +50,8 @@ pub enum BoundaryIngressKind {
     Decision,
     /// Owner-authorized maintenance.
     Maintenance,
+    /// A seat rebinding.
+    SeatRebinding,
 }
 
 /// Who queued an ingress item, by the kind of its recorded cause. Grouping by
@@ -154,6 +156,7 @@ impl BoundarySummary {
             IngressPayload::Calendar { .. } => BoundaryIngressKind::Calendar,
             IngressPayload::Decision { .. } => BoundaryIngressKind::Decision,
             IngressPayload::Maintenance { .. } => BoundaryIngressKind::Maintenance,
+            IngressPayload::SeatRebinding { .. } => BoundaryIngressKind::SeatRebinding,
             IngressPayload::PluginCancellation { .. } => {
                 return Err(CanwuError::new(
                     ErrorCode::InvalidSnapshot,
