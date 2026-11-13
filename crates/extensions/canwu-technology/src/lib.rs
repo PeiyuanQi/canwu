@@ -15,8 +15,9 @@ pub use plugin::{
     technology_result_ingress_descriptor,
 };
 pub use query::{
-    TechnologyRecordSet, from_technology_checkpoint_journal, from_technology_snapshot_json,
-    replay_technology_from_journal, validate_technology_runtime,
+    TechnologyRecordSet, TechnologyRestoreAccess, from_technology_checkpoint_journal,
+    from_technology_snapshot_json, replay_technology_from_journal, validate_technology_runtime,
+    validate_technology_runtime_on,
 };
 pub use schema::{technology_knowledge_schemas, technology_record_schemas};
 

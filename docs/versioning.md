@@ -6,6 +6,106 @@ runtime migration for pre-8 data. Applications that need old
 records must keep the old engine or run an explicit, application-owned export
 outside the Canwu runtime.
 
+## Unreleased
+
+Draft for the next release, a pre-1.0 minor version (0.23.0): the
+technology plugin's semantic hash changes. The release step folds it into
+the contract below. It comes from one package, with its own proposal:
+
+- [technology restore validation](proposals/technology-restore-validation.md)
+  (`canwu-technology`: downstream gap G-95).
+
+What changed:
+
+- **Technology restore validation on either run handle.**
+  `canwu_technology::validate_technology_runtime_on(&run)` checks the
+  technology state of a `Canwu` or a `CompactedCanwu`, including one restored
+  from a continuation checkpoint or sealed, without reading any journal entry
+  at or before the run's history cut (for each journal, the entries the run
+  no longer holds). It checks every live technology record's invariants (the
+  shared and per-kind caps, limits, references, and canonical payload
+  continuations), the exact bodies they cite, generic evidence and the causal
+  time cut of each observation, claim, and assessment, each consumed
+  execution intent (consumed by one applied operation, naming the operation,
+  result, and pending version, with the provider ingress and the finalizer's
+  change checked when the run retains them), and published technology
+  knowledge. The new trait `TechnologyRestoreAccess`, implemented for both
+  handles, is what it reads. `validate_technology_runtime` keeps its
+  signature: it is the full-journal mode, which also replays provenance and
+  needs the full `Canwu`.
+- **Sealed and restored runs decide technology operations as the
+  uninterrupted run does.** Before, once a live claim or assessment cited, as
+  generic evidence, a record version that a seal or a continuation restore
+  had dropped, every later technology operation on that run was rejected
+  while the uninterrupted run applied it, and the checkpoint hashes parted;
+  and once a rule read a body through a superseded version (a
+  transmission's source implementation, moved onto a renewed
+  qualification), every later boundary with a technology operation failed
+  on that run.
+  The plugin now reads a cited version through
+  `SimulationView::replay_stable_domain_record_version` (the record's
+  committed current version, or an initial-scenario version), and accepts
+  any other cited version by its identity: a committed boundary established
+  it, it is not version zero, its record is current, and it is older than
+  the current version and comes from a boundary no later than the current
+  version's; its time is that boundary's. A new operation's exact citation
+  must resolve replay-stably or be a body the plugin's loaded state holds.
+  A runtime technology record's payload continuation now also declares what
+  each cited version of a supersedable kind (program, execution intent,
+  capability qualification, asset binding, implementation, adoption,
+  transmission) declares, so the kernel keeps every body the plugin loads
+  while the citing record is current. Both validators apply the same
+  identity rule and check the same continuation, and the full validator
+  replays each boundary through the same reads.
+
+Formats: no state shape, record schema, snapshot, checkpoint, journal, or
+format number changes. A runtime technology record's payload continuation
+declares more versions, so the same operations write different payloads
+and hashes than 0.22.x. The `canwu-technology` plugin semantic hash changes
+from `8b4703e2…ce3a` to `adab965f…d44d` (BLAKE3 of the string recorded in
+the proposal), so a run saved by 0.22.x does not restore with the new
+plugin; same version only. Two public items are added to
+`canwu-technology`; nothing is removed.
+
+Behavior that changes for an uninterrupted run:
+
+- A generic citation of a version no boundary wrote, but that obeys the
+  identity rule, is accepted, as a sealed run must accept it.
+- A new operation's exact citation of a superseded version that no current
+  technology record holds is rejected (`invalid_domain_record`); cite the
+  current version.
+- A provider result whose intent's program version is no longer current is
+  rejected with the same code and a different message.
+- A citation of a version that owner-authorized maintenance wrote earlier
+  in the same boundary is rejected; only committed versions resolve. A
+  command cannot name such a version before it is written.
+- A rejected provider operation's outcome names no intent unless the result
+  names an execution intent the run holds, or a current one.
+- A record's payload is larger by the versions its continuation adds; a
+  record near the 16 KiB technology payload limit can now pass it and be
+  rejected.
+
+Upgrading: a host that restores from a continuation checkpoint, or validates
+a sealed run, calls `validate_technology_runtime_on(&run)` after the
+restore.
+
+Known limits:
+
+- It does not replay provenance: operation outcomes before the cut are not
+  recomputed. A host that needs that keeps a full save.
+- Before the cut, a consumed intent's provider ingress and finalizer change
+  are not read; what the run held there is covered by the continuation hash
+  the host stored, or by the sealed segments.
+- A forged identity of an older version of a current record that obeys the
+  identity rule cannot be told from a real one without the full journal, so
+  the plugin and both validators accept it on every handle; its time is the
+  forged boundary's, which can be earlier than the record existed. When
+  owner-authorized maintenance updates a record earlier in the boundary,
+  the full validator's replay may refuse a forged identity of it that the
+  plugin accepted; technology registers no maintenance.
+- `TechnologyRestoreAccess` is an open trait: an outside implementor must add
+  any read a later release adds.
+
 ## Current contract
 
 The workspace version is `0.22.1`. A live `SimulationSnapshot` has:

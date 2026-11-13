@@ -84,6 +84,7 @@ current published **social diffusion simulation module**
 - [Movement executions keep only the bookings that bear on their legs](proposals/movement-kept-bookings.md)
 - [Fiscal archive after a continuation restore](proposals/fiscal-archive-after-continuation-restore.md)
 - [Military engagement revisions](proposals/military-engagement-revisions.md)
+- [Technology restore validation and replay-stable citations](proposals/technology-restore-validation.md)
 - [Downstream grand-strategy gap set](proposals/downstream-grand-strategy-gap-set.md)
 
 ## Runnable cases, reference content, and starter kits

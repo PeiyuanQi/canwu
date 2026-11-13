@@ -557,9 +557,12 @@ impl TechnologyRecordPayload {
         }
     }
 
+    /// Encodes the record `id` with a payload continuation that declares
+    /// `continuation`, built by [`continuation_versions`].
     pub(crate) fn draft(
         &self,
         id: impl Into<String>,
+        continuation: Vec<DomainRecordVersionRef>,
     ) -> Result<DomainRecordDraft, canwu_api::CanwuError> {
         let reference = self.reference(id);
         let payload = serde_json::to_value(self).map_err(|error| {
@@ -577,7 +580,7 @@ impl TechnologyRecordPayload {
                 "technology record wrapper has no payload",
             )
         })?;
-        attach_payload_continuation(&mut payload, self.exact_versions())?;
+        attach_payload_continuation(&mut payload, continuation)?;
         Ok(DomainRecordDraft {
             reference,
             payload,
@@ -1079,6 +1082,74 @@ impl TechnologyCatalogRecord {
             references,
         })
     }
+}
+
+/// Whether a later version of a record of this kind can supersede a cited
+/// one: the kinds an operation or the intent finalizer updates. Every other
+/// technology kind is written once, so its versions stay current.
+pub(crate) fn supersedable_kind(kind: &canwu_api::DomainRecordKind) -> bool {
+    kind.matches_type::<TechnicalProgram>()
+        || kind.matches_type::<TechnologyExecutionIntent>()
+        || kind.matches_type::<CapabilityQualification>()
+        || kind.matches_type::<AssetBinding>()
+        || kind.matches_type::<ImplementationRecord>()
+        || kind.matches_type::<AdoptionRecord>()
+        || kind.matches_type::<TransmissionOpportunity>()
+}
+
+/// The record versions a runtime technology record's payload continuation
+/// declares: each version it cites exactly and, for each cited version that
+/// a later version can supersede, the versions that body declares, which
+/// `declared` returns. The kernel keeps the bodies a current record declares
+/// on every handle, so a body that a rule reads through a superseded version
+/// stays with the run while the citing record is current.
+pub(crate) fn continuation_versions(
+    cited: Vec<DomainRecordVersionRef>,
+    mut declared: impl FnMut(
+        &DomainRecordVersionRef,
+    ) -> Result<Vec<DomainRecordVersionRef>, canwu_api::CanwuError>,
+) -> Result<Vec<DomainRecordVersionRef>, canwu_api::CanwuError> {
+    let mut values = BTreeSet::new();
+    for reference in cited {
+        if matches!(
+            reference.established_by,
+            DomainRecordVersionSource::BoundaryChange { .. }
+        ) && supersedable_kind(&reference.record.kind)
+        {
+            values.extend(declared(&reference)?);
+        }
+        values.insert(reference);
+    }
+    Ok(values.into_iter().collect())
+}
+
+/// The record versions a technology record body's payload continuation
+/// declares.
+pub(crate) fn declared_continuation(
+    record: &DomainRecord,
+) -> Result<Vec<DomainRecordVersionRef>, canwu_api::CanwuError> {
+    let invalid = |message: String| {
+        canwu_api::CanwuError::new(canwu_api::ErrorCode::InvalidDomainRecord, message)
+    };
+    let value = record
+        .payload
+        .get(PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD)
+        .ok_or_else(|| {
+            invalid(format!(
+                "technology record {} has no payload continuation",
+                record.reference
+            ))
+        })?;
+    let continuation = PayloadRequiredEvidenceContinuationV1::deserialize(value)
+        .map_err(|error| invalid(format!("technology continuation is invalid: {error}")))?;
+    Ok(continuation
+        .dependencies
+        .into_iter()
+        .filter_map(|dependency| match dependency {
+            EvidenceRef::DomainRecordVersion(version) => Some(version),
+            _ => None,
+        })
+        .collect())
 }
 
 pub(crate) fn attach_payload_continuation(

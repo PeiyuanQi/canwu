@@ -962,8 +962,29 @@ read of that kind, but its existence and time are seal-stable: the journal
 counters and the time index answer `evidence_exists` and `evidence_time` for
 a sealed ordinal reference as the exact replay does, so
 `canwu-history-research` checks a generic citation the same way in every run.
+The technology plugin reads each cited record version through
+`replay_stable_domain_record_version`. A version that does not resolve there
+is accepted by its identity when a committed boundary established it, it is
+not version zero, its record is current, and it is older than the current
+version and comes from a boundary no later than the current version's; its
+time is that boundary's, which the time index answers on every handle. A new
+operation's exact citation must resolve replay-stably or be a body the
+plugin's loaded state holds. A runtime technology record's payload
+continuation also declares what each cited version of a kind that a later
+version can supersede declares, so a body a rule reads through a superseded
+version stays with the run on every handle while the citing record is
+current. A sealed run, a run restored from a continuation checkpoint, and
+the uninterrupted run therefore decide every technology operation alike.
 Module-owned restore wrappers re-run technology semantics after normal core
-snapshot, checkpoint, or replay validation.
+snapshot, checkpoint, or replay validation. `validate_technology_runtime_on`
+checks technology state on either run handle, so a run restored from a
+continuation checkpoint or sealed is checked without its earlier journal:
+live records, the exact bodies they cite, generic evidence and causal time
+cuts, consumed execution intents, and published knowledge, reading no
+journal entry at or before the run's history cut. It accepts a version the
+run no longer knows by the plugin's identity rule. It does not replay
+provenance, which `validate_technology_runtime` does on a full `Canwu`
+through the plugin's replay-stable reads.
 
 Historical fidelity is downstream and optional. `canwu-history-research`
 provides separately selectable source, practice, and production-archaeology

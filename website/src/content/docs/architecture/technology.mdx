@@ -191,6 +191,10 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 快照保存技术记录、操作结果和持有人知识。每个载荷还列出它依赖的旧精确版本，压缩存档时会保留后续校验需要的记录内容。恢复时请使用模块提供的包装函数：`from_technology_snapshot_json`、`from_technology_checkpoint_journal` 或 `replay_technology_from_journal`；用其他加载方式之后，调用 `validate_technology_runtime`。这些函数先执行内核的通用检查，再重演技术语义：根据每个边界准入的输入重新计算操作结果，核对已消费的执行意图，检查所引用的证据在每个因果切点上是否已经存在，并核对每条知识的绑定。通过了通用检查、却违反技术规则的状态会被拒绝。
 
+从接续检查点恢复的运行，或封存过的运行，不再持有之前的历史。请用 `validate_technology_runtime_on` 检查它，这个函数接受两种运行句柄：`Canwu` 或 `CompactedCanwu`。它对记录、引用的证据、已消费的执行意图和知识做同样的检查，但不读取运行已不再持有的历史。它不重新计算之前的操作结果；如果需要，请保留完整存档并使用 `validate_technology_runtime`。
+
+这样的运行之后处理技术操作，也和从未存档或封存的运行完全一致：结果相同，检查点哈希也相同。被引用的记录版本在每种运行上都按同一规则读取。若运行已不再保存它，只要它早于该记录的当前版本，且出自不晚于当前版本的边界，就接受这条引用。新操作若精确引用某个版本，只能引用每种运行都保留的版本：该记录的当前版本、场景中的版本，或某条当前技术记录已经依赖的旧版本。每条技术记录在需要保留的正文中，还会列出它所引用的、日后可能被替换的版本自身需要的正文，因此封存或恢复后的运行仍保留规则要读取的全部内容。
+
 精确重放从已记录的输入中读取提供方结果，不会再次运行你的提供方代码。历史研究 crate 也有对应的函数：`from_historical_research_snapshot_json`、`from_historical_research_checkpoint_journal`、`replay_historical_research_from_journal` 和 `validate_historical_research_runtime`。恢复和重放时请使用运行时的同一组插件，因为插件组合属于[插件语义环境](/reference/terminology/)。
 
 ## 上层应用需要提供什么
