@@ -97,9 +97,10 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `FiscalReportGranularity`、`FiscalReportCadence` | 报告的一行是什么（默认 `Scope`，或 `Institution`）；报告何时到期（默认 `OnChange`，或 `Interval { every, offset }`，可用 `staggered` 错开） |
 | `FiscalAdoptionState` | 一条法规在一个范围内的阶段，带一个记录变更次数的代次 |
 | `FiscalActionBatch`、`FiscalActionEntry`、`FiscalAction` | 一条命令中同一绑定下最多 4,096 个程序步骤；带 ID 和预期修订号的一个步骤；步骤本身 |
+| `FiscalActionBatchSet` | 一条命令中同一签发者之下最多 64 个批次，让几个机构的批次在一轮内结算 |
 | `FiscalActionTarget` | 行动写明修订号的那条记录：范围明细、财政机构记录、辖区记录或观察者记录 |
 | `FiscalExecutionRequest` | 征收、汇解、支出、储备或退还某个数量的授权 |
-| `FiscalExecutionEvidence` | 适配器在实际操作之后写入的类型化结果，写明它结算的范围和请求 |
+| `FiscalExecutionEvidence`、`FiscalExecutionEvidencePart` | 适配器在实际操作之后写入的类型化结果，写明它结算的范围和请求；或者作为汇总证据，每个范围一个分项，各带请求和数量 |
 | `FiscalExecutionReceiptPacket`、`FiscalExecutionReceipt` | 引用精确证据版本的凭证请求，以及结算后的凭证 |
 | `FiscalArchiveKeyV1`、`FiscalArchiveStore` | 已归档账册、机构合计或维护凭证的键；归档所在的、由上层应用拥有的存储 |
 | `FiscalReport`、`FiscalProjection`、`FiscalReportFact` | 读者看到的一位观察者的报告：每个总数都是一个区间，每条事实按周期、行和位置标记 |
@@ -173,7 +174,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 法规在某个范围内被采纳，就形成了应征义务；核算把一个核算周期内应缴多少固定下来，并在范围明细里开立该周期的账册。引擎按下面的顺序运行这条流程：
 
 1. **安装。** 场景带上编译好的目录（`CompiledFiscalCatalog::into_record`）和初始状态的记录（`FiscalState::into_records`）。注册 `FiscalPlugin::new(evidence_kinds)`；如果绑定用到代理角色或审计人，再加上 `.with_authority_basis_kinds(kinds)`；如果你的边界可能没有任何事件就过去了，加上 `.with_report_cadence(cadence)`，即唤醒节奏（`wake-fiscal-reports-on-cadence-v1` 运行所用的 `SystemCadence`，不是绑定的报告节律）；要改报告份额或报告记录的留存策略，用 `.with_report_budget(...)` 和 `.with_report_retention(...)`（见[报告如何发布](#报告如何发布)）。这几个选项都记在插件身份里：请在第一个边界之前定下来，换了设置再恢复或重放会被拒绝。激活时审计每条财政记录，所以财政记录集合无效或不完整的模拟运行在创建或恢复时就会被拒绝，不会等到某个边界才出错。绑定引用的权限依据如果属于插件不会读取的种类，激活同样会被拒绝；首次报告派生放不下的状态也会被拒绝。
-2. **提交。** 用 `fiscal_target_revision` 读取行动目标的修订号（或先用 `fiscal_action_target` 找到某个绑定和行动的目标），在同一绑定下构造包含一个或多个条目的 `FiscalActionBatch`（单个条目用 `FiscalActionBatch::single`），用 `fiscal_action_command` 包装成 `apply_fiscal_action_v1` 的[领域命令](/tutorials/command-plugin/)，再用 `Canwu::enqueue_command` 排队；旧式的直接命令路径会以 `MixedCommandIngress` 失败。每个条目带有行动 ID、目标的 `expected_revision` 和行动本身。一个机构要在同一个核算步骤里核算许多范围时，把它们放进一个批次。
+2. **提交。** 用 `fiscal_target_revision` 读取行动目标的修订号（或先用 `fiscal_action_target` 找到某个绑定和行动的目标），在同一绑定下构造包含一个或多个条目的 `FiscalActionBatch`（单个条目用 `FiscalActionBatch::single`），用 `fiscal_action_command` 包装成 `apply_fiscal_action_v1` 的[领域命令](/tutorials/command-plugin/)，再用 `Canwu::enqueue_command` 排队；旧式的直接命令路径会以 `MixedCommandIngress` 失败。每个条目带有行动 ID、目标的 `expected_revision` 和行动本身。一个机构要在同一个核算步骤里核算许多范围时，把它们放进一个批次。一个人在同一时刻替几个机构行事时，用 `fiscal_action_set_command`（`apply_fiscal_action_set_v1`）把这些批次作为一个 `FiscalActionBatchSet` 提交，它们在一轮内全部结算（见[批次组](#批次组)）。
 3. **准入。** 在准入该命令的[结算边界](/architecture/settlement/)上，处理函数读取目录桶、机构记录和每个条目的目标记录，并在遇到以下情况时拒绝整个批次，指出第一个不能准入的条目的序号和原因（`entry 3: ...`）：
    - 条目超过 `MAX_FISCAL_BATCH_ENTRIES`（4,096）个，批次超过 4 MiB，单个条目超过 32 KiB，行动 ID、绑定 ID 或新建条目的 ID 不规范，自由文本超过 2,048 字节，单位或被引用的 ID 超过 160 字节，或者同一个目标下同一个行动 ID 出现两次（`InvalidPayload`）；
    - 行动 ID 的结果还在目标的结果环中（`IdempotencyConflict`），修订号高于目标的修订号（`ValueOutOfRange`，`FISCAL_REVISION_UNKNOWN`），或不高于目标的结果下限（`ValueOutOfRange`，`FISCAL_REVISION_EXPIRED`），这就是已被挤出结果环的行动重发时被拒绝的方式；
@@ -210,7 +211,9 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 ### 凭证
 
-`FiscalExecutionReceiptPacket` 包含凭证 ID、它结算的范围、请求 ID 和 1 到 32 个精确证据版本。插件逐个检查：版本的种类在根记录获准的证据种类中；这个精确版本是其记录的当前版本，或初始场景中的版本；载荷能解码为 `FiscalExecutionEvidence`，并且其中的范围、请求、单位、支付形态、执行种类、资源、来源和目标都与请求一致。所有被引用记录的处置结果相同，数量合计不超过请求数量，建立时间都不早于请求。凭证的数量和 `FiscalReceiptDisposition` 取自这些证据。`Fulfilled` 和 `Partial` 计入合计，`Rejected` 和 `Excused` 的数量为零。一个精确版本最多结算一张凭证，一个 `(evidence kind, external_operation_id)` 组合在该范围的常驻账册内最多结算一张。以相同内容重复提交同一张凭证，状态保持不变。
+`FiscalExecutionReceiptPacket` 包含凭证 ID、它结算的范围、请求 ID 和 1 到 32 个精确证据版本。插件逐个检查：版本的种类在根记录获准的证据种类中；这个精确版本是其记录的当前版本，或初始场景中的版本；载荷能解码为 `FiscalExecutionEvidence`，并且其中的范围、请求、单位、支付形态、执行种类、资源、来源和目标都与请求一致。所有被引用记录的处置结果相同，数量合计不超过请求数量，建立时间都不早于请求。凭证的数量和 `FiscalReceiptDisposition` 取自这些证据。`Fulfilled` 和 `Partial` 计入合计，`Rejected` 和 `Excused` 的数量为零。一个精确版本在它写明的每个范围内最多结算一张凭证，一个 `(evidence kind, external_operation_id)` 组合在该范围的常驻账册内最多结算一张。以相同内容重复提交同一张凭证，状态保持不变。
+
+**汇总证据。** 一次操作服务几个范围时，例如一个机构在一个征收日跨它的各个范围征收，可以只写一条证据记录。它的 `scope_binding_id` 和 `request_id` 留空，改为列出 `parts`：最多 `MAX_FISCAL_EVIDENCE_PARTS`（4,096）个 `FiscalExecutionEvidencePart`，每个范围至多一个，各写明它结算的请求和数量；各分项数量之和等于记录的 `quantity`，其余字段对每个分项都成立。每个分项发一张凭证，各写自己的范围和请求，引用同一个精确版本，放在同一个数据包里：每张凭证按上面的规则结算写明其范围的分项，数量取该分项的数量。分项写明的范围或请求没有对应的常驻请求时，以 `request_unknown` 拒绝；记录里没有该凭证范围的分项，或分项写的是另一个请求时，以 `claim_mismatch` 拒绝；分项数量超过请求尚可授权的数量时，以 `quantity_exceeded` 拒绝。记录在分项之外还写了顶层范围或请求、同一范围有两个分项、分项过多或分项合计不等于其数量时，它不能结算任何凭证（`claim_mismatch`）。每个分项的凭证各自结算或被拒绝。
 
 凭证通过 `enqueue_execution_receipts` 以每包最多 `MAX_FISCAL_RECEIPTS_PER_PACKET`（4,096）张的数据包提交，按顺序结算，每张对照它所在范围的范围明细。结算不能接受的凭证以 `canwu.fiscal.ingress_rejected.v1` 被拒绝，后面的凭证照常结算：
 
@@ -220,7 +223,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `request_unknown` | 该范围没有这个 ID 的常驻请求（从来没有，或者它的账册已归档） |
 | `cycle_closed` | 请求所在的账册已关闭 |
 | `evidence_count_invalid`、`evidence_kind_unapproved`、`evidence_not_current` | 没有证据或超过 32 个版本；根记录未获准的种类；被引用的版本不是其记录的当前版本，例如记录在数据包排队之后发生了变化 |
-| `claim_mismatch`、`quantity_exceeded` | 声明与范围、请求或其他声明不一致，或早于请求；凭证合计会超过请求授权的数量 |
+| `claim_mismatch`、`quantity_exceeded` | 声明与范围、请求或其他声明不一致，或早于请求，或汇总证据没有该范围的分项、不合其规则；凭证合计会超过请求授权的数量 |
 | `operation_reused`、`evidence_reused`、`receipt_id_conflict` | 已被该范围常驻账册中的凭证结算过；某张常驻凭证已占用这个 ID 且内容不同 |
 | `state_budget_exhausted`、`boundary_limit` | 范围明细会超出字节预算；本边界已写了 65,536 个范围明细（请重新发送） |
 | `context_outside_pack`、`invalid_packet` | 语境年份超出内容包范围；其他任何会让状态无效的情况 |
@@ -248,6 +251,10 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 过期或未通过权限检查的行动被拒绝时不占用任何上限。这些都不是整个运行期的总量上限：关闭并归档账册就能释放它们。
 
+### 批次组
+
+一个 `FiscalActionBatchSet` 带 1 到 `MAX_FISCAL_BATCH_SET_BATCHES`（64）个批次，合计至多 `MAX_FISCAL_BATCH_SET_JSON_BYTES`（16 MiB）、65,536 个条目，每个批次各自不超过批次的上限。准入像 `apply_fiscal_action_v1` 准入一个批次那样，在批次组唯一的签发者之下逐个准入各批次，并按顺序为每个批次排一个 `fiscal_action_v1` 数据包；跨批次为同一目标两次写明同一个行动 ID，或者任何一个批次的准入会拒绝的情形，都会拒绝整组，消息以 `batch N:` 开头。下一个边界结算这些批次，与结算一起准入的几条批次命令完全相同：每个条目对照目标在该边界开始时的修订号，受同样的单边界上限约束。所以改动不同记录的批次，留下的账册和结果与这些批次一轮接一轮发送时相同，只是用两个边界，而不是每个批次两个。签发者必须在每个批次的绑定下都有身份；以本人名义决策的人可以做到，见[权限](#权限)。
+
 ### 核算周期与归档
 
 每个范围的范围明细为每个常驻核算周期保存一本 `FiscalCycleBook`，每个机构的财政机构记录按周期统计常驻账册数。核算周期 ID 由上层应用决定，与历史时期相互独立；它们按字节顺序比较，所以请让它们按时间排序（`"1644"`、`"1644-03"`）。
@@ -273,6 +280,8 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | --- | --- |
 | `Issuer::Actor(actor)`，没有决策控制者 | `actor` 是绑定中的常设角色或代理角色，或者是适用的任命政策列出的人物 |
 | `Issuer::Human` 或 `Issuer::Ai`，且等于已校验的 `decision_controller_id` | `CommandAuthority` 中的命令主体是绑定的机构，并且决策来源是指向某个绑定角色的 `DecisionOrigin::Actor`，或者是该机构的 `DecisionOrigin::Institution`，其负责角色已在绑定中 |
+
+[批次组](#批次组)还接受**本人名义决策**：来源是 `DecisionOrigin::Actor { actor }`、命令主体是 `EntityRef::Person(actor)` 的已校验决策。它在每个批次的绑定之下都按此人直接签发处理，所以身为几个机构常设角色或代理角色的人，用一个批次组就能涵盖它们全部；它持有此人所持的常设或代理身份，对审计绑定或任命政策则是此人作为审计人或名单上的人物，绝不持有机构身份。批次命令不接受这种决策。只为可以动用其财政身份的人注册这样的控制者（`DecisionAuthority::Actor`，命令主体为此人本人）：只要某张票据向它提供批次组命令，它就能在此人所任的每个机构中行事。
 
 绑定的机构还必须拥有行动涉及的范围；对 `ApplyTransition` 来说，要拥有全部目标范围；对观察者行动来说，它必须是绑定的 `controlled_by` 机构。[代理角色](/reference/terminology/)需要一个精确的[权限依据](/reference/terminology/)版本，而且必须与常设角色不同。权限依据是一条外部记录，其种类必须是插件会读取的：用 `with_authority_basis_kinds` 声明的种类，或者传给 `FiscalPlugin::new` 的证据种类。只要这个版本仍是其记录的当前版本，代理角色就能被准入。一旦记录更新到新版本或已退役，代理角色会以 `FISCAL_ACTING_BASIS_NOT_CURRENT`（`InvalidAuthority`）失败，常设角色仍可准入。
 
@@ -388,7 +397,7 @@ for (binding_id, report) in fiscal_reports(&viewer)? {
 
 财政状态存放在[记录与字节预算](#记录与字节预算)所列的记录中。目录记录只可创建。每条范围明细把它常驻账册中的凭证和折纳报价引用的、运行中产生的精确证据版本标记为需要保留载荷，所以账册常驻期间引擎会让这些载荷始终可以加载；归档账册会结束这项声明，这正是会封存的运行上 `prepare_fiscal_archive` 拒绝未封存引用的原因。观察者记录引用持有人的人物或政府，所以如果状态写到了不存在的持有人，引擎会拒绝它。改绑、审计绑定、提名和结论的 `entered_by` 所写的记录版本则没有这样保留：之后不会再有判断读取它们，`seal_evidence` 之后，其中已被取代的版本可能无法再证明。`load_fiscal_state` 和 `audit_fiscal_records` 校验目录、每条记录和跨记录不变量。
 
-每个边界判断都只读常驻财政记录、目录、本边界自己准入的输入、当前版本索引、不受封存影响的记录版本、人物可用性和 `knowledge_heads`，从不读取保留的证据或归档存储，所以封存过的运行、未封存的派生分支、从已封存日志段恢复的运行和精确重放结算完全一致。插件只安排零延迟的数据包（报告排空），规范化步进会在同一次调用中准入它，所以它不会长时间阻止 `seal_evidence`；报告的到期时间写在队列条目里，从不写成未来到期的数据包。默认留存策略下，报告记录在发布时清退，实时运行和重放一致，与封存无关。快照和[精确重放](/developer/persistence/)要求插件身份一致：名称 `canwu-fiscal`、版本 `0.5.0-experimental` 和它的语义哈希，哈希涵盖你选定的唤醒节奏（`with_report_cadence`）、报告份额和留存策略。重放消费记录下来的命令和输入，不会重新运行玩家或 AI 的选择。参考整合包的 `restore_ming_fiscal_reference` 和 `replay_ming_fiscal_reference` 注册同样的三个插件，然后运行 `validate_ming_fiscal_reference`：它接受任一运行句柄，只用封存无法改变的状态把每张凭证与其证据重新核对一遍。
+每个边界判断都只读常驻财政记录、目录、本边界自己准入的输入、当前版本索引、不受封存影响的记录版本、人物可用性和 `knowledge_heads`，从不读取保留的证据或归档存储，所以封存过的运行、未封存的派生分支、从已封存日志段恢复的运行和精确重放结算完全一致。插件只安排零延迟的数据包（报告排空），规范化步进会在同一次调用中准入它，所以它不会长时间阻止 `seal_evidence`；报告的到期时间写在队列条目里，从不写成未来到期的数据包。默认留存策略下，报告记录在发布时清退，实时运行和重放一致，与封存无关。快照和[精确重放](/developer/persistence/)要求插件身份一致：名称 `canwu-fiscal`、版本 `0.6.0-experimental` 和它的语义哈希，哈希涵盖你选定的唤醒节奏（`with_report_cadence`）、报告份额和留存策略。重放消费记录下来的命令和输入，不会重新运行玩家或 AI 的选择。参考整合包的 `restore_ming_fiscal_reference` 和 `replay_ming_fiscal_reference` 注册同样的三个插件，然后运行 `validate_ming_fiscal_reference`：它接受任一运行句柄，只用封存无法改变的状态把每张凭证与其证据重新核对一遍。
 
 ## 上层应用需要提供什么
 
@@ -413,10 +422,11 @@ for (binding_id, report) in fiscal_reports(&viewer)? {
 | `MAX_FISCAL_HOT_BOOKS_PER_LEDGER`、`MAX_FISCAL_HOT_CYCLES_PER_OFFICE` | 64 | 一个范围的常驻账册；一个机构的常驻周期 |
 | `MAX_FISCAL_PARTITION_KEYS` | 4 | 每个机构、机制和周期的分区键 |
 | `MAX_FISCAL_BATCH_ENTRIES`、`MAX_FISCAL_BATCH_JSON_BYTES` | 4,096、4 MiB | 一个行动批次的条目数和字节数 |
+| `MAX_FISCAL_BATCH_SET_BATCHES`、`MAX_FISCAL_BATCH_SET_JSON_BYTES` | 64、16 MiB | 一个批次组的批次数和字节数；一组合计至多 65,536 个条目 |
 | `MAX_FISCAL_ACTIONS_PER_BOUNDARY`、`MAX_FISCAL_LEDGER_WRITES_PER_BOUNDARY` | 65,536 | 一个边界应用的行动数和写入的范围明细数 |
 | `MAX_FISCAL_ACTIONS_PER_RECORD_PER_BOUNDARY` | 64 | 一个边界内同一目标上应用的行动数 |
 | `FISCAL_RECENT_OUTCOMES` | 8 | 一个目标保留的常驻结果数 |
-| `MAX_FISCAL_RECEIPTS_PER_PACKET` | 4,096 | 一个数据包中的凭证数 |
+| `MAX_FISCAL_RECEIPTS_PER_PACKET`、`MAX_FISCAL_EVIDENCE_PARTS` | 4,096 | 一个数据包中的凭证数；一条汇总证据记录的分项数 |
 | `MAX_FISCAL_EVIDENCE_KINDS`、`MAX_FISCAL_EVIDENCE_PER_RECORD` | 32 | 获准的证据种类；每张凭证或每条审计的证据数 |
 | `MAX_FISCAL_ACTION_JSON_BYTES`、`MAX_FISCAL_ACTION_TEXT_BYTES`、`MAX_FISCAL_IDENTIFIER_BYTES` | 32 KiB、2,048 字节、160 字节 | 一个条目；审计的 `finding`、减免的 `reason` 或执行授权的 `purpose`；单位或被引用的 ID、核算的单位和核算周期，以及领域记录机构的命名空间、名称和 ID 的合计长度 |
 | `MAX_FISCAL_APPOINTMENT_PARTIES`、`MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY`、`MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY` | 32、4、64 | 一份政策的提名方或请议方；一方的待决提案；一份政策保留的已结案提案 |

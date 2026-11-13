@@ -170,6 +170,7 @@ fn execution_evidence() -> ReferenceFiscalExecutionEvidence {
         external_operation_id: "resource-transfer.compact".to_owned(),
         request_id: "compact.execution".to_owned(),
         quantity: 70,
+        parts: Vec::new(),
         unit: "shi_grain_equivalent".to_owned(),
         payment_form: FiscalPaymentForm::Grain,
         execution_kind: FiscalExecutionKind::Collect,

@@ -11,14 +11,15 @@ use crate::model::{
     FISCAL_ACTING_BASIS_NOT_CURRENT, FISCAL_AUTHORITY_BASIS_NOT_CURRENT,
     FISCAL_INGRESS_MALFORMED_REJECTION, FISCAL_INGRESS_ORIGIN_REJECTION, FISCAL_OBSERVER_REMOVED,
     FISCAL_RECORD_RING_RESERVE_BYTES, FISCAL_REVISION_EXPIRED, FISCAL_REVISION_UNKNOWN,
-    FiscalAction, FiscalActionBatch, FiscalActionEntry, FiscalActionIssuer, FiscalActionRequest,
-    FiscalActionTarget, FiscalAppointmentDecision, FiscalAuthorityBinding, FiscalCatalogRecord,
-    FiscalExecutionReceiptPacket, FiscalHistoricalContextPacket, FiscalIssuerRole,
-    FiscalRecentOutcome, FiscalReportBudget, FiscalState, MAX_FISCAL_ACTION_JSON_BYTES,
-    MAX_FISCAL_ACTION_TEXT_BYTES, MAX_FISCAL_BATCH_ENTRIES, MAX_FISCAL_BATCH_JSON_BYTES,
-    MAX_FISCAL_EVIDENCE_PER_RECORD, MAX_FISCAL_IDENTIFIER_BYTES, MAX_FISCAL_LEDGER_RECORD_BYTES,
-    MAX_FISCAL_RECEIPTS_PER_PACKET, MAX_FISCAL_RECORD_BYTES, MAX_FISCAL_REFERENCES_PER_DEFINITION,
-    fiscal_catalog_reference, invalid, validate_identifier,
+    FiscalAction, FiscalActionBatch, FiscalActionBatchSet, FiscalActionEntry, FiscalActionIssuer,
+    FiscalActionRequest, FiscalActionTarget, FiscalAppointmentDecision, FiscalAuthorityBinding,
+    FiscalCatalogRecord, FiscalExecutionReceiptPacket, FiscalHistoricalContextPacket,
+    FiscalIssuerRole, FiscalRecentOutcome, FiscalReportBudget, FiscalState,
+    MAX_FISCAL_ACTION_JSON_BYTES, MAX_FISCAL_ACTION_TEXT_BYTES, MAX_FISCAL_ACTIONS_PER_BOUNDARY,
+    MAX_FISCAL_BATCH_ENTRIES, MAX_FISCAL_BATCH_JSON_BYTES, MAX_FISCAL_BATCH_SET_BATCHES,
+    MAX_FISCAL_BATCH_SET_JSON_BYTES, MAX_FISCAL_EVIDENCE_PER_RECORD, MAX_FISCAL_IDENTIFIER_BYTES,
+    MAX_FISCAL_LEDGER_RECORD_BYTES, MAX_FISCAL_RECEIPTS_PER_PACKET, MAX_FISCAL_RECORD_BYTES,
+    MAX_FISCAL_REFERENCES_PER_DEFINITION, fiscal_catalog_reference, invalid, validate_identifier,
 };
 use crate::projection::committed_fiscal_catalog;
 use crate::records::{
@@ -53,8 +54,12 @@ use std::sync::OnceLock;
 
 pub const PLUGIN_NAME: &str = "canwu-fiscal";
 pub const APPLY_FISCAL_ACTION_COMMAND: &str = "apply_fiscal_action_v1";
+/// The command that submits one [`FiscalActionBatchSet`]: several batches,
+/// each settled as a batch command's is, in one round.
+pub const APPLY_FISCAL_ACTION_SET_COMMAND: &str = "apply_fiscal_action_set_v1";
 /// The internal packet that the admission of an [`APPLY_FISCAL_ACTION_COMMAND`]
-/// queues for the next boundary to settle: the admitted batch.
+/// queues for the next boundary to settle: the admitted batch. The admission
+/// of an [`APPLY_FISCAL_ACTION_SET_COMMAND`] queues one per batch, in order.
 ///
 /// The type is kernel-internal: a host cannot enqueue it
 /// (`enqueue_plugin_ingress` refuses it with `InvalidAuthority`), and the
@@ -105,8 +110,10 @@ pub const FISCAL_ACTION_SETTLED_EVENT: &str = "canwu.fiscal.action_settled.v1";
 /// Event recorded for every settled archive commit, applied or stale.
 pub const FISCAL_ARCHIVE_MAINTENANCE_EVENT: &str = "canwu.fiscal.archive_maintenance.v1";
 
-const PLUGIN_VERSION: &str = "0.5.0-experimental";
-const SEMANTIC_HASH: &str = "e3ed464eaa0fe274cf92d07477c0525c7a3b0a62249a61ad11553f72891cdb72";
+const PLUGIN_VERSION: &str = "0.6.0-experimental";
+/// BLAKE3 of `canwu-fiscal plugin semantic hash 0.6.0-experimental: batch
+/// sets and aggregated execution evidence`.
+const SEMANTIC_HASH: &str = "8b37008533b60bd6b891617475e601a797b3645d4dc2c448b4ffc8bd139c9afe";
 
 static ARCHIVE_COMMIT_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static ARCHIVE_RETENTION_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
@@ -462,17 +469,7 @@ impl SimulationPlugin for FiscalPlugin {
         let mut action_reads = vec![StateKey::core_evidence()];
         action_reads.extend(fiscal_reads.iter().cloned());
         action_reads.extend(self.external_record_state_keys());
-        registrar.register_command(
-            PluginActionDescriptor {
-                name: APPLY_FISCAL_ACTION_COMMAND.to_owned(),
-                description: "Admit one batch of authority-bound fiscal procedure actions"
-                    .to_owned(),
-                payload_schema: PayloadSchema::Any,
-                reads: sorted(action_reads),
-                writes: Vec::new(),
-            },
-            admit_fiscal_action,
-        )?;
+        register_fiscal_commands(registrar, &sorted(action_reads))?;
         register_fiscal_ingress(registrar)?;
         registrar.register_archive_reachability_participant(fiscal_archive_reachability)?;
 
@@ -679,6 +676,36 @@ fn keep_permit(
     Ok(())
 }
 
+/// Registers the batch command and the batch set command, which read the
+/// same state.
+fn register_fiscal_commands(
+    registrar: &mut PluginRegistrar<'_>,
+    reads: &[StateKey],
+) -> Result<(), CanwuError> {
+    registrar.register_command(
+        PluginActionDescriptor {
+            name: APPLY_FISCAL_ACTION_COMMAND.to_owned(),
+            description: "Admit one batch of authority-bound fiscal procedure actions".to_owned(),
+            payload_schema: PayloadSchema::Any,
+            reads: reads.to_vec(),
+            writes: Vec::new(),
+        },
+        admit_fiscal_action,
+    )?;
+    registrar.register_command(
+        PluginActionDescriptor {
+            name: APPLY_FISCAL_ACTION_SET_COMMAND.to_owned(),
+            description:
+                "Admit several batches of authority-bound fiscal procedure actions as one round"
+                    .to_owned(),
+            payload_schema: PayloadSchema::Any,
+            reads: reads.to_vec(),
+            writes: Vec::new(),
+        },
+        admit_fiscal_action_set,
+    )
+}
+
 /// Admits one batch of fiscal actions. A rejection caused by the command
 /// uses a code the engine records as a rejected command attempt instead of
 /// failing the boundary.
@@ -703,99 +730,217 @@ fn admit_fiscal_action(
     context: &CommandContext,
     payload: &Value,
 ) -> Result<Vec<SystemDirective>, CanwuError> {
-    if context.ingress == CommandIngress::LegacyDirect {
-        return Err(CanwuError::new(
-            ErrorCode::MixedCommandIngress,
-            "fiscal actions require tracked command ingress",
-        ));
-    }
+    require_tracked_ingress(context)?;
     if json_len(payload)? > MAX_FISCAL_BATCH_JSON_BYTES {
         return Err(invalid_payload(
             "fiscal action batch exceeds its serialized byte limit",
         ));
     }
     let batch: FiscalActionBatch = decode(payload, "fiscal action batch")?;
+    check_batch_shape(&batch)?;
+    let mut working = admission_working(view)?;
+    let admission = BatchAdmission {
+        view,
+        context,
+        own_name: false,
+        command_label: "batch",
+    };
+    Ok(vec![admission.admit(
+        &mut working,
+        batch,
+        &mut BTreeSet::new(),
+    )?])
+}
+
+/// Admits one [`FiscalActionBatchSet`]: each batch as
+/// [`admit_fiscal_action`] admits a batch command, under the one command
+/// issuer, which may also be a decision in the deciding person's own name.
+/// Each batch becomes its own settlement packet, in order, so the next
+/// boundary settles all of them. The set is refused as a whole for its
+/// size, its batch count, more entries in all than
+/// [`MAX_FISCAL_ACTIONS_PER_BOUNDARY`] (which one boundary could never
+/// apply), an action ID it names twice for one target across its batches,
+/// or anything one batch's admission refuses; that refusal's message begins
+/// with `batch N:`.
+fn admit_fiscal_action_set(
+    view: &SimulationView<'_>,
+    context: &CommandContext,
+    payload: &Value,
+) -> Result<Vec<SystemDirective>, CanwuError> {
+    require_tracked_ingress(context)?;
+    if json_len(payload)? > MAX_FISCAL_BATCH_SET_JSON_BYTES {
+        return Err(invalid_payload(
+            "fiscal action batch set exceeds its serialized byte limit",
+        ));
+    }
+    let set: FiscalActionBatchSet = decode(payload, "fiscal action batch set")?;
+    if set.batches.is_empty() || set.batches.len() > MAX_FISCAL_BATCH_SET_BATCHES {
+        return Err(invalid_payload(
+            "a fiscal action batch set carries from one batch to the set limit",
+        ));
+    }
+    let in_batch = |index: usize| {
+        move |error: CanwuError| {
+            CanwuError::new(error.code, format!("batch {index}: {}", error.message))
+        }
+    };
+    let mut entries = 0_usize;
+    for (index, batch) in set.batches.iter().enumerate() {
+        if json_len(batch)? > MAX_FISCAL_BATCH_JSON_BYTES {
+            return Err(in_batch(index)(invalid_payload(
+                "fiscal action batch exceeds its serialized byte limit",
+            )));
+        }
+        check_batch_shape(batch).map_err(in_batch(index))?;
+        entries += batch.entries.len();
+    }
+    if entries > MAX_FISCAL_ACTIONS_PER_BOUNDARY {
+        return Err(invalid_payload(
+            "a fiscal action batch set carries more entries than one boundary can settle",
+        ));
+    }
+    let mut working = admission_working(view)?;
+    let admission = BatchAdmission {
+        view,
+        context,
+        own_name: true,
+        command_label: "set",
+    };
+    let mut named = BTreeSet::new();
+    let mut directives = Vec::with_capacity(set.batches.len());
+    for (index, batch) in set.batches.into_iter().enumerate() {
+        directives.push(
+            admission
+                .admit(&mut working, batch, &mut named)
+                .map_err(in_batch(index))?,
+        );
+    }
+    Ok(directives)
+}
+
+/// Refuses a batch whose entry count or binding ID admission can refuse
+/// without reading any record.
+fn check_batch_shape(batch: &FiscalActionBatch) -> Result<(), CanwuError> {
     if batch.entries.is_empty() || batch.entries.len() > MAX_FISCAL_BATCH_ENTRIES {
         return Err(invalid_payload(
             "a fiscal action batch carries from one entry to the batch limit",
         ));
     }
     validate_identifier(&batch.authority_binding_id, "fiscal authority binding")
-        .map_err(as_invalid_payload)?;
+        .map_err(as_invalid_payload)
+}
+
+/// Refuses a fiscal command that did not arrive as tracked command ingress.
+fn require_tracked_ingress(context: &CommandContext) -> Result<(), CanwuError> {
+    if context.ingress == CommandIngress::LegacyDirect {
+        return Err(CanwuError::new(
+            ErrorCode::MixedCommandIngress,
+            "fiscal actions require tracked command ingress",
+        ));
+    }
+    Ok(())
+}
+
+/// The records a fiscal command's admission reads, once the catalog and the
+/// state are known to exist.
+fn admission_working<'a, 'v>(
+    view: &'a SimulationView<'v>,
+) -> Result<Working<'a, SimulationView<'v>>, CanwuError> {
     if view
         .typed_domain_record(&fiscal_catalog_reference())?
         .is_none()
     {
         return Err(missing("fiscal catalog is not configured"));
     }
-    let Some(mut working) = Working::new(view)? else {
-        return Err(missing("fiscal state is not configured"));
-    };
-    if working
-        .ensure_binding_office(&batch.authority_binding_id)?
-        .is_none()
-    {
-        return Err(invalid_authority("fiscal authority binding is unavailable"));
-    }
-    let mut entries = Vec::with_capacity(batch.entries.len());
-    let mut affected = BTreeSet::new();
-    let mut named = BTreeSet::new();
-    for (index, entry) in batch.entries.iter().enumerate() {
-        let admitted = admit_entry(
-            view,
-            context,
-            &mut working,
-            &batch.authority_binding_id,
-            entry,
-        )
-        .map_err(|error| {
-            CanwuError::new(error.code, format!("entry {index}: {}", error.message))
-        })?;
-        if !named.insert((admitted.target.clone(), admitted.action_id.clone())) {
-            return Err(invalid_payload(&format!(
-                "entry {index}: the batch names fiscal action {} twice for its target",
-                admitted.action_id
-            )));
+    Working::new(view)?.ok_or_else(|| missing("fiscal state is not configured"))
+}
+
+/// How one command admits its batches: the command's context, whether its
+/// issuer may be a decision in the deciding person's own name (a set's), and
+/// what a refusal of an action ID named twice calls the command.
+struct BatchAdmission<'a, 'v> {
+    view: &'a SimulationView<'v>,
+    context: &'a CommandContext,
+    own_name: bool,
+    command_label: &'static str,
+}
+
+impl<'v> BatchAdmission<'_, 'v> {
+    /// Admits one batch, whose shape [`check_batch_shape`] has accepted,
+    /// and returns the packet that settles it. `named` holds the targets and
+    /// action IDs the command's earlier batches named.
+    fn admit(
+        &self,
+        working: &mut Working<'_, SimulationView<'v>>,
+        batch: FiscalActionBatch,
+        named: &mut BTreeSet<(FiscalActionTarget, String)>,
+    ) -> Result<SystemDirective, CanwuError> {
+        if working
+            .ensure_binding_office(&batch.authority_binding_id)?
+            .is_none()
+        {
+            return Err(invalid_authority("fiscal authority binding is unavailable"));
         }
-        affected.extend(named_entities(&admitted.action));
-        entries.push(admitted);
+        let mut entries = Vec::with_capacity(batch.entries.len());
+        let mut affected = BTreeSet::new();
+        for (index, entry) in batch.entries.iter().enumerate() {
+            let admitted = admit_entry(
+                self.view,
+                self.context,
+                working,
+                &batch.authority_binding_id,
+                entry,
+                self.own_name,
+            )
+            .map_err(|error| {
+                CanwuError::new(error.code, format!("entry {index}: {}", error.message))
+            })?;
+            if !named.insert((admitted.target.clone(), admitted.action_id.clone())) {
+                return Err(invalid_payload(&format!(
+                    "entry {index}: the {} names fiscal action {} twice for its target",
+                    self.command_label, admitted.action_id
+                )));
+            }
+            affected.extend(named_entities(&admitted.action));
+            entries.push(admitted);
+        }
+        // The engine checks every affected entity of a queued item against
+        // its entity registry, which also holds persons that have no record
+        // in the world projection. Naming the persons and governments of a
+        // rebind here therefore rejects the command as `EntityNotFound` when
+        // one of them does not exist.
+        if let Some(binding) = working
+            .state
+            .authority_binding(&batch.authority_binding_id)
+            .map(|binding| binding.institution.clone())
+            .or_else(|| {
+                working
+                    .state
+                    .audit_binding(&batch.authority_binding_id)
+                    .map(|binding| binding.institution.clone())
+            })
+            .or_else(|| {
+                working
+                    .state
+                    .appointment_policy(&batch.authority_binding_id)
+                    .map(|policy| policy.institution.clone())
+            })
+        {
+            affected.insert(binding);
+        }
+        Ok(SystemDirective::EnqueuePluginIngress {
+            after: canwu_api::SimDuration::ZERO,
+            packet_type: FISCAL_ACTION_INGRESS.to_owned(),
+            priority: 0,
+            affected: affected.into_iter().collect(),
+            payload: serde_json::to_value(AdmittedFiscalBatch {
+                authority_binding_id: batch.authority_binding_id,
+                command: self.context.command_id,
+                entries,
+            })
+            .map_err(encode_error)?,
+        })
     }
-    // The engine checks every affected entity of a queued item against its
-    // entity registry, which also holds persons that have no record in the
-    // world projection. Naming the persons and governments of a rebind here
-    // therefore rejects the command as `EntityNotFound` when one of them does
-    // not exist.
-    if let Some(binding) = working
-        .state
-        .authority_binding(&batch.authority_binding_id)
-        .map(|binding| binding.institution.clone())
-        .or_else(|| {
-            working
-                .state
-                .audit_binding(&batch.authority_binding_id)
-                .map(|binding| binding.institution.clone())
-        })
-        .or_else(|| {
-            working
-                .state
-                .appointment_policy(&batch.authority_binding_id)
-                .map(|policy| policy.institution.clone())
-        })
-    {
-        affected.insert(binding);
-    }
-    Ok(vec![SystemDirective::EnqueuePluginIngress {
-        after: canwu_api::SimDuration::ZERO,
-        packet_type: FISCAL_ACTION_INGRESS.to_owned(),
-        priority: 0,
-        affected: affected.into_iter().collect(),
-        payload: serde_json::to_value(AdmittedFiscalBatch {
-            authority_binding_id: batch.authority_binding_id,
-            command: context.command_id,
-            entries,
-        })
-        .map_err(encode_error)?,
-    }])
 }
 
 /// Admits one entry of a batch: its bounds, its issuer's role, what it names,
@@ -806,6 +951,7 @@ fn admit_entry(
     working: &mut Working<'_, SimulationView<'_>>,
     authority_binding_id: &str,
     entry: &FiscalActionEntry,
+    own_name: bool,
 ) -> Result<AdmittedFiscalEntry, CanwuError> {
     if json_len(entry)? > MAX_FISCAL_ACTION_JSON_BYTES {
         return Err(invalid_payload(
@@ -816,7 +962,7 @@ fn admit_entry(
     validate_action_bounds(&entry.action)?;
     let request = FiscalActionRequest::new(authority_binding_id, entry);
     load_admission_records(working, &request.action)?;
-    let (issuer, institution) = admit_issuer(view, context, &working.state, &request)?;
+    let (issuer, institution) = admit_issuer(view, context, &working.state, &request, own_name)?;
     let institution = institution.clone();
     admit_action(view, working, &request, &issuer, &institution)?;
     let target = action_target(working, &request.action, &institution)?;
@@ -1031,16 +1177,19 @@ fn action_target<S: crate::working::RecordSource + ?Sized>(
 }
 
 /// Resolves the binding a request names and the role its issuer holds under
-/// it, together with the institution the action concerns.
+/// it, together with the institution the action concerns. `own_name` admits
+/// a decision in the deciding person's own name ([`own_name_decision`]), as
+/// a batch set does.
 fn admit_issuer<'a>(
     view: &SimulationView<'_>,
     context: &CommandContext,
     state: &'a FiscalState,
     request: &FiscalActionRequest,
+    own_name: bool,
 ) -> Result<(FiscalActionIssuer, &'a EntityRef), CanwuError> {
     let appointment = is_appointment_action(&request.action);
     if let Some(binding) = state.authority_binding(&request.authority_binding_id) {
-        let (role, actor) = authority_role(context, binding, appointment)?;
+        let (role, actor) = authority_role(context, binding, appointment, own_name)?;
         let authority_basis = if role == FiscalIssuerRole::Acting {
             if appointment {
                 return Err(invalid_authority(
@@ -1074,7 +1223,7 @@ fn admit_issuer<'a>(
                 "an appointment policy admits only the nominations and removal petitions of the persons it lists",
             ));
         }
-        let actor = issuing_actor(context, &policy.institution).ok_or_else(|| {
+        let actor = issuing_actor(context, &policy.institution, own_name).ok_or_else(|| {
             invalid_authority(
                 "fiscal action requires its bound actor or validated decision controller",
             )
@@ -1097,7 +1246,7 @@ fn admit_issuer<'a>(
             "a fiscal audit binding admits only audit findings",
         ));
     }
-    if issuing_actor(context, &binding.institution) != Some(binding.auditor) {
+    if issuing_actor(context, &binding.institution, own_name) != Some(binding.auditor) {
         return Err(invalid_authority(
             "fiscal audit finding requires its bound auditor or a validated decision of that auditor",
         ));
@@ -1565,10 +1714,15 @@ fn actor_role(binding: &FiscalAuthorityBinding, actor: PersonId) -> Option<Fisca
 /// all, does the institution deciding as a body hold the institution role, so
 /// that it can replace an authorized actor who can no longer act, or nominate,
 /// petition, or decide as a body. Any other responsible actor holds no role.
+///
+/// With `own_name` (a batch set), a decision in the deciding person's own
+/// name ([`own_name_decision`]) is resolved as that person issuing directly:
+/// the role his actor issuer would hold.
 fn authority_role(
     context: &CommandContext,
     binding: &FiscalAuthorityBinding,
     appointment: bool,
+    own_name: bool,
 ) -> Result<(FiscalIssuerRole, Option<PersonId>), CanwuError> {
     match (&context.issuer, context.decision_controller_id.as_deref()) {
         (Issuer::Actor(actor), None) => actor_role(binding, *actor)
@@ -1579,6 +1733,15 @@ fn authority_role(
                 )
             }),
         (Issuer::Human(issuer) | Issuer::Ai(issuer), Some(controller)) if issuer == controller => {
+            if own_name && let Some(actor) = own_name_decision(context) {
+                return actor_role(binding, actor)
+                    .map(|role| (role, Some(actor)))
+                    .ok_or_else(|| {
+                        invalid_authority(
+                            "fiscal decision origin does not satisfy the authority binding",
+                        )
+                    });
+            }
             if context.authority.command_subject.as_ref() != Some(&binding.institution) {
                 return Err(invalid_authority(
                     "fiscal decision subject does not match the bound institution",
@@ -1619,14 +1782,22 @@ fn authority_role(
 /// The person a command comes from, for an auditor or a person an
 /// appointment policy lists: its actor issuer, or the actor or responsible
 /// actor of a validated decision whose subject is `subject`, the audited
-/// institution.
-fn issuing_actor(context: &CommandContext, subject: &EntityRef) -> Option<PersonId> {
+/// institution, or, with `own_name` (a batch set), the person of a decision
+/// in his own name ([`own_name_decision`]).
+fn issuing_actor(
+    context: &CommandContext,
+    subject: &EntityRef,
+    own_name: bool,
+) -> Option<PersonId> {
     match (&context.issuer, context.decision_controller_id.as_deref()) {
         (Issuer::Actor(actor), None) => Some(*actor),
-        (Issuer::Human(issuer) | Issuer::Ai(issuer), Some(controller))
-            if issuer == controller
-                && context.authority.command_subject.as_ref() == Some(subject) =>
-        {
+        (Issuer::Human(issuer) | Issuer::Ai(issuer), Some(controller)) if issuer == controller => {
+            if own_name && let Some(actor) = own_name_decision(context) {
+                return Some(actor);
+            }
+            if context.authority.command_subject.as_ref() != Some(subject) {
+                return None;
+            }
             match &context.authority.decision_origin {
                 DecisionOrigin::Actor { actor } => Some(*actor),
                 DecisionOrigin::Institution {
@@ -1634,6 +1805,31 @@ fn issuing_actor(context: &CommandContext, subject: &EntityRef) -> Option<Person
                 } => *responsible_actor,
                 _ => None,
             }
+        }
+        _ => None,
+    }
+}
+
+/// The person a validated decision speaks for in his own name: the actor of
+/// a decision whose origin is that actor and whose command subject is that
+/// same person. Only a batch set admits it, since a set's batches can be
+/// several institutions', so no one institution is its subject; it holds,
+/// under each binding, what the person holds when he issues directly, and
+/// nothing an institution decision holds.
+fn own_name_decision(context: &CommandContext) -> Option<PersonId> {
+    match (
+        &context.issuer,
+        context.decision_controller_id.as_deref(),
+        &context.authority.decision_origin,
+    ) {
+        (
+            Issuer::Human(issuer) | Issuer::Ai(issuer),
+            Some(controller),
+            DecisionOrigin::Actor { actor },
+        ) if issuer == controller
+            && context.authority.command_subject == Some(EntityRef::Person(*actor)) =>
+        {
+            Some(*actor)
         }
         _ => None,
     }
@@ -1717,13 +1913,14 @@ fn admitted_fiscal_packets<'a>(
 /// cause, the command the packet carries. The action ingress is internal, so
 /// a host cannot enqueue a packet, and a command's handler can queue ingress
 /// only for its own plugin: the admission of an `apply_fiscal_action_v1`
-/// command is the one producer of a fiscal packet whose cause is a command,
-/// and it records that command in the packet, with the issuer and role it
-/// resolved for each entry. Any other action packet, which only a boundary
-/// system of another plugin that declares this target could schedule, is
-/// refused and changes nothing. The check reads the ingress record of the
-/// boundary that admits it and no retained command evidence, so a sealed run
-/// decides as its exact replay does.
+/// or `apply_fiscal_action_set_v1` command is the one producer of a fiscal
+/// packet whose cause is a command, and it records that command in each
+/// packet it queues, with the issuer and role it resolved for each entry.
+/// Any other action packet, which only a boundary system of another plugin
+/// that declares this target could schedule, is refused and changes nothing.
+/// The check reads the ingress record of the boundary that admits it and no
+/// retained command evidence, so a sealed run decides as its exact replay
+/// does.
 fn decode_fiscal_packets(packets: &[AdmittedPacket<'_>]) -> Vec<FiscalPacket> {
     let malformed = |packet: &AdmittedPacket<'_>, packet_type| {
         FiscalPacket::Refused(
@@ -1891,6 +2088,16 @@ pub fn fiscal_action_command(batch: &FiscalActionBatch) -> Result<Command, serde
         plugin: PLUGIN_NAME.to_owned(),
         command: APPLY_FISCAL_ACTION_COMMAND.to_owned(),
         payload: serde_json::to_value(batch)?,
+    })
+}
+
+/// The command that submits a [`FiscalActionBatchSet`]: several offices'
+/// batches, settled in one round.
+pub fn fiscal_action_set_command(set: &FiscalActionBatchSet) -> Result<Command, serde_json::Error> {
+    Ok(Command::Plugin {
+        plugin: PLUGIN_NAME.to_owned(),
+        command: APPLY_FISCAL_ACTION_SET_COMMAND.to_owned(),
+        payload: serde_json::to_value(set)?,
     })
 }
 

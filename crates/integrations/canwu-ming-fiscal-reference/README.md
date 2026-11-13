@@ -17,9 +17,11 @@ typed fiscal-execution adapter, and configured fiscal plugins. The generic
 fiscal plugin decodes exact typed adapter results at the live settlement
 boundary and derives receipt quantity and disposition from them. The
 integration's semantic validator repeats the complete match during validation
-and restore. An exact result version settles at most one receipt, and one
-`(evidence kind, external_operation_id)` pair at most one among a scope's hot
-books. `close_ming_fiscal_sample_cycle` closes a sample cycle's book, and
+and restore. The adapter records the evidence of one request of one scope
+(`enqueue_reference_execution_result` refuses aggregated evidence, a result
+with `parts`), so an exact result version settles at most one receipt, and
+one `(evidence kind, external_operation_id)` pair at most one among a
+scope's hot books. `close_ming_fiscal_sample_cycle` closes a sample cycle's book, and
 `archive_ming_fiscal_books` archives every closed book into a fiscal archive
 store the caller passes, so a long run keeps a bounded state; the
 `archive_century` test runs a century that way.

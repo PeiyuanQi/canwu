@@ -26,6 +26,79 @@ Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
 
+**Unreleased.** For the release after 0.22.1 (not released; the workspace
+version stays 0.22.1 until the owner releases), one package is implemented
+on a branch, with its own proposal:
+
+- [fiscal batch sets and aggregated evidence](proposals/fiscal-batch-sets-and-aggregated-evidence.md)
+  (`canwu-fiscal`, and a guard in the reference integration
+  `canwu-ming-fiscal-reference`: downstream gap G-96).
+
+What changed:
+
+- **Batch sets.** `FiscalActionBatchSet { batches }` (1 to
+  `MAX_FISCAL_BATCH_SET_BATCHES`, 64, batches; at most
+  `MAX_FISCAL_BATCH_SET_JSON_BYTES`, 16 MiB, and 65,536 entries in all) is
+  the payload of the new command `apply_fiscal_action_set_v1`
+  (`APPLY_FISCAL_ACTION_SET_COMMAND`, `fiscal_action_set_command`). Admission
+  admits each batch as the batch command does, under the one command issuer,
+  and queues one `fiscal_action_v1` packet per batch, so several offices'
+  batches settle in one round of two boundaries; a refusal rejects the whole
+  set and begins with `batch N:`. The set command also admits a decision in
+  the deciding person's own name (`DecisionOrigin::Actor { actor }` with
+  command subject `EntityRef::Person(actor)`), resolved as that person
+  issuing directly: the principal or acting role he holds under each
+  binding, never the institution role. `apply_fiscal_action_v1` keeps
+  0.22.1's rule. This widens 0.22.1's contract: a controller whose command
+  subject is a person now holds that person's fiscal roles in any set
+  command a ticket offers it.
+- **Aggregated execution evidence.** `FiscalExecutionEvidence` gains
+  `parts: Vec<FiscalExecutionEvidencePart>` (scope, request, quantity; at
+  most `MAX_FISCAL_EVIDENCE_PARTS`, 4,096, one per scope, summing to
+  `quantity`, with the top-level scope and request empty). One record
+  version is cited by one receipt per scope, each settling its scope's part
+  at the part's quantity; an exact version settles at most one receipt in
+  each scope it names. A receipt whose part names an unknown scope or
+  request (`request_unknown`), whose scope has no part or whose part names
+  another request (`claim_mismatch`), or whose part asks more than its
+  request (`quantity_exceeded`) is a recorded refusal, never a failed
+  boundary. `enqueue_reference_execution_result` refuses aggregated
+  evidence: the reference adapter records per-scope results.
+
+Formats and hashes: the fiscal plugin is `0.6.0-experimental` with semantic
+hash `8b37008533b60bd6b891617475e601a797b3645d4dc2c448b4ffc8bd139c9afe`, and
+its descriptor gains `apply_fiscal_action_set_v1`, so the plugin semantic
+environment, and every checkpoint hash of a run that registers the fiscal
+plugin, changes. No fiscal record, packet, snapshot, journal, or format
+number changes. Per-scope evidence serializes byte for byte as before
+(`parts` is written only when non-empty, scope and request only when
+non-empty). A receipt citing aggregated evidence records that one version in
+`external_evidence`, so its books equal the per-scope path's but for those
+citations, and the ledger records and every hash over them differ from the
+per-scope path's: a departure from the equal state hash that downstream gap
+G-96 asks for, named in the proposal. A set leaves the fiscal state of the
+same batches sent in successive rounds when they change disjoint records;
+the run's attempts, ingress, revisions, and boundaries differ.
+
+Upgrading (SemVer: a pre-1.0 minor; `FiscalExecutionEvidence` gains a
+public field):
+
+- Add `parts: Vec::new()` to every `FiscalExecutionEvidence` struct literal.
+- Nothing else changes for a host that keeps batch commands and per-scope
+  evidence. To settle a holder's offices in one round, register a decision
+  controller with `DecisionAuthority::Actor` and the same person as command
+  subject and offer it a set command; such a controller holds the person's
+  fiscal roles in any set command a ticket offers it.
+- **Saves.** Same version only: a save that registers the 0.5.0 fiscal
+  plugin does not load.
+
+Known limits, for that release's entry:
+
+- A set has one issuer; offices held by different persons take one set per
+  person.
+- Aggregated evidence saves evidence records and ingress, not ledger
+  writes: each scope still takes its own receipt.
+
 Version 0.22.1 is a pre-1.0 patch release. Its change comes from one
 package, with its own proposal:
 

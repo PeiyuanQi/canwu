@@ -83,8 +83,14 @@ pub const MAX_FISCAL_ACTIONS_PER_RECORD_PER_BOUNDARY: usize = 64;
 pub const MAX_FISCAL_LEDGER_WRITES_PER_BOUNDARY: usize = 65_536;
 /// Entries one fiscal action batch may carry.
 pub const MAX_FISCAL_BATCH_ENTRIES: usize = 4_096;
+/// Batches one [`FiscalActionBatchSet`] may carry.
+pub const MAX_FISCAL_BATCH_SET_BATCHES: usize = 64;
 /// Execution receipts one receipt packet may carry.
 pub const MAX_FISCAL_RECEIPTS_PER_PACKET: usize = 4_096;
+/// Parts one aggregated [`FiscalExecutionEvidence`] may carry: as many as one
+/// receipt packet has receipts. Evidence with more parts settles no receipt
+/// ([`FISCAL_RECEIPT_CLAIM_MISMATCH`]).
+pub const MAX_FISCAL_EVIDENCE_PARTS: usize = MAX_FISCAL_RECEIPTS_PER_PACKET;
 /// Longest identifier, in bytes, that a fiscal record or action may carry.
 /// The same length bounds every text of a report row: a scope, a unit, an
 /// accounting cycle, and the namespace, name, and ID of a scope's
@@ -100,6 +106,9 @@ pub const MAX_FISCAL_ACTION_TEXT_BYTES: usize = 2_048;
 pub const MAX_FISCAL_ACTION_JSON_BYTES: usize = 32 * 1_024;
 /// Largest serialized fiscal action batch, in bytes.
 pub const MAX_FISCAL_BATCH_JSON_BYTES: usize = 4 * 1_024 * 1_024;
+/// Largest serialized [`FiscalActionBatchSet`], in bytes; each of its batches
+/// also keeps to [`MAX_FISCAL_BATCH_JSON_BYTES`].
+pub const MAX_FISCAL_BATCH_SET_JSON_BYTES: usize = 16 * 1_024 * 1_024;
 /// Rows one part of a fiscal report holds: one cycle of 16 consecutive rows.
 pub const FISCAL_REPORT_ROWS_PER_PART: usize = 16;
 /// Parts one cycle of an observer's report can have.
@@ -486,6 +495,46 @@ impl FiscalActionBatch {
     }
 }
 
+/// Several batches in one command, so that the actions of several offices
+/// due at one instant settle in one round: the payload of one
+/// `apply_fiscal_action_set_v1` command.
+///
+/// Admission resolves each batch exactly as it resolves a
+/// [`FiscalActionBatch`] command of its own, under the set's one command
+/// issuer, and queues each as its own settlement packet, in order, for the
+/// next boundary; there the batches settle one after another, each entry as
+/// an ordinary action, in one round of two boundaries. The batches settle
+/// exactly as the same batches would as separate commands admitted in one
+/// boundary: each entry against its target's revision when the settling
+/// boundary began (see [`FiscalActionEntry::expected_revision`]), within the
+/// same per-boundary limits. Batches whose entries change disjoint records
+/// therefore settle to the same books and outcomes as the same batches sent
+/// one round after another at that instant.
+///
+/// One issuer must hold a role under every batch's binding: an actor issuing
+/// directly, or a validated decision. A decision's command subject is the
+/// institution of each batch's binding, as for a batch, or the person who
+/// decides, in his own name: a decision whose origin is that actor and whose
+/// command subject is that same person holds, under every binding, the role
+/// the person holds when he issues directly, so a person who is the
+/// authorized or acting actor of several offices issues one set for all of
+/// them. Only a set admits such a decision, a set of one batch included; a
+/// host that offers a set command on a ticket of a controller of that shape
+/// gives the controller the person's fiscal roles. An institution decision
+/// covers its own institution's bindings only.
+///
+/// Admission refuses the whole set for what concerns the whole (its size, a
+/// batch count outside 1 to [`MAX_FISCAL_BATCH_SET_BATCHES`], more entries in
+/// all than [`MAX_FISCAL_ACTIONS_PER_BOUNDARY`], an action ID named twice for
+/// one target across its batches) and for anything it would refuse in one of
+/// its batches; the message then begins with `batch N:`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FiscalActionBatchSet {
+    /// From 1 to [`MAX_FISCAL_BATCH_SET_BATCHES`] batches, settled in order.
+    pub batches: Vec<FiscalActionBatch>,
+}
+
 /// One action of a [`FiscalActionBatch`].
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -836,11 +885,14 @@ pub enum FiscalAppointmentDecision {
 
 /// External evidence that settles one execution request of one scope.
 ///
-/// Settlement records the receipt in the book that holds the request, or
-/// refuses it with one `canwu.fiscal.ingress_rejected.v1` event whose summary
-/// ends with the stable reason (see [`FISCAL_RECEIPT_REQUEST_UNKNOWN`] and the
-/// constants after it); a refused receipt changes nothing and consumes
-/// nothing, and the packets after it settle.
+/// Every evidence version it cites claims that request of that scope: per
+/// scope, or as the part of aggregated [`FiscalExecutionEvidence`] that
+/// names the scope. Settlement records the receipt in the book that holds
+/// the request, or refuses it with one `canwu.fiscal.ingress_rejected.v1`
+/// event whose summary ends with the stable reason (see
+/// [`FISCAL_RECEIPT_REQUEST_UNKNOWN`] and the constants after it); a refused
+/// receipt changes nothing and consumes nothing, and the packets after it
+/// settle.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FiscalExecutionReceiptPacket {
@@ -853,13 +905,39 @@ pub struct FiscalExecutionReceiptPacket {
 /// What one external evidence record claims: the scope and request it
 /// settles, and what was executed. A receipt that cites it settles only that
 /// request of that scope.
+///
+/// **Aggregated evidence** settles one request in each of several scopes
+/// with one record, such as one transfer that collects for many scopes of
+/// one office. It names no scope or request of its own (both empty) and
+/// lists `parts` instead, at most one per scope and at most
+/// [`MAX_FISCAL_EVIDENCE_PARTS`], whose quantities sum to `quantity`; every
+/// other field holds for every part. A receipt of a scope that cites it
+/// settles the part naming that scope, at the part's quantity, and is
+/// refused as a receipt citing per-scope evidence is: a part naming a scope
+/// with no such hot request with [`FISCAL_RECEIPT_REQUEST_UNKNOWN`], one
+/// above what its request still authorizes with
+/// [`FISCAL_RECEIPT_QUANTITY_EXCEEDED`], and a receipt of a scope the
+/// evidence names no part for, or any receipt citing evidence that breaks
+/// these rules, with [`FISCAL_RECEIPT_CLAIM_MISMATCH`]. One exact version
+/// settles at most one receipt in each scope it names, so the receipts of
+/// one aggregated record can share one receipt ID.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalExecutionEvidence {
     pub id: String,
     pub external_operation_id: String,
+    /// The scope this evidence settles a request of; empty for aggregated
+    /// evidence.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub scope_binding_id: String,
+    /// The request this evidence settles; empty for aggregated evidence.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub request_id: String,
+    /// What was executed; for aggregated evidence, the sum of its parts.
     pub quantity: u64,
+    /// The parts of aggregated evidence; empty for the evidence of one
+    /// request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<FiscalExecutionEvidencePart>,
     pub unit: String,
     pub payment_form: FiscalPaymentForm,
     pub execution_kind: FiscalExecutionKind,
@@ -867,6 +945,15 @@ pub struct FiscalExecutionEvidence {
     pub source: EntityRef,
     pub target: EntityRef,
     pub disposition: FiscalReceiptDisposition,
+}
+
+/// One scope's share of aggregated [`FiscalExecutionEvidence`]: the request
+/// it settles and the quantity its receipt records.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalExecutionEvidencePart {
+    pub scope_binding_id: String,
+    pub request_id: String,
+    pub quantity: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -1410,7 +1497,9 @@ pub const FISCAL_RECEIPT_EVIDENCE_KIND_UNAPPROVED: &str = "evidence_kind_unappro
 pub const FISCAL_RECEIPT_EVIDENCE_NOT_CURRENT: &str = "evidence_not_current";
 /// Reason a receipt is refused when an evidence claim does not match the
 /// receipt's scope and request, or the claims of one receipt differ in their
-/// disposition, or a claim predates its request.
+/// disposition, or a claim predates its request; for aggregated evidence, also
+/// when it names no part for the receipt's scope or breaks the rules of
+/// aggregated [`FiscalExecutionEvidence`].
 pub const FISCAL_RECEIPT_CLAIM_MISMATCH: &str = "claim_mismatch";
 /// Reason a receipt is refused when it would fulfil more than its request
 /// authorizes.

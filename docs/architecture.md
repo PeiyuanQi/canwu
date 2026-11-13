@@ -1584,7 +1584,14 @@ actions on different targets never make each other stale. A target keeps a
 ring of its `FISCAL_RECENT_OUTCOMES` (8) latest outcomes and the revision
 floor below which outcomes are forgotten; admission refuses a repeated action
 ID in the ring, a revision above the target's, and one at or below the floor,
-and refuses a whole batch for one inadmissible entry, naming it. Several
+and refuses a whole batch for one inadmissible entry, naming it. A
+`FiscalActionBatchSet` of up to `MAX_FISCAL_BATCH_SET_BATCHES` (64) batches
+and 65,536 entries is one `apply_fiscal_action_set_v1` command under one
+issuer: admission admits each batch as the batch command does and queues
+one packet per batch, so several offices' batches settle in one round, and
+refuses the whole set naming the batch. Only a set also admits a decision in
+the deciding person's own name (origin `DecisionOrigin::Actor`, command
+subject that same person), resolved as that person issuing directly. Several
 batches settle in one boundary, in admission order, each entry validated
 against the state the previous one left, and no entry fails the boundary: it
 is applied or rejected as its own outcome, published in
@@ -1596,7 +1603,12 @@ per ledger and hot cycles per office, and the record byte budgets, 256 KiB
 for a ledger and 1 MiB for an office or jurisdiction, each held at settlement
 less a 4 KiB reserve for the outcome ring. Execution receipts arrive in
 packets of up to `MAX_FISCAL_RECEIPTS_PER_PACKET` (4,096) through
-`enqueue_execution_receipts`; a receipt or a historical-context change that
+`enqueue_execution_receipts`. Aggregated `FiscalExecutionEvidence` lists one
+part per scope (`parts`, up to `MAX_FISCAL_EVIDENCE_PARTS`, 4,096, with a
+request and a quantity each), so one record evidences one operation across
+several scopes: each scope's receipt cites the one version and settles its
+part, and an exact version settles at most one receipt in each scope it
+names. A receipt or a historical-context change that
 does not validate or fit is refused with one
 `canwu.fiscal.ingress_rejected.v1` event carrying a stable reason, never a
 failed boundary.

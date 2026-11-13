@@ -635,6 +635,7 @@ where
         scope_binding_id: scope_id.clone(),
         request_id: request_id.clone(),
         quantity: 70,
+        parts: Vec::new(),
         unit: sample_unit(payment_form).to_owned(),
         payment_form,
         execution_kind: FiscalExecutionKind::Collect,

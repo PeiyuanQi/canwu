@@ -13,7 +13,8 @@ operation, then submits `FiscalExecutionReceiptPacket`s citing exact external
 domain-record versions through `enqueue_execution_receipts`, up to
 `MAX_FISCAL_RECEIPTS_PER_PACKET` (4,096) in one packet; each receipt and the
 evidence envelope (`FiscalExecutionEvidence`) name the scope
-(`scope_binding_id`) whose request they settle. At the live settlement
+(`scope_binding_id`) whose request they settle, or the envelope lists one
+part per scope (aggregated evidence, below). At the live settlement
 boundary the extension requires each cited version to be the current version
 of its record, decodes the generic execution-evidence envelope, validates
 every field against the authorization, and derives the receipt quantity and
@@ -33,7 +34,7 @@ the same boundary. Each receipt of a packet settles or is refused on its own:
 | `evidence_count_invalid` | `FISCAL_RECEIPT_EVIDENCE_COUNT` | no evidence, or more than 32 versions |
 | `evidence_kind_unapproved` | `FISCAL_RECEIPT_EVIDENCE_KIND_UNAPPROVED` | a kind the state does not approve |
 | `evidence_not_current` | `FISCAL_RECEIPT_EVIDENCE_NOT_CURRENT` | a cited version is not its record's current version |
-| `claim_mismatch` | `FISCAL_RECEIPT_CLAIM_MISMATCH` | a claim differs from the scope, the request, or the other claims, or predates the request |
+| `claim_mismatch` | `FISCAL_RECEIPT_CLAIM_MISMATCH` | a claim differs from the scope, the request, or the other claims, or predates the request; aggregated evidence names no part for the scope or breaks its rules |
 | `quantity_exceeded` | `FISCAL_RECEIPT_QUANTITY_EXCEEDED` | the receipts would fulfil more than the request authorizes |
 | `operation_reused`, `evidence_reused` | `FISCAL_RECEIPT_OPERATION_REUSED`, `FISCAL_RECEIPT_EVIDENCE_REUSED` | already settled by a receipt of the scope's hot books |
 | `receipt_id_conflict` | `FISCAL_RECEIPT_ID_CONFLICT` | a hot receipt of the scope has the ID with other content |
@@ -46,16 +47,37 @@ A refused receipt consumes nothing, so a corrected one can settle later; if a
 cited record changes before the receipt settles, cite its new version. A
 configured evidence-kind allowlist and the host integration's redundant
 semantic validator keep arbitrary world records from proving execution. An
-exact evidence version settles at most one receipt: its claim names the scope
-and request it settles, and a request's receipts are all hot while its book
-takes receipts. An `(evidence kind, external_operation_id)` pair settles at
-most one receipt among the receipts of one scope's hot books; across scopes,
-and after a book is archived, unique operation keys are the evidence
-domain's guarantee, as the resource extension's are. Evidence must not
+exact evidence version settles at most one receipt in each scope it names:
+its claim names the scope and request it settles, and a request's receipts
+are all hot while its book takes receipts. An
+`(evidence kind, external_operation_id)` pair settles at most one receipt
+among the receipts of one scope's hot books; across scopes (where one
+aggregated record settles a receipt in each scope it names), and after a
+book is archived, unique operation keys are the evidence domain's
+guarantee, as the resource extension's are. Evidence must not
 predate its request, by simulated time; a request ID used again in a later
 book of the same scope, at the same simulated time as the evidence of an
 archived request of that ID, could take that evidence again, so use each
 request ID once per scope for the life of a run.
+
+**Aggregated evidence.** One operation that serves several scopes, such as
+an office's collection day across its scopes, can be one evidence record.
+It leaves `scope_binding_id` and `request_id` empty and lists `parts`: up to
+`MAX_FISCAL_EVIDENCE_PARTS` (4,096) `FiscalExecutionEvidencePart`s, at most
+one per scope, each naming the request it settles and its quantity, which
+sum to the record's `quantity`; every other field holds for every part. The
+host sends one receipt per part, each of its own scope and request and
+citing the one exact version, in one packet; each settles the part naming
+its scope, at the part's quantity, and is refused on its own as above: a
+part naming a scope or request with no hot request with `request_unknown`,
+a receipt of a scope the record has no part for, or whose part names
+another request, with `claim_mismatch`, and a part asking more than its
+request still authorizes with `quantity_exceeded`. A record with a top-level
+scope or request beside its parts, two parts for one scope, too many parts,
+or parts that do not sum to its quantity settles no receipt
+(`claim_mismatch`). Settlement reads and decodes an aggregated version once
+per boundary. The books such a record leaves are those per-scope records of
+the same operation leave, except that every receipt cites the one version.
 
 A `FiscalAuthorityBinding` names its standing `authorized_actor` and may also
 name an `acting_actor` together with an exact `authority_basis` record version,
@@ -89,6 +111,17 @@ an institution with no responsible actor can rebind a binding to any actors,
 or to none, and on a binding that names no authorized actor it acts as
 principal itself. Register a controller of that shape only for the body that
 appoints the binding's actors.
+
+A batch set (below) also admits a **decision in one's own name**: a
+validated decision whose origin is `DecisionOrigin::Actor { actor }` and
+whose command subject is `EntityRef::Person(actor)`. Admission resolves it,
+under every batch's binding, as that actor issuing directly: the principal
+or acting role he holds (an acting role still needs its current basis and
+cannot rebind or appoint), or for an audit binding or an appointment policy
+the auditor or listed person he is; never the institution role. The batch
+command keeps requiring the binding's institution as the decision's
+subject. A controller of that shape holds the person's fiscal roles in any
+set command a ticket offers it, so register one only where that is meant.
 
 A `FiscalAuditBinding` lets an auditor from outside an institution record
 audit findings on it. It admits `RecordAudit` on targets whose scope the
@@ -190,6 +223,21 @@ authority binding, under which every entry is issued, and up to
 admission queues the batch as one internal packet, and the next boundary
 settles its entries in order, each with its own outcome and its own
 `canwu.fiscal.action_settled.v1` event.
+
+**Batch sets.** A person who acts for several offices at one instant sends
+their batches as one `FiscalActionBatchSet` with the
+`apply_fiscal_action_set_v1` command (`fiscal_action_set_command`): 1 to
+`MAX_FISCAL_BATCH_SET_BATCHES` (64) batches, at most
+`MAX_FISCAL_BATCH_SET_JSON_BYTES` (16 MiB) and
+`MAX_FISCAL_ACTIONS_PER_BOUNDARY` (65,536) entries in all, each batch within
+the batch limits. Admission admits each batch as the batch command does,
+under the set's one issuer, and queues one packet per batch, in order; the
+next boundary settles them as it settles several batch commands admitted
+together. A set is refused as a whole, for an action ID it names twice for
+one target across its batches or for anything one batch's admission
+refuses, with `batch N:` before the batch's message. Batches that change
+different records leave the same books and outcomes as the same batches
+sent one round after another, in two boundaries instead of two per batch.
 
 **Targets and revisions.** Every action has a target,
 `FiscalActionTarget`: the ledger of the scope a scope action names, the office

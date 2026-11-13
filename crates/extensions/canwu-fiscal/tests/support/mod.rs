@@ -1132,6 +1132,7 @@ pub fn execution_claim(
         scope_binding_id: scope.to_owned(),
         request_id: request.to_owned(),
         quantity,
+        parts: Vec::new(),
         unit: "grain".to_owned(),
         payment_form: FiscalPaymentForm::Grain,
         execution_kind: FiscalExecutionKind::Collect,

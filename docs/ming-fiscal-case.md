@@ -130,9 +130,12 @@ quantity and disposition are derived from those results rather than declared by
 the caller. An exact adapter-result version names the scope and request it
 settles, so it settles at most one receipt; within one scope's hot books, one
 `(evidence kind, external_operation_id)` pair cannot settle two receipts
-either. A receipt that does not validate is refused with an event that names
-its reason, and does not stop the boundary. The four dispositions are
-fulfilled, partial, rejected, and excused.
+either. (A host whose one operation serves several scopes may instead write
+aggregated evidence, one part per scope, which settles one receipt in each
+scope it names; the reference adapter writes per-scope results.) A receipt
+that does not validate is refused with an event that names its reason, and
+does not stop the boundary. The four dispositions are fulfilled, partial,
+rejected, and excused.
 
 核算记录“应当发生什么”，执行授权记录机构可以征收、汇解、支出、储备或退还
 什么；二者都不会直接改变资源余额。上层应用在资源、市场、生产或物流领域执行
@@ -141,8 +144,10 @@ fulfilled, partial, rejected, and excused.
 形态、资源、来源、目标和单位；持久化凭证的数量与处置结果从证据派生，不由调用
 方自行声明。精确适配结果版本写明它结算的范围和请求，因此最多结算一张凭证；
 在同一范围的常驻账册内，同一 `（证据种类，外部操作 ID）` 组合也不能结算两张
-凭证。未通过校验的凭证会以写明原因的事件被拒绝，不会中断边界。处置结果可以是
-完成、部分完成、拒绝或豁免。
+凭证。（一次操作服务几个范围的上层应用也可以改写汇总证据，每个范围一个分项，
+在它写明的每个范围内各结算一张凭证；参考适配器写的是逐范围的结果。）未通过校验
+的凭证会以写明原因的事件被拒绝，不会中断边界。处置结果可以是完成、部分完成、
+拒绝或豁免。
 
 A `FiscalAuthorityBinding` may name an acting actor next to its
 standing `authorized_actor`, together with an exact `authority_basis` record
