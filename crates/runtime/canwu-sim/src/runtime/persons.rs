@@ -580,7 +580,7 @@ pub(super) fn validate_command_issuer_availability<A: AvailabilityLookup + ?Size
     Ok(())
 }
 
-const fn authority_person(authority: &DecisionAuthority) -> Option<PersonId> {
+pub(super) const fn authority_person(authority: &DecisionAuthority) -> Option<PersonId> {
     match authority {
         DecisionAuthority::Actor { actor } => Some(*actor),
         DecisionAuthority::Institution {
@@ -684,7 +684,7 @@ pub(super) fn validate_decision_preparation<A: AvailabilityLookup + ?Sized>(
 
 /// Cancels the open tickets selected by `matches`, in ticket-ID order, with
 /// `reason` and returns the cancelled IDs.
-fn cancel_open_tickets(
+pub(super) fn cancel_open_tickets(
     decisions: &mut DecisionState,
     matches: impl Fn(&DecisionState, &DecisionTicket) -> bool,
     reason: &str,

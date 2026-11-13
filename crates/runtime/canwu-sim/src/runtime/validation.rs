@@ -572,6 +572,7 @@ pub(super) fn validate_continuation_state(
     plugins: &PluginRegistry,
 ) -> Result<(), CanwuError> {
     validate_snapshot_header(snapshot, false)?;
+    validate_snapshot_rebound_seat(snapshot)?;
     validate_snapshot_domain_records(snapshot, plugins)?;
     super::knowledge::validate_snapshot_records(
         snapshot,
@@ -641,6 +642,7 @@ pub(super) fn validate_snapshot(
     plugins: &PluginRegistry,
 ) -> Result<(random::KeyedDrawLedger, HolderLedgers), CanwuError> {
     let initial_domain_records = validate_snapshot_header(snapshot, true)?;
+    validate_snapshot_rebound_seat(snapshot)?;
     let domain_records = validate_snapshot_domain_records(snapshot, plugins)?;
     let max_knowledge_record_id = super::knowledge::validate_snapshot_records(
         snapshot,
@@ -684,7 +686,8 @@ pub(super) fn validate_snapshot(
         );
     }
     let max_ingress_id = validate_ingress_records(snapshot, plugins, &domain_history)?;
-    validate_decision_state(snapshot)?;
+    let seat_history = validate_decision_state(snapshot)?;
+    seat_history.check_persisted(snapshot)?;
     let boundaries_before_attempt =
         boundaries_before_attempts(snapshot.command_attempts.len(), &snapshot.boundaries)?;
     let mut request_ids = BTreeSet::new();
@@ -718,8 +721,16 @@ pub(super) fn validate_snapshot(
                 invalid_snapshot_error("command attempt boundary cut exceeds platform index space")
             })?;
         let attempt_cut = DomainHistoryCut::after_boundaries(boundaries_before);
+        // An attempt a boundary admitted meets the rebindings that boundary
+        // decided first; any other attempt follows every boundary.
+        let seat_binding = seat_history.binding_after(
+            boundaries_before
+                .saturating_add(1)
+                .min(snapshot.boundaries.len()),
+        );
         let preflight_error = snapshot_command_attempt_preflight_error(
             snapshot,
+            seat_binding,
             attempt,
             &domain_history,
             attempt_cut,
@@ -1578,7 +1589,12 @@ fn validate_snapshot_domain_records(
     Ok(records)
 }
 
-fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuError> {
+/// Rebuilds the decision state and, with it, the seat binding in force from
+/// a full snapshot's boundaries; a checkpoint snapshot without history keeps
+/// its authenticated state and returns an underived seat history.
+fn validate_decision_state(
+    snapshot: &SimulationSnapshot,
+) -> Result<super::seat::SeatHistory, CanwuError> {
     snapshot.decisions.validate().map_err(|error| {
         invalid_snapshot_error(format!("snapshot decision state is invalid: {error}"))
     })?;
@@ -1638,7 +1654,7 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
         // decision roots and counters are authenticated by the checkpoint
         // commitment, while paged checkpoints may keep only the archive
         // directory rather than hydrating historical receipt buckets.
-        return Ok(());
+        return Ok(super::seat::SeatHistory::new(snapshot, false));
     }
     let expected_next_trace_id = snapshot
         .decisions
@@ -1674,10 +1690,20 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
     let mut reconstructed_archive_commits = 0_u64;
     let mut rejected_archive_commits = 0_u64;
     let mut persons = super::persons::PersonReplayCut::new(snapshot);
-    for boundary in &snapshot.boundaries {
+    let mut seat_history = super::seat::SeatHistory::new(snapshot, true);
+    for (boundary_index, boundary) in snapshot.boundaries.iter().enumerate() {
         let mut maintenance_change_index = 0_usize;
         // As settlement does, before the boundary admits anything.
         reconstructed.begin_admission_batch();
+        reconstruct_seat_rebindings(
+            snapshot,
+            boundary_index,
+            boundary,
+            &persons,
+            current_revision,
+            &mut reconstructed,
+            &mut seat_history,
+        )?;
         for ingress_id in &boundary.admitted_ingress {
             let index = usize::try_from(ingress_id.get().saturating_sub(1)).map_err(|_| {
                 invalid_snapshot_error("decision ingress ID exceeds platform range")
@@ -1706,7 +1732,8 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
                 }
                 IngressPayload::Decision { .. }
                 | IngressPayload::Plugin { .. }
-                | IngressPayload::Calendar { .. } => {}
+                | IngressPayload::Calendar { .. }
+                | IngressPayload::SeatRebinding { .. } => {}
                 IngressPayload::PluginCancellation { .. } => {
                     return invalid_snapshot("a boundary admits a terminal ingress cancellation");
                 }
@@ -1824,7 +1851,124 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
             rejected_archive_commits,
         ));
     }
+    Ok(seat_history)
+}
+
+/// Re-decides, at the start of `boundary` and in admission order, every seat
+/// rebinding it admitted, as settlement does before any other admitted
+/// ingress, and requires the recorded outcomes. Applied rebindings cancel the
+/// same tickets on the reconstructed decision state and advance the seat
+/// history.
+fn reconstruct_seat_rebindings(
+    snapshot: &SimulationSnapshot,
+    boundary_index: usize,
+    boundary: &BoundaryRecord,
+    persons: &super::persons::PersonReplayCut,
+    revision: u64,
+    decisions: &mut DecisionState,
+    seat_history: &mut super::seat::SeatHistory,
+) -> Result<(), CanwuError> {
+    let mut recorded = boundary.seat_rebindings.iter();
+    for ingress_id in &boundary.admitted_ingress {
+        let index = usize::try_from(ingress_id.get().saturating_sub(1))
+            .map_err(|_| invalid_snapshot_error("admitted ingress ID exceeds platform range"))?;
+        let Some(record) = snapshot.ingress.get(index) else {
+            return invalid_snapshot("boundary admits an unknown ingress record");
+        };
+        let IngressPayload::SeatRebinding { request } = &record.payload else {
+            continue;
+        };
+        let Some(entry) = recorded.next() else {
+            return invalid_snapshot("an admitted seat rebinding lacks its recorded outcome");
+        };
+        if entry.ingress != *ingress_id || entry.seat_id != request.seat_id {
+            return invalid_snapshot("seat rebinding evidence disagrees with its admitted ingress");
+        }
+        let current = seat_history.current().cloned();
+        let decided = super::seat::admit_seat_rebinding(
+            current.as_ref(),
+            request,
+            revision,
+            &|person| {
+                persons.runtime_person_exists(person).unwrap_or_else(|| {
+                    snapshot_entity_identity_exists(snapshot, &EntityRef::Person(person))
+                })
+            },
+            &persons.availability,
+        );
+        let expected = match (decided, current) {
+            (Ok(binding), Some(previous)) => {
+                let cancelled_tickets = super::seat::cancel_rebound_seat_tickets(
+                    decisions,
+                    &previous,
+                    &binding,
+                    boundary.at,
+                )?;
+                let after = boundary_index.checked_add(1).ok_or_else(|| {
+                    invalid_snapshot_error("boundary index exceeds the platform range")
+                })?;
+                seat_history.record(after, binding.clone());
+                super::SeatRebindingOutcome::Applied {
+                    previous: Box::new(previous),
+                    binding: Box::new(binding),
+                    cancelled_tickets,
+                }
+            }
+            (Err(error), _) => super::SeatRebindingOutcome::Rejected { error },
+            (Ok(_), None) => {
+                return invalid_snapshot("an applied seat rebinding requires a bound seat");
+            }
+        };
+        if entry.outcome != expected {
+            return invalid_snapshot(
+                "a recorded seat rebinding outcome disagrees with deterministic admission",
+            );
+        }
+    }
+    if recorded.next().is_some() {
+        return invalid_snapshot("a boundary records a seat rebinding it did not admit");
+    }
     Ok(())
+}
+
+/// Checks the shape of a persisted rebound seat binding; a full snapshot's
+/// history must also end at it.
+fn validate_snapshot_rebound_seat(snapshot: &SimulationSnapshot) -> Result<(), CanwuError> {
+    let Some(rebound) = &snapshot.rebound_seat else {
+        return Ok(());
+    };
+    super::seat::validate_rebound_seat_shape(
+        snapshot.run_configuration.as_ref(),
+        rebound,
+        &|person| snapshot_entity_identity_exists(snapshot, &EntityRef::Person(person)),
+    )
+}
+
+/// Checks a persisted seat-rebinding ingress record: host ingress of the
+/// command class at priority zero, due at the instant it was issued and
+/// expected, without a cause, and a valid rebinding of the run's seat.
+fn validate_seat_rebinding_ingress(
+    snapshot: &SimulationSnapshot,
+    record: &IngressRecord,
+    request: &super::SeatRebindingRequest,
+) -> Result<(), CanwuError> {
+    if record.class != IngressClass::Command
+        || record.priority != 0
+        || record.cause.is_some()
+        || record.due_at != record.issued_at
+        || request.expected_time != record.due_at
+    {
+        return invalid_snapshot("seat rebinding ingress is not canonical");
+    }
+    let Some(run_configuration) = snapshot.run_configuration.as_ref() else {
+        return invalid_snapshot("seat rebinding ingress requires a run configuration");
+    };
+    super::seat::validate_seat_rebinding_shape(run_configuration, request).map_err(|error| {
+        invalid_snapshot_error(format!(
+            "seat rebinding ingress is invalid: {}",
+            error.message
+        ))
+    })
 }
 
 /// `availability` is the person availability committed before `boundary`,
@@ -2234,6 +2378,9 @@ pub(super) fn validate_continuation_ingress(
         }
         return Ok(());
     }
+    if let IngressPayload::SeatRebinding { request } = &record.payload {
+        return validate_seat_rebinding_ingress(snapshot, record, request);
+    }
     let IngressPayload::Plugin {
         plugin,
         packet_type,
@@ -2475,6 +2622,9 @@ fn validate_ingress_records(
                     return invalid_snapshot("calendar ingress is not canonical");
                 }
             }
+            IngressPayload::SeatRebinding { request } => {
+                validate_seat_rebinding_ingress(snapshot, record, request)?;
+            }
             IngressPayload::Decision { request } => {
                 if record.class != IngressClass::Decision
                     || request.request_id.get() == 0
@@ -2680,6 +2830,7 @@ fn validate_ingress_records(
                     IngressPayload::Plugin { .. }
                     | IngressPayload::Command { .. }
                     | IngressPayload::Maintenance { .. }
+                    | IngressPayload::SeatRebinding { .. }
                     | IngressPayload::PluginCancellation { .. } => {}
                 }
             }
@@ -3733,7 +3884,8 @@ fn validate_boundary_ingress_generation(
             }
             IngressPayload::Command { .. }
             | IngressPayload::Calendar { .. }
-            | IngressPayload::Maintenance { .. } => false,
+            | IngressPayload::Maintenance { .. }
+            | IngressPayload::SeatRebinding { .. } => false,
         };
         if generation.phase != contract.phase
             || generation.visibility != contract.visibility
@@ -5285,6 +5437,7 @@ pub(super) fn has_unqueued_command_history(
             IngressPayload::Plugin { .. }
             | IngressPayload::Calendar { .. }
             | IngressPayload::Maintenance { .. }
+            | IngressPayload::SeatRebinding { .. }
             | IngressPayload::PluginCancellation { .. } => None,
         })
         .collect();

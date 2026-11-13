@@ -188,6 +188,7 @@ pub(super) struct BoundaryTransactionCheckpoint {
     checkpoint_hash: String,
     commitment_roots: Option<CommitmentRoots>,
     commitment_cache: Option<Box<RuntimeCommitmentCache>>,
+    rebound_seat: Option<Arc<super::SeatBinding>>,
 }
 
 impl BoundaryTransactionCheckpoint {
@@ -219,6 +220,7 @@ impl BoundaryTransactionCheckpoint {
             checkpoint_hash: state.metadata.checkpoint_hash.clone(),
             commitment_roots: state.metadata.commitment_roots.clone(),
             commitment_cache: state.metadata.commitment_cache.clone(),
+            rebound_seat: state.metadata.rebound_seat.clone(),
         }
     }
 
@@ -251,6 +253,7 @@ impl BoundaryTransactionCheckpoint {
         state.metadata.checkpoint_hash = self.checkpoint_hash;
         state.metadata.commitment_roots = self.commitment_roots;
         state.metadata.commitment_cache = self.commitment_cache;
+        state.metadata.rebound_seat = self.rebound_seat;
     }
 }
 

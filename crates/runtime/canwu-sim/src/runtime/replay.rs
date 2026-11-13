@@ -490,6 +490,7 @@ impl Simulation {
                 IngressPayload::Plugin { .. }
                 | IngressPayload::Calendar { .. }
                 | IngressPayload::Maintenance { .. }
+                | IngressPayload::SeatRebinding { .. }
                 | IngressPayload::PluginCancellation { .. } => None,
             })
             .collect();
@@ -705,6 +706,9 @@ fn enqueue_replay_ingress_cut(
                         commit.clone(),
                     )?,
             },
+            IngressPayload::SeatRebinding { request } => {
+                simulation.rebind_seat(request.as_ref().clone())?
+            }
             IngressPayload::PluginCancellation {
                 cancelled,
                 authority,

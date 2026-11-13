@@ -26,6 +26,7 @@ mod replay;
 mod revision;
 mod scenario;
 mod scheduling;
+mod seat;
 mod settlement;
 mod state;
 mod stream_hash;
@@ -159,6 +160,9 @@ pub use records::{
     DomainRecordOperation, DomainRecordPageRoots, DomainRecordSchema, DomainReference,
     DomainReferenceSchema, DomainReferenceTarget, DomainReferenceTargetKind, PatriciaStoreMetrics,
     PersistentDomainRecordStore, format8_patricia_scale_probe,
+};
+pub use seat::{
+    BoundarySeatRebinding, SEAT_REBOUND_REASON, SeatRebindingOutcome, SeatRebindingRequest,
 };
 pub use transitions::{
     MAX_PENDING_TRANSITION_MANIFESTS, MAX_PENDING_TRANSITION_MANIFESTS_PER_COORDINATOR,
@@ -1731,6 +1735,7 @@ impl Simulation {
                     commitment_cache: None,
                     plugin_registration_closed: false,
                     replay_revision_format_version: STATE_REVISION_FORMAT_VERSION,
+                    rebound_seat: None,
                 },
                 evidence: RuntimeEvidence {
                     archived: EvidenceCursor::default(),
@@ -2749,6 +2754,7 @@ impl Simulation {
                 STATE_REVISION_FORMAT_VERSION,
                 self.state.counters.state_revision,
                 self.state.metadata.replay_revision_format_version,
+                self.state.metadata.rebound_seat.as_deref(),
             )?;
             self.state.metadata.commitment_roots = Some(roots);
         } else if self.state.metadata.commitment_format_version == 0 {
@@ -3073,6 +3079,7 @@ impl Simulation {
                     commitment_cache: None,
                     plugin_registration_closed: snapshot.plugin_registration_closed,
                     replay_revision_format_version: snapshot.replay_revision_format_version,
+                    rebound_seat: snapshot.rebound_seat.clone().map(Arc::new),
                 },
                 evidence,
             },
@@ -3823,8 +3830,13 @@ fn resolve_command_authority(envelope: &CommandEnvelope) -> Result<CommandAuthor
     }
 }
 
+/// Checks a command's origin and authority against the run policy.
+/// `seat_binding` is the seat binding in force when the command is admitted:
+/// the configuration's own binding, or the binding of the last seat rebinding
+/// applied before.
 fn validate_command_ingress_policy(
     run_configuration: &RunConfigurationSnapshot,
+    seat_binding: Option<&SeatBinding>,
     issuer: &Issuer,
     authority: &CommandAuthority,
     admission: CommandAdmission,
@@ -3901,7 +3913,7 @@ fn validate_command_ingress_policy(
             "declared runs require a typed human, AI, institution, replay, experiment, debug, or system origin",
         )),
         Issuer::Human(controller) => {
-            let Some(binding) = &configuration.seat_binding else {
+            let Some(binding) = seat_binding else {
                 return Err(CanwuError::new(
                     ErrorCode::InvalidAuthority,
                     "human commands require the run's exact seat binding",
@@ -3947,7 +3959,7 @@ fn validate_command_ingress_policy(
                     "replay command sources require a replay-purpose, replay-controller, read-only run",
                 ));
             }
-            if let Some(binding) = &configuration.seat_binding
+            if let Some(binding) = seat_binding
                 && (source != &binding.controller_id
                     || authority.seat_id.as_deref() != Some(binding.seat_id.as_str())
                     || authority.permission_profile_id.as_deref()
@@ -4161,6 +4173,7 @@ fn is_domain_record_state(schemas: &records::DomainRecordSchemas, state: &StateK
 
 fn snapshot_command_attempt_preflight_error(
     snapshot: &SimulationSnapshot,
+    seat_binding: Option<&SeatBinding>,
     attempt: &CommandAttemptRecord,
     history: &DomainRecordHistory,
     cut: DomainHistoryCut,
@@ -4176,6 +4189,7 @@ fn snapshot_command_attempt_preflight_error(
     };
     if let Err(error) = validate_command_ingress_policy(
         run_configuration,
+        seat_binding,
         &attempt.envelope.issuer,
         &authority,
         CommandAdmission {

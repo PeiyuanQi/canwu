@@ -82,6 +82,11 @@ pub struct SimulationSnapshot {
     pub run_manifest_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_configuration: Option<RunConfigurationSnapshot>,
+    /// The seat binding of the last applied seat rebinding; absent while the
+    /// run configuration's own binding is in force. The checkpoint hash binds
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebound_seat: Option<super::SeatBinding>,
     #[serde(default)]
     pub checkpoint_hash: String,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -2486,6 +2491,12 @@ impl CompactedSimulation {
         self.simulation.run_configuration()
     }
 
+    /// See [`Simulation::seat_binding`].
+    #[must_use]
+    pub fn seat_binding(&self) -> Option<&super::SeatBinding> {
+        self.simulation.seat_binding()
+    }
+
     /// The run's type schema.
     #[must_use]
     pub const fn schema(&self) -> &SchemaRegistry {
@@ -3304,6 +3315,14 @@ impl CompactedSimulation {
         self.simulation.enqueue_decision(due_at, priority, request)
     }
 
+    /// See [`Simulation::rebind_seat`].
+    pub fn rebind_seat(
+        &mut self,
+        request: super::SeatRebindingRequest,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.rebind_seat(request)
+    }
+
     pub fn drive_decision(
         &mut self,
         due_at: super::SimTime,
@@ -3621,6 +3640,7 @@ impl Simulation {
                 IngressPayload::Plugin { .. }
                 | IngressPayload::Calendar { .. }
                 | IngressPayload::Maintenance { .. }
+                | IngressPayload::SeatRebinding { .. }
                 | IngressPayload::PluginCancellation { .. } => false,
             };
             if cited {
@@ -3804,6 +3824,7 @@ impl Simulation {
                 IngressPayload::Plugin { .. }
                 | IngressPayload::Calendar { .. }
                 | IngressPayload::Maintenance { .. }
+                | IngressPayload::SeatRebinding { .. }
                 | IngressPayload::PluginCancellation { .. } => {}
             }
         }
@@ -3969,6 +3990,7 @@ impl Simulation {
             run_manifest: Some(self.state.metadata.run_manifest.clone()),
             run_manifest_hash: self.state.metadata.run_manifest_hash.clone(),
             run_configuration: Some(self.state.metadata.run_configuration.clone()),
+            rebound_seat: self.state.metadata.rebound_seat.as_deref().cloned(),
             checkpoint_hash: self.state.metadata.checkpoint_hash.clone(),
             commitment_format_version: self.state.metadata.commitment_format_version,
             commitment_roots: self.state.metadata.commitment_roots.clone(),

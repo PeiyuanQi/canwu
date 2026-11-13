@@ -134,11 +134,13 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 - `Resolve` 带的策略身份必须与控制者注册时的绑定完全一致，包括 `semantic_hash`，否则记为 `PolicyMismatch`。
 - 选中的选项必须存在于当前票据版本，并且没有阻碍项。
 - 抽样证据只能来自边界的 `ResolveDecisionRandomly`，而且只有 `Random` 控制者和用 `with_random_tie_break` 开启许可的 `Utility` 控制者接受它。因此 `Random` 票据只能由边界系统结算。
-- 嵌套命令的签发者和权限都从绑定推导：`Human` 策略对应 `Issuer::Human`，其他策略对应 `Issuer::Ai`，两者都带控制者 ID。`CommandAuthority` 的 `decision_origin` 取自绑定中的权限，席位、权限配置和命令主体也取自绑定。在声明了运行配置的运行中，`Issuer::Human` 还必须与运行的席位绑定（`SeatBinding`）和 `ControllerPolicy::HumanRoleBound` 一致，`Issuer::Ai` 的权限不能是 `NoResponsibleActor`。
+- 嵌套命令的签发者和权限都从绑定推导：`Human` 策略对应 `Issuer::Human`，其他策略对应 `Issuer::Ai`，两者都带控制者 ID。`CommandAuthority` 的 `decision_origin` 取自绑定中的权限，席位、权限配置和命令主体也取自绑定。在声明了运行配置的运行中，`Issuer::Human` 还必须与运行当前生效的席位绑定（`SeatBinding`，由 `seat_binding()` 读取）和 `ControllerPolicy::HumanRoleBound` 一致，`Issuer::Ai` 的权限不能是 `NoResponsibleActor`。
 
 [人物可用性](/reference/terminology/)也会限制结算。人物死亡、失踪、被拘押或被俘时即为不可用。决策者不可用时，票据不能开启，也不能交给 `prepare_decision` 求值（`DecisionMakerUnavailable`）；控制者的权限人物不可用时，票据不能开启，不能交给 `prepare_decision` 求值，也不能结算（`IssuerUnavailable`）。人物在某个边界中变为不可用，该边界结束时（在本边界的随机决策生成之后）引擎取消相关的开启票据，原因记为 `decision_maker_unavailable` 或 `controller_authority_unavailable`，票据 ID 写入 `BoundaryPersonAvailabilityChange` 的 `cancelled_tickets` 和 `cancelled_controller_tickets`。
 
 被取消的票据不会恢复。要继续这项决策，就开启新票据，并把 `parent_ticket` 设为被取消的票据。前序票据必须已经终止且尚未归档（见[决策历史归档](#决策历史归档)），而且要么与新票据的决策者相同，要么两张票据的控制者绑定了同一个 `seat_id`，即[席位继任](/reference/terminology/)。完整规则和两种接续方式见[已无法行事的人物](/developer/integration/#已无法行事的人物)。
+
+运行的席位本身可以用 `rebind_seat` 改绑到另一个已有人物，即[席位改绑](/reference/terminology/)。改绑在收下它的边界中先于其他输入裁决：新绑定从该边界起生效，该席位上代表旧人物行事的控制者的开启票据以 `seat_rebound` 取消，可以按席位继任接续；人物不存在、已死亡或失踪时，改绑记为被拒绝，其他状态不变。用法见[把运行的席位交给继任者](/developer/integration/#把运行的席位交给继任者)。
 
 ## 策略能看到什么
 

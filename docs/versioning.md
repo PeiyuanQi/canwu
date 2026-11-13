@@ -99,6 +99,80 @@ Known limits, for that release's entry:
 - Aggregated evidence saves evidence records and ingress, not ledger
   writes: each scope still takes its own receipt.
 
+**Unreleased, second package.** For the same release, a second package is
+implemented on a branch, with its own proposal and release notes text:
+
+- [seat rebinding](proposals/seat-rebinding.md) (`canwu-sim`, `canwu-api`:
+  downstream gap G-97).
+
+What changed:
+
+- **The run's seat can move to another person.** `rebind_seat(request)` on
+  `Simulation`, `CompactedSimulation`, `Canwu` (through `gated!`), and
+  `CompactedCanwu` queues a `SeatRebindingRequest` (seat, new person,
+  optional controller and permission profile, expected revision and
+  current time) as canonical host ingress,
+  `IngressPayload::SeatRebinding`. The boundary that admits it decides it
+  before any other ingress it admits, from committed state: applied, the
+  new binding is in force from that boundary and the seat's open tickets
+  whose controller acts for the previous person are cancelled with
+  `seat_rebound` (`SEAT_REBOUND_REASON`); an unknown, dead, or missing
+  person, a stale revision, or an unchanged binding is a recorded rejection
+  that changes nothing else. A detained or captive person may hold the seat;
+  the command gates refuse their commands until they are free.
+  `BoundaryRecord::seat_rebindings` and `BoundaryReceipt::seat_rebindings`
+  carry each outcome (`BoundarySeatRebinding`, `SeatRebindingOutcome`).
+- **The binding in force.** `seat_binding()` on every handle returns it.
+  The human-only command gate, the actor-bound viewer (`viewer`,
+  `viewer_for_actor`), and snapshot validation of every command attempt
+  read it instead of
+  `run_configuration().seat_binding`, which, with the manifest, stays as
+  declared.
+
+Formats: no format number changes. A run that rebinds writes a new ingress
+payload (`seat_rebinding`), a new boundary-record field (`seat_rebindings`,
+a member of the boundary hash material, so of the boundary chain and the
+authoritative state hash), and a new snapshot field (`rebound_seat`, in
+snapshots, checkpoint journals, paged checkpoints, and continuation
+checkpoints, a member of the checkpoint hash material and of no commitment
+root) while a rebound binding is in force. All three are omitted while
+empty, so a run that never rebinds writes the same bytes and the same
+state, boundary, and checkpoint hashes. A new `&mut self` method,
+`Canwu::rebind_seat`, goes through `gated!`.
+
+SemVer: additive, but `IngressPayload` and `BoundaryIngressKind` gain a
+variant and `BoundaryRecord`, `BoundaryReceipt`, and `SimulationSnapshot` a
+field, so an exhaustive match or a struct literal outside the workspace
+breaks: a pre-1.0 minor change.
+
+Upgrading:
+
+- Add the `SeatRebinding` arm to exhaustive matches on `IngressPayload` and
+  `BoundaryIngressKind`, and the new field (`Vec::new()`, `None`) to
+  literals of `BoundaryRecord`, `BoundaryReceipt`, and `SimulationSnapshot`.
+- A host that reads the seat's person from
+  `run_configuration().seat_binding` reads `seat_binding()`.
+
+Known limits it leaves, for that release's entry:
+
+- A run with direct command history cannot rebind (`MixedCommandIngress`);
+  read-only and replay-purpose runs cannot rebind (`InteractionReadOnly`), so
+  a replay-purpose run keeps its configured binding.
+- A boundary-window summary counts a seat rebinding under the command class;
+  hosts that set apart player commands filter on kind
+  (`BoundaryIngressKind::SeatRebinding`).
+- One rebinding per seat may be queued at a time; a retry after its
+  boundary is refused at the call as stale.
+- A rebinding changes the person, controller, and permission profile only,
+  never the seat or its institution, and cancels tickets only when the
+  person changes; the host continues them through seat succession.
+- A seat bound to an institution without a person cannot be rebound
+  (`InvalidAuthority`).
+- A continuation's authoritative state hash does not cover the binding in
+  force; restore continuations through `from_continuation_checkpoint_verified`
+  with the stored continuation hash.
+- `CanwuRun` does not gain `rebind_seat`.
+
 Version 0.22.1 is a pre-1.0 patch release. Its change comes from one
 package, with its own proposal:
 
