@@ -6,16 +6,38 @@ runtime migration for pre-8 data. Applications that need old
 records must keep the old engine or run an explicit, application-owned export
 outside the Canwu runtime.
 
-## Unreleased
+## Current contract
 
-Draft for the next release, a pre-1.0 minor version (0.23.0): the
-technology plugin's semantic hash changes. The release step folds it into
-the contract below. It comes from one package, with its own proposal:
+The workspace version is `0.23.0`. A live `SimulationSnapshot` has:
+
+- snapshot format `9`;
+- commitment format `8`;
+- checkpoint/evidence-journal format `6`;
+- paged-checkpoint envelope format `7` and continuation checkpoint format `4`;
+- state revision format `3`;
+- admission cursor format `3`;
+- exact replay revision format `3`;
+- a declared `RunManifest`, a declared or `CompatibilityV1` run
+  configuration, and canonical `initial_scenario`;
+- a non-zero `authority_root_seed`, derived independently from the simulation
+  random streams.
+
+Typed loading and strict JSON loading reject any other engine or contract
+version. Strict JSON loading also rejects unknown fields at every nested
+object and rejects a wire value whose canonical re-encoding changes shape.
+
+Version 0.23.0 is a pre-1.0 minor release. Its changes come from three
+packages, each with its own proposal:
 
 - [technology restore validation](proposals/technology-restore-validation.md)
-  (`canwu-technology`: downstream gap G-95).
+  (`canwu-technology`: downstream gap G-95);
+- [fiscal batch sets and aggregated evidence](proposals/fiscal-batch-sets-and-aggregated-evidence.md)
+  (`canwu-fiscal`, and a guard in the unpublished reference integration
+  `canwu-ming-fiscal-reference`: downstream gap G-96);
+- [seat rebinding](proposals/seat-rebinding.md) (`canwu-sim`, `canwu-api`:
+  downstream gap G-97).
 
-What changed:
+What changed, in one list:
 
 - **Technology restore validation on either run handle.**
   `canwu_technology::validate_technology_runtime_on(&run)` checks the
@@ -41,8 +63,7 @@ What changed:
   and once a rule read a body through a superseded version (a
   transmission's source implementation, moved onto a renewed
   qualification), every later boundary with a technology operation failed
-  on that run.
-  The plugin now reads a cited version through
+  on that run. The plugin now reads a cited version through
   `SimulationView::replay_stable_domain_record_version` (the record's
   committed current version, or an initial-scenario version), and accepts
   any other cited version by its identity: a committed boundary established
@@ -57,86 +78,7 @@ What changed:
   while the citing record is current. Both validators apply the same
   identity rule and check the same continuation, and the full validator
   replays each boundary through the same reads.
-
-Formats: no state shape, record schema, snapshot, checkpoint, journal, or
-format number changes. A runtime technology record's payload continuation
-declares more versions, so the same operations write different payloads
-and hashes than 0.22.x. The `canwu-technology` plugin semantic hash changes
-from `8b4703e2…ce3a` to `adab965f…d44d` (BLAKE3 of the string recorded in
-the proposal), so a run saved by 0.22.x does not restore with the new
-plugin; same version only. Two public items are added to
-`canwu-technology`; nothing is removed.
-
-Behavior that changes for an uninterrupted run:
-
-- A generic citation of a version no boundary wrote, but that obeys the
-  identity rule, is accepted, as a sealed run must accept it.
-- A new operation's exact citation of a superseded version that no current
-  technology record holds is rejected (`invalid_domain_record`); cite the
-  current version.
-- A provider result whose intent's program version is no longer current is
-  rejected with the same code and a different message.
-- A citation of a version that owner-authorized maintenance wrote earlier
-  in the same boundary is rejected; only committed versions resolve. A
-  command cannot name such a version before it is written.
-- A rejected provider operation's outcome names no intent unless the result
-  names an execution intent the run holds, or a current one.
-- A record's payload is larger by the versions its continuation adds; a
-  record near the 16 KiB technology payload limit can now pass it and be
-  rejected.
-
-Upgrading: a host that restores from a continuation checkpoint, or validates
-a sealed run, calls `validate_technology_runtime_on(&run)` after the
-restore.
-
-Known limits:
-
-- It does not replay provenance: operation outcomes before the cut are not
-  recomputed. A host that needs that keeps a full save.
-- Before the cut, a consumed intent's provider ingress and finalizer change
-  are not read; what the run held there is covered by the continuation hash
-  the host stored, or by the sealed segments.
-- A forged identity of an older version of a current record that obeys the
-  identity rule cannot be told from a real one without the full journal, so
-  the plugin and both validators accept it on every handle; its time is the
-  forged boundary's, which can be earlier than the record existed. When
-  owner-authorized maintenance updates a record earlier in the boundary,
-  the full validator's replay may refuse a forged identity of it that the
-  plugin accepted; technology registers no maintenance.
-- `TechnologyRestoreAccess` is an open trait: an outside implementor must add
-  any read a later release adds.
-
-## Current contract
-
-The workspace version is `0.22.1`. A live `SimulationSnapshot` has:
-
-- snapshot format `9`;
-- commitment format `8`;
-- checkpoint/evidence-journal format `6`;
-- paged-checkpoint envelope format `7` and continuation checkpoint format `4`;
-- state revision format `3`;
-- admission cursor format `3`;
-- exact replay revision format `3`;
-- a declared `RunManifest`, a declared or `CompatibilityV1` run
-  configuration, and canonical `initial_scenario`;
-- a non-zero `authority_root_seed`, derived independently from the simulation
-  random streams.
-
-Typed loading and strict JSON loading reject any other engine or contract
-version. Strict JSON loading also rejects unknown fields at every nested
-object and rejects a wire value whose canonical re-encoding changes shape.
-
-**Unreleased.** For the release after 0.22.1 (not released; the workspace
-version stays 0.22.1 until the owner releases), one package is implemented
-on a branch, with its own proposal:
-
-- [fiscal batch sets and aggregated evidence](proposals/fiscal-batch-sets-and-aggregated-evidence.md)
-  (`canwu-fiscal`, and a guard in the reference integration
-  `canwu-ming-fiscal-reference`: downstream gap G-96).
-
-What changed:
-
-- **Batch sets.** `FiscalActionBatchSet { batches }` (1 to
+- **Fiscal batch sets.** `FiscalActionBatchSet { batches }` (1 to
   `MAX_FISCAL_BATCH_SET_BATCHES`, 64, batches; at most
   `MAX_FISCAL_BATCH_SET_JSON_BYTES`, 16 MiB, and 65,536 entries in all) is
   the payload of the new command `apply_fiscal_action_set_v1`
@@ -149,10 +91,8 @@ What changed:
   command subject `EntityRef::Person(actor)`), resolved as that person
   issuing directly: the principal or acting role he holds under each
   binding, never the institution role. `apply_fiscal_action_v1` keeps
-  0.22.1's rule. This widens 0.22.1's contract: a controller whose command
-  subject is a person now holds that person's fiscal roles in any set
-  command a ticket offers it.
-- **Aggregated execution evidence.** `FiscalExecutionEvidence` gains
+  0.22.1's rule.
+- **Aggregated fiscal execution evidence.** `FiscalExecutionEvidence` gains
   `parts: Vec<FiscalExecutionEvidencePart>` (scope, request, quantity; at
   most `MAX_FISCAL_EVIDENCE_PARTS`, 4,096, one per scope, summing to
   `quantity`, with the top-level scope and request empty). One record
@@ -162,51 +102,9 @@ What changed:
   request (`request_unknown`), whose scope has no part or whose part names
   another request (`claim_mismatch`), or whose part asks more than its
   request (`quantity_exceeded`) is a recorded refusal, never a failed
-  boundary. `enqueue_reference_execution_result` refuses aggregated
-  evidence: the reference adapter records per-scope results.
-
-Formats and hashes: the fiscal plugin is `0.6.0-experimental` with semantic
-hash `8b37008533b60bd6b891617475e601a797b3645d4dc2c448b4ffc8bd139c9afe`, and
-its descriptor gains `apply_fiscal_action_set_v1`, so the plugin semantic
-environment, and every checkpoint hash of a run that registers the fiscal
-plugin, changes. No fiscal record, packet, snapshot, journal, or format
-number changes. Per-scope evidence serializes byte for byte as before
-(`parts` is written only when non-empty, scope and request only when
-non-empty). A receipt citing aggregated evidence records that one version in
-`external_evidence`, so its books equal the per-scope path's but for those
-citations, and the ledger records and every hash over them differ from the
-per-scope path's: a departure from the equal state hash that downstream gap
-G-96 asks for, named in the proposal. A set leaves the fiscal state of the
-same batches sent in successive rounds when they change disjoint records;
-the run's attempts, ingress, revisions, and boundaries differ.
-
-Upgrading (SemVer: a pre-1.0 minor; `FiscalExecutionEvidence` gains a
-public field):
-
-- Add `parts: Vec::new()` to every `FiscalExecutionEvidence` struct literal.
-- Nothing else changes for a host that keeps batch commands and per-scope
-  evidence. To settle a holder's offices in one round, register a decision
-  controller with `DecisionAuthority::Actor` and the same person as command
-  subject and offer it a set command; such a controller holds the person's
-  fiscal roles in any set command a ticket offers it.
-- **Saves.** Same version only: a save that registers the 0.5.0 fiscal
-  plugin does not load.
-
-Known limits, for that release's entry:
-
-- A set has one issuer; offices held by different persons take one set per
-  person.
-- Aggregated evidence saves evidence records and ingress, not ledger
-  writes: each scope still takes its own receipt.
-
-**Unreleased, second package.** For the same release, a second package is
-implemented on a branch, with its own proposal and release notes text:
-
-- [seat rebinding](proposals/seat-rebinding.md) (`canwu-sim`, `canwu-api`:
-  downstream gap G-97).
-
-What changed:
-
+  boundary. The unpublished reference integration's
+  `enqueue_reference_execution_result` refuses aggregated evidence: its
+  adapter records per-scope results.
 - **The run's seat can move to another person.** `rebind_seat(request)` on
   `Simulation`, `CompactedSimulation`, `Canwu` (through `gated!`), and
   `CompactedCanwu` queues a `SeatRebindingRequest` (seat, new person,
@@ -222,56 +120,225 @@ What changed:
   the command gates refuse their commands until they are free.
   `BoundaryRecord::seat_rebindings` and `BoundaryReceipt::seat_rebindings`
   carry each outcome (`BoundarySeatRebinding`, `SeatRebindingOutcome`).
-- **The binding in force.** `seat_binding()` on every handle returns it.
-  The human-only command gate, the actor-bound viewer (`viewer`,
-  `viewer_for_actor`), and snapshot validation of every command attempt
-  read it instead of
-  `run_configuration().seat_binding`, which, with the manifest, stays as
-  declared.
+- **The seat binding in force.** `seat_binding()` on every handle returns
+  it. The human-only command gate, the actor-bound viewer (`viewer`,
+  `viewer_for_actor`), and snapshot validation of every command attempt read
+  it instead of `run_configuration().seat_binding`, which, with the
+  manifest, stays as declared.
 
-Formats: no format number changes. A run that rebinds writes a new ingress
-payload (`seat_rebinding`), a new boundary-record field (`seat_rebindings`,
-a member of the boundary hash material, so of the boundary chain and the
-authoritative state hash), and a new snapshot field (`rebound_seat`, in
-snapshots, checkpoint journals, paged checkpoints, and continuation
-checkpoints, a member of the checkpoint hash material and of no commitment
-root) while a rebound binding is in force. All three are omitted while
-empty, so a run that never rebinds writes the same bytes and the same
-state, boundary, and checkpoint hashes. A new `&mut self` method,
-`Canwu::rebind_seat`, goes through `gated!`.
+**Same version only.** Canwu crates depend only on the exact same version of
+each other: every first-party crate requires `=0.23.0` of every other
+first-party crate it uses, and a host pins `canwu-api = "=0.23.0"` and the
+same version of every extension. Nothing written by 0.22.1 is read by
+0.23.0. There is no migration: the exact engine-version check refuses every
+0.22.1 snapshot, checkpoint journal, paged checkpoint, continuation
+checkpoint, replay journal, evidence segment, and scenario that records its
+engine version, and a run that registers the technology or fiscal plugin
+would also be refused by that plugin's semantic hash. Retain the 0.22.1
+engine to read 0.22.1 data.
 
-SemVer: additive, but `IngressPayload` and `BoundaryIngressKind` gain a
-variant and `BoundaryRecord`, `BoundaryReceipt`, and `SimulationSnapshot` a
-field, so an exhaustive match or a struct literal outside the workspace
-breaks: a pre-1.0 minor change.
+Formats and hashes that change:
 
-Upgrading:
+| Item | 0.22.1 | 0.23.0 | What changed |
+| --- | --- | --- | --- |
+| Snapshot, commitment, checkpoint/evidence-journal, paged-checkpoint, and continuation-checkpoint formats; state revision, admission cursor, and exact replay formats | 9, 8, 6, 7, 4; 3, 3, 3 | the same | no format number changes; the engine version in every checkpoint hash changes, as with any version change |
+| `canwu-technology` plugin semantic hash | `8b4703e2…ce3a` | `adab965f…d44d` | BLAKE3 of the string recorded in the proposal; the plugin version follows the crate version |
+| Runtime technology record payload continuation | the versions the record cites exactly | also what each cited version of a supersedable kind declares | no state shape or record schema changes; the same operations write larger payloads, so different record and checkpoint hashes |
+| `canwu-fiscal` plugin identity | `0.5.0-experimental`, semantic hash `e3ed464e…db72` | `0.6.0-experimental`, semantic hash `8b370085…9afe` | the descriptor gains `apply_fiscal_action_set_v1`, so the plugin semantic environment, and every checkpoint hash of a run that registers the fiscal plugin, changes; no fiscal record, settlement or receipts packet, or format number changes |
+| `FiscalExecutionEvidence` (the adapter-result payload a receipt cites) | one scope and request | also `parts`, written only when non-empty; scope and request written only when non-empty | per-scope evidence serializes byte for byte as in 0.22.1; aggregated evidence has no 0.22.1 form |
+| Ingress record `seat_rebinding` (`IngressPayload::SeatRebinding`) | — | new variant | written only by a run that rebinds its seat |
+| `BoundaryRecord::seat_rebindings`, `BoundaryReceipt::seat_rebindings` | — | new field, omitted while empty | a member of the boundary hash material (`canwu.boundary-record.v1`), so of the boundary chain and the authoritative state hash |
+| `SimulationSnapshot::rebound_seat` (in snapshots, checkpoint journals, paged checkpoints, and continuation checkpoints) | — | new field, present only while a rebound binding is in force | a member of the checkpoint hash material (`canwu.checkpoint.v4`), and of no commitment root |
 
-- Add the `SeatRebinding` arm to exhaustive matches on `IngressPayload` and
-  `BoundaryIngressKind`, and the new field (`Vec::new()`, `None`) to
-  literals of `BoundaryRecord`, `BoundaryReceipt`, and `SimulationSnapshot`.
-- A host that reads the seat's person from
-  `run_configuration().seat_binding` reads `seat_binding()`.
+A run that never rebinds its seat writes none of the three seat items, so
+its bytes and its state, boundary, and checkpoint hashes are what they would
+be without them. A receipt citing aggregated evidence records that one
+version in `external_evidence`, so its books equal the per-scope path's but
+for those citations, and the ledger records and every hash over them differ
+from the per-scope path's: a departure from the equal state hash that
+downstream gap G-96 asks for, named in the proposal. A set leaves the fiscal
+state of the same batches sent in successive rounds when they change
+disjoint records; the run's attempts, ingress, revisions, and boundaries
+differ. Semantic identities that differ from 0.22.1: `canwu-technology` and
+`canwu-fiscal`. The other first-party plugins keep their semantic hash
+constants; as with any version change, first-party plugins that take their
+plugin version from the crate version report a new one.
 
-Known limits it leaves, for that release's entry:
+New and changed public contracts, by crate:
 
-- A run with direct command history cannot rebind (`MixedCommandIngress`);
-  read-only and replay-purpose runs cannot rebind (`InteractionReadOnly`), so
-  a replay-purpose run keeps its configured binding.
-- A boundary-window summary counts a seat rebinding under the command class;
-  hosts that set apart player commands filter on kind
-  (`BoundaryIngressKind::SeatRebinding`).
-- One rebinding per seat may be queued at a time; a retry after its
-  boundary is refused at the call as stale.
-- A rebinding changes the person, controller, and permission profile only,
-  never the seat or its institution, and cancels tickets only when the
-  person changes; the host continues them through seat succession.
-- A seat bound to an institution without a person cannot be rebound
-  (`InvalidAuthority`).
-- A continuation's authoritative state hash does not cover the binding in
-  force; restore continuations through `from_continuation_checkpoint_verified`
-  with the stored continuation hash.
-- `CanwuRun` does not gain `rebind_seat`.
+- `canwu-technology`: `TechnologyRestoreAccess` (new trait, object safe,
+  implemented for `Canwu` and `CompactedCanwu`; its reads are trusted-host
+  reads of ground truth) and `validate_technology_runtime_on` (new
+  function), both re-exported at the crate root.
+  `validate_technology_runtime` keeps its signature and is the full-journal
+  mode; it accepts by the identity rule what the plugin now accepts.
+  Refusals use `ErrorCode::InvalidDomainRecord`, as before. The crate also
+  gains a Cargo feature, `continuation-gate` (off by default), a release-test
+  hook that only turns on `canwu-api/continuation-gate` so the crate's own
+  tests can expect the gate's panic. Like `canwu-api`'s, it is not part of
+  the supported API, and applications must never enable it.
+- `canwu-fiscal`: `FiscalActionBatchSet`, `fiscal_action_set_command`,
+  `APPLY_FISCAL_ACTION_SET_COMMAND`, `MAX_FISCAL_BATCH_SET_BATCHES`,
+  `MAX_FISCAL_BATCH_SET_JSON_BYTES`, `FiscalExecutionEvidencePart`, and
+  `MAX_FISCAL_EVIDENCE_PARTS` (new); `FiscalExecutionEvidence::parts` (new
+  field). A set is one command: whatever admission refuses rejects it whole
+  as a recorded command attempt (`InvalidPayload` for its size, its batch
+  count, its entries in all, or an action ID named twice for one target
+  across its batches; for a batch, the batch command's refusal after
+  `batch N:`). Receipts citing aggregated evidence are refused, each with one
+  `canwu.fiscal.ingress_rejected.v1` event while the packet's other receipts
+  settle, as `request_unknown`, `claim_mismatch` (also for malformed
+  aggregated evidence), `quantity_exceeded`, `evidence_reused`, or
+  `operation_reused`.
+- `canwu-sim`, re-exported by `canwu-api`: `SeatRebindingRequest` (with
+  `new`, `with_controller`, and `with_permission_profile`),
+  `BoundarySeatRebinding`, `SeatRebindingOutcome`, and
+  `SEAT_REBOUND_REASON` (new); `IngressPayload::SeatRebinding` and
+  `BoundaryIngressKind::SeatRebinding` (new variants);
+  `BoundaryRecord::seat_rebindings`, `BoundaryReceipt::seat_rebindings`, and
+  `SimulationSnapshot::rebound_seat` (new fields); `rebind_seat` and
+  `seat_binding` on `Simulation` and `CompactedSimulation`. The call refuses,
+  queuing nothing, before the runtime is ready, after direct command history
+  (`MixedCommandIngress`), in a read-only run (`InteractionReadOnly`), for a
+  run without a declared seat binding, another seat, or a seat bound to an
+  institution without a person (`InvalidAuthority`), for non-canonical IDs
+  (`InvalidPayload`), while another rebinding of the seat is queued
+  (`IdempotencyConflict`), and for a stale time or revision; an identical
+  queued request returns its receipt. Load refuses with `InvalidSnapshot` a
+  rebinding record that is not canonical, a boundary whose evidence
+  disagrees with the deterministic outcome or cancellations, and a persisted
+  binding that does not follow the history or, in a continuation, does not
+  reproduce the checkpoint hash.
+- `canwu-api`: `Canwu::rebind_seat` (a new `&mut self` method, through
+  `gated!`), `CompactedCanwu::rebind_seat`, and `seat_binding()` on both;
+  the viewer principal reads the binding in force. `CanwuRun` is unchanged.
+
+The source-incompatible changes are the new public fields
+(`FiscalExecutionEvidence::parts`, `BoundaryRecord::seat_rebindings`,
+`BoundaryReceipt::seat_rebindings`, and `SimulationSnapshot::rebound_seat`),
+which break a struct literal outside the workspace, and the new variants
+`IngressPayload::SeatRebinding` and `BoundaryIngressKind::SeatRebinding`,
+which break an exhaustive match (neither enum is `#[non_exhaustive]`). One
+`&mut self` method is added to `Canwu`, `rebind_seat`, through `gated!`.
+The release is therefore a minor version.
+
+Version 0.23.0 also changes these behaviours, which are visible to existing
+code and runs:
+
+- **Technology, on an uninterrupted run.** A generic citation of a version
+  no boundary wrote, but that obeys the identity rule, is accepted, as a
+  sealed run must accept it. A new operation's exact citation of a
+  superseded version that no current technology record holds is rejected
+  (`invalid_domain_record`), where the run used to apply it. A provider
+  result whose intent's program version is no longer current is rejected
+  with the same code and a different message. A citation of a version that
+  owner-authorized maintenance wrote earlier in the same boundary is
+  rejected; only committed versions resolve, and a command cannot name such
+  a version before it is written. A rejected provider operation's outcome
+  names no intent unless the result names an execution intent the run
+  holds, or a current one. A record's payload is larger by the versions its
+  continuation adds (an adoption citing four implementations, each with a
+  qualification and two assets, declares about 20 versions, some 3.6 KB),
+  so a record near the 16 KiB technology payload limit
+  (`TechnologyLimitsV1::max_payload_bytes`) can now pass it and be rejected.
+- **Fiscal decisions in a person's own name.** In 0.22.1 every fiscal
+  admission of a decision required the institution its binding, audit
+  binding, or appointment policy names as the decision's command subject.
+  A controller whose authority is an actor and whose command subject is that
+  same person now holds the person's fiscal roles in any set command a
+  ticket offers it, even a one-batch set; it holds nothing the person does
+  not hold when issuing directly, and the decision kernel's checks are
+  unchanged. The batch command keeps 0.22.1's rule.
+- **The seat gates read the binding in force.** The human-only command gate,
+  the actor-bound viewer, and load validation of each command attempt read
+  `seat_binding()`; on a run that never rebinds it is the configured binding,
+  so nothing changes there.
+
+Upgrading from 0.22.1, for hosts and plugin authors:
+
+- **Pin `=0.23.0`** for `canwu-api` and every extension. Nothing earlier
+  loads.
+- **Struct literals and matches.** Add `parts: Vec::new()` to every
+  `FiscalExecutionEvidence` struct literal. Add the `SeatRebinding` arm to
+  exhaustive matches on `IngressPayload` and `BoundaryIngressKind`, and the
+  new field to literals of `BoundaryRecord` and `BoundaryReceipt`
+  (`seat_rebindings: Vec::new()`) and of `SimulationSnapshot`
+  (`rebound_seat: None`).
+- **Continuation restores.** Restore a continuation checkpoint through
+  `from_continuation_checkpoint_verified` with the continuation hash stored
+  at the save. A continuation's authoritative state hash does not cover the
+  seat binding in force, so pinning only the state hash does not protect the
+  seat. On a run that registers the technology plugin, call
+  `validate_technology_runtime_on(&run)` after the restore, and on a sealed
+  run when you validate it.
+- **Technology content** that cites, in a new operation's exact field, a
+  superseded version no current technology record holds now gets a
+  rejection; cite the current version. Check again records whose payloads
+  come near the 16 KiB limit.
+- **A fiscal host** that keeps batch commands and per-scope evidence changes
+  nothing else. To settle a person's offices in one round, send their
+  batches as one set (`fiscal_action_set_command`); where the person decides
+  through decisions, register a controller with `DecisionAuthority::Actor`
+  and the same person as command subject and offer it the set command, and
+  choose which tickets offer one, since such a controller holds the
+  person's fiscal roles in any set command a ticket offers it. Where one
+  operation serves several scopes, write one aggregated
+  `FiscalExecutionEvidence` with one part per scope and send one receipt per
+  scope citing it.
+- **A seat host** reads the seat's person from `seat_binding()` instead of
+  `run_configuration().seat_binding`. When the seat's person dies, queue
+  `rebind_seat` with the heir at the current revision and time, and
+  continue the cancelled tickets by seat succession (`parent_ticket`).
+- **Saves.** Write a fresh continuation checkpoint, snapshot, or checkpoint
+  journal with 0.23.0; nothing from 0.22.1 loads.
+
+Known limits carried by this release, each stated in its proposal:
+
+- Technology
+  ([known limits](proposals/technology-restore-validation.md#known-limits)):
+  the restore validator does not replay provenance, so operation outcomes
+  before the cut are not recomputed (a host that needs that keeps a full
+  save and runs `validate_technology_runtime`); before the cut, a consumed
+  intent's provider ingress and finalizer change are not read, and what the
+  run held there is covered by the continuation hash the host stored, or by
+  the sealed segments; a forged identity of an older version of a current
+  record that obeys the identity rule cannot be told from a real one
+  without the full journal, so the plugin and both validators accept it on
+  every handle, and its time is the forged boundary's, which can be earlier
+  than the record existed (when owner-authorized maintenance updates a
+  record earlier in the boundary, the full validator's replay may refuse a
+  forged identity of it that the plugin accepted; technology registers no
+  maintenance); `TechnologyRestoreAccess` is an open trait, so an outside
+  implementor must add any read a later release adds.
+- Fiscal
+  ([known limits](proposals/fiscal-batch-sets-and-aggregated-evidence.md#known-limits)):
+  an own-name controller holds the person's fiscal roles in any set command
+  a ticket offers it, even a one-batch set, so the host decides which
+  tickets offer one; a set has one issuer, so offices held by different
+  persons take one set per person, and where those persons decide through
+  decisions each person's decision still takes its own round; the reference
+  integration's boundary system does not yet skip aggregated evidence, so
+  aggregated evidence sent to it as raw plugin ingress can still fail that
+  boundary, as invalid evidence could in 0.22.1; aggregated evidence saves
+  evidence records and ingress, not ledger writes, since each scope still
+  takes its own receipt.
+- Seat rebinding ([known limits](proposals/seat-rebinding.md#known-limits)):
+  a run with direct command history cannot rebind (`MixedCommandIngress`),
+  and read-only and replay-purpose runs cannot rebind
+  (`InteractionReadOnly`), so a replay-purpose run keeps its configured
+  binding; a boundary-window summary counts a seat rebinding under the
+  command class, so a host that sets apart player commands filters on kind
+  (`BoundaryIngressKind::SeatRebinding`); one rebinding per seat may be
+  queued at a time, and a retry after its boundary is refused at the call as
+  stale; a rebinding changes the person, controller, and permission profile
+  only, never the seat or its institution, and cancels tickets only when the
+  person changes, for the seat's controllers that act for the previous
+  person (the host continues them through seat succession); a seat bound to
+  an institution without a person cannot be rebound (`InvalidAuthority`); a
+  continuation's authoritative state hash does not cover the binding in
+  force, so restore continuations through
+  `from_continuation_checkpoint_verified` with the stored continuation hash;
+  `CanwuRun` does not gain `rebind_seat`.
 
 Version 0.22.1 is a pre-1.0 patch release. Its change comes from one
 package, with its own proposal:

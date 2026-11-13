@@ -713,9 +713,9 @@ boundary. Since 0.18.0 the host archive helpers read only the records a
 commit needs and take the sealed cut from the run itself, so a sealing host
 seals at each save, and a report part is encoded compactly. The lifetime
 caps of 0.15.0 are gone: a run is bounded by its hot cycles and record byte
-budgets, not by how long it has run. In the release after 0.22.1, a batch set
-settles a person's batches for several offices in one round, and one
-aggregated evidence record settles one receipt in each scope it names.
+budgets, not by how long it has run. Since 0.23.0, a batch set settles a
+person's batches for several offices in one round, and one aggregated
+evidence record settles one receipt in each scope it names.
 
 ## Debug client
 

@@ -848,6 +848,11 @@ fn technology_records_past_the_shared_cap_are_refused_on_both_handles() {
 }
 
 #[test]
+// The tampered continuation names a version that only boundary 2 creates.
+#[cfg_attr(
+    feature = "continuation-gate",
+    should_panic(expected = "continuation gate: the sealed run cannot seal at revision 0")
+)]
 fn a_noncanonical_payload_continuation_is_refused_on_both_handles() {
     // The kernel accepts an active continuation that names a version the run
     // establishes before its cut; the canonical continuation of a claim that

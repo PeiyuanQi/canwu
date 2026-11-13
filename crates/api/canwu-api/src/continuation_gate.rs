@@ -32,10 +32,16 @@
 //! shadow only when the two read differently. An exact replay of the run
 //! answers from everything the run has loaded, and from the run's provider
 //! only for an object the run never loaded. A test that deliberately
-//! declares evidence after its seal leaves the shadow unable to write a
-//! continuation checkpoint or to seal; the one such test,
-//! `a_packet_first_declared_after_its_seal_is_not_ready`, expects that panic
-//! under the feature.
+//! declares evidence the shadow cannot hold yet leaves the shadow unable to
+//! write a continuation checkpoint or to seal, and expects that panic under
+//! the feature. There are two such tests:
+//! `a_packet_first_declared_after_its_seal_is_not_ready` in `canwu-api`
+//! declares evidence after its seal, and
+//! `a_noncanonical_payload_continuation_is_refused_on_both_handles` in
+//! `canwu-technology` starts from a scenario record that names a version only
+//! boundary 2 creates, so the shadow cannot seal at revision 0. The second
+//! sees the gate through `canwu-technology`'s own `continuation-gate`
+//! feature, which only turns this one on.
 
 use canwu_sim::{CanwuError, CompactedSimulation, PluginArchiveObjectProvider, Simulation};
 use std::collections::BTreeMap;

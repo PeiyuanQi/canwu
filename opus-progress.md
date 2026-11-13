@@ -1,6 +1,6 @@
 # Opus progress — downstream engine gaps / Opus 进度记录
 
-> Updated 2026-11-05 at Canwu **0.22.1** (tag `v0.22.1`, release commit `7a7feff` on `main`, published 2026-11-05). This file is the to-do list of engine gaps that a downstream application has filed
+> Updated 2026-11-13 at Canwu **0.23.0** (prepared on branch `release/0.23.0`, awaiting publication; §1). This file is the to-do list of engine gaps that a downstream application has filed
 > against the published crates. The application is Celestial Mandate (CM); its gap ledger (implementation document `59`,
 > in the CM repository) gives each row its id (`G-nn`) and the full evidence. Priorities are the ledger's severities:
 > High, Medium, Low.
@@ -11,20 +11,24 @@
 > 0.21.0 closes every row the downstream filed after adopting 0.20.0: G-91 (Medium, from its B33 fix) and G-83 to G-90
 > (Low, from its 0.20.0 adoption). Since then the downstream filed **G-92 and G-93** (Medium, 2026-10-26, from its
 > day-cost package); 0.22.0 closes both. It then filed **G-94** (Medium, 2026-10-29: in-boundary knowledge pages cost
-> the holder's history); 0.22.1 closes it. Also open: the known limits the 0.18.0 to 0.22.1
-> packages left on purpose (§4.2, engine findings E-34 to E-54, E-56, E-58, and E-59; E-55 and E-57 are fixed), two limits the downstream met and worked around
-> (§4.3), and the decisions this run took for the owner to confirm (§6).
+> the holder's history); 0.22.1 closes it. Since then it proposed **G-95** (Medium, 2026-11-05: no technology
+> validation on a run restored from a continuation checkpoint), **G-96** (Low for its first chapter, Medium at series
+> scale, 2026-11-06: one fiscal round per office and one evidence record per scope), and **G-97** (from its build: a
+> declared run's seat could not move to an heir); 0.23.0 closes all three. Also open: the known limits the 0.18.0 to
+> 0.23.0 packages left on purpose (§4.2, engine findings E-34 to E-54, E-56, E-58, E-59, and E-60 to E-62; E-55 and
+> E-57 are fixed), two limits the downstream met and worked around (§4.3), and the decisions this run took for the
+> owner to confirm (§6).
 
 ## 1. Where things are
 
 | Item | State |
 | --- | --- |
-| Release | **0.22.1 is published** (2026-11-05, a pre-1.0 patch release; owner's authorization of 2026-11-05: "G-94: release it, and move CM to use latest"): all 24 library crates on crates.io (one workspace publish from the tagged commit, after a clean dry run), the annotated tag `v0.22.1` on the release commit `7a7feff`, the GitHub release, and the website deployed from `main` (canwu.org shows `=0.22.1` in both languages). The release commit follows the package commit `a3a4fc4` (from the cloud branch `claude/youthful-johnson-b38ta4`) and the release pass's fix commit `015cd3b` (the projection view streamed into its hash; `docs/proposals/bounded-knowledge-pages.md`, review record). It closes G-94 (`docs/proposals/bounded-knowledge-pages.md`); no public API, format, or hash change other than the engine version. Verification on the release tree: fmt, Clippy with warnings denied, the workspace tests (867 passed, 0 failed, 3 ignored), the debug client, the documentation build with warnings denied, the four public examples, the minimum Rust version (1.88), the performance-harness checks (its allocation contract `a_publication_allocates_each_body_once` failed on the package commit, 16.6 MB for 4.1 MB of payload, and passes after the fix commit), the release-only `#[ignore]` scale tests in a release build (3 passed), the continuation gate across the workspace (867 passed; the expected panic), the package contents (`LICENSE`, `NOTICE`, and `README.md` in all 24), and the website build, with a copy review of the changed pages in both languages. 0.22.0 (tag `v0.22.0`, `8459daa`), 0.21.0, and 0.20.0 stay published and are not yanked; 0.19.0 was yanked on 2026-10-24. The downstream pins `=0.22.0` since CM 0.91.0 and moves to `=0.22.1` as its next change set; its next free ledger id is G-95. |
-| Policy | **Same version only** (owner, 2026-10-14): Canwu crates depend only on the exact same version of each other (`=0.22.1`); nothing written by an earlier release is read; no migration. |
-| Proposals of 0.21.0 (all "implemented in 0.21.0") | `docs/proposals/`: `decision-ticket-option-bias.md` (G-84), `movement-kept-bookings.md` (G-83), `fiscal-archive-after-continuation-restore.md` (G-91), `military-engagement-revisions.md` (G-85 to G-90; extends `military-engagements.md`). The 0.20.0, 0.19.0, and 0.18.0 proposals are listed in their entries of `docs/versioning.md`. |
-| Branches and worktrees | Locally only `main`; no 0.22.1 worktrees remain. On the remote, `main` and the merged cloud branch `claude/youthful-johnson-b38ta4` (its package commit `a3a4fc4` is on `main`), left for the owner to delete. |
+| Release | **0.23.0: prepared, awaiting publication** (2026-11-13, a pre-1.0 minor release; owner's authorization: "once done, and released to crates.io and on the canwu website"). The release commit is on the local branch `release/0.23.0` (worktree `.worktrees/rel`), on top of the three merged packages: `6108737` (G-95, branch `fix/g95`), `8d819f7` (G-96, `fix/g96`), and `99b4fcb` (G-97, `fix/g97`). Not yet pushed, tagged, published, or deployed; the owner does that, then fills in this row. It closes G-95 (`docs/proposals/technology-restore-validation.md`), G-96 (`docs/proposals/fiscal-batch-sets-and-aggregated-evidence.md`), and G-97 (`docs/proposals/seat-rebinding.md`); no format number changes, the technology and fiscal semantic hashes change, and the new seat-rebinding fields are optional and written only by a run that rebinds. Verification on the release tree: fmt, Clippy with warnings denied, the workspace tests (883 passed, 0 failed, 3 ignored; 0.22.1's 867 and the packages' 16), the debug client, the documentation build with warnings denied, the four public examples, the minimum Rust version (1.88), the performance-harness checks (4 and, with allocation counting, 6 passed), the release-only `#[ignore]` scale tests in a release build (3 passed), the continuation gate across the workspace (883 passed, 0 failed, 3 ignored; the two expected panics: the first gate run failed on the G-95 test `a_noncanonical_payload_continuation_is_refused_on_both_handles`, whose scenario record names a version only boundary 2 creates, so the release pass added `canwu-technology`'s never-enable `continuation-gate` hook and that test now expects the gate's panic beside `a_packet_first_declared_after_its_seal_is_not_ready`), the package contents (`LICENSE`, `NOTICE`, and `README.md` in all 24), a clean `cargo publish --workspace --registry crates-io --dry-run --locked` (all 24 packaged and verified in dependency order, uploads aborted), the third-party notices regenerated with cargo-about 0.8.4 (unchanged: no dependency changed), and the website build, with a copy review of the changed pages in both languages. 0.22.1 (tag `v0.22.1`, `7a7feff`), 0.22.0, 0.21.0, and 0.20.0 stay published and are not yanked; 0.19.0 was yanked on 2026-10-24. The downstream pins `=0.22.1` since CM 0.97.0 and moves to `=0.23.0` once it is published; its next free ledger id is G-98. |
+| Policy | **Same version only** (owner, 2026-10-14): Canwu crates depend only on the exact same version of each other (`=0.23.0`); nothing written by an earlier release is read; no migration. |
+| Proposals of 0.23.0 (all "implemented in 0.23.0") | `docs/proposals/`: `technology-restore-validation.md` (G-95), `fiscal-batch-sets-and-aggregated-evidence.md` (G-96), `seat-rebinding.md` (G-97). Earlier releases' proposals are listed in their entries of `docs/versioning.md`. |
+| Branches and worktrees | `main`; locally `release/0.23.0` (worktree `.worktrees/rel`) until 0.23.0 is published, and the merged package branches `fix/g95`, `fix/g96`, and `fix/g97` (worktrees `.worktrees/g95`, `.worktrees/g96`, `.worktrees/g97`), each to be removed after publication. On the remote, `main` and the merged cloud branch `claude/youthful-johnson-b38ta4`, left for the owner to delete. |
 | Release procedure | `.agents/skills/canwu-contributor-release/SKILL.md` and `docs/releasing.md`. The orchestrator runs the full verification list once on the integrated release tree and the pre-release tests (the public examples, the performance-harness checks, the release-only `#[ignore]` scale tests in a release build, the continuation gate) before tagging (the counts go in the release row). |
-| What the adopter must know first | (1) Pin every Canwu crate at `=0.22.1`; the exact engine-version check refuses 0.22.0 saves, as for every release. No code changes: every knowledge page, `next` cursor, read cut, and refusal is what 0.22.0 returned, and the read-cut root keeps its bytes, so stored read cuts (correspondence, law) and every record and evidence hash over them are unchanged; only the engine version in each checkpoint hash moves. (2) A page (`SimulationView::knowledge_records`, `admin_query_knowledge`, `CanwuViewer::query_knowledge`) now costs the page plus the entries its subject filter skips; lead with schema, `learned_after`, or the cursor. (3) Costs moved (the 0.22.1 entry's known limits): a commit that clears or removes an entry re-hashes that holder's views after the hash copy before it, once per holder, even for holders nobody pages; an existing body given to a holder below its highest global ID does the same; each admission hashes its view (about 3 µs), decoding re-hashes every view, memory +10% per entry and 9 KB per holder. (4) The 0.22.0 and earlier notes of `docs/versioning.md` still apply to a host that skipped those releases. |
+| What the adopter must know first | (1) Pin every Canwu crate at `=0.23.0`; the exact engine-version check refuses 0.22.1 saves, and a run that registers the technology or fiscal plugin is also refused by that plugin's semantic hash. (2) Source changes: add `parts: Vec::new()` to every `FiscalExecutionEvidence` struct literal; add the `SeatRebinding` arm to exhaustive matches on `IngressPayload` and `BoundaryIngressKind`, and `seat_rebindings: Vec::new()` / `rebound_seat: None` to literals of `BoundaryRecord`, `BoundaryReceipt`, and `SimulationSnapshot`. (3) Restore continuations through `from_continuation_checkpoint_verified` with the stored continuation hash (the authoritative state hash does not cover the seat binding in force), then call `canwu_technology::validate_technology_runtime_on(&run)` on a run with the technology plugin. (4) Technology content: a new operation's exact citation of a superseded version that no current technology record holds is rejected (cite the current version), and records near the 16 KiB payload limit grow by the versions their continuations add. (5) Optional: fiscal batch sets (`fiscal_action_set_command`, and an own-name controller with `DecisionAuthority::Actor` and the same person as command subject, which holds that person's fiscal roles in any set command a ticket offers it) and aggregated evidence (one record, one receipt per scope); seat rebinding (`rebind_seat`; read the binding in force with `seat_binding()`). (6) The "Upgrading from 0.22.1" notes and "Known limits" of the 0.23.0 entry of `docs/versioning.md`; the 0.22.1 and earlier notes still apply to a host that skipped those releases. |
 
 ## 2. High
 
@@ -32,8 +36,15 @@ No row filed by the downstream ledger is open.
 
 ## 3. Medium
 
-No row filed by the downstream ledger is open. G-94 (in-boundary knowledge pages cost the holder's history, filed
-2026-10-29) is closed by 0.22.1 (`docs/proposals/bounded-knowledge-pages.md`; the 0.22.1 entry of `docs/versioning.md`).
+No row filed by the downstream ledger is open. G-95 (no technology validation on a continuation-restored or sealed
+run, Medium, proposed 2026-11-05), G-96 (one fiscal round per office and one evidence record per scope, Low for the
+downstream's first chapter and Medium at series scale, proposed 2026-11-06), and G-97 (a declared run's seat could not
+move to an heir, proposed by the downstream's build) are closed by 0.23.0
+(`docs/proposals/technology-restore-validation.md`, `docs/proposals/fiscal-batch-sets-and-aggregated-evidence.md`,
+`docs/proposals/seat-rebinding.md`; the 0.23.0 entry of `docs/versioning.md`).
+
+G-94 (in-boundary knowledge pages cost the holder's history, filed 2026-10-29) is closed by 0.22.1
+(`docs/proposals/bounded-knowledge-pages.md`; the 0.22.1 entry of `docs/versioning.md`).
 
 G-92 and G-93 (host-side knowledge and resource reads, filed 2026-10-26) are closed by 0.22.0
 (`docs/proposals/host-side-targeted-reads.md`; the 0.22.0 entry of `docs/versioning.md`).
@@ -53,7 +64,7 @@ None. G-38 (the `canwu-military` shape contradicted the downstream design) is cl
 (`docs/proposals/military-engagements.md`); its criterion of a second independent host adopting the crate is open
 (§4.2, part of the military limits).
 
-### 4.2 Known limits left by the 0.18.0 to 0.22.1 packages (engine-side; not numbered by the downstream ledger)
+### 4.2 Known limits left by the 0.18.0 to 0.23.0 packages (engine-side; not numbered by the downstream ledger)
 
 Each is stated in the "Known limits" of its release in `docs/versioning.md` and in its proposal. `E-nn` ids are local to this
 file and continue the earlier numbering. Severity is this file's suggestion; none blocks the downstream adoption.
@@ -79,6 +90,9 @@ file and continue the earlier numbering. Severity is this file's suggestion; non
 | E-56 | Low | `canwu-resource` (0.22.0) | A re-attach after the live root changes (nearly every step that settles resource work) decodes the live root and the changed buckets but attaches every record its requests reach again from the kept decodes: O(attached records), not O(changed). Reuse needs the run's own record allocations: a kept root from a view reader, or from another process, re-reads everything. | A host that needs work in proportion to what changed reads targeted records. |
 | E-58 | Low | `canwu-resource` (0.22.0) | `resource_operation_outcome_by_id`, `latest_resource_fulfillment`, `exact_resource_completion_certificate`, `resource_report`, `resource_observation_witness`, and the validators still read the whole root: no key names what they scan, or their checks read records no key reaches. | Not proposed. |
 | E-59 | Low | `canwu-knowledge` (0.22.1) | A page that filters by subject reads the entries of its schemas and time range that lack the subject (only schema, `learned_after`, the cursor, `learned_at_or_before`, and `CurrentHeads` are seeks), and a page naming no schema seeks once per schema the holder ever held. A commit that clears or removes an entry re-hashes the holder's views after the hash copy before it (one per 256 views), once per holder, paged or not: clearing an old entry under a long history costs that history once (10,000 entries: 14 ms in a release build); an existing body given below the holder's highest global ID costs the same. Each admission hashes its view (about 3 µs), decoding re-hashes every view (median +14% on a 3.7 MB ledger), memory +10% per entry and 9 KB per holder. | The chunked view root (`docs/proposals/bounded-knowledge-pages.md`, alternatives) bounds the re-hash but changes the read-cut root and every hash over a stored cut; not taken (§6 item 9). Revisit if the downstream's clearing commits show the re-hash. |
+| E-60 | Low | `canwu-technology` (0.23.0) | `validate_technology_runtime_on` does not replay provenance: operation outcomes before the run's history cut are not recomputed. Before the cut, a consumed intent's provider ingress and finalizer change are not read; what the run held there rests on the continuation hash the host stored, or on the sealed segments. A forged identity of an older version of a current record that obeys the identity rule (not version zero, its record current, older than the current version and from a boundary no later than it) cannot be told from a real one without the full journal, so the plugin and both validators accept it on every handle, and its time is the forged boundary's, which can be earlier than the record existed; when owner-authorized maintenance updates a record earlier in the boundary, the full validator's replay may refuse a forged identity of it that the plugin accepted (technology registers no maintenance). `TechnologyRestoreAccess` is an open trait: an outside implementor must add any read a later release adds. The two consumed-intent checks are duplicated (about 100 lines). | A host that needs provenance keeps a full save and runs `validate_technology_runtime`. Declaring generic citations identity-only would refuse forged identities but declares far more than the exact closure; not taken (`docs/proposals/technology-restore-validation.md`, alternatives). Merge the consumed-intent checks when the refusal order may change. |
+| E-61 | Low | `canwu-fiscal`, `canwu-ming-fiscal-reference` (0.23.0) | A controller whose authority is an actor and whose command subject is that same person holds the person's fiscal roles in any set command a ticket offers it, even a one-batch set (the host decides which tickets offer one). A set has one issuer: offices held by different persons take one set per person, and where those persons decide through decisions, each person's decision still takes its own round. The reference integration's boundary system does not yet skip aggregated evidence, so aggregated evidence sent to it as raw plugin ingress can still fail that boundary (its enqueue helper refuses it). Aggregated evidence saves evidence records and ingress, not ledger writes: each scope still takes its own receipt. Receipts citing aggregated evidence leave the per-scope path's books but for their citations, so the ledger records and hashes differ from it (the named departure from the gap row's equal state hash). | Skip aggregated evidence inside the reference integration's boundary as a recorded refusal; a multi-issuer set only if a host needs one round across persons. |
+| E-62 | Low | `canwu-sim`, `canwu-api` (0.23.0) | A run with direct command history cannot rebind its seat (`MixedCommandIngress`); read-only and replay-purpose runs cannot rebind (`InteractionReadOnly`), so a replay-purpose run keeps its configured binding. A boundary-window summary counts a seat rebinding under the command class (filter player commands on kind). One rebinding per seat may be queued at a time, and a retry after its boundary is refused at the call as stale. A rebinding changes the person, controller, and permission profile only, never the seat or its institution, and cancels tickets only when the person changes, for the seat's controllers that act for the previous person. A seat bound to an institution without a person cannot be rebound (`InvalidAuthority`). A continuation's authoritative state hash does not cover the binding in force (restore through `from_continuation_checkpoint_verified` with the stored continuation hash). `CanwuRun` does not gain `rebind_seat`. | Binding the seat in the control commitment was rejected (the state hash would cover seat policy; `docs/proposals/seat-rebinding.md`, alternatives). Widen a limit only if a host meets it. |
 
 ### 4.3 Limits the downstream met and worked around (not filed)
 
@@ -110,15 +124,19 @@ own leases) and E-37's publication-budget overshoot (the application's publisher
 
 ## 5. Next steps
 
-1. **Wait for the downstream's adoption of 0.22.1** (its ledger records G-94's adoption at the `=0.22.1` pin; its `Daily`
-   p99 past campaign month 22 is the real check) and for the rows it files against 0.22.1. If its clearing commits show
-   E-59's re-hash, measure how old the cleared entries are before choosing anything.
-2. Then the §4.2 limits by downstream need: **E-50** first if the downstream runs cross-plugin completions through a
+1. **Publish 0.23.0** (the owner): push the release commit to `main`, tag `v0.23.0`, publish the 24 crates, create
+   the GitHub release, and deploy the website; then fill in the release row (§1) and remove the 0.23.0 worktrees and
+   the merged `fix/g95`, `fix/g96`, and `fix/g97` branches.
+2. **Wait for the downstream's adoption of 0.23.0** (its ledger records the adoption of G-95, G-96, and G-97 at the
+   `=0.23.0` pin) and for the rows it files against 0.23.0. G-94's real check is still its `Daily` p99 past campaign
+   month 22; if its clearing commits show E-59's re-hash, measure how old the cleared entries are before choosing
+   anything.
+3. Then the §4.2 limits by downstream need: **E-50** first if the downstream runs cross-plugin completions through a
    long campaign (the cap of 1,024 ended participants); **E-49** if a host wants malformed correspondence commands
    recorded rather than validated before sending; E-41's force-supply deferral if a host runs the reference economy
-   near its byte cap; E-46 to E-47, the military limits (E-51), the 0.21.0 limits (E-52 to E-54), and E-59 as the
-   downstream's slices ask; §4.3 if the downstream asks.
-3. Each change set follows the 0.18.0 pattern: one worktree and branch per package under `.worktrees/`, a proposal,
+   near its byte cap; E-46 to E-47, the military limits (E-51), the 0.21.0 limits (E-52 to E-54), E-59, and the
+   0.23.0 limits (E-60 to E-62) as the downstream's slices ask; §4.3 if the downstream asks.
+4. Each change set follows the 0.18.0 pattern: one worktree and branch per package under `.worktrees/`, a proposal,
    durable tests that bite, an independent code review (two for persistence-heavy packages) and a delta review of the
    fixes, integration on a release branch, the pre-release tests of the release skill (the continuation gate
    included), then one release commit with the shared docs, the website (with its accuracy and copy reviews), and the
@@ -190,6 +208,24 @@ Decided by the owner for 0.22.1 (G-94, `docs/proposals/bounded-knowledge-pages.m
    root keeps its material, kept as a running hash, so no stored read cut or hash over one changes; the price is E-59's
    one-time re-hash when an entry leaves. The chunked view root, which bounds that cost and changes the root, was not
    taken.
+
+Decisions the 0.23.0 packages took (G-95 to G-97), each recorded in its proposal, for the owner to confirm:
+
+10. **G-95's identity rule.** The technology plugin and both validators accept a cited version the run no longer holds
+    by its identity (a committed boundary established it, not version zero, its record current, older than the
+    current version and from a boundary no later than it), so sealed, restored, and uninterrupted runs decide alike; a
+    forged identity that obeys the rule is accepted (E-60). A record's payload continuation also declares what each
+    supersedable cited version declares. The restore validator reads through a trait in `canwu-technology`
+    (`TechnologyRestoreAccess`), not new `CanwuRun` methods.
+11. **G-96's shape.** Only the set command admits the own-name decision (the batch command keeps 0.22.1's rule), and
+    receipts citing aggregated evidence record that one version, so the books equal the per-scope path's but for
+    their citations and the state hash differs: a named departure from the gap row's equal state hash.
+12. **G-97's shape.** A seat rebinding is host ingress, not a command, decided before any other ingress its boundary
+    admits; only life state refuses a person (a detained or captive heir may hold the seat); the binding in force is
+    in the checkpoint hash and the boundary chain, not in a commitment root or the authoritative state hash.
+13. **The Chinese terms** of the release, in `docs/terminology.md` and both website term pages: 行动批次组 (fiscal
+    action batch set), 本人名义决策 (decision in one's own name), 汇总执行证据 (aggregated execution evidence), 证据分项
+    (evidence part), and 席位改绑 (seat rebinding), marked for the owner in `docs/terminology.md` until confirmed.
 
 Every decision through 0.20.0 is decided and confirmed by the owner and recorded in its proposals, its
 `docs/versioning.md` entry, and the term sheets.

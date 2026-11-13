@@ -42,7 +42,11 @@ Nothing here can fail a boundary. Every first-party scenario, fixture, and
 reference world still loads (workspace tests). The continuation gate's
 deliberate `a_packet_first_declared_after_its_seal_is_not_ready` declares
 identity evidence in a boundary-written record, not an initial one, and keeps
-its meaning and its expected panic.
+its meaning and its expected panic. Since 0.23.0 a second test expects the
+gate's panic: `canwu-technology`'s
+`a_noncanonical_payload_continuation_is_refused_on_both_handles` starts from
+an initial record that names a version only boundary 2 creates, so the gate's
+shadow cannot seal it at revision 0.
 
 ## E-31: the mid-boundary checkpoint refresh
 

@@ -19,13 +19,13 @@ Canwu needs Rust 1.88 or newer. Add the published [`canwu-api`](https://crates.i
 
 ```toml
 [dependencies]
-canwu-api = "=0.22.1"
+canwu-api = "=0.23.0"
 ```
 
 - `canwu-api` is the supported public API; its API docs are on [docs.rs](https://docs.rs/canwu-api). Application code depends on it and on any extension crates it uses, such as [`canwu-resource`](https://crates.io/crates/canwu-resource). Extension crates are also published on crates.io; use the same version number as `canwu-api`. Do not depend on `canwu-sim` or other runtime crates directly.
-- `canwu-reference-world` is a small example world you can replace, and the minimal flow below uses it. It is not published to crates.io, so the only way to get its source is to clone the [GitHub repository](https://github.com/PeiyuanQi/canwu) (check out the `v0.22.1` tag to match the version above). Run the examples inside the clone, or copy the crate into your project as a template and point it at the same crates.io `canwu-api`. If `canwu-api` comes from crates.io in one place and from Git in another, Cargo builds two separate copies whose types do not mix.
+- `canwu-reference-world` is a small example world you can replace, and the minimal flow below uses it. It is not published to crates.io, so the only way to get its source is to clone the [GitHub repository](https://github.com/PeiyuanQi/canwu) (check out the `v0.23.0` tag to match the version above). Run the examples inside the clone, or copy the crate into your project as a template and point it at the same crates.io `canwu-api`. If `canwu-api` comes from crates.io in one place and from Git in another, Cargo builds two separate copies whose types do not mix.
 
-`=0.22.1` pins the engine to exactly this release. If your application keeps saves, upgrade only once you have a plan for existing saves: Canwu does not migrate them, so keep the old engine to read them, or export and re-import them with your own tool (see [persistence](/en/developer/persistence/#version-and-save-compatibility)).
+`=0.23.0` pins the engine to exactly this release. If your application keeps saves, upgrade only once you have a plan for existing saves: Canwu does not migrate them, so keep the old engine to read them, or export and re-import them with your own tool (see [persistence](/en/developer/persistence/#version-and-save-compatibility)).
 
 ## Minimal host flow
 
@@ -212,12 +212,12 @@ let request = SeatRebindingRequest::new("seat.realm", heir, canwu.revision(), ca
 canwu.rebind_seat(request)?;
 ```
 
-The request must name the current time and revision, and it is queued as host input. The boundary that admits it decides it before the other input it admits, and records the outcome in `BoundaryRecord::seat_rebindings`.
+The request must name the current time and revision, and it is queued as host ingress. The boundary that admits it decides it before any other ingress it admits, and records the outcome in `BoundaryRecord::seat_rebindings`.
 
-- **Applied.** The new binding is in force from that boundary: an `Issuer::Human` command must match the new person, the previous person's commands are refused with `InvalidAuthority`, and the actor-bound viewer (`viewer`) follows the new person. The seat's open tickets whose controller acts for the previous person are cancelled with `seat_rebound`; continue them by seat succession, as above.
+- **Applied.** The new binding is in force from that boundary: an `Issuer::Human` command must match the new person, the previous person's commands are refused with `InvalidAuthority`, and the actor-bound viewer (`viewer()`) follows the new person. The seat's open tickets whose controller acts for the previous person are cancelled with `seat_rebound`; continue them by seat succession, as above.
 - **Recorded rejection.** An unknown person (`ActorNotFound`), a dead or missing one (`IssuerUnavailable`), a stale revision, or an unchanged binding is refused and recorded, and nothing else in the run changes. A detained or captive person may take the seat, but their commands are refused as unavailable until they are free.
 
-`canwu.seat_binding()` returns the binding in force; `run_configuration().seat_binding` stays the one from the start. The binding in force is saved with snapshots and continuation checkpoints and bound by the checkpoint hash. Restore a continuation checkpoint with `from_continuation_checkpoint_verified` and the continuation hash you stored with it; checking only the state hash does not protect the seat binding. A read-only run, or one that has processed commands directly, cannot rebind, and a seat has at most one queued rebinding at a time.
+`canwu.seat_binding()` returns the binding in force; `run_configuration().seat_binding` stays the one from the start. The binding in force is saved in every save form (snapshots, checkpoint journals, paged checkpoints, and continuation checkpoints) and is covered by the checkpoint hash. Restore a continuation checkpoint with `from_continuation_checkpoint_verified` and the continuation hash you stored with it; checking only the state hash does not protect the seat binding. The `rebind_seat` call itself refuses, queuing nothing, on a read-only run (`InteractionReadOnly`), on a run that has used `process_command` directly (`MixedCommandIngress`), for a run without a declared seat binding or a seat bound to an institution without a person (`InvalidAuthority`), and while another rebinding of the seat is queued (`IdempotencyConflict`). A rebinding changes only the seat's person, controller, and permission profile; it cannot move the seat to another institution or remove it.
 
 ## Limit evaluation traces
 

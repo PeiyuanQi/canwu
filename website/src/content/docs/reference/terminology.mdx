@@ -126,7 +126,7 @@ sidebar:
 | 搁置轮询 | parked rotation | `FISCAL_PARKED_CHECKS_PER_BOUNDARY`、`FiscalRoot::parked_cursor` | 报告系统重新检查持有人已死亡的观察者的方式：每次运行检查根记录游标之后的 16 个被搁置条目，按队列页和绑定 ID 顺序循环，所以恢复存活的持有人最多在 `ceil(被搁置数 / 16)` 次运行内收到欠它的报告，每次运行的开销固定。 |
 | [行动目标](/architecture/fiscal/#行动批次与修订号) | action target | `FiscalActionTarget`、`FiscalActionEntry::expected_revision`、`fiscal_target_revision` | 一个行动写明修订号的那条记录：范围明细、财政机构记录、辖区记录或观察者记录。只有目标在签发者查看之后发生了变化，行动才算过期。 |
 | [行动批次](/architecture/fiscal/#行动批次与修订号) | fiscal action batch | `FiscalActionBatch`、`FiscalActionEntry` | `apply_fiscal_action_v1` 的载荷：一个权限绑定和最多 4,096 个条目，每个条目都是一个普通行动，有自己的 ID、预期修订号、结果和事件。某个条目不能准入时，准入拒绝整个批次并指出它的序号。 |
-| [行动批次组](/architecture/fiscal/#批次组) | fiscal action batch set | `FiscalActionBatchSet`、`fiscal_action_set_command` | `apply_fiscal_action_set_v1` 的载荷：同一个命令签发者之下最多 64 个批次，每个批次都像批次命令那样准入，并各自排成一个结算数据包，所以几个机构的批次在一轮内结算。准入拒绝时拒绝整组，并指出是哪个批次。只有批次组还接受**本人名义决策**（decision in one's own name）：来源是某个行动者、命令主体就是此人本人的决策，按此人直接签发处理，绝不按机构处理。 |
+| [行动批次组](/architecture/fiscal/#批次组) | fiscal action batch set | `FiscalActionBatchSet`、`fiscal_action_set_command` | `apply_fiscal_action_set_v1` 的载荷：同一个命令签发者之下最多 64 个批次，每个批次都像批次命令那样准入，并各自排成一个结算数据包，所以几个机构的批次在一轮内结算。准入拒绝时拒绝整组，并指出是哪个批次。只有批次组还接受**本人名义决策**（decision in one's own name）：来源是某个角色、命令主体就是此人本人的决策，按此人直接签发处理，绝不按机构处理。 |
 | 结果环 | outcome ring | `FISCAL_RECENT_OUTCOMES`、`fiscal_recent_outcome` | 一个行动目标保留的最近八个结果，连同**结果下限**（outcome floor），即最近被挤出的结果的结算修订号。两者只凭常驻状态就能拒绝重发的行动；每个结果都留在它的结算事件里。 |
 | 周期水位线 | cycle watermark | `FISCAL_CYCLE_ARCHIVED` | 一个范围已归档的最大核算周期（范围水位线，scope watermark），或其机构已归档合计的最大核算周期（机构水位线，office watermark）。不在任何一条水位线及以下开立新账册，所以一个核算分区在整个运行中最多核算一次，而无需读取归档。 |
 | 分区键 | partition key | `MAX_FISCAL_PARTITION_KEYS` | 账册或报告行中一条事实的单位和支付形态。一个机构在一个周期、一种机制下的账册最多使用四个。 |
@@ -136,7 +136,7 @@ sidebar:
 | [历史财政语境](/architecture/fiscal/) | fiscal historical context | `FiscalHistoricalContext` | 用于判断活动时期和改革候选的显式历史年份与模式；只通过规范化输入改变，不会自动实施改革。 |
 | [财政覆盖单元](/architecture/fiscal/) | fiscal coverage cell | `FiscalCoverageCell` | 一个“时期 × 地区 × 机制”单元，通过确定性优先级解析为有支持、原型回退、明确未知或不适用。 |
 | [财政执行凭证](/tutorials/cases/ming-fiscal/) | fiscal execution receipt | `FiscalExecutionReceiptPacket` | 引用精确类型化适配结果版本、并写明所结算请求所在范围的结算请求，通过 `enqueue_execution_receipts` 以每包最多 4,096 张提交；准入后的凭证从这些结果派生外部观察到的数量与处置。一个精确版本在它写明的每个范围内最多结算一张凭证，一个 `(evidence kind, external_operation_id)` 组合在一个范围的常驻账册内最多结算一张。结算不能接受的凭证会以事件被拒绝，绝不会让边界失败。凭证不拥有资源真值。 |
-| [汇总执行证据](/architecture/fiscal/#凭证) | aggregated execution evidence | `FiscalExecutionEvidence::parts`、`FiscalExecutionEvidencePart` | 一次执行跨多个范围的一条证据记录：本身不写范围和请求，而是列出最多 4,096 个**证据分项**（parts），每个范围一个，各写明一个请求和一个数量，合计等于记录的数量。每个范围的一张凭证引用这同一个版本，按写明该范围的分项及其数量结算。 |
+| [汇总执行证据](/architecture/fiscal/#凭证) | aggregated execution evidence | `FiscalExecutionEvidence::parts`、`FiscalExecutionEvidencePart` | 一次执行跨多个范围的一条证据记录：本身不写范围和请求，而是列出最多 4,096 个**证据分项**（evidence part，字段 `parts`），每个范围一个，各写明一个请求和一个数量，合计等于记录的数量。每个范围的一张凭证引用这同一个版本，按写明该范围的分项及其数量结算。 |
 | [代理角色](/architecture/fiscal/) | acting actor | `FiscalAuthorityBinding::acting_actor` | 只有当权限依据仍是其记录的当前版本时，才可为某个权限绑定执行财政行动的第二个角色；常设角色不受影响。代理角色不能发起权限改绑；权限改绑可以更换或撤下它。 |
 | [权限依据](/architecture/fiscal/) | authority basis | `FiscalAuthorityBinding::authority_basis`, `FiscalAuditBinding::authority_basis`, `MovementOrderRequestV1::authority_basis` | 授予权限的精确应用记录版本，其记录种类须是所属插件会读取的种类。它可以授予财政权限绑定中的代理角色权限，可以授予审计绑定中的审计人权限，也可以授权一条移动命令（`MovementOrderRequestV1`）移动所有者以外的对象。核验时它必须是其记录的当前版本；该记录出现新版本或退役后，财政授权随之结束，直到一次改绑换上当前版本。 |
 | [权限改绑](/architecture/fiscal/#权限改绑) | authority rebinding | `FiscalAction::RebindAuthority`, `FiscalRebinding` | 一项已结算的财政行动，在一次提交内同时更换权限绑定的常设角色、代理角色和权限依据。它必须在被更换的绑定之下发起，发起者是该绑定的常设角色，或者以整体名义作决定的机构，代理角色不能发起。绑定会记下这次行动及其签发者。 |
@@ -289,7 +289,7 @@ sidebar:
 | [决策票据](/tutorials/cases/warlord-aid-decision/) | decision ticket | `DecisionTicket` | 请求一个控制者从带版本的当前有效选项中选择的持久化对象。 |
 | [前序票据](/tutorials/cases/warlord-aid-decision/) | parent ticket | `DecisionTicket::parent_ticket` | 新票据所接续的终态票据：可以是同一决策者的票据（例如为另一控制者重新开启的已取消票据），也可以是经席位继任接续的票据。该关联会复制到新票据的决策轨迹上。 |
 | [席位继任](/tutorials/cases/warlord-aid-decision/) | seat succession | `DecisionControllerBinding::seat_id`, `DecisionTicket::parent_ticket` | 从终态票据到新票据的接续关系：新票据的指定控制者与原票据的控制者绑定同一个非空席位，因此继任者可以接续前任的决策，而不必是同一决策者。 |
-| [席位改绑](/architecture/decisions/) | seat rebinding | `rebind_seat`, `SeatRebindingRequest` | 上层应用输入，在运行继续时把运行的席位交给另一个已有人物。从收下它的边界起，席位相关的检查跟随新人物，该席位上代表旧人物行事的控制者的开启票据以 `seat_rebound` 取消。 |
+| [席位改绑](/architecture/decisions/) | seat rebinding | `rebind_seat`, `SeatRebindingRequest` | 上层应用输入，在运行继续时把运行的席位交给另一个已有人物。从准入它的结算边界起，席位相关的检查跟随新人物，该席位上代表旧人物行事的控制者的开启票据以 `seat_rebound` 取消。 |
 | [决策选项](/tutorials/cases/warlord-aid-decision/) | decision option | `DecisionOption` | 决策票据提供的一个候选选择。 |
 | [决策尝试](/tutorials/cases/warlord-aid-decision/) | decision attempt | `DecisionAttemptRecord` | 一条已准入决策请求的权威记录，写明该请求被接受还是被拒绝。请求可以是注册控制者，也可以是开启票据、替换票据选项、为票据展期、改派票据、解决票据或取消票据。 |
 | [展期](/architecture/decisions/) | deadline extension | `DecisionMutation::ExtendDeadline` | 在票据 ID 不变的前提下把开启票据的截止时间推后，按票据版本校验。 |

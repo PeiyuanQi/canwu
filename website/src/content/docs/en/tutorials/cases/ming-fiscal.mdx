@@ -306,13 +306,14 @@ stay a few kilobytes; no boundary ever reads the archive store.
 
 - The collected amount enters fiscal state only from the adapter's evidence
   record, two boundaries after the authorization.
-- The receipt's quantity and disposition come from the cited evidence. The
-  adapter writes the evidence of one request of one scope, so an exact
-  evidence version settles at most one receipt, and a pair of evidence kind
-  and `external_operation_id` at most one among the scope's hot books. (A
-  host whose one operation serves several scopes can write
-  [aggregated evidence](/en/architecture/fiscal/#receipts) instead, which
-  this integration's adapter refuses.)
+- The receipt's quantity and disposition come from the cited evidence. This
+  adapter writes one evidence record per request of one scope, so an exact
+  evidence version settles at most one receipt; and, as always, a pair of
+  evidence kind and `external_operation_id` settles at most one receipt
+  among the scope's hot books. (Canwu also accepts
+  [aggregated execution evidence](/en/architecture/fiscal/#receipts) for an
+  operation that serves several scopes; this integration does not use it,
+  and its adapter refuses it.)
 - Each action names the revision of the one record it changes, the scope
   ledger here, so an action on another scope would never make it stale.
 - One code path runs all three starts; the fixture JSON picks the rule, scope,

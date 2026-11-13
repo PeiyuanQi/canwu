@@ -47,12 +47,15 @@ skill lists in
 the public examples, the performance-harness checks, the release-only
 `#[ignore]` scale tests in a release build, and the continuation gate. The
 gate is the `continuation-gate` feature of `canwu-api`, a release test that CI
-and applications never enable, so lint it with the feature on as well:
+and applications never enable, so lint it with the feature on as well. The
+commands also turn on `canwu-technology`'s feature of the same name, a hook
+that only turns on `canwu-api`'s, so that crate's tests can expect the gate's
+panic:
 
 ```text
 cargo test --release --locked --workspace -- --ignored
-cargo clippy --locked --workspace --all-targets --features canwu-api/continuation-gate -- -D warnings
-cargo test --locked --workspace --features canwu-api/continuation-gate
+cargo clippy --locked --workspace --all-targets --features canwu-api/continuation-gate,canwu-technology/continuation-gate -- -D warnings
+cargo test --locked --workspace --features canwu-api/continuation-gate,canwu-technology/continuation-gate
 ```
 
 Inspect every source package with `cargo package --locked --list -p <crate>`.

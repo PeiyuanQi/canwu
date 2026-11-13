@@ -1,16 +1,16 @@
 # Technology Restore Validation and Replay-Stable Citations
 
-Status: implemented for the next release (0.23.0), unreleased. It closes
-downstream gap G-95 (`canwu-technology`): a host can check the technology
-state of a run restored from a continuation checkpoint, or of a sealed run,
-which `validate_technology_runtime` could not. Closing it found two
-determinism bugs in the technology plugin, fixed here too: a sealed or
-continuation-restored run rejected later operations that its uninterrupted
-twin applied, or failed every boundary with a technology operation. It
-changes `canwu-technology` only: two public items, the plugin's citation
-reads, the payload continuation its records declare, and its semantic
-hash. No state shape, schema, snapshot, checkpoint, journal, or format
-number changes.
+Status: implemented in 0.23.0 (package commit `6108737`, from branch
+`fix/g95`). It closes downstream gap G-95 (`canwu-technology`): a host can
+check the technology state of a run restored from a continuation
+checkpoint, or of a sealed run, which `validate_technology_runtime` could
+not. Closing it found two determinism bugs in the technology plugin, fixed
+here too: a sealed or continuation-restored run rejected later operations
+that its uninterrupted twin applied, or failed every boundary with a
+technology operation. It changes `canwu-technology` only: two public items,
+the plugin's citation reads, the payload continuation its records declare,
+and its semantic hash. No state shape, schema, snapshot, checkpoint,
+journal, or format number changes.
 
 ## Problem
 
@@ -442,6 +442,14 @@ The framework tests keep passing, including a claim citing a paused
 program's first version after a provider-backed seal, and an implementation
 deactivated while it still cites a superseded asset binding it holds.
 
+Under the release-only continuation gate, the noncanonical payload
+continuation test expects the gate's panic instead: its scenario record names
+a version only boundary 2 creates, so the gate's shadow cannot seal at
+revision 0. The 0.23.0 release pass found this and added the
+`continuation-gate` feature of `canwu-technology`, a release-test hook that
+only turns on `canwu-api/continuation-gate` and that applications never
+enable, so the test can see the gate.
+
 ## Upgrading notes
 
 A run restored from a continuation checkpoint, or sealed, now decides
@@ -457,7 +465,7 @@ cites declares.
 ## Documentation delta
 
 `docs/architecture.md` (the technology restore sentences), `docs/versioning.md`
-(the next release's notes), the crate README, and in both languages
+(the 0.23.0 entry), the crate README, and in both languages
 `website/src/content/docs/{,en/}architecture/technology.mdx` (restore and
 replay) and `website/src/content/docs/{,en/}developer/persistence.mdx` (host
 helpers on a continued run), the proposal index in `docs/README.md`, the

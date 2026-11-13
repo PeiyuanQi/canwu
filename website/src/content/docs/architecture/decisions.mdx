@@ -140,7 +140,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 被取消的票据不会恢复。要继续这项决策，就开启新票据，并把 `parent_ticket` 设为被取消的票据。前序票据必须已经终止且尚未归档（见[决策历史归档](#决策历史归档)），而且要么与新票据的决策者相同，要么两张票据的控制者绑定了同一个 `seat_id`，即[席位继任](/reference/terminology/)。完整规则和两种接续方式见[已无法行事的人物](/developer/integration/#已无法行事的人物)。
 
-运行的席位本身可以用 `rebind_seat` 改绑到另一个已有人物，即[席位改绑](/reference/terminology/)。改绑在收下它的边界中先于其他输入裁决：新绑定从该边界起生效，该席位上代表旧人物行事的控制者的开启票据以 `seat_rebound` 取消，可以按席位继任接续；人物不存在、已死亡或失踪时，改绑记为被拒绝，其他状态不变。用法见[把运行的席位交给继任者](/developer/integration/#把运行的席位交给继任者)。
+运行的席位本身可以用 `rebind_seat` 改绑到另一个已有人物，即[席位改绑](/reference/terminology/)。准入改绑的结算边界先于本边界准入的其他输入裁决它：新绑定从该边界起生效，该席位上代表旧人物行事的控制者的开启票据以 `seat_rebound` 取消，可以按席位继任接续；人物不存在、已死亡或失踪时，改绑记为被拒绝，其他状态不变。用法见[把运行的席位交给继任者](/developer/integration/#把运行的席位交给继任者)。
 
 ## 策略能看到什么
 

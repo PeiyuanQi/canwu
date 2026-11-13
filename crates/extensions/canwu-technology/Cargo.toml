@@ -17,5 +17,10 @@ canwu-api.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[features]
+# Release-test hook for `canwu-api/continuation-gate`, never enabled by
+# applications: lets this crate's tests expect the gate's panic.
+continuation-gate = ["canwu-api/continuation-gate"]
+
 [lints]
 workspace = true

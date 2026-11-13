@@ -1,10 +1,9 @@
 # Fiscal Batch Sets and Aggregated Evidence
 
-Status: implemented on branch `fix/g96` for the release after 0.22.1 (not
-released; the workspace version stays 0.22.1 until the owner releases). It
-closes downstream gap G-96 (`canwu-fiscal`): the actions of several offices
-due at one instant settle in one round, and one execution across many scopes
-is one evidence record. It changes `canwu-fiscal`, and in the non-published
+Status: implemented in 0.23.0 (package commit `8d819f7`, from branch
+`fix/g96`). It closes downstream gap G-96 (`canwu-fiscal`): the actions of
+several offices due at one instant settle in one round, and one execution
+across many scopes is one evidence record. It changes `canwu-fiscal`, and in the non-published
 reference integration `canwu-ming-fiscal-reference` one host-helper guard and
 its README. Both additions are additive: the batch command and per-scope
 evidence behave as in 0.22.1. The plugin identity changes (version
@@ -266,8 +265,8 @@ method is added to `Canwu`, so `gated!` is unchanged.
 
 ## Rollout
 
-Downstream gap G-96 moves to implemented on this branch. A host adopts it at
-the release that carries it: build sets with `fiscal_action_set_command`,
+Downstream gap G-96 is implemented in 0.23.0. A host adopts it at the
+`=0.23.0` pin: build sets with `fiscal_action_set_command`,
 register an own-name decision controller (`DecisionAuthority::Actor` with
 the same person as command subject) where a person decides for several
 offices, and write aggregated evidence where one operation serves several

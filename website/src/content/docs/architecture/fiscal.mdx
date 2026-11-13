@@ -174,7 +174,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 法规在某个范围内被采纳，就形成了应征义务；核算把一个核算周期内应缴多少固定下来，并在范围明细里开立该周期的账册。引擎按下面的顺序运行这条流程：
 
 1. **安装。** 场景带上编译好的目录（`CompiledFiscalCatalog::into_record`）和初始状态的记录（`FiscalState::into_records`）。注册 `FiscalPlugin::new(evidence_kinds)`；如果绑定用到代理角色或审计人，再加上 `.with_authority_basis_kinds(kinds)`；如果你的边界可能没有任何事件就过去了，加上 `.with_report_cadence(cadence)`，即唤醒节奏（`wake-fiscal-reports-on-cadence-v1` 运行所用的 `SystemCadence`，不是绑定的报告节律）；要改报告份额或报告记录的留存策略，用 `.with_report_budget(...)` 和 `.with_report_retention(...)`（见[报告如何发布](#报告如何发布)）。这几个选项都记在插件身份里：请在第一个边界之前定下来，换了设置再恢复或重放会被拒绝。激活时审计每条财政记录，所以财政记录集合无效或不完整的模拟运行在创建或恢复时就会被拒绝，不会等到某个边界才出错。绑定引用的权限依据如果属于插件不会读取的种类，激活同样会被拒绝；首次报告派生放不下的状态也会被拒绝。
-2. **提交。** 用 `fiscal_target_revision` 读取行动目标的修订号（或先用 `fiscal_action_target` 找到某个绑定和行动的目标），在同一绑定下构造包含一个或多个条目的 `FiscalActionBatch`（单个条目用 `FiscalActionBatch::single`），用 `fiscal_action_command` 包装成 `apply_fiscal_action_v1` 的[领域命令](/tutorials/command-plugin/)，再用 `Canwu::enqueue_command` 排队；旧式的直接命令路径会以 `MixedCommandIngress` 失败。每个条目带有行动 ID、目标的 `expected_revision` 和行动本身。一个机构要在同一个核算步骤里核算许多范围时，把它们放进一个批次。一个人在同一时刻替几个机构行事时，用 `fiscal_action_set_command`（`apply_fiscal_action_set_v1`）把这些批次作为一个 `FiscalActionBatchSet` 提交，它们在一轮内全部结算（见[批次组](#批次组)）。
+2. **提交。** 用 `fiscal_target_revision` 读取行动目标的修订号（或先用 `fiscal_action_target` 找到某个绑定和行动的目标），在同一绑定下构造包含一个或多个条目的 `FiscalActionBatch`（单个条目用 `FiscalActionBatch::single`），用 `fiscal_action_command` 包装成 `apply_fiscal_action_v1` 的[领域命令](/tutorials/command-plugin/)，再用 `Canwu::enqueue_command` 排队；旧式的直接命令路径会以 `MixedCommandIngress` 失败。每个条目带有行动 ID、目标的 `expected_revision` 和行动本身。一个机构要在同一个核算步骤里核算许多范围时，把它们放进一个批次。一个人在同一时刻替几个机构行事时，用 `fiscal_action_set_command`（`apply_fiscal_action_set_v1`）把这些批次作为一个 `FiscalActionBatchSet` 提交，它们在同一个边界准入，并在下一个边界全部结算（见[批次组](#批次组)）。
 3. **准入。** 在准入该命令的[结算边界](/architecture/settlement/)上，处理函数读取目录桶、机构记录和每个条目的目标记录，并在遇到以下情况时拒绝整个批次，指出第一个不能准入的条目的序号和原因（`entry 3: ...`）：
    - 条目超过 `MAX_FISCAL_BATCH_ENTRIES`（4,096）个，批次超过 4 MiB，单个条目超过 32 KiB，行动 ID、绑定 ID 或新建条目的 ID 不规范，自由文本超过 2,048 字节，单位或被引用的 ID 超过 160 字节，或者同一个目标下同一个行动 ID 出现两次（`InvalidPayload`）；
    - 行动 ID 的结果还在目标的结果环中（`IdempotencyConflict`），修订号高于目标的修订号（`ValueOutOfRange`，`FISCAL_REVISION_UNKNOWN`），或不高于目标的结果下限（`ValueOutOfRange`，`FISCAL_REVISION_EXPIRED`），这就是已被挤出结果环的行动重发时被拒绝的方式；
@@ -213,7 +213,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 `FiscalExecutionReceiptPacket` 包含凭证 ID、它结算的范围、请求 ID 和 1 到 32 个精确证据版本。插件逐个检查：版本的种类在根记录获准的证据种类中；这个精确版本是其记录的当前版本，或初始场景中的版本；载荷能解码为 `FiscalExecutionEvidence`，并且其中的范围、请求、单位、支付形态、执行种类、资源、来源和目标都与请求一致。所有被引用记录的处置结果相同，数量合计不超过请求数量，建立时间都不早于请求。凭证的数量和 `FiscalReceiptDisposition` 取自这些证据。`Fulfilled` 和 `Partial` 计入合计，`Rejected` 和 `Excused` 的数量为零。一个精确版本在它写明的每个范围内最多结算一张凭证，一个 `(evidence kind, external_operation_id)` 组合在该范围的常驻账册内最多结算一张。以相同内容重复提交同一张凭证，状态保持不变。
 
-**汇总证据。** 一次操作服务几个范围时，例如一个机构在一个征收日跨它的各个范围征收，可以只写一条证据记录。它的 `scope_binding_id` 和 `request_id` 留空，改为列出 `parts`：最多 `MAX_FISCAL_EVIDENCE_PARTS`（4,096）个 `FiscalExecutionEvidencePart`，每个范围至多一个，各写明它结算的请求和数量；各分项数量之和等于记录的 `quantity`，其余字段对每个分项都成立。每个分项发一张凭证，各写自己的范围和请求，引用同一个精确版本，放在同一个数据包里：每张凭证按上面的规则结算写明其范围的分项，数量取该分项的数量。分项写明的范围或请求没有对应的常驻请求时，以 `request_unknown` 拒绝；记录里没有该凭证范围的分项，或分项写的是另一个请求时，以 `claim_mismatch` 拒绝；分项数量超过请求尚可授权的数量时，以 `quantity_exceeded` 拒绝。记录在分项之外还写了顶层范围或请求、同一范围有两个分项、分项过多或分项合计不等于其数量时，它不能结算任何凭证（`claim_mismatch`）。每个分项的凭证各自结算或被拒绝。
+**汇总执行证据。** 一次操作服务几个范围时，例如一个机构在一个征收日跨它的各个范围征收，可以只写一条证据记录。它的 `scope_binding_id` 和 `request_id` 留空，改为列出 `parts`：最多 `MAX_FISCAL_EVIDENCE_PARTS`（4,096）个证据分项（`FiscalExecutionEvidencePart`），每个范围至多一个，各写明它结算的请求和数量；各分项数量之和等于记录的 `quantity`，记录的其余字段（例如单位、支付形态、执行种类、资源、来源、目标和处置结果）适用于每个分项。每个分项发一张凭证，各写自己的范围和请求，引用同一个精确版本；这些凭证可以放在同一个数据包里。每张凭证按上面的规则结算写明其范围的分项，数量取该分项的数量。分项写明的范围或请求没有对应的常驻请求时，以 `request_unknown` 拒绝；记录里没有该凭证范围的分项，或分项写的是另一个请求时，以 `claim_mismatch` 拒绝；分项数量超过请求尚可授权的数量时，以 `quantity_exceeded` 拒绝。记录在分项之外还写了顶层范围或请求、同一范围有两个分项、分项过多或分项合计不等于其数量时，它不能结算任何凭证（`claim_mismatch`）。每个分项的凭证各自结算或被拒绝。
 
 凭证通过 `enqueue_execution_receipts` 以每包最多 `MAX_FISCAL_RECEIPTS_PER_PACKET`（4,096）张的数据包提交，按顺序结算，每张对照它所在范围的范围明细。结算不能接受的凭证以 `canwu.fiscal.ingress_rejected.v1` 被拒绝，后面的凭证照常结算：
 
@@ -253,7 +253,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 ### 批次组
 
-一个 `FiscalActionBatchSet` 带 1 到 `MAX_FISCAL_BATCH_SET_BATCHES`（64）个批次，合计至多 `MAX_FISCAL_BATCH_SET_JSON_BYTES`（16 MiB）、65,536 个条目，每个批次各自不超过批次的上限。准入像 `apply_fiscal_action_v1` 准入一个批次那样，在批次组唯一的签发者之下逐个准入各批次，并按顺序为每个批次排一个 `fiscal_action_v1` 数据包；跨批次为同一目标两次写明同一个行动 ID，或者任何一个批次的准入会拒绝的情形，都会拒绝整组，消息以 `batch N:` 开头。下一个边界结算这些批次，与结算一起准入的几条批次命令完全相同：每个条目对照目标在该边界开始时的修订号，受同样的单边界上限约束。所以改动不同记录的批次，留下的账册和结果与这些批次一轮接一轮发送时相同，只是用两个边界，而不是每个批次两个。签发者必须在每个批次的绑定下都有身份；以本人名义决策的人可以做到，见[权限](#权限)。
+一个 `FiscalActionBatchSet` 带 1 到 `MAX_FISCAL_BATCH_SET_BATCHES`（64）个批次，合计至多 `MAX_FISCAL_BATCH_SET_JSON_BYTES`（16 MiB）、65,536 个条目，每个批次各自不超过批次的上限。准入像 `apply_fiscal_action_v1` 准入一个批次那样，在批次组唯一的签发者之下逐个准入各批次，并按顺序为每个批次排一个 `fiscal_action_v1` 数据包；跨批次为同一目标两次写明同一个行动 ID，或者任何一个批次的准入会拒绝的情形，都会拒绝整组，消息以 `batch N:` 开头。下一个边界结算这些批次的方式，与结算同一边界准入的几条批次命令完全相同：每个条目对照目标在该边界开始时的修订号，受同样的单边界上限约束。所以改动不同记录的批次，留下的账册和结果与这些批次一轮接一轮发送时相同，只是总共只用两个边界，而不是每个批次各用两个。签发者必须在每个批次的绑定下都有身份；本人名义决策可以做到，见[权限](#权限)。
 
 ### 核算周期与归档
 
@@ -281,7 +281,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `Issuer::Actor(actor)`，没有决策控制者 | `actor` 是绑定中的常设角色或代理角色，或者是适用的任命政策列出的人物 |
 | `Issuer::Human` 或 `Issuer::Ai`，且等于已校验的 `decision_controller_id` | `CommandAuthority` 中的命令主体是绑定的机构，并且决策来源是指向某个绑定角色的 `DecisionOrigin::Actor`，或者是该机构的 `DecisionOrigin::Institution`，其负责角色已在绑定中 |
 
-[批次组](#批次组)还接受**本人名义决策**：来源是 `DecisionOrigin::Actor { actor }`、命令主体是 `EntityRef::Person(actor)` 的已校验决策。它在每个批次的绑定之下都按此人直接签发处理，所以身为几个机构常设角色或代理角色的人，用一个批次组就能涵盖它们全部；它持有此人所持的常设或代理身份，对审计绑定或任命政策则是此人作为审计人或名单上的人物，绝不持有机构身份。批次命令不接受这种决策。只为可以动用其财政身份的人注册这样的控制者（`DecisionAuthority::Actor`，命令主体为此人本人）：只要某张票据向它提供批次组命令，它就能在此人所任的每个机构中行事。
+[批次组](#批次组)还接受**本人名义决策**：来源是 `DecisionOrigin::Actor { actor }`、命令主体是 `EntityRef::Person(actor)` 的已校验决策。准入在每个批次的绑定之下都把这种决策当作此人直接签发，所以身为几个机构常设角色或代理角色的人，用一个批次组就能涵盖这些机构。在权限绑定下，它持有此人所持的常设或代理身份；在审计绑定或任命政策下，它以此人作为审计人或名单所列人物的身份行事；它绝不持有机构身份。批次命令不接受这种决策。只有当这个控制者可以动用此人的全部财政身份时，才注册这样的控制者（`DecisionAuthority::Actor`，命令主体为此人本人）：只要某张票据向它提供批次组命令，它就能在此人任职的每个机构中行事。
 
 绑定的机构还必须拥有行动涉及的范围；对 `ApplyTransition` 来说，要拥有全部目标范围；对观察者行动来说，它必须是绑定的 `controlled_by` 机构。[代理角色](/reference/terminology/)需要一个精确的[权限依据](/reference/terminology/)版本，而且必须与常设角色不同。权限依据是一条外部记录，其种类必须是插件会读取的：用 `with_authority_basis_kinds` 声明的种类，或者传给 `FiscalPlugin::new` 的证据种类。只要这个版本仍是其记录的当前版本，代理角色就能被准入。一旦记录更新到新版本或已退役，代理角色会以 `FISCAL_ACTING_BASIS_NOT_CURRENT`（`InvalidAuthority`）失败，常设角色仍可准入。
 

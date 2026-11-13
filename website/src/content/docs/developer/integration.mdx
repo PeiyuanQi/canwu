@@ -19,13 +19,13 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 ```toml
 [dependencies]
-canwu-api = "=0.22.1"
+canwu-api = "=0.23.0"
 ```
 
 - `canwu-api` 是受支持的对外 API，API 文档见 [docs.rs](https://docs.rs/canwu-api)。应用代码依赖它，以及实际用到的扩展 crate（例如 [`canwu-resource`](https://crates.io/crates/canwu-resource)）。扩展 crate 也发布在 crates.io 上，版本号请与 `canwu-api` 保持一致。不要直接依赖 `canwu-sim` 或其他运行时 crate。
-- `canwu-reference-world` 是一个可替换的小型示例世界，下面的最小流程会用到它。它没有发布到 crates.io，只能克隆 [GitHub 仓库](https://github.com/PeiyuanQi/canwu)获取源码（检出 `v0.22.1` 标签，与上面的版本对应）。可以直接在克隆的仓库里运行示例，也可以把它复制到自己的项目里当模板，改为依赖上面这个 crates.io 版本的 `canwu-api`。如果 `canwu-api` 一处来自 crates.io、另一处来自 Git，Cargo 会编译出两份互不相通的副本，类型无法混用。
+- `canwu-reference-world` 是一个可替换的小型示例世界，下面的最小流程会用到它。它没有发布到 crates.io，只能克隆 [GitHub 仓库](https://github.com/PeiyuanQi/canwu)获取源码（检出 `v0.23.0` 标签，与上面的版本对应）。可以直接在克隆的仓库里运行示例，也可以把它复制到自己的项目里当模板，改为依赖上面这个 crates.io 版本的 `canwu-api`。如果 `canwu-api` 一处来自 crates.io、另一处来自 Git，Cargo 会编译出两份互不相通的副本，类型无法混用。
 
-`=0.22.1` 会把引擎精确固定在这个发布版本。如果应用会保存存档，升级前请先确定旧存档的处理方式：参伍不迁移旧存档，可以保留旧引擎读取，或用自己的工具导出再导入（见[存档与重放](/developer/persistence/#版本与存档兼容)）。
+`=0.23.0` 会把引擎精确固定在这个发布版本。如果应用会保存存档，升级前请先确定旧存档的处理方式：参伍不迁移旧存档，可以保留旧引擎读取，或用自己的工具导出再导入（见[存档与重放](/developer/persistence/#版本与存档兼容)）。
 
 ## 最小接入流程
 
@@ -212,12 +212,12 @@ let request = SeatRebindingRequest::new("seat.realm", heir, canwu.revision(), ca
 canwu.rebind_seat(request)?;
 ```
 
-请求必须对应当前时间和当前修订版本，并作为上层应用输入排队；收下它的结算边界会先于该边界的其他输入裁决它，裁决结果记在 `BoundaryRecord::seat_rebindings` 中。
+请求必须对应当前时间和当前修订版本，并作为上层应用输入排队；准入它的结算边界会先于该边界准入的其他输入裁决它，裁决结果记在 `BoundaryRecord::seat_rebindings` 中。
 
-- **改绑成功。** 新绑定从这个结算边界起生效：`Issuer::Human` 命令要与新人物一致，旧人物的命令以 `InvalidAuthority` 拒绝，绑定人物的查看器（`viewer`）也跟随新人物。该席位上代表旧人物行事的控制者，其未关闭票据以 `seat_rebound` 取消，可按上文的席位继任接续。
+- **改绑成功。** 新绑定从这个结算边界起生效：`Issuer::Human` 命令要与新人物一致，旧人物的命令以 `InvalidAuthority` 拒绝，绑定人物的查看器（`viewer()`）也跟随新人物。该席位上代表旧人物行事的控制者，其未关闭票据以 `seat_rebound` 取消，可按上文的席位继任接续。
 - **记录在案的拒绝。** 人物不存在（`ActorNotFound`）、已死亡或失踪（`IssuerUnavailable`）、预期修订版本已过时，或绑定没有变化时，改绑被拒绝并记录，运行的其他状态不变。被拘押或被俘的人物可以接任席位，但在获释之前，命令会因人物不可用而被拒绝。
 
-`canwu.seat_binding()` 返回当前生效的绑定；`run_configuration().seat_binding` 仍是开局时的绑定。生效的绑定随存档和接续检查点保存，并由检查点哈希约束。恢复接续检查点时，要用 `from_continuation_checkpoint_verified` 并传入保存时得到的接续哈希；只核对状态哈希保护不了席位绑定。只读运行和已直接处理过命令的运行不能改绑；同一席位同时只能有一个排队中的改绑。
+`canwu.seat_binding()` 返回当前生效的绑定；`run_configuration().seat_binding` 仍是开局时的绑定。生效的绑定随每种存档（快照、检查点日志、分页检查点和接续检查点）保存，并计入检查点哈希。恢复接续检查点时，要用 `from_continuation_checkpoint_verified` 并传入保存时得到的接续哈希；只核对状态哈希保护不了席位绑定。`rebind_seat` 调用本身在以下情况下拒绝，且不排入任何内容：只读运行（`InteractionReadOnly`）、已直接调用过 `process_command` 的运行（`MixedCommandIngress`）、没有声明席位绑定的运行或绑定在没有人物的机构上的席位（`InvalidAuthority`），以及该席位已有一个排队中的改绑（`IdempotencyConflict`）。改绑只改变席位的人物、控制者和权限配置，不能把席位移到另一个机构，也不能撤销席位。
 
 ## 限制评估轨迹数量
 

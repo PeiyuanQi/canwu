@@ -86,6 +86,7 @@ current published **social diffusion simulation module**
 - [Fiscal archive after a continuation restore](proposals/fiscal-archive-after-continuation-restore.md)
 - [Military engagement revisions](proposals/military-engagement-revisions.md)
 - [Technology restore validation and replay-stable citations](proposals/technology-restore-validation.md)
+- [Fiscal batch sets and aggregated evidence](proposals/fiscal-batch-sets-and-aggregated-evidence.md)
 - [Downstream grand-strategy gap set](proposals/downstream-grand-strategy-gap-set.md)
 
 ## Runnable cases, reference content, and starter kits

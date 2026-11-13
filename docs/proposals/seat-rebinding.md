@@ -1,7 +1,7 @@
 # Seat Rebinding
 
-Status: implemented on branch `fix/g97`, unreleased; the integrator assigns
-the version. It closes downstream gap G-97 (`canwu-sim`, `canwu-api`): a run
+Status: implemented in 0.23.0 (package commit `99b4fcb`, from branch
+`fix/g97`). It closes downstream gap G-97 (`canwu-sim`, `canwu-api`): a run
 names its seat's person once, at run start, and had no way to move the seat
 to another person while it runs. When the seat's character died and an heir
 took the seat, the engine still treated the dead person as the human seat.
@@ -330,7 +330,7 @@ the `SeatRebinding` arm. Code that builds `BoundaryRecord`,
 
 `docs/architecture.md` (seat rebinding after decision lineage; the host
 ingress list; the boundary-window ingress kinds; the checkpoint paragraph),
-`docs/versioning.md` (the unreleased entry), `docs/README.md` and the
+`docs/versioning.md` (the 0.23.0 entry), `docs/README.md` and the
 engine-docs documentation map (this proposal), the website settlement pages
 (the new ingress kind),
 `docs/terminology.md` and both website terminology pages (seat rebinding,
@@ -345,7 +345,7 @@ while the run continues. Added to the terminology tables.
 
 ## Release notes text (for `docs/versioning.md`)
 
-See the unreleased entry in `docs/versioning.md`.
+See the 0.23.0 entry of `docs/versioning.md`.
 
 ## Review record
 

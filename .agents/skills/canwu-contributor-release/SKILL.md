@@ -70,8 +70,8 @@ cargo clippy --locked --manifest-path benchmarks/performance-harness/Cargo.toml 
 cargo test --locked --manifest-path benchmarks/performance-harness/Cargo.toml
 cargo test --locked --manifest-path benchmarks/performance-harness/Cargo.toml --features allocation-counting
 cargo test --release --locked --workspace -- --ignored
-cargo clippy --locked --workspace --all-targets --features canwu-api/continuation-gate -- -D warnings
-cargo test --locked --workspace --features canwu-api/continuation-gate
+cargo clippy --locked --workspace --all-targets --features canwu-api/continuation-gate,canwu-technology/continuation-gate -- -D warnings
+cargo test --locked --workspace --features canwu-api/continuation-gate,canwu-technology/continuation-gate
 ```
 
 - `RUSTDOCFLAGS=-Dwarnings` makes any rustdoc warning fail the doc build.
@@ -89,10 +89,15 @@ cargo test --locked --workspace --features canwu-api/continuation-gate
   divergence. It proves state equality (checkpoint hashes and the
   continuation round trip) with the run's own plugin registry, not that the
   public restore and replay paths accept the checkpoint or the journal. Lint
-  it with the feature on as well, since CI never builds it. A passing run is
-  fully green: the one test that declares evidence after its seal,
-  `a_packet_first_declared_after_its_seal_is_not_ready`, expects the gate's
-  panic. It takes about 40 minutes.
+  it with the feature on as well, since CI never builds it. The commands
+  also turn on `canwu-technology/continuation-gate`, a hook that only turns
+  on `canwu-api`'s, so that crate's tests can see the gate. A passing run is
+  fully green: two tests expect the gate's panic,
+  `a_packet_first_declared_after_its_seal_is_not_ready` (`canwu-api`, which
+  declares evidence after its seal) and
+  `a_noncanonical_payload_continuation_is_refused_on_both_handles`
+  (`canwu-technology`, whose scenario record names a version only boundary 2
+  creates). It takes about 50 minutes.
 
 Any failure blocks the release. Fix it in the release change set, then rerun
 the failing command and every check above that the fix affects.

@@ -146,6 +146,19 @@ with a machine-validated payload and declared core/component access.
   The trace records the policy's bias plus the ticket's, unweighted, apart
   from the factors as `DecisionOptionEvaluation::bias`; the ticket's part is
   outside the policy's hash, so one controller serves every ticket.
+- Hand the player's seat to an heir (0.23.0) with
+  `canwu.rebind_seat(SeatRebindingRequest::new(seat_id, heir,
+  canwu.revision(), canwu.time()))`, adding `.with_controller(..)` when the
+  heir's controller has another ID. The boundary that admits it decides it
+  before its other ingress and records the outcome in
+  `BoundaryRecord::seat_rebindings`; an unknown, dead, or missing heir, a
+  stale revision, or an unchanged binding is a recorded rejection. From that
+  boundary the seat gates follow the heir, and the seat's open tickets that
+  acted for the previous person are cancelled with `seat_rebound`; continue
+  them by seat succession (`parent_ticket`). Read the binding in force with
+  `seat_binding()`, never `run_configuration().seat_binding`, which stays as
+  declared. A read-only run, or one with direct command history, cannot
+  rebind.
 
 ## Read named records as a host (0.22.0)
 
@@ -199,7 +212,18 @@ with a machine-validated payload and declared core/component access.
   `snapshot_with_segments`, and `replay_journal_with_segments` return
   `HistoryUnavailable`, so keep a `Canwu` run's `snapshot`, `replay_journal`,
   and checkpoint journal where debugging, exact replay, or an archive needs
-  them.
+  them. Since 0.23.0 the verified restore is also what protects a rebound
+  seat: a continuation's authoritative state hash does not cover the seat
+  binding in force, only its checkpoint and continuation hashes do.
+- Check technology state after a continuation restore, or on a sealed run,
+  with `canwu_technology::validate_technology_runtime_on(&run)` (0.23.0, on
+  `Canwu` or `CompactedCanwu`); it reads no journal entry before the run's
+  history cut and does not replay provenance, which
+  `validate_technology_runtime` still does on a full `Canwu`. Since 0.23.0 a
+  sealed or restored run decides later technology operations as the
+  uninterrupted run does; a new operation's exact citation names the
+  record's current version (or one a current technology record already
+  holds).
 - Paged restores take a budget (0.18.0, paged format 7):
   `from_paged_checkpoint_and_journal(checkpoint, provider, segments,
   budget)` and its `_with_plugins` form, on `Canwu` and `CompactedCanwu`,
