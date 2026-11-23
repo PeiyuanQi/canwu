@@ -100,6 +100,7 @@ fn draft(id: u64, decision_maker: EntityRef, deadline: Option<SimTime>) -> Decis
         }],
         deadline,
         parent_ticket: None,
+        custody_addressed: None,
     }
 }
 

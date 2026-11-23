@@ -179,10 +179,12 @@ pub enum DecisionHistoryLocation {
 
 /// Format of an archived decision record (`DecisionArchiveBlob`), its
 /// receipt, and a verified archive commit. Format 2 (0.21.0): an archived
-/// ticket's options carry their per-ticket `bias`. An archive blob is kept
+/// ticket's options carry their per-ticket `bias`. Format 3 (0.24.0): an
+/// archived ticket may carry its custody address
+/// ([`crate::DecisionTicket::custody_addressed`]). An archive blob is kept
 /// by the host's archive store and records no engine version, so this
 /// number alone names its shape; any other format is refused.
-pub const DECISION_ARCHIVE_FORMAT_VERSION: u32 = 2;
+pub const DECISION_ARCHIVE_FORMAT_VERSION: u32 = 3;
 pub const MAX_DECISION_ARCHIVE_BATCH_ENTRIES: usize = 4_096;
 pub const MAX_DECISION_HISTORY_PAGE_SIZE: usize = 512;
 pub const MAX_DECISION_HISTORY_PAGE_BYTES: u64 = 16 * 1024 * 1024;
@@ -1459,10 +1461,12 @@ impl DecisionState {
     /// root, and the current admission batch. The batch stays out of the
     /// hot-history root, which an archive commit names as its source: a new
     /// batch must not make a prepared archive commit stale. Version 4
-    /// (0.21.0) commits to tickets whose options carry a per-ticket `bias`.
+    /// (0.21.0) commits to tickets whose options carry a per-ticket `bias`;
+    /// version 5 (0.24.0) to tickets that may carry a custody address
+    /// ([`crate::DecisionTicket::custody_addressed`]).
     pub fn authoritative_commitment(&self) -> Result<String, DecisionError> {
         decision_archive_hash(
-            "canwu.commitment.decisions.v4",
+            "canwu.commitment.decisions.v5",
             &(
                 &self.controllers,
                 self.hot_history_root()?,
@@ -2514,6 +2518,7 @@ impl DecisionState {
                     version: 1,
                     state: DecisionTicketState::Open,
                     parent_ticket: ticket.parent_ticket,
+                    custody_addressed: ticket.custody_addressed,
                 };
                 self.insert_hot_history_record(&DecisionArchiveRecord::Ticket {
                     ticket: persisted.clone(),
@@ -3375,6 +3380,7 @@ pub fn format8_trace_locator_scale_probe(
             reason: "Scale fixture is terminal".to_owned(),
         },
         parent_ticket: None,
+        custody_addressed: None,
     };
     ticket.validate()?;
     state.insert_hot_history_record(&DecisionArchiveRecord::Ticket {
@@ -3504,6 +3510,7 @@ mod archive_restart_tests {
                 }
             },
             parent_ticket: None,
+            custody_addressed: None,
         };
         state
             .insert_hot_history_record(&DecisionArchiveRecord::Ticket {

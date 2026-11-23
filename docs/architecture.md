@@ -489,7 +489,10 @@ validation, for random-policy controllers and tie-breaks alike. A
 `ResolveDecisionRandomly` directive also fails its boundary before any draw is
 committed when the ticket's person decision maker (`DecisionMakerUnavailable`)
 or its controller's authority person (`IssuerUnavailable`) is unavailable in the
-person availability committed before that boundary. An availability change
+person availability committed before that boundary. The decision maker of a
+custody-addressed ticket (below) counts as available there, as decision maker
+and as that authority person, while its custody holds, and as unavailable once
+it does not. An availability change
 staged earlier in the same boundary does not fail the directive, because
 failing would roll the change back and repeat it on every retry; the draw
 commits, the end-of-boundary sweep cancels the ticket, and the generated
@@ -515,6 +518,23 @@ the actor of `DecisionAuthority::Actor` or the responsible actor of
 `DecisionAuthority::Institution`; council and no-responsible-actor authorities
 are unaffected. Host preparation through `prepare_decision` and
 `drive_decision` applies the same two checks before evaluating a policy.
+
+A ticket that a person in custody decides, such as a captor's question to his
+captive, carries `DecisionTicketDraft::custody_addressed`, a
+`DecisionCustodyAddress { custodian }` that the host sets at `Open` and the
+ticket keeps for its life; it is part of the committed ticket. Such an `Open`
+requires a person decision maker who is alive and `Captive` or `Detained` by
+exactly that custodian: one who is not alive is refused with
+`DecisionMakerUnavailable`, one free or held by another with `InvalidDecision`.
+While the custody holds, the ticket is exempt from the decision-maker check at
+`Open` and at preparation, and its decision maker does not count as an
+unavailable authority person of its controller (at `Open`, `Reassign`,
+`Resolve`, and preparation) or in either pass of the end-of-boundary sweep. Any
+other unavailable authority person is refused as usual, and an ordinary ticket
+of the same person keeps every rule above. A custody-addressed ticket cannot
+offer a `DecisionAction::Command` option: command admission still refuses the
+captive as an issuer, so `Open` and `ReplaceOptions` refuse such an option with
+`InvalidDecision`, and the host applies the answer itself.
 
 `DecisionTicketDraft::parent_ticket` records decision lineage. At `Open` the
 parent must be a terminal ticket in hot decision history with exactly the same
@@ -2138,8 +2158,22 @@ then every remaining open ticket whose assigned controller's authority person
 is that person with `CONTROLLER_AUTHORITY_UNAVAILABLE_REASON`
 (`controller_authority_unavailable`). A ticket that qualifies for both carries
 the decision-maker reason. The cancelled IDs are recorded in ticket-ID order in
-the change's `cancelled_tickets` and `cancelled_controller_tickets`, and
-snapshot validation recomputes both lists.
+the change's `cancelled_tickets` and `cancelled_controller_tickets`, the
+custody cancellations below in its `cancelled_custody_tickets`, and snapshot
+validation recomputes all three lists.
+
+A custody-addressed ticket (see the decision framework) is exempt from both
+cancellations while its decision maker stays alive and `Captive` or `Detained`
+by its custodian. Any change of his that ends that custody, including one that
+makes him available, cancels it at the end of the same boundary with
+`DECISION_MAKER_DEAD_REASON` (`decision_maker_dead`) when he dies,
+`CUSTODY_ENDED_REASON` (`custody_ended`) when he is available, and
+`CUSTODY_TRANSFERRED_REASON` (`custody_transferred`) when another custodian, or
+none, holds him; the new custodian opens a ticket of his own. A person who goes missing
+has his custody-addressed tickets cancelled with
+`DECISION_MAKER_UNAVAILABLE_REASON` in `cancelled_tickets`. A transfer has no
+event of its own: it is a change whose new custodian differs from the
+ticket's.
 
 `BoundaryDirective::CreatePerson` creates a person at runtime from a phase-7
 system that declares `StateKey::core_people()`. The `PersonDraft` supplies name,
@@ -2899,7 +2933,7 @@ the dedicated private `canwu-sim` state module. This is an implementation
 ownership boundary only: public snapshots and replay journals remain flat and
 unchanged.
 
-Every current snapshot stores commitment format 8 roots for world, knowledge,
+Every current snapshot stores commitment format 9 roots for world, knowledge,
 plugin components, generic records, scheduler state, commands and attempts,
 events, ingress, random state/evidence, the boundary chain, run/plugin identity,
 and runtime control counters. Unordered collections are canonicalized by stable

@@ -191,6 +191,7 @@ fn decide(
                         }],
                         deadline: Some(now + SimDuration::days(1)),
                         parent_ticket: None,
+                        custody_addressed: None,
                     },
                 },
             ),

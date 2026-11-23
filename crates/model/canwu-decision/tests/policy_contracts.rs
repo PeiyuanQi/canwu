@@ -71,6 +71,7 @@ fn ticket(version: u64) -> DecisionTicket {
         version,
         state: DecisionTicketState::Open,
         parent_ticket: None,
+        custody_addressed: None,
     }
 }
 

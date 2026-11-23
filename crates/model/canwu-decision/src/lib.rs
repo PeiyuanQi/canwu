@@ -32,11 +32,12 @@ pub use engine::{
 };
 pub use model::{
     DecisionAction, DecisionAttemptErrorCode, DecisionAttemptOutcome, DecisionAttemptRecord,
-    DecisionAuthority, DecisionContext, DecisionControllerBinding, DecisionError,
-    DecisionErrorCode, DecisionExternalEvidence, DecisionFactorContribution, DecisionMutation,
-    DecisionOption, DecisionOptionEvaluation, DecisionOptionWeight, DecisionOutcome,
-    DecisionPolicyIdentity, DecisionPolicyKind, DecisionRandomEvidence, DecisionStage,
-    DecisionTicket, DecisionTicketDraft, DecisionTicketState, DecisionTrace, PolicyDecision,
+    DecisionAuthority, DecisionContext, DecisionControllerBinding, DecisionCustodyAddress,
+    DecisionError, DecisionErrorCode, DecisionExternalEvidence, DecisionFactorContribution,
+    DecisionMutation, DecisionOption, DecisionOptionEvaluation, DecisionOptionWeight,
+    DecisionOutcome, DecisionPolicyIdentity, DecisionPolicyKind, DecisionRandomEvidence,
+    DecisionStage, DecisionTicket, DecisionTicketDraft, DecisionTicketState, DecisionTrace,
+    PolicyDecision,
 };
 pub use policy::{
     DecisionPolicy, DecisionRule, ExternalDecisionOption, ExternalDecisionRequest,

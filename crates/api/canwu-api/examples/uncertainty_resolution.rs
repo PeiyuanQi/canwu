@@ -137,6 +137,7 @@ fn enqueue_ticket(
                     ],
                     deadline: None,
                     parent_ticket: None,
+                    custody_addressed: None,
                 },
             },
         ),

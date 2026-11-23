@@ -216,6 +216,7 @@ fn ticket(id: u64, assigned_controller: &str) -> DecisionTicketDraft {
         options: vec![DecisionOption::new("proclaim", "Proclaim it")],
         deadline: None,
         parent_ticket: None,
+        custody_addressed: None,
     }
 }
 

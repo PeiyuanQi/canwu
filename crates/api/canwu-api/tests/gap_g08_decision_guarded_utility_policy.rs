@@ -207,6 +207,7 @@ fn draft(id: DecisionTicketId, context: serde_json::Value) -> DecisionTicketDraf
         ],
         deadline: None,
         parent_ticket: None,
+        custody_addressed: None,
     }
 }
 

@@ -422,6 +422,7 @@ fn culture_retirement_preserves_enacted_law_and_blocks_live_dependencies() {
                 options: vec![DecisionOption::new("hold", "Hold")],
                 deadline: Some(SimTime::from_minutes(10)),
                 parent_ticket: None,
+                custody_addressed: None,
             },
             knowledge_read_cut: canwu_api::KnowledgeReadCut {
                 boundary: Some(BoundaryId::new(1)),

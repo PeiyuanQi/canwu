@@ -163,6 +163,7 @@ fn decide_as_institution(canwu: &mut Canwu, office: &Office, ticket: u64, action
                         }],
                         deadline: Some(now + SimDuration::days(1)),
                         parent_ticket: None,
+                        custody_addressed: None,
                     },
                 },
             ),

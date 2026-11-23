@@ -1635,6 +1635,14 @@ fn validate_decision_state(
     {
         return invalid_snapshot("decision ticket references an unknown decision maker");
     }
+    if snapshot.decisions.tickets.values().any(|ticket| {
+        ticket
+            .custody_addressed
+            .as_ref()
+            .is_some_and(|address| !snapshot_entity_identity_exists(snapshot, &address.custodian))
+    }) {
+        return invalid_snapshot("decision ticket references an unknown custodian");
+    }
     if snapshot.ingress.is_empty() && snapshot.boundaries.is_empty() {
         let next_after_hot_trace = snapshot
             .decisions

@@ -377,6 +377,37 @@ impl DecisionOption {
     }
 }
 
+/// The custody a custody-addressed ticket is put to its decision maker in.
+///
+/// A host sets it on [`DecisionTicketDraft::custody_addressed`] when it opens
+/// a ticket that a person in custody decides: a captor's question to his
+/// captive. The decision maker must be a person, and the custodian must be
+/// another entity. In a runtime the ticket opens only while the person is
+/// alive and `Captive` or `Detained` with exactly this custodian, is exempt
+/// from the availability gates that refuse or cancel an ordinary ticket of
+/// an unavailable person (and from the controller-authority gate when its
+/// controller's authority person is the decision maker himself), and is
+/// cancelled when that custody no longer holds.
+///
+/// Its options cannot carry a [`DecisionAction::Command`]: the captive's
+/// answer could never be issued as a command, since command admission still
+/// refuses an unavailable issuer. `Open` and `ReplaceOptions` refuse such an
+/// option with `InvalidDecision`; the host applies the answer itself.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct DecisionCustodyAddress {
+    /// The entity that holds the decision maker, as his committed
+    /// availability names it.
+    pub custodian: EntityRef,
+}
+
+impl DecisionCustodyAddress {
+    /// Addresses a ticket to a person held by `custodian`.
+    #[must_use]
+    pub const fn new(custodian: EntityRef) -> Self {
+        Self { custodian }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DecisionTicketDraft {
     pub id: DecisionTicketId,
@@ -402,6 +433,11 @@ pub struct DecisionTicketDraft {
     /// `TicketNotFound`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_ticket: Option<DecisionTicketId>,
+    /// Marks the ticket as addressed to a person in custody (see
+    /// [`DecisionCustodyAddress`]); `None` for an ordinary ticket. The mark
+    /// is set only here, at `Open`, and kept for the ticket's life.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custody_addressed: Option<DecisionCustodyAddress>,
 }
 
 impl DecisionTicketDraft {
@@ -413,6 +449,11 @@ impl DecisionTicketDraft {
             ));
         }
         validate_parent_reference(self.id, self.parent_ticket)?;
+        validate_custody_address(
+            &self.decision_maker,
+            self.custody_addressed.as_ref(),
+            &self.options,
+        )?;
         require_identifier(&self.definition, "decision definition")?;
         require_identifier(&self.assigned_controller, "assigned controller")?;
         require_text(&self.summary, "decision summary")?;
@@ -459,6 +500,11 @@ pub struct DecisionTicket {
     /// (see [`DecisionTicketDraft::parent_ticket`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_ticket: Option<DecisionTicketId>,
+    /// The custody this ticket is addressed in, set at `Open`
+    /// ([`DecisionTicketDraft::custody_addressed`]); `None` for an ordinary
+    /// ticket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custody_addressed: Option<DecisionCustodyAddress>,
 }
 
 impl DecisionTicket {
@@ -477,6 +523,11 @@ impl DecisionTicket {
 
     pub(crate) fn validate(&self) -> Result<(), DecisionError> {
         validate_parent_reference(self.id, self.parent_ticket)?;
+        validate_custody_address(
+            &self.decision_maker,
+            self.custody_addressed.as_ref(),
+            &self.options,
+        )?;
         require_identifier(&self.definition, "decision definition")?;
         require_identifier(&self.assigned_controller, "assigned controller")?;
         require_text(&self.summary, "decision summary")?;
@@ -1114,6 +1165,32 @@ fn validate_parent_reference(
         return Err(DecisionError::new(
             DecisionErrorCode::InvalidDecision,
             "a decision ticket parent must be a different nonzero ticket ID",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_custody_address(
+    decision_maker: &EntityRef,
+    address: Option<&DecisionCustodyAddress>,
+    options: &[DecisionOption],
+) -> Result<(), DecisionError> {
+    let Some(address) = address else {
+        return Ok(());
+    };
+    if !matches!(decision_maker, EntityRef::Person(_)) || address.custodian == *decision_maker {
+        return Err(DecisionError::new(
+            DecisionErrorCode::InvalidDecision,
+            "a custody-addressed ticket needs a person decision maker held by another entity",
+        ));
+    }
+    if options
+        .iter()
+        .any(|option| matches!(option.action, DecisionAction::Command { .. }))
+    {
+        return Err(DecisionError::new(
+            DecisionErrorCode::InvalidDecision,
+            "a custody-addressed ticket cannot offer a command option",
         ));
     }
     Ok(())
