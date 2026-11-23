@@ -640,11 +640,80 @@ pub enum FacilityProjectLifecycle {
     Failed,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// What a facility project does to its asset. Every completed project yields
+/// the next generation of the asset, `Operational` at 1,000 ‰.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FacilityProjectKind {
+    /// Builds a `Planned` or `Authorized` asset.
     Construction,
+    /// Repairs a `Repairing`, `Degraded` or `Damaged` asset. A worn asset
+    /// that is still `Operational` (above
+    /// [`FACILITY_DAMAGED_CONDITION_PER_MILLE`]) first records `Degraded`
+    /// with [`ProductionOperation::RecordFacilityCondition`].
     Repair,
+    /// Raises an `Operational` asset's capacity to `capacity_after`, which
+    /// must be an expansion by [`is_facility_capacity_expansion`]: every
+    /// capability the asset has kept at no less than its current figure,
+    /// only positive figures under non-empty capability names, at most
+    /// [`MAX_FACILITY_CAPACITY_ENTRIES`] entries, and a capacity that differs
+    /// from the current one (a higher figure or a new capability).
+    ///
+    /// The completed asset has exactly this capacity and, like every
+    /// completed project, is `Operational` at 1,000 ‰, even when the asset
+    /// fell, was damaged, or stopped for repair while the work ran.
+    Expand {
+        capacity_after: BTreeMap<String, u64>,
+    },
+}
+
+/// Why a [`ProductionOperation::RecordFacilityCondition`] lowers a facility's
+/// condition.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FacilityConditionCause {
+    /// Use and age.
+    Wear,
+    /// A natural hazard, such as a flood or a fire.
+    Hazard,
+    /// A hostile act, such as a raid or a siege.
+    Hostile,
+}
+
+/// The engine's damage line: a standing facility whose condition is at or
+/// below this figure, in thousandths, is `Damaged`; above it, it is
+/// `Operational` or `Degraded`. Incidents and recorded condition falls both
+/// set the lifecycle by it.
+pub const FACILITY_DAMAGED_CONDITION_PER_MILLE: u16 = 250;
+
+/// The most capability entries an expansion's `capacity_after` may hold.
+pub const MAX_FACILITY_CAPACITY_ENTRIES: usize = 64;
+
+/// Whether `after` is a capacity expansion of `current`: at most
+/// [`MAX_FACILITY_CAPACITY_ENTRIES`] entries, every capability name non-empty,
+/// without leading or trailing whitespace (so `" bench"` is not a capability
+/// of its own), and at most [`MAX_PRODUCTION_IDENTIFIER_BYTES`] long, every
+/// figure
+/// positive, every capability of `current` kept at no less than its figure,
+/// and the two capacities different.
+#[must_use]
+pub fn is_facility_capacity_expansion(
+    current: &BTreeMap<String, u64>,
+    after: &BTreeMap<String, u64>,
+) -> bool {
+    after != current
+        && after.len() <= MAX_FACILITY_CAPACITY_ENTRIES
+        && after.iter().all(|(capability, value)| {
+            *value > 0
+                && !capability.is_empty()
+                && capability.trim() == capability.as_str()
+                && capability.len() <= MAX_PRODUCTION_IDENTIFIER_BYTES
+        })
+        && current.iter().all(|(capability, value)| {
+            after
+                .get(capability)
+                .is_some_and(|expanded| expanded >= value)
+        })
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1260,6 +1329,41 @@ pub enum ProductionOperation {
     RetireFacility {
         facility: FacilityAssetId,
         expected_generation: u64,
+    },
+    /// Records a fall in a standing facility's condition for wear, a hazard,
+    /// or a hostile act, as the provider record `evidence` cites.
+    ///
+    /// Admitted only for the site holder, on the facility generation
+    /// `expected_generation`, while the facility is `Operational`, `Degraded`
+    /// or `Damaged` (a `Repairing`, planned, or retired facility takes no
+    /// condition record), and only when `condition_after_per_mille` is at
+    /// most the current condition: a rise is a project's. `lifecycle_after`
+    /// follows [`FACILITY_DAMAGED_CONDITION_PER_MILLE`]: `Damaged` at or below
+    /// the line, otherwise `Operational` or `Degraded`, and never
+    /// `Operational` for a facility that is not. A record that changes
+    /// neither the condition nor the lifecycle is refused.
+    ///
+    /// These rules are checked against the root first. Only then is the
+    /// evidence resolved: `evidence.version` must be the current exact
+    /// version of its record when the operation settles, `semantic_digest`
+    /// must be the `canwu.production.provider-evidence.v1` hash of that
+    /// record, and `capability` must be non-empty. The binding's `kind` and
+    /// `available_quantity` are not checked for condition evidence: only the
+    /// version, the digest, and the non-empty `capability` and
+    /// `semantic_digest` are. The binding is kept with the operation
+    /// outcome. The generation does not change; a facility
+    /// whose condition reaches 0 leaves incident evaluation.
+    ///
+    /// A worn facility that is to be repaired while it is above the line
+    /// records `Degraded` here first: a `Repair` project is not admitted on an
+    /// `Operational` facility.
+    RecordFacilityCondition {
+        facility: FacilityAssetId,
+        expected_generation: u64,
+        condition_after_per_mille: u16,
+        lifecycle_after: FacilityLifecycle,
+        cause: FacilityConditionCause,
+        evidence: ProductionEvidenceBinding,
     },
 }
 
@@ -2433,6 +2537,7 @@ impl ProductionState {
                         && asset.generation == project.resulting_generation
                         && asset.lifecycle == FacilityLifecycle::Operational
                         && asset.condition_per_mille == 1_000
+                        && project_result_capacity_is_valid(project, asset)
                 }
                 None => false,
             };
@@ -2453,8 +2558,40 @@ impl ProductionState {
                         && result_is_valid
                         && project.result_evidence_digest.as_deref()
                             == Some(expected_result_digest.as_str()))
+                // A completed project's result is the asset's generation it
+                // produced: the asset keeps its site, and keeps the result's
+                // capacity while it is still at that generation. Its
+                // condition and lifecycle may since have moved (a fall, an
+                // incident, a retirement), and a later project may have
+                // produced a newer generation.
                 || (project.lifecycle == FacilityProjectLifecycle::Completed
-                    && self.facilities.get(&project.facility) != project.resulting_asset.as_ref())
+                    && !self.facilities.get(&project.facility).is_some_and(|facility| {
+                        project.resulting_asset.as_ref().is_some_and(|result| {
+                            facility.site == result.site
+                                && (facility.generation > result.generation
+                                    || (facility.generation == result.generation
+                                        && facility.capacity == result.capacity))
+                        })
+                    }))
+                // An open expansion stays an expansion over its source
+                // generation.
+                || (!matches!(
+                    project.lifecycle,
+                    FacilityProjectLifecycle::Completed
+                        | FacilityProjectLifecycle::Cancelled
+                        | FacilityProjectLifecycle::Failed
+                ) && match &project.kind {
+                    FacilityProjectKind::Expand { capacity_after } => {
+                        self.facilities.get(&project.facility).is_some_and(|facility| {
+                            facility.generation == project.base_generation
+                                && !is_facility_capacity_expansion(
+                                    &facility.capacity,
+                                    capacity_after,
+                                )
+                        })
+                    }
+                    FacilityProjectKind::Construction | FacilityProjectKind::Repair => false,
+                })
                 || (!terminal_evidence
                     && (project.resulting_asset.is_some()
                         || project.result_evidence_digest.is_some()))
@@ -2502,16 +2639,9 @@ impl ProductionState {
 
     fn validate_runtime_indexes(&self) -> Result<(), CanwuError> {
         if self.incident_due_index.iter().any(|id| {
-            self.facilities.get(id).is_none_or(|facility| {
-                facility.incident_risk_per_mille == 0
-                    || facility.condition_per_mille == 0
-                    || !matches!(
-                        facility.lifecycle,
-                        FacilityLifecycle::Operational
-                            | FacilityLifecycle::Degraded
-                            | FacilityLifecycle::Damaged
-                    )
-            })
+            self.facilities
+                .get(id)
+                .is_none_or(|facility| !facility_is_incident_eligible(facility))
         }) {
             return Err(invalid(
                 "production incident due index contains an ineligible facility",
@@ -2931,14 +3061,9 @@ impl ProductionState {
                     .processes
                     .get(&project.process)
                     .ok_or_else(|| invalid("facility project process is unavailable"))?;
-                let facility = self
-                    .facilities
-                    .get(&project.facility)
-                    .ok_or_else(|| {
-                        invalid(
-                            "facility project requires an existing authoritative planned or repairing asset",
-                        )
-                    })?;
+                let facility = self.facilities.get(&project.facility).ok_or_else(|| {
+                    invalid("facility project requires an existing authoritative asset")
+                })?;
                 if project.holder != envelope.holder
                     || project.lifecycle != FacilityProjectLifecycle::Planned
                     || project.created_at != now
@@ -2952,13 +3077,23 @@ impl ProductionState {
                     || project.base_generation != facility.generation
                     || project.resulting_generation != facility.generation.saturating_add(1)
                     || project.site != facility.site
-                    || match project.kind {
+                    || match &project.kind {
                         FacilityProjectKind::Construction => !matches!(
                             facility.lifecycle,
                             FacilityLifecycle::Planned | FacilityLifecycle::Authorized
                         ),
-                        FacilityProjectKind::Repair => {
-                            facility.lifecycle != FacilityLifecycle::Repairing
+                        FacilityProjectKind::Repair => !matches!(
+                            facility.lifecycle,
+                            FacilityLifecycle::Repairing
+                                | FacilityLifecycle::Degraded
+                                | FacilityLifecycle::Damaged
+                        ),
+                        FacilityProjectKind::Expand { capacity_after } => {
+                            facility.lifecycle != FacilityLifecycle::Operational
+                                || !is_facility_capacity_expansion(
+                                    &facility.capacity,
+                                    capacity_after,
+                                )
                         }
                     }
                     || self.facility_projects.contains_key(&project.id)
@@ -3114,13 +3249,35 @@ impl ProductionState {
                             .get(&project.facility)
                             .ok_or_else(|| invalid("facility project source asset disappeared"))?;
                         if base.generation != project.base_generation
-                            || match project.kind {
+                            || match &project.kind {
                                 FacilityProjectKind::Construction => !matches!(
                                     base.lifecycle,
                                     FacilityLifecycle::Planned | FacilityLifecycle::Authorized
                                 ),
-                                FacilityProjectKind::Repair => {
-                                    base.lifecycle != FacilityLifecycle::Repairing
+                                // A repair admitted on a degraded or damaged
+                                // asset may see it fall further or stop for
+                                // repair while the work runs.
+                                FacilityProjectKind::Repair => !matches!(
+                                    base.lifecycle,
+                                    FacilityLifecycle::Repairing
+                                        | FacilityLifecycle::Degraded
+                                        | FacilityLifecycle::Damaged
+                                ),
+                                // An expansion admitted on an operational
+                                // asset may see it fall, be damaged, or stop
+                                // for repair while the work runs; none of
+                                // these strands it.
+                                FacilityProjectKind::Expand { capacity_after } => {
+                                    !matches!(
+                                        base.lifecycle,
+                                        FacilityLifecycle::Operational
+                                            | FacilityLifecycle::Degraded
+                                            | FacilityLifecycle::Damaged
+                                            | FacilityLifecycle::Repairing
+                                    ) || !is_facility_capacity_expansion(
+                                        &base.capacity,
+                                        capacity_after,
+                                    )
                                 }
                             }
                         {
@@ -3132,6 +3289,9 @@ impl ProductionState {
                         result.generation = project.resulting_generation;
                         result.lifecycle = FacilityLifecycle::Operational;
                         result.condition_per_mille = 1_000;
+                        if let FacilityProjectKind::Expand { capacity_after } = &project.kind {
+                            result.capacity.clone_from(capacity_after);
+                        }
                         project.resulting_asset = Some(result);
                         project.lifecycle = FacilityProjectLifecycle::Commissioning;
                         project.result_evidence_digest =
@@ -3235,25 +3395,50 @@ impl ProductionState {
                 facility.lifecycle = FacilityLifecycle::Retired;
                 facility.condition_per_mille = 0;
             }
+            ProductionOperation::RecordFacilityCondition {
+                facility,
+                expected_generation,
+                condition_after_per_mille,
+                lifecycle_after,
+                cause: _,
+                evidence,
+            } => {
+                self.facility_condition_admission(
+                    &envelope.holder,
+                    facility,
+                    *expected_generation,
+                    *condition_after_per_mille,
+                    *lifecycle_after,
+                    evidence,
+                )?;
+                let facility = self
+                    .facilities
+                    .get_mut(facility)
+                    .expect("condition facility was checked");
+                facility.condition_per_mille = *condition_after_per_mille;
+                facility.lifecycle = *lifecycle_after;
+            }
         }
         if let Some(site) = affected_site {
             self.mark_site_observation_dirty(&site)?;
         }
-        if let Some(facility) = affected_facility
-            && self.facilities.get(&facility).is_some_and(|asset| {
-                asset.incident_risk_per_mille > 0
-                    && asset.condition_per_mille > 0
-                    && matches!(
-                        asset.lifecycle,
-                        FacilityLifecycle::Operational
-                            | FacilityLifecycle::Degraded
-                            | FacilityLifecycle::Damaged
-                    )
-            })
-            && (self.incident_due_index.len() < self.limits.max_incidents_per_boundary
-                || self.incident_due_index.contains(&facility))
-        {
-            self.incident_due_index.insert(facility);
+        // The operation's facility joins the incident due index when it is
+        // eligible and the index has room, and leaves it whenever it is no
+        // longer eligible (a fall to 0, a stop for repair, a retirement).
+        if let Some(facility) = affected_facility {
+            if self
+                .facilities
+                .get(&facility)
+                .is_some_and(facility_is_incident_eligible)
+            {
+                if self.incident_due_index.len() < self.limits.max_incidents_per_boundary
+                    || self.incident_due_index.contains(&facility)
+                {
+                    self.incident_due_index.insert(facility);
+                }
+            } else {
+                self.incident_due_index.remove(&facility);
+            }
         }
         self.revision = self
             .revision
@@ -3405,6 +3590,48 @@ impl ProductionState {
         order.execution = Some(execution.id.clone());
         order.expected_revision += 1;
         self.validate_allocations()
+    }
+
+    /// Applies every rule of a facility condition record except the evidence
+    /// record lookup: the site holder, the expected generation, a standing
+    /// facility, no rise, the lifecycle of the damage line, a change, and a
+    /// well-formed binding. The plugin runs it before it resolves the cited
+    /// version, so a rejection does not reveal whether a record exists.
+    pub(crate) fn facility_condition_admission(
+        &self,
+        holder: &KnowledgeHolderRef,
+        facility_id: &FacilityAssetId,
+        expected_generation: u64,
+        condition_after: u16,
+        lifecycle_after: FacilityLifecycle,
+        evidence: &ProductionEvidenceBinding,
+    ) -> Result<(), CanwuError> {
+        let facility = self
+            .facilities
+            .get(facility_id)
+            .ok_or_else(|| invalid("condition facility is unavailable"))?;
+        if self
+            .sites
+            .get(&facility.site)
+            .is_none_or(|site| site.holder != *holder)
+            || facility.generation != expected_generation
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "facility condition record is unauthorized or stale",
+            ));
+        }
+        if !facility_condition_fall_is_admissible(facility, condition_after, lifecycle_after) {
+            return Err(invalid(
+                "facility condition record must lower or reclassify a standing facility's condition, without a rise, at the lifecycle of the damage line",
+            ));
+        }
+        if evidence.capability.trim().is_empty() || evidence.semantic_digest.trim().is_empty() {
+            return Err(invalid(
+                "facility condition evidence lacks its capability or semantic digest",
+            ));
+        }
+        Ok(())
     }
 
     /// Applies every completion admission rule except the evidence record
@@ -4311,16 +4538,7 @@ impl ProductionState {
         let eligible = self
             .facilities
             .values()
-            .filter(|facility| {
-                facility.incident_risk_per_mille > 0
-                    && facility.condition_per_mille > 0
-                    && matches!(
-                        facility.lifecycle,
-                        FacilityLifecycle::Operational
-                            | FacilityLifecycle::Degraded
-                            | FacilityLifecycle::Damaged
-                    )
-            })
+            .filter(|facility| facility_is_incident_eligible(facility))
             .map(|facility| facility.id.clone())
             .collect::<Vec<_>>();
         let maximum = self.limits.max_incidents_per_boundary;
@@ -4593,7 +4811,8 @@ impl ProductionState {
                 .facility_projects
                 .get(project)
                 .map(|project| project.site.clone()),
-            ProductionOperation::RetireFacility { facility, .. } => self
+            ProductionOperation::RetireFacility { facility, .. }
+            | ProductionOperation::RecordFacilityCondition { facility, .. } => self
                 .facilities
                 .get(facility)
                 .map(|facility| facility.site.clone()),
@@ -4606,7 +4825,10 @@ impl ProductionState {
                 Some(execution.facility.clone())
             }
             ProductionOperation::ResolveDegradedFacility { facility, .. }
-            | ProductionOperation::RetireFacility { facility, .. } => Some(facility.clone()),
+            | ProductionOperation::RetireFacility { facility, .. }
+            | ProductionOperation::RecordFacilityCondition { facility, .. } => {
+                Some(facility.clone())
+            }
             ProductionOperation::CreateFacilityProject { project } => {
                 Some(project.facility.clone())
             }
@@ -5063,6 +5285,60 @@ fn canonical_text(value: &str, label: &str) -> Result<(), CanwuError> {
         Err(invalid(format!("{label} is empty or over its byte bound")))
     } else {
         Ok(())
+    }
+}
+
+/// Whether a recorded condition fall to `condition_after` with
+/// `lifecycle_after` is admissible on `facility`: a standing facility, no
+/// rise, the lifecycle of [`FACILITY_DAMAGED_CONDITION_PER_MILLE`], no
+/// return to `Operational`, and a change of the condition or the lifecycle.
+/// Above the line a `Damaged` facility records `Degraded`.
+fn facility_condition_fall_is_admissible(
+    facility: &FacilityAsset,
+    condition_after: u16,
+    lifecycle_after: FacilityLifecycle,
+) -> bool {
+    let standing = matches!(
+        facility.lifecycle,
+        FacilityLifecycle::Operational | FacilityLifecycle::Degraded | FacilityLifecycle::Damaged
+    );
+    let lifecycle_matches_line = if condition_after <= FACILITY_DAMAGED_CONDITION_PER_MILLE {
+        lifecycle_after == FacilityLifecycle::Damaged
+    } else {
+        match lifecycle_after {
+            FacilityLifecycle::Operational => facility.lifecycle == FacilityLifecycle::Operational,
+            FacilityLifecycle::Degraded => true,
+            _ => false,
+        }
+    };
+    let changes =
+        condition_after != facility.condition_per_mille || lifecycle_after != facility.lifecycle;
+    standing && condition_after <= facility.condition_per_mille && lifecycle_matches_line && changes
+}
+
+/// Whether `facility` takes part in incident evaluation: a positive risk, a
+/// positive condition, and a standing lifecycle.
+fn facility_is_incident_eligible(facility: &FacilityAsset) -> bool {
+    facility.incident_risk_per_mille > 0
+        && facility.condition_per_mille > 0
+        && matches!(
+            facility.lifecycle,
+            FacilityLifecycle::Operational
+                | FacilityLifecycle::Degraded
+                | FacilityLifecycle::Damaged
+        )
+}
+
+/// Whether a project's resulting asset has the capacity its kind sets: an
+/// expansion's `capacity_after`. Any other kind keeps the source asset's
+/// capacity, which the source generation pins.
+pub(crate) fn project_result_capacity_is_valid(
+    project: &FacilityProject,
+    asset: &FacilityAsset,
+) -> bool {
+    match &project.kind {
+        FacilityProjectKind::Expand { capacity_after } => &asset.capacity == capacity_after,
+        FacilityProjectKind::Construction | FacilityProjectKind::Repair => true,
     }
 }
 

@@ -59,13 +59,13 @@ const INCIDENT_COMMIT_AUDIT_SYSTEM: &str = "production_incident_commit_audit_v1"
 const OUTPUT_DISPATCH_SYSTEM: &str = "production_output_dispatch_v1";
 const REPORT_SYSTEM: &str = "production_holder_report_publish_v1";
 const PRODUCTION_REPORT_KNOWLEDGE: &str = "holder_report";
-/// BLAKE3, lowercase hex, of `canwu-production 0.20.0 semantics: asset binding
-/// and application spec reads declared, cited record kinds checked before
-/// reading, pending output sources declared identity-only, report holders that
-/// cannot receive knowledge skipped` (one line, one space after each comma and
+/// BLAKE3, lowercase hex, of `canwu-production 0.24.0 semantics: facility
+/// condition falls recorded on current provider evidence, repair projects
+/// admitted on degraded and damaged facilities, expansion projects raise an
+/// operational facility's capacity` (one line, one space after each comma and
 /// colon).
 pub const PRODUCTION_SEMANTIC_HASH: &str =
-    "eded50444992d0a08392ecf601ab9b38954d244e65aa8f06f83ed3ef3f8f6d9e";
+    "c9cdf79722ec253f014c2a7862c35159d012b10d851fe6aa262d1803412b7afc";
 const REPORT_SCHEMA_HASH: &str = "2e84d66c85841a251a94aa15fa4fd477d29136ed31c8434c5dd61dc92156fdf8";
 static PRODUCTION_ARCHIVE_COMMIT_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static PRODUCTION_ARCHIVE_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
@@ -1863,7 +1863,7 @@ fn evaluate_incident_candidates(
                 expected_generation: facility.generation,
                 condition_before: facility.condition_per_mille,
                 condition_after,
-                lifecycle_after: if condition_after <= 250 {
+                lifecycle_after: if condition_after <= crate::FACILITY_DAMAGED_CONDITION_PER_MILLE {
                     crate::FacilityLifecycle::Damaged
                 } else {
                     crate::FacilityLifecycle::Degraded
@@ -2827,7 +2827,8 @@ fn operation_work_order(operation: &crate::ProductionOperation) -> Option<crate:
         | crate::ProductionOperation::AuthorizeFacilityProject { .. }
         | crate::ProductionOperation::AdvanceFacilityProject { .. }
         | crate::ProductionOperation::AcceptFacilityCommissioning { .. }
-        | crate::ProductionOperation::RetireFacility { .. } => None,
+        | crate::ProductionOperation::RetireFacility { .. }
+        | crate::ProductionOperation::RecordFacilityCondition { .. } => None,
     }
 }
 
@@ -3000,6 +3001,53 @@ fn validate_external_operation_evidence(
     }
     if let crate::ProductionOperation::CreateFacilityProject { project } = operation {
         validate_external_project_evidence(view, production, project)?;
+        return Ok(());
+    }
+    if let crate::ProductionOperation::RecordFacilityCondition {
+        facility,
+        expected_generation,
+        condition_after_per_mille,
+        lifecycle_after,
+        evidence,
+        ..
+    } = operation
+    {
+        // Holder, generation, and fall rules run first, so only an
+        // admissible record ever resolves its evidence record.
+        production.facility_condition_admission(
+            holder,
+            facility,
+            *expected_generation,
+            *condition_after_per_mille,
+            *lifecycle_after,
+            evidence,
+        )?;
+        // The provider record may be of any kind. As for realization
+        // evidence, only its current exact version is admitted, so a sealed
+        // run and its replay admit the same records; the current body is
+        // read through the administrative domain-record read.
+        if !view.domain_record_version_is_current(&evidence.version)? {
+            return Err(CanwuError::new(
+                ErrorCode::DomainRecordNotFound,
+                "facility condition evidence is not the current exact version of its record",
+            ));
+        }
+        let record = view
+            .domain_record(&evidence.version.record)?
+            .filter(|record| record.version == evidence.version.version)
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::EvidenceContentUnavailable,
+                    "facility condition evidence body is unavailable",
+                )
+            })?;
+        if evidence.semantic_digest
+            != canonical_hash("canwu.production.provider-evidence.v1", record)?
+        {
+            return Err(invalid(
+                "facility condition evidence digest differs from its exact record body",
+            ));
+        }
         return Ok(());
     }
     if let crate::ProductionOperation::AdvanceFacilityProject { project, .. } = operation {
