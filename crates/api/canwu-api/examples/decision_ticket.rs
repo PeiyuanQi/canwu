@@ -77,6 +77,7 @@ fn open_aid_request(canwu: &mut Canwu, ids: DemoIds) -> Result<(), Box<dyn std::
                     }],
                     deadline: Some(now + SimDuration::days(2)),
                     parent_ticket: None,
+                    custody_addressed: None,
                 },
             },
         ),

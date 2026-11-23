@@ -62,16 +62,16 @@ pub use canwu_decision::{
     DecisionArchiveReceipt, DecisionArchiveRecord, DecisionArchiveStore,
     DecisionArchiveStoreOutcome, DecisionAttemptErrorCode, DecisionAttemptOutcome,
     DecisionAttemptRecord, DecisionAuthority, DecisionContext, DecisionController,
-    DecisionControllerBinding, DecisionError, DecisionErrorCode, DecisionExternalEvidence,
-    DecisionFactorContribution, DecisionHistoryCursor, DecisionHistoryKey, DecisionHistoryLocation,
-    DecisionHistoryPage, DecisionHistoryQueryBudget, DecisionHotState, DecisionLocatorScaleMetrics,
-    DecisionMutation, DecisionOption, DecisionOptionEvaluation, DecisionOptionWeight,
-    DecisionOutcome, DecisionPolicy, DecisionPolicyIdentity, DecisionPolicyKind,
-    DecisionRandomEvidence, DecisionRule, DecisionStage, DecisionState, DecisionTicket,
-    DecisionTicketDraft, DecisionTicketState, DecisionTrace, ExternalDecisionOption,
-    ExternalDecisionRequest, ExternalDecisionResponse, ExternalPolicy, GuardedUtilityPolicy,
-    HumanDecisionResponse, HumanPolicy, LlmModelIdentity, LlmPolicy,
-    MAX_DECISION_ARCHIVE_BATCH_ENTRIES, MAX_DECISION_HISTORY_PAGE_BYTES,
+    DecisionControllerBinding, DecisionCustodyAddress, DecisionError, DecisionErrorCode,
+    DecisionExternalEvidence, DecisionFactorContribution, DecisionHistoryCursor,
+    DecisionHistoryKey, DecisionHistoryLocation, DecisionHistoryPage, DecisionHistoryQueryBudget,
+    DecisionHotState, DecisionLocatorScaleMetrics, DecisionMutation, DecisionOption,
+    DecisionOptionEvaluation, DecisionOptionWeight, DecisionOutcome, DecisionPolicy,
+    DecisionPolicyIdentity, DecisionPolicyKind, DecisionRandomEvidence, DecisionRule,
+    DecisionStage, DecisionState, DecisionTicket, DecisionTicketDraft, DecisionTicketState,
+    DecisionTrace, ExternalDecisionOption, ExternalDecisionRequest, ExternalDecisionResponse,
+    ExternalPolicy, GuardedUtilityPolicy, HumanDecisionResponse, HumanPolicy, LlmModelIdentity,
+    LlmPolicy, MAX_DECISION_ARCHIVE_BATCH_ENTRIES, MAX_DECISION_HISTORY_PAGE_BYTES,
     MAX_DECISION_HISTORY_PAGE_SIZE, OrderedRulePolicy, PersistentDecisionLog, PolicyDecision,
     PreparedDecisionArchive, QueuedExternalPolicy, QueuedHumanPolicy, QueuedLlmPolicy, RuleChoice,
     RulePolicy, TraceLocatorScaleMetrics, UtilityEvaluator, UtilityPolicy, UtilityProfile,
@@ -133,8 +133,9 @@ pub use persistence::{
 };
 pub use persons::{
     BoundaryCreatedPerson, BoundaryPersonAvailabilityChange, BoundaryPersonCreation,
-    CONTROLLER_AUTHORITY_UNAVAILABLE_REASON, CreatedPerson, CustodyState,
-    DECISION_MAKER_UNAVAILABLE_REASON, LifeState, PersonAvailability, PersonDraft, PersonPlacement,
+    CONTROLLER_AUTHORITY_UNAVAILABLE_REASON, CUSTODY_ENDED_REASON, CUSTODY_TRANSFERRED_REASON,
+    CreatedPerson, CustodyState, DECISION_MAKER_DEAD_REASON, DECISION_MAKER_UNAVAILABLE_REASON,
+    LifeState, PersonAvailability, PersonDraft, PersonPlacement,
 };
 pub use plugins::{
     MaintenanceDependencyResolverDescriptor, OwnerAuthorizedMaintenanceParticipant,
@@ -274,8 +275,12 @@ pub const ADMISSION_CURSOR_FORMAT_VERSION: u32 = 3;
 /// archive receipt root.
 ///
 /// Format 8 commits to decision state through `canwu.commitment.decisions.v4`,
-/// whose tickets' options carry a per-ticket bias. Format 7 is refused.
-pub const COMMITMENT_FORMAT_VERSION: u32 = 8;
+/// whose tickets' options carry a per-ticket bias.
+///
+/// Format 9 commits to decision state through `canwu.commitment.decisions.v5`,
+/// whose tickets may carry a custody address
+/// ([`DecisionTicket::custody_addressed`]). Format 8 is refused.
+pub const COMMITMENT_FORMAT_VERSION: u32 = 9;
 /// Maximum nested depth of the compatibility synchronous event-reactor path.
 ///
 /// New plugin mechanics should use phased boundary systems instead of relying

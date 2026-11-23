@@ -147,7 +147,10 @@ pub enum BoundaryDirective {
     /// controller's authority person ([`crate::ErrorCode::IssuerUnavailable`])
     /// is unavailable in the availability committed before this boundary. The
     /// authority person is the actor of an actor authority or the responsible
-    /// actor of an institution authority. Because the end-of-boundary sweep
+    /// actor of an institution authority. The decision maker of a
+    /// custody-addressed ticket counts as available, as decision maker and as
+    /// that authority person, while its custody holds, and as unavailable
+    /// once it does not. Because the end-of-boundary sweep
     /// and `Open` admission keep such tickets from staying open, this is a
     /// safeguard. Any availability change made in the same boundary does not
     /// fail the directive, because failing would roll the change back and
@@ -217,6 +220,17 @@ pub enum BoundaryDirective {
     /// reasons carries the decision-maker reason. The cancelled IDs are
     /// recorded in ticket-ID order on the boundary's
     /// [`crate::BoundaryPersonAvailabilityChange`].
+    ///
+    /// A custody-addressed ticket ([`crate::DecisionTicket::custody_addressed`])
+    /// is exempt from both cancellations while its decision maker stays alive
+    /// and `Captive` or `Detained` by the ticket's custodian. Any change that
+    /// ends that custody cancels it at the end of the same boundary, also a
+    /// change that makes the person available:
+    /// [`crate::DECISION_MAKER_DEAD_REASON`] when he dies,
+    /// [`crate::CUSTODY_ENDED_REASON`] when he is available,
+    /// [`crate::CUSTODY_TRANSFERRED_REASON`] when another custodian (or none)
+    /// holds him, and [`crate::DECISION_MAKER_UNAVAILABLE_REASON`] when he is
+    /// missing.
     SetPersonAvailability {
         person: PersonId,
         availability: PersonAvailability,

@@ -436,8 +436,10 @@ fn run_ordered_rules(
 /// In `canwu-sim`, a random resolution fails its boundary before any draw is
 /// committed when the ticket's person decision maker (`DecisionMakerUnavailable`)
 /// or its controller's authority person (`IssuerUnavailable`) is unavailable in
-/// the availability committed before that boundary. Any availability change
-/// made in the same boundary does not fail it: the draw is committed and the
+/// the availability committed before that boundary (a custody-addressed
+/// ticket's decision maker counts as available while its custody holds).
+/// Any availability change made in the same boundary does not fail it: the
+/// draw is committed and the
 /// end-of-boundary sweep cancels the ticket instead. Tie-break systems should
 /// skip tickets whose decision maker or controller authority person is
 /// unavailable, read through `SimulationView::person_availability` with

@@ -107,6 +107,7 @@ fn open(id: u64, maker: PersonId, desk: &str, deadline: Option<SimTime>) -> Deci
             options: vec![DecisionOption::new("seal", "Seal")],
             deadline,
             parent_ticket: None,
+            custody_addressed: None,
         },
     }
 }

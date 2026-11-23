@@ -6,11 +6,11 @@
 
 use super::{
     BoundaryPhase, BoundaryRecord, BoundarySystemContract, CanwuError, CommandAuthority,
-    DecisionAttemptErrorCode, DecisionAuthority, DecisionControllerBinding, DecisionMutation,
-    DecisionOrigin, DecisionState, DecisionTicket, DecisionTicketId, EntityRef, ErrorCode,
-    EvidenceRef, GovernmentId, Issuer, Person, PersonId, PluginRegistry, SimTime, Simulation,
-    SimulationSnapshot, StateKey, StateVisibility, TerritoryId, canonical_text, claim_counter,
-    invalid_snapshot, invalid_snapshot_error, runtime_entity_exists,
+    DecisionAttemptErrorCode, DecisionAuthority, DecisionControllerBinding, DecisionCustodyAddress,
+    DecisionMutation, DecisionOrigin, DecisionState, DecisionTicket, DecisionTicketId, EntityRef,
+    ErrorCode, EvidenceRef, GovernmentId, Issuer, Person, PersonId, PluginRegistry, SimTime,
+    Simulation, SimulationSnapshot, StateKey, StateVisibility, TerritoryId, canonical_text,
+    claim_counter, invalid_snapshot, invalid_snapshot_error, runtime_entity_exists,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -44,6 +44,30 @@ pub const DECISION_MAKER_UNAVAILABLE_REASON: &str = "decision_maker_unavailable"
 /// ticket stays cancelled, and the decision continues as a successor ticket
 /// for a different, available controller with `parent_ticket` naming it.
 pub const CONTROLLER_AUTHORITY_UNAVAILABLE_REASON: &str = "controller_authority_unavailable";
+
+/// Cancellation reason recorded on an open custody-addressed ticket
+/// ([`DecisionTicket::custody_addressed`]) whose decision maker is no longer
+/// in custody: a change leaves him alive and available.
+///
+/// Like the other custody reasons, it is applied at the end of the boundary
+/// that makes the change, and the IDs are recorded in
+/// [`BoundaryPersonAvailabilityChange::cancelled_custody_tickets`].
+pub const CUSTODY_ENDED_REASON: &str = "custody_ended";
+
+/// Cancellation reason recorded on an open custody-addressed ticket whose
+/// decision maker died ([`LifeState::Dead`]). It is distinct from
+/// [`DECISION_MAKER_UNAVAILABLE_REASON`], which an ordinary ticket of a dead
+/// decision maker carries. A custody-addressed ticket of a person who goes
+/// [`LifeState::Missing`] carries [`DECISION_MAKER_UNAVAILABLE_REASON`] and is
+/// listed in [`BoundaryPersonAvailabilityChange::cancelled_tickets`].
+pub const DECISION_MAKER_DEAD_REASON: &str = "decision_maker_dead";
+
+/// Cancellation reason recorded on an open custody-addressed ticket whose
+/// decision maker stays alive and `Captive` or `Detained` but is held by a
+/// custodian other than the ticket's
+/// ([`DecisionCustodyAddress::custodian`]), including one that names no
+/// custodian. The new custodian opens a ticket of his own.
+pub const CUSTODY_TRANSFERRED_REASON: &str = "custody_transferred";
 
 const MAX_PERSON_CORRELATION_BYTES: usize = 256;
 
@@ -111,6 +135,16 @@ impl PersonAvailability {
     pub const fn is_available(&self) -> bool {
         matches!(self.life, LifeState::Alive)
             && !matches!(self.custody, CustodyState::Detained | CustodyState::Captive)
+    }
+
+    /// Returns whether the person is alive and `Captive` or `Detained` by
+    /// exactly `custodian`: the custody a custody-addressed ticket
+    /// ([`DecisionCustodyAddress`]) is opened and kept in.
+    #[must_use]
+    pub fn is_held_by(&self, custodian: &EntityRef) -> bool {
+        matches!(self.life, LifeState::Alive)
+            && matches!(self.custody, CustodyState::Detained | CustodyState::Captive)
+            && self.custodian.as_ref() == Some(custodian)
     }
 }
 
@@ -239,9 +273,20 @@ pub struct BoundaryPersonAvailabilityChange {
     /// [`CONTROLLER_AUTHORITY_UNAVAILABLE_REASON`] because this person, the
     /// authority person of their assigned controller, became unavailable, in
     /// ticket-ID order. A ticket closed for its decision maker by any change
-    /// of the boundary is listed only in that change's `cancelled_tickets`.
+    /// of the boundary is listed only in that change's `cancelled_tickets`
+    /// or `cancelled_custody_tickets`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cancelled_controller_tickets: Vec<DecisionTicketId>,
+    /// Open custody-addressed tickets of this person, their decision maker,
+    /// closed in the same boundary because the custody they were addressed
+    /// in no longer holds, in ticket-ID order. All carry one reason, chosen
+    /// by the new availability: [`DECISION_MAKER_DEAD_REASON`] when he is
+    /// dead, [`CUSTODY_ENDED_REASON`] when he is available, and otherwise
+    /// [`CUSTODY_TRANSFERRED_REASON`] for each ticket whose custodian is not
+    /// his new one. A missing person's custody-addressed tickets are listed
+    /// in `cancelled_tickets` instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cancelled_custody_tickets: Vec<DecisionTicketId>,
 }
 
 /// Committed person-creation evidence in a boundary record.
@@ -600,15 +645,81 @@ fn controller_issuer_message(controller: &str, person: PersonId) -> String {
     )
 }
 
+fn custody_address_message(person: PersonId, address: &DecisionCustodyAddress) -> String {
+    format!(
+        "custody-addressed decision maker person {person} is not alive and captive or detained by {}",
+        address.custodian
+    )
+}
+
+/// Whether the custody a ticket is addressed in holds for `person` in
+/// `availability`. Absent availability is a free person, so it never holds.
+fn custody_holds<A: AvailabilityLookup + ?Sized>(
+    availability: &A,
+    person: PersonId,
+    address: &DecisionCustodyAddress,
+) -> bool {
+    availability
+        .availability_of(person)
+        .is_some_and(|value| value.is_held_by(&address.custodian))
+}
+
+/// The person a custody-addressed ticket exempts from the availability
+/// gates: its decision maker, while the custody it is addressed in holds.
+fn custody_exempt_person<A: AvailabilityLookup + ?Sized>(
+    availability: &A,
+    ticket: &DecisionTicket,
+) -> Option<PersonId> {
+    match (&ticket.decision_maker, &ticket.custody_addressed) {
+        (EntityRef::Person(person), Some(address))
+            if custody_holds(availability, *person, address) =>
+        {
+            Some(*person)
+        }
+        _ => None,
+    }
+}
+
+/// Refusal of a custody-addressed `Open` whose custody does not hold: a
+/// person who is not alive is unavailable, and one alive but free or held
+/// by another custodian is an invalid address.
+fn custody_open_error<A: AvailabilityLookup + ?Sized>(
+    availability: &A,
+    person: PersonId,
+    address: &DecisionCustodyAddress,
+) -> Option<(DecisionAttemptErrorCode, String)> {
+    if custody_holds(availability, person, address) {
+        return None;
+    }
+    let alive = availability
+        .availability_of(person)
+        .is_none_or(|value| value.life == LifeState::Alive);
+    Some(if alive {
+        (
+            DecisionAttemptErrorCode::InvalidDecision,
+            custody_address_message(person, address),
+        )
+    } else {
+        (
+            DecisionAttemptErrorCode::DecisionMakerUnavailable,
+            decision_maker_message(person),
+        )
+    })
+}
+
+/// Refuses a controller whose authority person is unavailable, unless that
+/// person is `exempt`: the decision maker of a custody-addressed ticket whose
+/// custody holds, who answers his captor through his own controller.
 fn controller_authority_availability_error<A: AvailabilityLookup + ?Sized>(
     decisions: &DecisionState,
     controller_id: &str,
     availability: &A,
+    exempt: Option<PersonId>,
 ) -> Option<(DecisionAttemptErrorCode, String)> {
     decisions
         .controller(controller_id)
         .and_then(|controller| authority_person(&controller.authority))
-        .filter(|person| !person_is_available(availability, *person))
+        .filter(|person| Some(*person) != exempt && !person_is_available(availability, *person))
         .map(|person| {
             (
                 DecisionAttemptErrorCode::IssuerUnavailable,
@@ -626,26 +737,66 @@ fn controller_authority_availability_error<A: AvailabilityLookup + ?Sized>(
 /// refuses, for the same reason, a new controller whose authority person is
 /// unavailable. `Resolve` refuses a controller whose authority person is
 /// unavailable.
+///
+/// A custody-addressed `Open` (`DecisionTicketDraft::custody_addressed`)
+/// instead requires its person decision maker to be alive and `Captive` or
+/// `Detained` by the ticket's custodian: one who is not alive is refused with
+/// `DecisionMakerUnavailable`, one alive but free or held by another with
+/// `InvalidDecision`. While that custody holds, the controller-authority
+/// check of `Open`, `Reassign`, and `Resolve` does not count the decision
+/// maker himself as an unavailable authority person; any other unavailable
+/// authority person is refused as for an ordinary ticket.
 pub(super) fn decision_mutation_availability_error<A: AvailabilityLookup + ?Sized>(
     mutation: &DecisionMutation,
     decisions: &DecisionState,
     availability: &A,
 ) -> Option<(DecisionAttemptErrorCode, String)> {
     match mutation {
-        DecisionMutation::Open { ticket } => match ticket.decision_maker {
-            EntityRef::Person(person) if !person_is_available(availability, person) => Some((
-                DecisionAttemptErrorCode::DecisionMakerUnavailable,
-                decision_maker_message(person),
-            )),
-            _ => controller_authority_availability_error(
-                decisions,
-                &ticket.assigned_controller,
-                availability,
-            ),
-        },
-        DecisionMutation::Resolve { controller_id, .. }
-        | DecisionMutation::Reassign { controller_id, .. } => {
-            controller_authority_availability_error(decisions, controller_id, availability)
+        DecisionMutation::Open { ticket } => {
+            match (&ticket.decision_maker, &ticket.custody_addressed) {
+                (EntityRef::Person(person), Some(address)) => {
+                    custody_open_error(availability, *person, address).or_else(|| {
+                        controller_authority_availability_error(
+                            decisions,
+                            &ticket.assigned_controller,
+                            availability,
+                            Some(*person),
+                        )
+                    })
+                }
+                (EntityRef::Person(person), None)
+                    if !person_is_available(availability, *person) =>
+                {
+                    Some((
+                        DecisionAttemptErrorCode::DecisionMakerUnavailable,
+                        decision_maker_message(*person),
+                    ))
+                }
+                // A custody address on a non-person decision maker is left to
+                // draft validation, which refuses it with `InvalidDecision`.
+                (_, Some(_)) => None,
+                _ => controller_authority_availability_error(
+                    decisions,
+                    &ticket.assigned_controller,
+                    availability,
+                    None,
+                ),
+            }
+        }
+        DecisionMutation::Resolve {
+            ticket_id,
+            controller_id,
+            ..
+        }
+        | DecisionMutation::Reassign {
+            ticket_id,
+            controller_id,
+            ..
+        } => {
+            let exempt = decisions
+                .ticket(*ticket_id)
+                .and_then(|ticket| custody_exempt_person(availability, ticket));
+            controller_authority_availability_error(decisions, controller_id, availability, exempt)
         }
         DecisionMutation::RegisterController { .. }
         | DecisionMutation::ReplaceOptions { .. }
@@ -656,21 +807,33 @@ pub(super) fn decision_mutation_availability_error<A: AvailabilityLookup + ?Size
 
 /// Availability guard for resolving one ticket through its controller, used
 /// by host decision preparation and by boundary random decision resolutions.
+///
+/// A custody-addressed ticket is prepared while its custody holds, and its
+/// decision maker is then not an unavailable authority person of its
+/// controller; once the custody no longer holds it is refused with
+/// `DecisionMakerUnavailable`, as the sweep at the end of the changing
+/// boundary will cancel it.
 pub(super) fn validate_decision_preparation<A: AvailabilityLookup + ?Sized>(
     availability: &A,
     ticket: &DecisionTicket,
     controller: &DecisionControllerBinding,
 ) -> Result<(), CanwuError> {
+    let exempt = custody_exempt_person(availability, ticket);
     if let EntityRef::Person(person) = ticket.decision_maker
-        && !person_is_available(availability, person)
+        && exempt.is_none()
+        && (ticket.custody_addressed.is_some() || !person_is_available(availability, person))
     {
-        return Err(CanwuError::new(
-            ErrorCode::DecisionMakerUnavailable,
-            decision_maker_message(person),
-        )
-        .with_entity(EntityRef::Person(person)));
+        let message = match &ticket.custody_addressed {
+            Some(address) => custody_address_message(person, address),
+            None => decision_maker_message(person),
+        };
+        return Err(
+            CanwuError::new(ErrorCode::DecisionMakerUnavailable, message)
+                .with_entity(EntityRef::Person(person)),
+        );
     }
     if let Some(person) = authority_person(&controller.authority)
+        && Some(person) != exempt
         && !person_is_available(availability, person)
     {
         return Err(CanwuError::new(
@@ -714,14 +877,21 @@ pub(super) fn cancel_open_tickets(
 
 /// End-of-boundary sweep shared by the runtime and snapshot reconstruction.
 ///
-/// For every change that leaves its person unavailable, first cancels the
-/// open tickets whose decision maker is that person
-/// ([`DECISION_MAKER_UNAVAILABLE_REASON`]); then, for every such change,
-/// cancels the remaining open tickets whose assigned controller's authority
-/// person is that person ([`CONTROLLER_AUTHORITY_UNAVAILABLE_REASON`]). The
-/// decision-maker pass runs for all changes first, so a ticket that qualifies
-/// for both reasons carries the decision-maker reason. Both lists are
-/// rewritten on every change, in ticket-ID order.
+/// First, for every change, the decision-maker pass. When the change leaves
+/// its person unavailable it cancels the open ordinary tickets whose decision
+/// maker is that person ([`DECISION_MAKER_UNAVAILABLE_REASON`]), and also his
+/// custody-addressed ones when he is missing. It then cancels his open
+/// custody-addressed tickets whose custody no longer holds, also on a change
+/// that leaves him available: [`DECISION_MAKER_DEAD_REASON`],
+/// [`CUSTODY_ENDED_REASON`], or [`CUSTODY_TRANSFERRED_REASON`]. Then, for
+/// every change that leaves its person unavailable, the controller-authority
+/// pass cancels the remaining open tickets whose assigned controller's
+/// authority person is that person
+/// ([`CONTROLLER_AUTHORITY_UNAVAILABLE_REASON`]), except his own
+/// custody-addressed tickets, which the first pass kept because their
+/// custody holds. The decision-maker pass runs for all changes first, so a
+/// ticket that qualifies for both passes carries the decision-maker pass's
+/// reason. The three lists are rewritten on every change, in ticket-ID order.
 pub(super) fn sweep_unavailable_person_tickets(
     decisions: &mut DecisionState,
     changes: &mut [BoundaryPersonAvailabilityChange],
@@ -729,29 +899,67 @@ pub(super) fn sweep_unavailable_person_tickets(
 ) -> Result<(), CanwuError> {
     for change in changes.iter_mut() {
         let maker = EntityRef::Person(change.person);
-        change.cancelled_tickets = if change.availability.is_available() {
+        let availability = &change.availability;
+        change.cancelled_tickets = if availability.is_available() {
             Vec::new()
         } else {
+            let missing = availability.life == LifeState::Missing;
             cancel_open_tickets(
                 decisions,
-                |_, ticket| ticket.decision_maker == maker,
+                |_, ticket| {
+                    ticket.decision_maker == maker
+                        && (missing || ticket.custody_addressed.is_none())
+                },
                 DECISION_MAKER_UNAVAILABLE_REASON,
                 at,
             )?
         };
+        // The custody pass scans hot history, so it runs only for a person
+        // whose open tickets (read through the decision-maker index) include
+        // a custody-addressed one.
+        let reason = match availability.life {
+            LifeState::Missing => None,
+            _ if !decisions
+                .open_tickets_of_decision_maker(&maker)
+                .any(|ticket| ticket.custody_addressed.is_some()) =>
+            {
+                None
+            }
+            LifeState::Dead => Some(DECISION_MAKER_DEAD_REASON),
+            LifeState::Alive if availability.is_available() => Some(CUSTODY_ENDED_REASON),
+            LifeState::Alive => Some(CUSTODY_TRANSFERRED_REASON),
+        };
+        let Some(reason) = reason else {
+            change.cancelled_custody_tickets = Vec::new();
+            continue;
+        };
+        change.cancelled_custody_tickets = cancel_open_tickets(
+            decisions,
+            |_, ticket| {
+                ticket.decision_maker == maker
+                    && ticket
+                        .custody_addressed
+                        .as_ref()
+                        .is_some_and(|address| !availability.is_held_by(&address.custodian))
+            },
+            reason,
+            at,
+        )?;
     }
     for change in changes.iter_mut() {
         let person = change.person;
+        let maker = EntityRef::Person(person);
         change.cancelled_controller_tickets = if change.availability.is_available() {
             Vec::new()
         } else {
             cancel_open_tickets(
                 decisions,
                 |decisions, ticket| {
-                    decisions
-                        .controller(&ticket.assigned_controller)
-                        .and_then(|controller| authority_person(&controller.authority))
-                        == Some(person)
+                    !(ticket.custody_addressed.is_some() && ticket.decision_maker == maker)
+                        && decisions
+                            .controller(&ticket.assigned_controller)
+                            .and_then(|controller| authority_person(&controller.authority))
+                            == Some(person)
                 },
                 CONTROLLER_AUTHORITY_UNAVAILABLE_REASON,
                 at,
@@ -846,27 +1054,34 @@ impl Simulation {
             summary,
             cancelled_tickets: Vec::new(),
             cancelled_controller_tickets: Vec::new(),
+            cancelled_custody_tickets: Vec::new(),
         })
     }
 
     /// Closes, at the end of the boundary and after random-decision ingress is
     /// materialized, every open ticket whose person decision maker or whose
     /// assigned controller's authority person became unavailable in this
-    /// boundary. The IDs are recorded on each change.
+    /// boundary, and every custody-addressed ticket whose custody no longer
+    /// holds. The IDs are recorded on each change.
     pub(super) fn cancel_unavailable_person_tickets(
         &mut self,
         changes: &mut [BoundaryPersonAvailabilityChange],
     ) -> Result<(), CanwuError> {
-        if changes
-            .iter()
-            .all(|change| change.availability.is_available())
-        {
+        let decisions = &self.state.current.decisions;
+        if changes.iter().all(|change| {
+            change.availability.is_available()
+                && decisions
+                    .open_tickets_of_decision_maker(&EntityRef::Person(change.person))
+                    .all(|ticket| ticket.custody_addressed.is_none())
+        }) {
             return Ok(());
         }
         let mut decisions = self.state.current.decisions.clone();
         sweep_unavailable_person_tickets(&mut decisions, changes, self.state.scheduler.now)?;
         if changes.iter().any(|change| {
-            !change.cancelled_tickets.is_empty() || !change.cancelled_controller_tickets.is_empty()
+            !change.cancelled_tickets.is_empty()
+                || !change.cancelled_controller_tickets.is_empty()
+                || !change.cancelled_custody_tickets.is_empty()
         }) {
             self.invalidate_commitments(super::CommitmentDomains::DECISIONS);
             self.state.current.decisions = decisions;
@@ -1192,6 +1407,7 @@ pub(super) fn validate_snapshot_persons(
                 || [
                     &change.cancelled_tickets,
                     &change.cancelled_controller_tickets,
+                    &change.cancelled_custody_tickets,
                 ]
                 .into_iter()
                 .any(|tickets| tickets.windows(2).any(|pair| pair[0] >= pair[1]))

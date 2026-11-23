@@ -79,6 +79,7 @@ pub fn correspondence_decision_ticket(
         options: vec![decline, send],
         deadline,
         parent_ticket: None,
+        custody_addressed: None,
     })
 }
 
@@ -114,5 +115,6 @@ pub fn correspondence_recovery_decision_ticket(
         options: vec![defer, apply],
         deadline,
         parent_ticket: None,
+        custody_addressed: None,
     })
 }

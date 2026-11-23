@@ -56,6 +56,7 @@ fn utility_decision_is_persisted_and_exactly_replayed_without_rerunning_policy()
                 }],
                 deadline: None,
                 parent_ticket: None,
+                custody_addressed: None,
             },
         },
     );
@@ -293,6 +294,7 @@ fn conflicting_decision_mutations_are_persisted_rejections_without_poisoning_the
                         options: vec![DecisionOption::new("decline", "Decline")],
                         deadline: None,
                         parent_ticket: None,
+                        custody_addressed: None,
                     },
                 },
             ),
@@ -378,6 +380,7 @@ fn deferred_ticket_expires_at_its_deadline_in_live_and_restored_runs() {
                     options: vec![DecisionOption::new("decline", "Decline")],
                     deadline: Some(deadline),
                     parent_ticket: None,
+                    custody_addressed: None,
                 },
             },
         ),
@@ -503,6 +506,7 @@ fn decision_and_command_request_ids_fail_closed_before_persistence() {
                 }],
                 deadline: None,
                 parent_ticket: None,
+                custody_addressed: None,
             },
         },
     ] {

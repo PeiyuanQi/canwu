@@ -184,6 +184,7 @@ fn random_policy_resolution_is_generated_replayable_and_tamper_evident() {
                         ],
                         deadline: None,
                         parent_ticket: None,
+                        custody_addressed: None,
                     },
                 },
             ),

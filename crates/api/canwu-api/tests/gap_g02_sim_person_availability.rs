@@ -167,6 +167,7 @@ fn ticket_for_commander(id: u64) -> DecisionTicketDraft {
         options: vec![DecisionOption::new("hold", "Hold the line")],
         deadline: None,
         parent_ticket: None,
+        custody_addressed: None,
     }
 }
 

@@ -52,6 +52,7 @@ fn seat_draft(
         }],
         deadline: None,
         parent_ticket: parent.map(DecisionTicketId::new),
+        custody_addressed: None,
     }
 }
 

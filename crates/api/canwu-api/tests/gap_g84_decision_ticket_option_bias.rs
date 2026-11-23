@@ -56,6 +56,7 @@ fn draft(id: u64, options: Vec<DecisionOption>) -> DecisionTicketDraft {
         options,
         deadline: None,
         parent_ticket: None,
+        custody_addressed: None,
     }
 }
 

@@ -1200,6 +1200,7 @@ pub fn degraded_facility_decision_ticket_in_root<H: canwu_api::CanwuRun + ?Sized
         options,
         deadline,
         parent_ticket: None,
+        custody_addressed: None,
     })
 }
 
