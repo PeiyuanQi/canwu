@@ -492,6 +492,11 @@ pub struct ResourceAccount {
     pub resource_revision: ResourceDefinitionRevisionId,
     pub unit_revision: ResourceUnitRevisionId,
     pub balance: u64,
+    /// The most the account may hold, `None` for no bound. A credit above it
+    /// is refused. Set when the account is created; afterwards only the host
+    /// application changes it, with
+    /// [`crate::ResourceOperationRequestV1::SetAccountCapacity`] queued
+    /// through [`crate::enqueue_resource_account_capacity`].
     pub capacity: Option<u64>,
     pub protected_floor_policy: Option<ProtectedFloorPolicyRevisionId>,
     pub closed: bool,
@@ -1125,6 +1130,9 @@ pub enum ResourceOperationKind {
     /// The host application changes an account's place scope
     /// ([`crate::ResourceOperationRequestV1::RescopeAccount`]).
     RescopeAccount,
+    /// The host application changes an account's capacity
+    /// ([`crate::ResourceOperationRequestV1::SetAccountCapacity`]).
+    SetAccountCapacity,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1240,10 +1248,10 @@ impl ResourceOperationOutcome {
                 ResourceOperationKind::AdvanceTransfer => evidence_count == 1,
                 // A production credit keeps its source and an external
                 // inflow its evidence; a rescope keeps the evidence of the
-                // move.
-                ResourceOperationKind::Credit | ResourceOperationKind::RescopeAccount => {
-                    evidence_count == 1
-                }
+                // move, and a capacity change the evidence of the works.
+                ResourceOperationKind::Credit
+                | ResourceOperationKind::RescopeAccount
+                | ResourceOperationKind::SetAccountCapacity => evidence_count == 1,
                 ResourceOperationKind::Loss => evidence_count <= 1,
                 ResourceOperationKind::BeginExchange | ResourceOperationKind::RevokeAccessGrant => {
                     evidence_count == 0
@@ -1345,7 +1353,8 @@ fn result_ref_matches_kind(
         | ResourceOperationKind::Observation
         | ResourceOperationKind::IssueAccessGrant
         | ResourceOperationKind::RevokeAccessGrant
-        | ResourceOperationKind::RescopeAccount => result_ref.is_none(),
+        | ResourceOperationKind::RescopeAccount
+        | ResourceOperationKind::SetAccountCapacity => result_ref.is_none(),
         ResourceOperationKind::Credit | ResourceOperationKind::ExternalOutflow => {
             result_ref.is_none()
         }

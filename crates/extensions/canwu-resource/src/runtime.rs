@@ -20,10 +20,12 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Format of the resource root ([`ResourceState`]). 6 since 0.20.0: the live
-/// root declares identity-only evidence dependencies
+/// Format of the resource root ([`ResourceState`]). 7 since 0.24.0: an
+/// outcome may be of kind [`crate::ResourceOperationKind::SetAccountCapacity`],
+/// and an account's capacity may change after it is created. 6 (0.20.0): the
+/// live root declares identity-only evidence dependencies
 /// (`canwu_identity_evidence_dependencies`), and so does each bucket.
-pub const RESOURCE_STATE_FORMAT_VERSION: u32 = 6;
+pub const RESOURCE_STATE_FORMAT_VERSION: u32 = 7;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceAllocationRequestV1 {
@@ -574,6 +576,46 @@ pub struct ResourceRescopeAccountRequestV1 {
     pub evidence: DomainRecordVersionRef,
 }
 
+/// The host application changes the capacity of one open account: a store
+/// was enlarged, or lost room. `capacity_after` is the account's new
+/// [`crate::ResourceAccount::capacity`], `None` for no capacity at all.
+///
+/// Only the host application sends it, through
+/// [`crate::enqueue_resource_account_capacity`]; a tracked command, an
+/// adapter packet, or a packet another plugin schedules cannot carry it. Like
+/// [`ResourceRescopeAccountRequestV1`], it needs no completion lease, leaves
+/// one `SetAccountCapacity` outcome that keeps `evidence` (the record of the
+/// works that changed the store, for example) as its exact evidence, and
+/// advances the account revision. The evidence must be its record's current
+/// version when the operation settles, read from the current-version index,
+/// and of one of the adapter evidence kinds the resource plugin was
+/// configured with.
+///
+/// It is admitted when `capacity_after` holds the account's balance. Reserved
+/// stock and the stock a protected floor keeps are part of the balance, so
+/// they always fit. A lowering (a capacity below the current one, or any
+/// capacity on an account without one) must also leave room for the escrow of
+/// every open transfer that names the account as source or destination, so
+/// the account keeps room for any stock in flight that an acceptance or a
+/// return could still credit to it (another credit may still fill that room
+/// first, as before). A rise, or the same capacity, needs only the balance. A
+/// capacity below what it must hold is the recorded rejection
+/// `capacity_exceeded`; a stale account revision and a completion lease that
+/// locks the account's current revision are recorded rejections too. A
+/// closed account is refused as `invalid_lifecycle`, unlike a rescope:
+/// only an open account's capacity changes. Reservations, demands, access
+/// grants and the protected floor carry over unchanged.
+/// [`ResourceState::apply_operation`] has no simulation view, so a detached
+/// root does not read the evidence; the resource plugin does.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceSetAccountCapacityRequestV1 {
+    pub operation_key: ResourceOperationKey,
+    pub account: ResourceAccountId,
+    pub expected_account_revision: ResourceRevision,
+    pub capacity_after: Option<u64>,
+    pub evidence: DomainRecordVersionRef,
+}
+
 /// Points one account at a protected-floor policy revision, or at none.
 ///
 /// A tracked command must come from the account's custodian; an access grant
@@ -867,6 +909,9 @@ pub enum ResourceOperationRequestV1 {
     /// The host application's change of an account's place scope; see
     /// [`ResourceRescopeAccountRequestV1`].
     RescopeAccount(ResourceRescopeAccountRequestV1),
+    /// The host application's change of an account's capacity; see
+    /// [`ResourceSetAccountCapacityRequestV1`].
+    SetAccountCapacity(ResourceSetAccountCapacityRequestV1),
 }
 
 impl ResourceOperationRequestV1 {
@@ -876,6 +921,7 @@ impl ResourceOperationRequestV1 {
             Self::RecordLoss(value) => value.operation_key.clone(),
             Self::RecordTransferLoss(value) => value.operation_key.clone(),
             Self::RescopeAccount(value) => value.operation_key.clone(),
+            Self::SetAccountCapacity(value) => value.operation_key.clone(),
             Self::BeginExchange(value) => value.operation_key.clone(),
             Self::IssueAccessGrant(value) => value.operation_key.clone(),
             Self::RevokeAccessGrant(value) => value.operation_key.clone(),
@@ -918,6 +964,7 @@ impl ResourceOperationRequestV1 {
             Self::Completion(_) => ResourceOperationKind::CompletionLease,
             Self::RecordLoss(_) | Self::RecordTransferLoss(_) => ResourceOperationKind::Loss,
             Self::RescopeAccount(_) => ResourceOperationKind::RescopeAccount,
+            Self::SetAccountCapacity(_) => ResourceOperationKind::SetAccountCapacity,
             Self::BeginExchange(_) => ResourceOperationKind::BeginExchange,
             Self::IssueAccessGrant(_) => ResourceOperationKind::IssueAccessGrant,
             Self::RevokeAccessGrant(_) => ResourceOperationKind::RevokeAccessGrant,
@@ -1012,7 +1059,8 @@ impl ResourceOperationRequestV1 {
             | Self::Completion(_)
             | Self::IssueAccessGrant(_)
             | Self::RevokeAccessGrant(_)
-            | Self::RescopeAccount(_) => Vec::new(),
+            | Self::RescopeAccount(_)
+            | Self::SetAccountCapacity(_) => Vec::new(),
         }
     }
 
@@ -2006,8 +2054,9 @@ impl ResourceState {
     /// plugin found against the simulation view, as its recorded rejection.
     /// A lease start (an archived outcome that took its identity, or a report
     /// holder that cannot receive knowledge), an external participant grant
-    /// (a report holder that cannot receive knowledge), an account rescope
-    /// (evidence that is not current or not of an adapter evidence kind), an
+    /// (a report holder that cannot receive knowledge), an account rescope or
+    /// a capacity change (evidence that is not current or not of an adapter
+    /// evidence kind), an
     /// observation head (a source that is not current or not of a kind the
     /// plugin reads), and an operation that redeems a completion lease (a
     /// loss identity an archived loss took, or a lease a tracked command may
@@ -2503,8 +2552,8 @@ impl ResourceState {
         // What the plugin found about an operation that redeems a completion
         // lease and that the root alone cannot tell (a loss identity an
         // archived loss took, or a lease a tracked command may not redeem)
-        // refuses it before its own checks. A completion operation and a
-        // rescope read their refusal themselves.
+        // refuses it before its own checks. A completion operation, a
+        // rescope, or a capacity change reads its refusal itself.
         if let Some(refusal) = external_refusal
             && !request.completion_certificates().is_empty()
         {
@@ -2558,6 +2607,9 @@ impl ResourceState {
             }
             ResourceOperationRequestV1::RescopeAccount(value) => {
                 self.rescope_account(value, external_refusal)
+            }
+            ResourceOperationRequestV1::SetAccountCapacity(value) => {
+                self.set_account_capacity(value, external_refusal)
             }
         }
     }
@@ -4822,16 +4874,7 @@ impl ResourceState {
                     .to_owned(),
             ));
         }
-        let current = CompletionLockedTargetV1::Account {
-            id: request.account.clone(),
-            revision: account.revision,
-        };
-        if self.completion_leases.target_locks.contains_key(&current)
-            || self
-                .external_completion_participants
-                .target_locks
-                .contains_key(&current)
-        {
+        if self.account_revision_is_lease_locked(&request.account, account.revision) {
             return Err(ResourceError::InvalidLifecycle(
                 "a resource account is not rescoped while a completion lease locks its current revision"
                     .to_owned(),
@@ -4845,6 +4888,101 @@ impl ResourceState {
             .get_mut(&request.account)
             .expect("checked above");
         account.place_scope.clone_from(&request.place_scope);
+        account.revision = account.revision.next()?;
+        Ok(AppliedOperation {
+            quantity: 0,
+            remainder: 0,
+            result_ref: None,
+            exact_evidence: vec![request.evidence.clone()],
+        })
+    }
+
+    /// Whether a completion lease, the resource plugin's or an external
+    /// participant's, locks `account` at `revision`.
+    fn account_revision_is_lease_locked(
+        &self,
+        account: &ResourceAccountId,
+        revision: ResourceRevision,
+    ) -> bool {
+        let current = CompletionLockedTargetV1::Account {
+            id: account.clone(),
+            revision,
+        };
+        self.completion_leases.target_locks.contains_key(&current)
+            || self
+                .external_completion_participants
+                .target_locks
+                .contains_key(&current)
+    }
+
+    /// Changes an open account's capacity: the host application's operation
+    /// ([`ResourceSetAccountCapacityRequestV1`]). `external_refusal` is what
+    /// the plugin found against the simulation view about the evidence,
+    /// checked after the root's own refusals; a detached caller passes none.
+    fn set_account_capacity(
+        &mut self,
+        request: &ResourceSetAccountCapacityRequestV1,
+        external_refusal: Option<&ResourceError>,
+    ) -> Result<AppliedOperation, ResourceError> {
+        let account = self
+            .accounts
+            .get(&request.account)
+            .ok_or_else(|| ResourceError::NotFound("resource account is unavailable".to_owned()))?;
+        if account.revision != request.expected_account_revision {
+            return Err(ResourceError::VersionConflict(
+                "resource account capacity change expected a stale account revision".to_owned(),
+            ));
+        }
+        if account.closed {
+            return Err(ResourceError::InvalidLifecycle(
+                "a closed resource account's capacity is not changed".to_owned(),
+            ));
+        }
+        if let Some(capacity) = request.capacity_after {
+            if capacity < account.balance {
+                return Err(ResourceError::Capacity(
+                    "resource account capacity would be below its balance".to_owned(),
+                ));
+            }
+            // A lowering keeps room for the escrow of every open transfer
+            // that names the account as source or destination. The live root
+            // holds every such transfer.
+            let lowers = account.capacity.is_none_or(|current| capacity < current);
+            if lowers {
+                let in_flight = self
+                    .active_transfers
+                    .iter()
+                    .filter_map(|id| self.transfers.get(id))
+                    .filter(|transfer| {
+                        transfer.source == request.account
+                            || transfer.destination.as_ref() == Some(&request.account)
+                    })
+                    .try_fold(u128::from(account.balance), |total, transfer| {
+                        total.checked_add(u128::from(transfer.escrow))
+                    })
+                    .ok_or(ResourceError::Overflow)?;
+                if u128::from(capacity) < in_flight {
+                    return Err(ResourceError::Capacity(
+                        "resource account capacity would leave no room for the escrow of its open transfers"
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+        if self.account_revision_is_lease_locked(&request.account, account.revision) {
+            return Err(ResourceError::InvalidLifecycle(
+                "a resource account's capacity is not changed while a completion lease locks its current revision"
+                    .to_owned(),
+            ));
+        }
+        if let Some(refusal) = external_refusal {
+            return Err(refusal.clone());
+        }
+        let account = self
+            .accounts
+            .get_mut(&request.account)
+            .expect("checked above");
+        account.capacity = request.capacity_after;
         account.revision = account.revision.next()?;
         Ok(AppliedOperation {
             quantity: 0,
@@ -5646,7 +5784,8 @@ impl ResourceState {
             | ResourceOperationRequestV1::RecordObservation(_)
             | ResourceOperationRequestV1::IssueAccessGrant(_)
             | ResourceOperationRequestV1::RevokeAccessGrant(_)
-            | ResourceOperationRequestV1::RescopeAccount(_) => false,
+            | ResourceOperationRequestV1::RescopeAccount(_)
+            | ResourceOperationRequestV1::SetAccountCapacity(_) => false,
         }
     }
 
@@ -7535,7 +7674,8 @@ fn request_remainder(state: &ResourceState, request: &ResourceOperationRequestV1
         | ResourceOperationRequestV1::Completion(_)
         | ResourceOperationRequestV1::BeginExchange(_)
         | ResourceOperationRequestV1::RevokeAccessGrant(_)
-        | ResourceOperationRequestV1::RescopeAccount(_) => 0,
+        | ResourceOperationRequestV1::RescopeAccount(_)
+        | ResourceOperationRequestV1::SetAccountCapacity(_) => 0,
         ResourceOperationRequestV1::IssueAccessGrant(value) => value.grant.cap_quantity,
     }
 }
