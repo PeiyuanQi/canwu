@@ -279,6 +279,33 @@ The exchange has no certificate of its own. After the start, the two transfers s
 - The terminal certificate locks the exact handover record. As a tracked command, `AcceptLocal` must come from the destination custodian; through adapter ingress, the handover record must be the provider's source.
 - Both legs of an exchange may be accepted locally against one handover record, but not in one boundary: the first leg's terminal certificate locks the record's exact version from its activation until its completion. Settle the second leg in a further boundary at the same simulated instant (a host may settle several boundaries at one instant; take the second leg's lease once the first acceptance has settled, as each holder's lease cooldown allows), or give each leg its own handover record.
 
+## Changing an account's capacity
+
+An account's `capacity` is the most it may hold; a credit above it is refused, and `None` means no bound. The scenario, or a `CreateAccount`, sets it. When the store itself changes, for example a granary gains bays or loses a wing to fire, the host application changes the capacity of the open account with an [account capacity change](/en/reference/terminology/):
+
+```rust
+enqueue_resource_account_capacity(
+    &mut canwu,
+    due_at,
+    &ResourceSetAccountCapacityRequestV1 {
+        operation_key,
+        account,
+        expected_account_revision,
+        capacity_after: Some(100),
+        evidence, // the current version of your record of the works
+    },
+)?;
+```
+
+- **Only the host sends it.** A tracked command or an adapter packet that carries `SetAccountCapacity` is refused, so no holder resizes its own store.
+- **Evidence.** As for a rescope: the current version of a record of a kind passed to `ResourcePlugin::new`, checked when you queue the request and again when it settles. The engine checks that the evidence is current and of an allowed kind, not what it says.
+- **A rise, or the same figure,** must hold the account's balance. Reserved stock and stock under a protected floor are part of the balance.
+- **A lowering** (a lower figure, or any figure on an account that had no bound) must also leave room for the stock of every open transfer that names the account as its source or destination. Stock already on its way keeps its room.
+- **Refusals** are recorded rejections: `capacity_exceeded` for a capacity that is too small; `version_conflict` for a stale account revision or evidence that is no longer current; `invalid_lifecycle` for a closed account or while a completion lease locks the account's current revision; `not_found` for an account that does not exist; and `invalid_authority` for evidence whose record is not of a kind passed to `ResourcePlugin::new`.
+- **Timing.** Send it while no lease is open on the account, and take the next lease at the new revision. An account that receives a production execution's output stays locked for that execution's whole run.
+
+The operation needs no completion lease and advances the account revision. Reservations, demands, access grants, and the protected floor carry over, and its outcome keeps the evidence. Unlike a rescope, it is admitted while a transfer that is not terminal names the account.
+
 ## External inflow
 
 `Credit` with `ResourceCreditSourceV1::ExternalInflow(DomainRecordVersionRef)` books value from outside the modelled accounts, such as tribute or a purchase from abroad, the counterpart of `ExternalOutflow`. It counts in `ConservationTotalsV1::external_inflow`, and its applied outcome keeps the cited record version as evidence.
@@ -318,6 +345,6 @@ Your plugin owns authorizing and retiring intents and any local consequences aft
 
 ## Versions and saves
 
-Pin exact versions of `canwu-api`, `canwu-resource`, `canwu-production`, and the plugin semantic hashes from one release line. Loading restores the saved Canwu snapshot and revalidates extension records against the plugins you pass. In 0.20.0 the resource state format is 6 and both resource bucket formats are 2; a continuation checkpoint or seal taken while a completion lease is in progress loads. See [save compatibility](/en/developer/persistence/#version-and-save-compatibility).
+Pin exact versions of `canwu-api`, `canwu-resource`, `canwu-production`, and the plugin semantic hashes from one release line. Loading restores the saved Canwu snapshot and revalidates extension records against the plugins you pass. In 0.24.0 the resource state format is 7 and both resource bucket formats are 2; a continuation checkpoint or seal taken while a completion lease is in progress loads. See [save compatibility](/en/developer/persistence/#version-and-save-compatibility).
 
 Continue with the [grain, production, and military supply case](/en/tutorials/cases/production-economy/) and the [mechanism decision](/en/proposals/production-economy-mechanism/).

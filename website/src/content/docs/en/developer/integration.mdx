@@ -19,13 +19,13 @@ Canwu needs Rust 1.88 or newer. Add the published [`canwu-api`](https://crates.i
 
 ```toml
 [dependencies]
-canwu-api = "=0.23.0"
+canwu-api = "=0.24.0"
 ```
 
 - `canwu-api` is the supported public API; its API docs are on [docs.rs](https://docs.rs/canwu-api). Application code depends on it and on any extension crates it uses, such as [`canwu-resource`](https://crates.io/crates/canwu-resource). Extension crates are also published on crates.io; use the same version number as `canwu-api`. Do not depend on `canwu-sim` or other runtime crates directly.
-- `canwu-reference-world` is a small example world you can replace, and the minimal flow below uses it. It is not published to crates.io, so the only way to get its source is to clone the [GitHub repository](https://github.com/PeiyuanQi/canwu) (check out the `v0.23.0` tag to match the version above). Run the examples inside the clone, or copy the crate into your project as a template and point it at the same crates.io `canwu-api`. If `canwu-api` comes from crates.io in one place and from Git in another, Cargo builds two separate copies whose types do not mix.
+- `canwu-reference-world` is a small example world you can replace, and the minimal flow below uses it. It is not published to crates.io, so the only way to get its source is to clone the [GitHub repository](https://github.com/PeiyuanQi/canwu) (check out the `v0.24.0` tag to match the version above). Run the examples inside the clone, or copy the crate into your project as a template and point it at the same crates.io `canwu-api`. If `canwu-api` comes from crates.io in one place and from Git in another, Cargo builds two separate copies whose types do not mix.
 
-`=0.23.0` pins the engine to exactly this release. If your application keeps saves, upgrade only once you have a plan for existing saves: Canwu does not migrate them, so keep the old engine to read them, or export and re-import them with your own tool (see [persistence](/en/developer/persistence/#version-and-save-compatibility)).
+`=0.24.0` pins the engine to exactly this release. If your application keeps saves, upgrade only once you have a plan for existing saves: Canwu does not migrate them, so keep the old engine to read them, or export and re-import them with your own tool (see [persistence](/en/developer/persistence/#version-and-save-compatibility)).
 
 ## Minimal host flow
 
@@ -189,9 +189,9 @@ A controller's *authority person* is the actor of `DecisionAuthority::Actor`, or
 | Situation | Result |
 | --- | --- |
 | A command's issuer, decision-origin actor, or institution's responsible actor is unavailable | Admission rejects it with `IssuerUnavailable`. A tracked request records the rejection. |
-| A ticket's person decision maker is unavailable | The ticket cannot be opened or prepared (`DecisionMakerUnavailable`). |
+| A ticket's person decision maker is unavailable | The ticket cannot be opened or prepared (`DecisionMakerUnavailable`), unless it is [addressed to that person in custody](#ask-a-person-in-custody). |
 | A ticket's controller acts for an unavailable authority person | The ticket cannot be opened, prepared, or resolved (`IssuerUnavailable`). |
-| A person becomes unavailable during a boundary | At the end of that boundary, their open tickets are cancelled: `decision_maker_unavailable` where they are the decision maker, `controller_authority_unavailable` where the controller acts for them. |
+| A person becomes unavailable during a boundary | At the end of that boundary, their open tickets are cancelled: `decision_maker_unavailable` where they are the decision maker, `controller_authority_unavailable` where the controller acts for them, except a [custody-addressed ticket](#ask-a-person-in-custody) while the custody holds. |
 
 ### Continue a cancelled decision
 
@@ -200,7 +200,42 @@ A cancelled ticket stays cancelled. To continue the decision, open a new ticket 
 - **Only the controller's authority person is unavailable.** Open a new ticket for the same decision maker, assigned to a controller whose authority person is available.
 - **The decision maker died or was captured.** Use *seat succession*: make the successor the decision maker, and assign the ticket to a controller bound to the same `seat_id` as the cancelled ticket's controller.
 
-The parent must be a terminal ticket that is still in hot decision history, meaning it has not been moved to the decision archive; an archived parent is rejected with `TicketNotFound`. A parent with a different decision maker and a different seat is rejected. You cannot open a ticket for a decision maker who is still unavailable.
+The parent must be a terminal ticket that is still in hot decision history, meaning it has not been moved to the decision archive; an archived parent is rejected with `TicketNotFound`. A parent with a different decision maker and a different seat is rejected. You cannot open an ordinary ticket for a decision maker who is still unavailable.
+
+### Ask a person in custody
+
+Sometimes the unavailable person is exactly who must decide: a captor summons a captive to submit, or offers the captive a post. Open that question as a *custody-addressed ticket*, a ticket marked with the custodian who holds the decision maker:
+
+```rust
+let custodian = EntityRef::Army(captor);
+let ticket = DecisionTicketDraft {
+    id,
+    definition: "summons.answer".to_owned(),
+    decision_maker: EntityRef::Person(captive),
+    assigned_controller: "controller.captive".to_owned(),
+    summary: "Submit, or refuse".to_owned(),
+    context,
+    options, // none of them may carry a command
+    deadline: None,
+    parent_ticket: None,
+    custody_addressed: Some(DecisionCustodyAddress::new(custodian.clone())),
+};
+```
+
+The ticket opens only while the person is alive and `Captive` or `Detained` by exactly that custodian, the one you set with `with_custodian`. To check before you queue the `Open`, read `canwu.person_availability(captive)` and call `is_held_by(&custodian)` on the value; a person with no stored value is free.
+
+| Situation | Result |
+| --- | --- |
+| The captive's own controller answers while the captive is held | The answer is admitted. The availability checks in the table above do not apply to this ticket. |
+| An option carries a command | `Open` and `ReplaceOptions` refuse it (`InvalidDecision`). A captive cannot issue commands, so apply the chosen option in your own system when the ticket resolves. |
+| The person is not held by that custodian when you open it | Recorded as `InvalidDecision` if the person is free or held by another, `DecisionMakerUnavailable` if dead or missing. |
+| The person dies | Cancelled with `decision_maker_dead`. |
+| The person is released, escapes, or becomes a hostage of the same custodian | Cancelled with `custody_ended`: the person is available again, and an ordinary ticket now works. |
+| Another custodian takes the person, or the custodian is cleared while the person stays captive | Cancelled with `custody_transferred`. Open a new ticket naming the new custodian. |
+| The person goes missing | Cancelled with `decision_maker_unavailable`. |
+| The controller acts for another person who becomes unavailable | Cancelled with `controller_authority_unavailable`, in that person's `cancelled_controller_tickets`. |
+
+These cancellations happen at the end of the boundary that changes the person's availability (in the last row, the other person's). Tickets cancelled with `decision_maker_dead`, `custody_ended`, or `custody_transferred` are listed in `cancelled_custody_tickets` on the `BoundaryPersonAvailabilityChange`; a missing captive's ticket is in `cancelled_tickets`, and a ticket cancelled with `controller_authority_unavailable` is in the `cancelled_controller_tickets` of the other person's change, so read all three lists. A change between `Captive` and `Detained` under the same custodian keeps the ticket open. The mark can be set only when the ticket is opened, and every struct literal of `DecisionTicketDraft` or `DecisionTicket` now names the field (`custody_addressed: None` for an ordinary ticket).
 
 ### Hand the run's seat to an heir
 

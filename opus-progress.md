@@ -1,6 +1,6 @@
 # Opus progress — downstream engine gaps / Opus 进度记录
 
-> Updated 2026-11-13 at Canwu **0.23.0** (tag `v0.23.0`, release commit `fd6ac8b` on `main`, published 2026-11-13). This file is the to-do list of engine gaps that a downstream application has filed
+> Updated 2026-11-22 at Canwu **0.24.0** (the release commit on `release/0.24.0`, verified, awaiting the tag and publication; 0.23.0, tag `v0.23.0`, release commit `fd6ac8b`, is the published release). This file is the to-do list of engine gaps that a downstream application has filed
 > against the published crates. The application is Celestial Mandate (CM); its gap ledger (implementation document `59`,
 > in the CM repository) gives each row its id (`G-nn`) and the full evidence. Priorities are the ledger's severities:
 > High, Medium, Low.
@@ -14,8 +14,12 @@
 > the holder's history); 0.22.1 closes it. Since then it proposed **G-95** (Medium, 2026-11-05: no technology
 > validation on a run restored from a continuation checkpoint), **G-96** (Low for its first chapter, Medium at series
 > scale, 2026-11-06: one fiscal round per office and one evidence record per scope), and **G-97** (from its build: a
-> declared run's seat could not move to an heir); 0.23.0 closes all three. Also open: the known limits the 0.18.0 to
-> 0.23.0 packages left on purpose (§4.2, engine findings E-34 to E-54, E-56, E-58, E-59, and E-60 to E-62; E-55 and
+> declared run's seat could not move to an heir); 0.23.0 closes all three. It then filed **G-98** (2026-11-13: no
+> ticket a person in custody decides), **G-99** (2026-11-15: no condition fall or repair of a worn facility),
+> **G-110** and **G-111** (2026-11-18: no expansion project; no capacity change on an open account), and **G-100 to
+> G-102** (2026-11-19: one engagement per command group, a garrison's surrender, order confusion by step length);
+> 0.24.0 closes all seven. Also open: the known limits the 0.18.0 to
+> 0.24.0 packages left on purpose (§4.2, engine findings E-34 to E-54, E-56, E-58, E-59, and E-60 to E-66; E-55 and
 > E-57 are fixed), two limits the downstream met and worked around (§4.3), and the decisions this run took for the
 > owner to confirm (§6).
 
@@ -23,12 +27,12 @@
 
 | Item | State |
 | --- | --- |
-| Release | **0.23.0 is published** (2026-11-13, a pre-1.0 minor release; owner's authorization: "once done, and released to crates.io and on the canwu website"): all 24 library crates on crates.io (one workspace publish with `--registry crates-io` from the tagged commit, after a clean dry run), the annotated tag `v0.23.0` on the release commit `fd6ac8b`, the GitHub release, and the website deployed from `main` (canwu.org shows `=0.23.0` in both languages). The release commit follows the three merged packages: `6108737` (G-95, branch `fix/g95`), `8d819f7` (G-96, `fix/g96`), and `99b4fcb` (G-97, `fix/g97`). It closes G-95 (`docs/proposals/technology-restore-validation.md`), G-96 (`docs/proposals/fiscal-batch-sets-and-aggregated-evidence.md`), and G-97 (`docs/proposals/seat-rebinding.md`); no format number changes, the technology and fiscal semantic hashes change, and the new seat-rebinding fields are optional and written only by a run that rebinds. Verification on the release tree: fmt, Clippy with warnings denied, the workspace tests (883 passed, 0 failed, 3 ignored; 0.22.1's 867 and the packages' 16), the debug client, the documentation build with warnings denied, the four public examples, the minimum Rust version (1.88), the performance-harness checks (4 and, with allocation counting, 6 passed), the release-only `#[ignore]` scale tests in a release build (3 passed), the continuation gate across the workspace (883 passed, 0 failed, 3 ignored; the two expected panics: the first gate run failed on the G-95 test `a_noncanonical_payload_continuation_is_refused_on_both_handles`, whose scenario record names a version only boundary 2 creates, so the release pass added `canwu-technology`'s never-enable `continuation-gate` hook and that test now expects the gate's panic beside `a_packet_first_declared_after_its_seal_is_not_ready`), the package contents (`LICENSE`, `NOTICE`, and `README.md` in all 24), a clean `cargo publish --workspace --registry crates-io --dry-run --locked` (all 24 packaged and verified in dependency order, uploads aborted), the third-party notices regenerated with cargo-about 0.8.4 (unchanged: no dependency changed), and the website build, with a copy review of the changed pages in both languages. 0.22.1 (tag `v0.22.1`, `7a7feff`), 0.22.0, 0.21.0, and 0.20.0 stay published and are not yanked; 0.19.0 was yanked on 2026-10-24. The downstream pins `=0.22.1` since CM 0.97.0 and moves to `=0.23.0` as its next change set; its next free ledger id is G-98. |
-| Policy | **Same version only** (owner, 2026-10-14): Canwu crates depend only on the exact same version of each other (`=0.23.0`); nothing written by an earlier release is read; no migration. |
-| Proposals of 0.23.0 (all "implemented in 0.23.0") | `docs/proposals/`: `technology-restore-validation.md` (G-95), `fiscal-batch-sets-and-aggregated-evidence.md` (G-96), `seat-rebinding.md` (G-97). Earlier releases' proposals are listed in their entries of `docs/versioning.md`. |
-| Branches and worktrees | `main`; locally the merged `release/0.23.0` (worktree `.worktrees/rel`) and package branches `fix/g95`, `fix/g96`, and `fix/g97` (worktrees `.worktrees/g95`, `.worktrees/g96`, `.worktrees/g97`), all on `main` and kept until the owner approves their removal. On the remote, `main` and the merged cloud branch `claude/youthful-johnson-b38ta4`, left for the owner to delete. |
+| Release | **0.24.0: verified, awaiting the tag and publication** (2026-11-22, a pre-1.0 minor release; owner's request of 2026-11-22: finish the open gap changes, release to remote `main`, update the website documents, clean up, and make sure the website is released). The packages are merged into `release/0.24.0` as they pass review: `304d172` (G-111, branch `fix/g111`, merge `6ed92ae`), `903f584` (G-98, `fix/g98`, merge `78d1262`), `3c143f0` (G-99 and G-110, `fix/g99-g110`, merge `34e085f`), and `aa2f9fd` (G-100 to G-102, `fix/g100-g102`, merge `a1cdcbb`). No package has a proposal; the contract is the 0.24.0 entry of `docs/versioning.md`, the rustdoc, and the crate READMEs. Formats: commitment 8 → 9 (`canwu.commitment.decisions.v5`), decision archive 2 → 3, resource state 6 → 7, production archive blob 3 → 4, military `SCHEMA_VERSION` 2 → 3; the resource, production, and military semantic hashes change; the snapshot, checkpoint/evidence-journal, paged-checkpoint, and continuation-checkpoint formats keep their numbers. Verification: by the owner's rule for this run (2026-11-22, "only test after all fixes are in") the workers ran only fmt and Clippy, and the integrator ran the full list once on the integrated tree with the 0.24.0 version and docs (2026-11-22): fmt; Clippy with warnings denied, plain and with the continuation gate; the workspace tests, 897 passed, 0 failed, 3 ignored; the debug client; rustdoc with warnings denied; the four public examples; the minimum Rust version; the performance-harness fmt, Clippy, tests (4) and allocation contract (6); the release-only scale tests in a release build, 3 passed; the continuation gate across the workspace, 897 passed with the two tests that expect its panic; and the website build (87 pages). The two docs reviews (accuracy against the code, website copy) were applied before it. The tag, the crates.io publication, the GitHub release, and the website deployment follow on `main`. 0.23.0 (tag `v0.23.0`, `fd6ac8b`), 0.22.1, 0.22.0, 0.21.0, and 0.20.0 stay published and are not yanked; 0.19.0 was yanked on 2026-10-24. The downstream pins `=0.23.0` since CM 0.121.0 and moves to `=0.24.0` by its own adoption plan; its next free ledger id is G-112. |
+| Policy | **Same version only** (owner, 2026-10-14): Canwu crates depend only on the exact same version of each other (`=0.24.0`); nothing written by an earlier release is read; no migration. |
+| Proposals of 0.24.0 | None of its own: the four packages were built from the downstream's gap rows. `docs/proposals/military-engagements.md` is updated in place for G-100 to G-102. 0.23.0's proposals are `technology-restore-validation.md` (G-95), `fiscal-batch-sets-and-aggregated-evidence.md` (G-96), and `seat-rebinding.md` (G-97); earlier releases' proposals are listed in their entries of `docs/versioning.md`. |
+| Branches and worktrees | `main` (0.23.0); locally `release/0.24.0` (worktree `.worktrees/rel`), the package branches `fix/g98`, `fix/g99-g110`, `fix/g100-g102`, and `fix/g111` (worktrees `.worktrees/g98`, `.worktrees/g99`, `.worktrees/g100`, `.worktrees/g111`), the docs branch `docs/0.24.0` (`.worktrees/docs`), and the run folder `.worktrees/run-0.24` (git-ignored: the plan, the gap rows, each package's report and review). The owner asked for the intermediate results and branches to be removed after the release, leaving only `main`. |
 | Release procedure | `.agents/skills/canwu-contributor-release/SKILL.md` and `docs/releasing.md`. The orchestrator runs the full verification list once on the integrated release tree and the pre-release tests (the public examples, the performance-harness checks, the release-only `#[ignore]` scale tests in a release build, the continuation gate) before tagging (the counts go in the release row). |
-| What the adopter must know first | (1) Pin every Canwu crate at `=0.23.0`; the exact engine-version check refuses 0.22.1 saves, and a run that registers the technology or fiscal plugin is also refused by that plugin's semantic hash. (2) Source changes: add `parts: Vec::new()` to every `FiscalExecutionEvidence` struct literal; add the `SeatRebinding` arm to exhaustive matches on `IngressPayload` and `BoundaryIngressKind`, and `seat_rebindings: Vec::new()` / `rebound_seat: None` to literals of `BoundaryRecord`, `BoundaryReceipt`, and `SimulationSnapshot`. (3) Restore continuations through `from_continuation_checkpoint_verified` with the stored continuation hash (the authoritative state hash does not cover the seat binding in force), then call `canwu_technology::validate_technology_runtime_on(&run)` on a run with the technology plugin. (4) Technology content: a new operation's exact citation of a superseded version that no current technology record holds is rejected (cite the current version), and records near the 16 KiB payload limit grow by the versions their continuations add. (5) Optional: fiscal batch sets (`fiscal_action_set_command`, and an own-name controller with `DecisionAuthority::Actor` and the same person as command subject, which holds that person's fiscal roles in any set command a ticket offers it) and aggregated evidence (one record, one receipt per scope); seat rebinding (`rebind_seat`; read the binding in force with `seat_binding()`). (6) The "Upgrading from 0.22.1" notes and "Known limits" of the 0.23.0 entry of `docs/versioning.md`; the 0.22.1 and earlier notes still apply to a host that skipped those releases. |
+| What the adopter must know first | (1) Pin every Canwu crate at `=0.24.0`; the exact engine-version check refuses 0.23.0 saves, a commitment at format 8 is refused by its format, and a run that registers the resource, production, or military plugin is also refused by that plugin's semantic hash. (2) Source changes: `custody_addressed: None` on every `DecisionTicketDraft` and `DecisionTicket` literal and `cancelled_custody_tickets: Vec::new()` on `BoundaryPersonAvailabilityChange`; the new arms `SetAccountCapacity` (`ResourceOperationRequestV1`, `ResourceOperationKind`), `RecordFacilityCondition` (`ProductionOperation`), `Expand { .. }` (`FacilityProjectKind`, no longer `Copy`), `OpenGroupEngagements`, `SurrenderSiege`, and `Surrendered`; military literals add `group: None` and, on each side, `confusion_carry: 0` and `confusion_paid_to` at the opening time, and a rulebook renames `cohesion.confusion` to `confusion_per_day` with the cost of one source per day of fighting. (3) A captor's question: open the ticket with `custody_addressed: Some(DecisionCustodyAddress::new(captor))` for the captive's own controller, with no command option, and apply the answer in the host; read endings from all three lists: `cancelled_custody_tickets` (`decision_maker_dead`, `custody_ended`, `custody_transferred`), `cancelled_tickets` for a captive who goes missing, and `cancelled_controller_tickets` on the change of another person the ticket's controller acts for; a custodian change within one polity is a transfer and cancels. (4) A store that grows: `enqueue_resource_account_capacity` citing the works' current record, sent while no completion lease locks the account's current revision (an account receiving a production execution's output stays locked for the execution's run); it replaces a second "annex" account. (5) Facilities: `RecordFacilityCondition` citing the host's own current record with its provider-evidence digest, `lifecycle_after` by the 250 ‰ line; `Repair` straight on a `Degraded` or `Damaged` facility; one `Expand` per capacity level, listing every capability. (6) Military: `OpenGroupEngagements` replaces a one-engagement stand-in for a split side in the field (siege assaults are not grouped, so a stand-in for a split besieging side stays); `SurrenderSiege` for a yielding garrison, read by the siege's `end_cause`. (7) The "Upgrading from 0.23.0" notes and "Known limits" of the 0.24.0 entry of `docs/versioning.md`; the 0.23.0 and earlier notes still apply to a host that skipped those releases. |
 
 ## 2. High
 
@@ -36,7 +40,15 @@ No row filed by the downstream ledger is open.
 
 ## 3. Medium
 
-No row filed by the downstream ledger is open. G-95 (no technology validation on a continuation-restored or sealed
+No row filed by the downstream ledger is open. The seven rows 0.24.0 closes carry no severity in the ledger rows as
+copied for this run (each names the downstream wave it is wanted by, W5 to W7 or later), so they are recorded here:
+G-98 (a ticket a person in custody decides, filed 2026-11-13), G-99 (a facility's condition fall and a repair on a
+degraded or damaged facility, 2026-11-15), G-110 (an expansion project, 2026-11-18), G-111 (a capacity change on an
+open account, 2026-11-18), and G-100 to G-102 (one engagement per command group, a surrender end cause, order
+confusion prorated by step length, 2026-11-19). All are closed by 0.24.0 (the 0.24.0 entry of `docs/versioning.md`;
+for G-100 to G-102 also `docs/proposals/military-engagements.md`).
+
+G-95 (no technology validation on a continuation-restored or sealed
 run, Medium, proposed 2026-11-05), G-96 (one fiscal round per office and one evidence record per scope, Low for the
 downstream's first chapter and Medium at series scale, proposed 2026-11-06), and G-97 (a declared run's seat could not
 move to an heir, proposed by the downstream's build) are closed by 0.23.0
@@ -64,7 +76,7 @@ None. G-38 (the `canwu-military` shape contradicted the downstream design) is cl
 (`docs/proposals/military-engagements.md`); its criterion of a second independent host adopting the crate is open
 (§4.2, part of the military limits).
 
-### 4.2 Known limits left by the 0.18.0 to 0.23.0 packages (engine-side; not numbered by the downstream ledger)
+### 4.2 Known limits left by the 0.18.0 to 0.24.0 packages (engine-side; not numbered by the downstream ledger)
 
 Each is stated in the "Known limits" of its release in `docs/versioning.md` and in its proposal. `E-nn` ids are local to this
 file and continue the earlier numbering. Severity is this file's suggestion; none blocks the downstream adoption.
@@ -93,6 +105,10 @@ file and continue the earlier numbering. Severity is this file's suggestion; non
 | E-60 | Low | `canwu-technology` (0.23.0) | `validate_technology_runtime_on` does not replay provenance: operation outcomes before the run's history cut are not recomputed. Before the cut, a consumed intent's provider ingress and finalizer change are not read; what the run held there rests on the continuation hash the host stored, or on the sealed segments. A forged identity of an older version of a current record that obeys the identity rule (not version zero, its record current, older than the current version and from a boundary no later than it) cannot be told from a real one without the full journal, so the plugin and both validators accept it on every handle, and its time is the forged boundary's, which can be earlier than the record existed; when owner-authorized maintenance updates a record earlier in the boundary, the full validator's replay may refuse a forged identity of it that the plugin accepted (technology registers no maintenance). `TechnologyRestoreAccess` is an open trait: an outside implementor must add any read a later release adds. The two consumed-intent checks are duplicated (about 100 lines). | A host that needs provenance keeps a full save and runs `validate_technology_runtime`. Declaring generic citations identity-only would refuse forged identities but declares far more than the exact closure; not taken (`docs/proposals/technology-restore-validation.md`, alternatives). Merge the consumed-intent checks when the refusal order may change. |
 | E-61 | Low | `canwu-fiscal`, `canwu-ming-fiscal-reference` (0.23.0) | A controller whose authority is an actor and whose command subject is that same person holds the person's fiscal roles in any set command a ticket offers it, even a one-batch set (the host decides which tickets offer one). A set has one issuer: offices held by different persons take one set per person, and where those persons decide through decisions, each person's decision still takes its own round. The reference integration's boundary system does not yet skip aggregated evidence, so aggregated evidence sent to it as raw plugin ingress can still fail that boundary (its enqueue helper refuses it). Aggregated evidence saves evidence records and ingress, not ledger writes: each scope still takes its own receipt. Receipts citing aggregated evidence leave the per-scope path's books but for their citations, so the ledger records and hashes differ from it (the named departure from the gap row's equal state hash). | Skip aggregated evidence inside the reference integration's boundary as a recorded refusal; a multi-issuer set only if a host needs one round across persons. |
 | E-62 | Low | `canwu-sim`, `canwu-api` (0.23.0) | A run with direct command history cannot rebind its seat (`MixedCommandIngress`); read-only and replay-purpose runs cannot rebind (`InteractionReadOnly`), so a replay-purpose run keeps its configured binding. A boundary-window summary counts a seat rebinding under the command class (filter player commands on kind). One rebinding per seat may be queued at a time, and a retry after its boundary is refused at the call as stale. A rebinding changes the person, controller, and permission profile only, never the seat or its institution, and cancels tickets only when the person changes, for the seat's controllers that act for the previous person. A seat bound to an institution without a person cannot be rebound (`InvalidAuthority`). A continuation's authoritative state hash does not cover the binding in force (restore through `from_continuation_checkpoint_verified` with the stored continuation hash). `CanwuRun` does not gain `rebind_seat`. | Binding the seat in the control commitment was rejected (the state hash would cover seat policy; `docs/proposals/seat-rebinding.md`, alternatives). Widen a limit only if a host meets it. |
+| E-63 | Low | `canwu-decision`, `canwu-sim` (0.24.0) | A custody-addressed ticket offers no command option (command admission still refuses the captive as issuer), so the host applies the answer. The mark is set only at `Open`. The controller-authority exemption covers only a controller whose authority person is the decision maker; a ticket whose controller acts for another person who becomes unavailable is cancelled with `controller_authority_unavailable` in that person's `cancelled_controller_tickets`. A captive who goes `Missing` is cancelled with `decision_maker_unavailable` in `cancelled_tickets`, not in `cancelled_custody_tickets`, so a host reads all three lists. `Hostage` is available, so a captive who becomes a hostage of the same custodian ends the ticket with `custody_ended`; a change between `Captive` and `Detained` under the same custodian keeps it. A transfer is any changed custodian: the engine cannot tell a move within one polity from one to another. A mismatched custodian at `Open` is `InvalidDecision`, with no code of its own. | A command option answered through a host-named issuer, or a custody reason for `Missing`, only if a host needs them. |
+| E-64 | Low | `canwu-resource` (0.24.0) | `SetAccountCapacity` is the host's only; the engine checks its evidence's currency and kind, not what it says (as for a rescope, E-47). A completion lease that locks the account's current revision refuses it, so an account receiving a production execution's output cannot be resized during that execution's run. A lowering counts the escrow of every open transfer naming the account at either end, also one on its way back to another account, so it can refuse a capacity the stock would fit; other credits may still fill the room a lowering left for stock in flight. A closed account's capacity cannot change. The rule is stricter than the gap row's "`capacity_after` at or above the balance" (§6 item 15). | Count only the escrow that can still be credited to the account, if a host meets the refusal. |
+| E-65 | Low | `canwu-production` (0.24.0) | `RecordFacilityCondition` only lowers a condition and takes no `Repairing`, planned, or retired facility; a worn `Operational` facility above 250 ‰ records `Degraded` before a `Repair` is admitted. Its evidence check is the record's currency, the provider-evidence digest, and a non-empty capability: any record kind, the binding's `kind` and `available_quantity` unchecked, and never what the record says. Every completed project, an `Expand` included, returns the facility `Operational` at 1,000 ‰, so an expansion also restores the condition. One open project per facility generation: no expansion during a repair. `Expand` names the whole capacity map (at most 64 capabilities, none dropped or lowered). Pre-existing (0.23.0 has the same rule), now stated in the README and the 0.24.0 entry: while any of the allocations that overlap at a time is `Reserved`, their sum is held to the condition-adjusted capacity (`FacilityAsset::usable_capacity`); once all are `Consumed` the bound is the nominal capacity. `StartExecution` accepts only `Reserved` allocations and turns them `Consumed` before the state is validated, and it checks neither the facility's condition nor its lifecycle, so an execution whose allocations overlap no reserved one starts within the nominal capacity on a worn or `Damaged` facility too; a host that wants a worn facility to take less work sizes its allocations by `usable_capacity`. Whether `StartExecution` should check condition and lifecycle is passed to the CM adoption plan as a possible next gap row; nothing is promised here. | A partial restore (a project that completes below 1,000 ‰), or a condition and lifecycle check at `StartExecution` and a capacity check on consumed allocations, if the downstream files the row. |
+| E-66 | Low | `canwu-military` (0.24.0) | Siege assaults are not grouped (a siege's forces are not free), so a besieging side split into command groups fights one assault and a host's stand-in for that case stays. Every command group of an engagement group is one owner's; the shared side takes no joiner; a command group whose opening share of the shared men would be 0 is refused. A shared-side input or order, and a profile revision from either side, advances the `host_revision` of every open engagement of the group. A held engagement of a group closes only when the host resumes or abandons it: after a group-wide `Abandon` by the shared defenders of a grouped relief lifts the siege, a held member keeps the besiegers engaged until then. The day of `confusion_per_day` is `siege.day_minutes`; a resumed engagement starts its confusion afresh, so a held span costs nothing (a resumed member of a group keeps the shared side's paid-up-to time); a confusion remainder below one point is never charged once the engagement closes; a step records no separate trace of the confusion cost. An assault closed by a surrender reads `AttackerPrevailed` with `site_fell`, as a storm: the siege's `end_cause` tells them apart. The synthetic rulebook keeps the figure 50 under the new per-day unit. | Grouped assaults (a siege side with command groups) if the downstream's siege design asks; a confusion term on `StepV1`. |
 
 ### 4.3 Limits the downstream met and worked around (not filed)
 
@@ -124,18 +140,20 @@ own leases) and E-37's publication-budget overshoot (the application's publisher
 
 ## 5. Next steps
 
-1. **Publish 0.23.0** (the owner): push the release commit to `main`, tag `v0.23.0`, publish the 24 crates, create
-   the GitHub release, and deploy the website; then fill in the release row (§1) and remove the 0.23.0 worktrees and
-   the merged `fix/g95`, `fix/g96`, and `fix/g97` branches.
-2. **Wait for the downstream's adoption of 0.23.0** (its ledger records the adoption of G-95, G-96, and G-97 at the
-   `=0.23.0` pin) and for the rows it files against 0.23.0. G-94's real check is still its `Daily` p99 past campaign
-   month 22; if its clearing commits show E-59's re-hash, measure how old the cleared entries are before choosing
-   anything.
+1. **Verify and publish 0.24.0** (the run's integrator, on the owner's request of 2026-11-22): merge the docs
+   pass, run the full verification once on `release/0.24.0`, have the docs checked against the code and the
+   website copy reviewed in both languages, bump the version,
+   tag `v0.24.0`, publish the crates, create the GitHub release, deploy the website, fill in the release row (§1),
+   and remove the run's worktrees and branches.
+2. **The downstream's adoption of 0.24.0** follows its own plan (its ledger records the adoption of G-98 to G-102,
+   G-110, and G-111 at the `=0.24.0` pin) and the rows it files against 0.24.0. G-94's real check is still its
+   `Daily` p99 past campaign month 22; if its clearing commits show E-59's re-hash, measure how old the cleared
+   entries are before choosing anything.
 3. Then the §4.2 limits by downstream need: **E-50** first if the downstream runs cross-plugin completions through a
    long campaign (the cap of 1,024 ended participants); **E-49** if a host wants malformed correspondence commands
    recorded rather than validated before sending; E-41's force-supply deferral if a host runs the reference economy
    near its byte cap; E-46 to E-47, the military limits (E-51), the 0.21.0 limits (E-52 to E-54), E-59, and the
-   0.23.0 limits (E-60 to E-62) as the downstream's slices ask; §4.3 if the downstream asks.
+   0.23.0 and 0.24.0 limits (E-60 to E-66) as the downstream's slices ask; §4.3 if the downstream asks.
 4. Each change set follows the 0.18.0 pattern: one worktree and branch per package under `.worktrees/`, a proposal,
    durable tests that bite, an independent code review (two for persistence-heavy packages) and a delta review of the
    fixes, integration on a release branch, the pre-release tests of the release skill (the continuation gate
@@ -226,6 +244,62 @@ Decisions the 0.23.0 packages took (G-95 to G-97), each recorded in its proposal
 13. **The Chinese terms** of the release, in `docs/terminology.md` and both website term pages: 行动批次组 (fiscal
     action batch set), 本人名义决策 (decision in one's own name), 汇总执行证据 (aggregated execution evidence), 证据分项
     (evidence part), and 席位改绑 (seat rebinding), marked for the owner in `docs/terminology.md` until confirmed.
+
+Decisions the 0.24.0 packages took (G-98 to G-102, G-110, G-111), each recorded in the 0.24.0 entry of
+`docs/versioning.md`, for the owner to confirm:
+
+14. **G-98's shape.** The host sets the mark at `DecisionMutation::Open` (`DecisionTicketDraft::custody_addressed`, a
+    `DecisionCustodyAddress { custodian }`), as the run-11 corrected contract asks. Decided beyond the row: the mark
+    refuses `DecisionAction::Command` options (the captive's answer could never be issued as a command); a missing
+    captive keeps `decision_maker_unavailable` in `cancelled_tickets` (the row is silent); the same custodian's
+    `Captive` ↔ `Detained` change keeps the ticket, and `Hostage` ends it with `custody_ended`; the controller
+    exemption is narrow (only the decision maker as authority person); a mismatched custodian is
+    `InvalidDecision` with no new error code; the custody pass of the sweep runs only for a person with an open
+    custody-addressed ticket. Commitment format 9 (`decisions.v5`) and decision archive format 3; the snapshot,
+    journal, paged, and continuation formats keep their numbers.
+15. **G-111's shape, stricter than the row.** A tuple variant around a request struct with an `operation_key` and
+    `expected_account_revision`, as every resource operation has; `capacity_after: Option<u64>` (`None` removes the
+    bound); host-only ingress like a rescope. Beyond the row's "admitted when `capacity_after` ≥ the balance": a
+    lowering must also leave room for the escrow of every open transfer naming the account; a closed account is
+    refused (a rescope accepts one); a completion lease locking the account's current revision refuses the change.
+16. **G-99's and G-110's shape.** `RecordFacilityCondition` carries a `ProductionEvidenceBinding` whose record may be
+    of any kind, checked for currency and digest after the authority and fall rules; a record that changes nothing
+    is refused; a `Repairing` facility takes none. `Expand`'s `capacity_after` is a per-capability map (the asset's
+    capacity is one), at most 64 entries, none dropped or lowered; an `Expand` completes `Operational` at 1,000 ‰
+    like every project, also from `Degraded`, `Damaged`, or `Repairing`. Fixed with them: a facility leaves the
+    incident due index when it stops being eligible, and a completed project pins only its result's site and, at
+    the result's generation, its capacity.
+17. **G-100 to G-102's shape.** G-100: one command, `OpenGroupEngagements`, opens every
+    engagement of the group; the shared forces' men are split by largest remainder at every step, the shared
+    side's cohesion, shock, and order-confusion state are one figure copied to every open member, shared-side
+    inputs and orders apply to the whole group, and the group keeps one step grid (a profile revision on one
+    revises and resumes every open member); an opening share of 0 is refused and a member whose share falls to 0
+    skips its step; siege assaults are not grouped. G-101: a surrender end cause (`SurrenderSiege`, `SiegeEndCause::Surrendered`) rather
+    than a release from the assault, which could empty a side and still close as a storm. G-102: the rulebook's
+    `confusion_per_day` with a carried remainder and a paid-up-to time (`SideStateV1::confusion_carry`,
+    `confusion_paid_to`), charged by the plugin after the resolver for the minutes since the side was last
+    charged, rather than a finer cohesion unit or a `StepProfileV1` field; the day is `siege.day_minutes`; the
+    reference content keeps the figure 50 under the new unit. Military `SCHEMA_VERSION` 3.
+18. **No proposals for 0.24.0.** The packages were built from the gap rows under the owner's request to finish the
+    open gap changes; the contract is the 0.24.0 entry of `docs/versioning.md`, the rustdoc, and the crate READMEs,
+    with `docs/proposals/military-engagements.md` updated in place.
+
+**Terms for the owner to confirm** (0.24.0; in `docs/terminology.md` and both website term pages, marked for the
+owner in `docs/terminology.md` until confirmed):
+
+| English | Proposed 中文 | Code |
+| --- | --- | --- |
+| custody-addressed ticket | 在押人物票据 | `DecisionTicketDraft::custody_addressed`, `DecisionCustodyAddress` |
+| account capacity change | 账户容量变更 | `ResourceOperationRequestV1::SetAccountCapacity`, `enqueue_resource_account_capacity` |
+| facility condition record | 设施状况记录 | `ProductionOperation::RecordFacilityCondition` |
+| expansion project | 扩建项目 | `FacilityProjectKind::Expand` |
+| command group | 指挥组 | `CommandGroupV1` |
+| engagement group | 交战组 | `EngagementGroupV1`, `OpenGroupEngagements` |
+| siege surrender | 围城投降 | `SurrenderSiege`, `SiegeEndCause::Surrendered` |
+| daily confusion cost | 每日号令混乱代价 | `CohesionRuleV1::confusion_per_day` |
+
+The pages also use, without a term row, 看管方 for a custodian (already on the integration page) and 号令混乱 for
+order confusion.
 
 Every decision through 0.20.0 is decided and confirmed by the owner and recorded in its proposals, its
 `docs/versioning.md` entry, and the term sheets.

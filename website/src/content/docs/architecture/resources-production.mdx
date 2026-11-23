@@ -119,7 +119,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `ProductionCapacityAllocation` | 某个生产执行占用的一段设施产能，时间区间左闭右开 |
 | `WorkOrder`、`ProductionExecution` | 在某地点运行某工艺的工单，以及它的一次执行，带证据、已消费的投入和待结算的产出 |
 | `WorkInProgress` | 生产执行的进度，以及所消费投入的证据。存量本身留在 `canwu-resource`。 |
-| `FacilityProject` | 某一代设施的建设或维修 |
+| `FacilityProject` | 某一代设施的建设、修复或扩建 |
 | `ProductionOperationOutcome` | 每条生产命令的凭证，处置结果为 `Applied`、`Duplicate` 或 `Rejected` |
 
 ## 运行过程
@@ -144,13 +144,14 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 `}
 />
 
-资源操作有四条入口。带请求标识的命令是通过 `CommandRequest` 提交、带请求 ID 和预期修订版本的命令。每条入口只接受一部分操作：
+资源操作有五条入口。带请求标识的命令是通过 `CommandRequest` 提交、带请求 ID 和预期修订版本的命令。每条入口只接受一部分操作：
 
 | 入口 | 由谁发送 | 操作 |
 | --- | --- | --- |
 | 带请求标识的命令 `apply_resource_operation_v1` | 对自己掌控的存量采取行动的持有人。命令主体必须是掌控目标记录的持有人。 | `CreateAccount`、`SubmitDemand`、`AmendDemand`、`CancelDemand`、`BeginTransfer`、`BeginExchange`、`CancelTransfer`、以 `AcceptLocal`、`Lose` 或 `Return` 处置的 `CompleteTransfer`、`RecordLoss`、`RecordTransferLoss`、`ExternalOutflow`、外部流入的 `Credit`、`SetProtectedFloor`、`IssueAccessGrant`、`RevokeAccessGrant`，以及租约的申请和放弃 |
 | 适配器输入 `resource_adapter_operation_v1` | 提供方插件。请求中的证据字段必须等于数据包引用的精确记录版本，带时间的请求只能在它写明的时间结算。 | `Consume`、`AdvanceTransfer`、以 `Accept`、`AcceptLocal` 或 `ExternalOutflow` 处置的 `CompleteTransfer`、`RecordLoss`、`RecordTransferLoss`、`ExternalOutflow`、外部流入的 `Credit`，以及观察记录 |
 | 上层应用的 `resource_account_rescope_v1`（`enqueue_resource_account_rescope`） | 只有上层应用；其他插件安排的数据包什么也不结算。 | `RescopeAccount` |
+| 上层应用的 `resource_account_capacity_v1`（`enqueue_resource_account_capacity`） | 只有上层应用；其他插件安排的数据包什么也不结算。 | `SetAccountCapacity` |
 | 插件自有的数据包 | 上层应用通过辅助函数发送，或由 `canwu-production` 发送 | 分配请求（`resource_authorized_allocation_v1`）、租约状态转移（`resource_completion_operation_v1`，包括一步式完成租约）和生产产出批次（`resource_production_output_batch_v1`） |
 
 <Steps>
@@ -177,7 +178,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `canwu-resource` | 12 `StrategicAggregation` | `maintain-resource-summary-v1` | 再运行一次同样的校验 |
 | `canwu-resource` | 13 `PerspectiveAndReportMaterialization` | `materialize-resource-reports-v1` | 以 `resource_report` 知识发布持有人报告 |
 | `canwu-production` | 7 `DomainDeltaProposal` | `production_lifecycle_apply_v1` | 生产根状态的唯一写入者。应用命令、租约状态转移和产出确认。 |
-| `canwu-production` | 8 `InvariantValidation` | `production_capacity_and_lifecycle_validate_v1` | 检查记录闭合、在制品总量，以及重叠的产能分配之和不超过设施按状况折算后的产能 |
+| `canwu-production` | 8 `InvariantValidation` | `production_capacity_and_lifecycle_validate_v1` | 检查记录闭合、在制品总量，以及重叠的产能分配之和不超过设施的产能（仍有预留时按状况折算，全部已消耗时按名义产能） |
 | `canwu-production` | 10 `HistoricalCandidateEvaluation` | `production_incident_candidate_evaluation_v1` | 抽样判定设施事故，并暂存对应的状态转移 |
 | `canwu-production` | 11 `ConditionalTransitionCommit` | `production_incident_commit_audit_v1` | 在事故提交后校验状态 |
 | `canwu-production` | 12 `StrategicAggregation` | `production_output_dispatch_v1` | 固定 `output_source`，并安排产出批次 |
@@ -198,6 +199,16 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 ### 参考消费者如何接入
 
 [军事补给参考消费者](/reference/terminology/)（`canwu-force-supply-reference`）是同一生命周期的第二个独立使用者：军队的消费意图经适配器输入变成一条 `Consume`，资源结果结算之后，短缺后果只应用一次。经济参考插件批准民间消费意图，并完成每个月的月结；[粮食、生产与军事补给案例](/tutorials/cases/production-economy/)逐步讲解了这两个消费者。这两个参考插件的参考包归档都是有界的：归档提交一经确认，它的凭证就折叠进插件根记录的摘要链；结果放不下的操作以 `operation_skipped` 事件跳过，等归档提交腾出空间后再发一次，绝不会让边界失败。
+
+### 设施状况、修复与扩建
+
+设施的 `condition_per_mille`（状况，千分数）决定它能提供多少产能（`FacilityAsset::usable_capacity`），生命周期状态决定它是否还能运转。折算后的产能只在重叠的产能分配中仍有预留时才构成上限；开始生产执行时不受它限制。有三件事会改变状况和生命周期状态。
+
+- **由你记录的下降。** 除了事故（见[随机性](#随机性持久化与重放)），生产地点的持有人还可以用 `ProductionOperation::RecordFacilityCondition` 记下一次状况下降，即[设施状况记录](/reference/terminology/)。原因可以是磨损、洪水之类的灾害，或敌对行为（`FacilityConditionCause`）。它适用于处在 `Operational`、`Degraded` 或 `Damaged` 状态的设施，而且只能调低状况。引擎以 250 ‰ 为界，决定你必须写明的生命周期状态：等于或低于 250 ‰ 时是 `Damaged`；高于它时是 `Degraded`，设施原本还是 `Operational` 的也可以保持 `Operational`。记录要引用你自己的一条提供方记录的当前版本，并把该记录的 `canwu.production.provider-evidence.v1` 哈希填入 `semantic_digest`，这个哈希覆盖所引用版本的整条 `canwu_api::DomainRecord`，而不只是它的载荷；引擎先检查持有人、设施代次和下降规则，然后才读取证据。
+- **修复。** `Repair` 项目可以修复处在 `Repairing`、`Degraded` 或 `Damaged` 状态的设施，所以受损的设施不必先选 `StopForRepair` 就能修复。已有磨损但仍是 `Operational` 的设施，要先记录为 `Degraded`。
+- **扩建。** [扩建项目](/reference/terminology/) `FacilityProjectKind::Expand { capacity_after }` 提高一座 `Operational` 设施的产能。`capacity_after` 列出建成后设施的每一项产能（最多 64 项）：原有的产能一项也不能少，也不能低于现值，并且至少有一项更高，或是新增的。`Construction` 项目仍然只用于已规划或已批准的设施。
+
+每个完成的项目都交回设施的下一个代次，状态为 `Operational`，状况为 1,000 ‰；扩建项目交回的设施，产能正好等于 `capacity_after`。施工期间设施状况下降、发生事故或停工待修，都不会让修复或扩建项目无法完成。一座设施同一时间只能有一个未结束的项目。
 
 ## 知识与可见性
 
@@ -235,7 +246,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 各根之间不共用任何标识：范围根的租约和产出操作键以 `{scope}/` 开头，主根的键不含 `/`，范围 ID 也不含 `/`，所以两个根永远不会指向同一个资源侧的键；违反这条规则的键是记录在案的拒绝。`apply_production_batch_v1` 在一条带请求标识的命令里，对同一个根结算同一持有人的许多操作，逐项结算、每项各有结果；`expected_runtime_revision` 过期、或各项会让根超出 `max_operations_per_boundary` 的批次，整批带追踪记录被拒绝，可以重新发送；没有写预期修订号的批次，每一项都按它前面各项留下的根状态各自检查。根结算过的东西没有一样会永久留下：已结束的工单、已结束的租约和无人认领的结果作为残留归档（`ProductionResidueArchiveRecordV1`，三种新的归档键），更早边界的事故凭证折叠进根的事故历史，持有人和地点相同的更新观察头可用之后，被挤出窗口的旧观察头就被清理。被生产插件拒绝的完成步骤、见证、归档提交或确认，不论谁安排的，都带追踪记录被拒绝，被拒绝的数据包不抽取事故、也不发布报告。
 
-资源根状态则分成几部分保存：活动根记录 `resource:runtime:v1`（`ResourceRuntimeRecord`，载荷为 `ResourceLiveRootV1`）保存未关闭的需求及其预留和分配腿、进行中的转移、租约、报告授权和观察头，其余的只在两本账里计数；每条常驻终态记录是某条常驻终态桶 `resource:hot-terminal:{bucket}`（`ResourceHotTerminalBucketV1`，每桶约两条）中的一个条目，每个账户、动用授权、资源定义、单位版本和保管人索引条目（`ResourceCustodianAccountsV1`，某个持有人名下的全部账户）是某条活动桶 `resource:live:{bucket}`（`ResourceLiveBucketV1`，每桶约四条）中的一个条目，都由其标识的哈希决定落在哪个桶。两类桶共用一种记录种类 `canwu.resource` `bucket`（`ResourceBucketRecord`）。自 0.20.0 起，每个常驻终态桶以仅凭身份的形式（`canwu_identity_evidence_dependencies`）声明其记录的精确证据，活动根声明它持有的完成租约、外部参与者和观察头所引用的版本，生产根声明尚无产出结果的生产执行的待处理产出来源，所以封存或接续检查点会保留常驻记录所引用版本的证明，即使该记录之后已更新；在完成租约进行中写出的接续检查点因此可以加载、校验并精确继续。资源状态格式为 6，两类桶的格式为 2。`ResourceState::into_records` 把状态写成这些记录，`from_records` 读回来，并检查每个账户都在其保管人的索引中、每条消费都指向它记录的那条履约（`ResourceConsumption::fulfillment`）。一个边界只读写活动根和它触及的记录所在的桶：资源插件在结算每个数据包之前，先挂载该数据包点名的每条常驻终态记录和活动记录（分配腿的账户、需求的来源账户和动用授权、账户的资源定义和单位）以及这些记录引用的记录；结算一次操作写的记录与账户数无关，池化需求的分配会挂载每一个账户，与资源插件无关的边界完全不读资源根。你自己的插件要读资源根时，用 `resource_root_in_view(view, keys)` 或 `ResourceRootReader` 点名需要的常驻终态记录，用 `attach_live(keys)` 或 `attach_custodian_accounts(holder)` 点名活动记录，或者用 `whole_resource_root_in_view` 读全部桶，并在活动根的读取声明之外再声明 `resource_hot_terminal_state_key()` 的读取；点名一条消费的读取方通过闭包直接得到它的履约，不必搜索。上层应用用 `resource_state` 读整个根。已结束的租约立即离开资源根（它的凭证留到归档提交取走为止，它的标识仍不能再开第二份租约），所以 `resource_completion_status` 不再找得到它；上层应用用 `enqueue_resource_completion_expiry_tick` 让授权过期，`enqueue_resource_completion_operation` 会拒绝上层应用发来的 `Expire`，因为上层应用无法知道哪个边界会准入它。快照把这些记录和内核状态存放在一起。恢复和重放请使用包装函数，它们会拒绝伪造的摘要、守恒失败、修订号不符和缺失的精确证据：
+资源根状态则分成几部分保存：活动根记录 `resource:runtime:v1`（`ResourceRuntimeRecord`，载荷为 `ResourceLiveRootV1`）保存未关闭的需求及其预留和分配腿、进行中的转移、租约、报告授权和观察头，其余的只在两本账里计数；每条常驻终态记录是某条常驻终态桶 `resource:hot-terminal:{bucket}`（`ResourceHotTerminalBucketV1`，每桶约两条）中的一个条目，每个账户、动用授权、资源定义、单位版本和保管人索引条目（`ResourceCustodianAccountsV1`，某个持有人名下的全部账户）是某条活动桶 `resource:live:{bucket}`（`ResourceLiveBucketV1`，每桶约四条）中的一个条目，都由其标识的哈希决定落在哪个桶。两类桶共用一种记录种类 `canwu.resource` `bucket`（`ResourceBucketRecord`）。自 0.20.0 起，每个常驻终态桶以仅凭身份的形式（`canwu_identity_evidence_dependencies`）声明其记录的精确证据，活动根声明它持有的完成租约、外部参与者和观察头所引用的版本，生产根声明尚无产出结果的生产执行的待处理产出来源，所以封存或接续检查点会保留常驻记录所引用版本的证明，即使该记录之后已更新；在完成租约进行中写出的接续检查点因此可以加载、校验并精确继续。资源状态格式为 7（自 0.24.0 起：账户容量可以更改，并新增了对应的操作结果种类），两类桶的格式为 2。`ResourceState::into_records` 把状态写成这些记录，`from_records` 读回来，并检查每个账户都在其保管人的索引中、每条消费都指向它记录的那条履约（`ResourceConsumption::fulfillment`）。一个边界只读写活动根和它触及的记录所在的桶：资源插件在结算每个数据包之前，先挂载该数据包点名的每条常驻终态记录和活动记录（分配腿的账户、需求的来源账户和动用授权、账户的资源定义和单位）以及这些记录引用的记录；结算一次操作写的记录与账户数无关，池化需求的分配会挂载每一个账户，与资源插件无关的边界完全不读资源根。你自己的插件要读资源根时，用 `resource_root_in_view(view, keys)` 或 `ResourceRootReader` 点名需要的常驻终态记录，用 `attach_live(keys)` 或 `attach_custodian_accounts(holder)` 点名活动记录，或者用 `whole_resource_root_in_view` 读全部桶，并在活动根的读取声明之外再声明 `resource_hot_terminal_state_key()` 的读取；点名一条消费的读取方通过闭包直接得到它的履约，不必搜索。上层应用用 `resource_state` 读整个根。已结束的租约立即离开资源根（它的凭证留到归档提交取走为止，它的标识仍不能再开第二份租约），所以 `resource_completion_status` 不再找得到它；上层应用用 `enqueue_resource_completion_expiry_tick` 让授权过期，`enqueue_resource_completion_operation` 会拒绝上层应用发来的 `Expire`，因为上层应用无法知道哪个边界会准入它。快照把这些记录和内核状态存放在一起。恢复和重放请使用包装函数，它们会拒绝伪造的摘要、守恒失败、修订号不符和缺失的精确证据：
 
 - 资源：`from_resource_snapshot_json`、`from_resource_checkpoint_journal`、`replay_resource_from_journal`，用其他方式加载后调用 `validate_resource_runtime`；
 - 生产：存在归档状态时，使用 `from_production_snapshot_json_with_archives`、`from_production_checkpoint_journal_with_archives`、`replay_production_from_journal_with_archives` 和 `validate_production_runtime_with_archives`。
@@ -290,6 +301,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 - 证据种类：传给 `ResourcePlugin::new` 的记录种类、每个工艺版本的 `realization_evidence_kinds`，以及动用授权和流出所引用的权限记录。
 - 消费者：你的插件在 `resource_consumption_intents` 映射中批准消费意图，并对结果作出反应。
 - 运输：通过 `canwu-transport` 和 `canwu-movement` 管理行程与执行，由它们的证据验收到货。
+- 引擎规则之外发生在仓储和设施上的事：记载仓储变化（例如扩建或火灾）的记录（供[账户容量变更](/reference/terminology/)引用），以及设施状况记录所引用的磨损、洪水或劫掠记录。
 - 降级设施票据的控制者，以及货币、市场、价格、工资、战斗公式和客户端界面。
 
 ## 限制与预算

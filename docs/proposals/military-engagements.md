@@ -23,6 +23,27 @@ report, a fight may be opened shorter than its kind, `JoinSiege` and
 defenders, and a host may queue a timed step; where that proposal and the
 sections below differ, it states the 0.21.0 contract.
 
+Extended in 0.24.0 (downstream gaps G-100 to G-102), in the sections below
+and in the 0.24.0 entry of [versioning](../versioning.md):
+
+- **Engagement groups (G-100).** `OpenGroupEngagements` opens one engagement
+  per command group of one side at one site, each against the same forces
+  of the other side, the shared side
+  ([Engagement groups](#engagement-groups-0240)).
+- **Surrender (G-101).** `SurrenderSiege` ends a siege `Fell` by
+  `Surrendered` and releases the defenders with their men instead of
+  dispersing them ([Sieges](#sieges)). A surrender was chosen over a release
+  from the assault: a release could empty a side, and the siege would still
+  have closed as a storm or a breach.
+- **Order confusion by the day (G-102).** `cohesion.confusion_per_day`
+  replaces `cohesion.confusion`; the plugin charges it after the resolver,
+  by the time fought since the side was last charged, with a carried
+  remainder (§8). The carried
+  remainder was chosen among the options the gap named (a finer cohesion
+  unit, or a field on the step profile that scales the confusion term): it
+  keeps cohesion in whole points and the cost exact.
+- Military payloads carry `SCHEMA_VERSION` 3.
+
 "Today" means 0.19.0 as it is on `main`.
 
 ## Contents
@@ -274,7 +295,7 @@ pub struct CombatRulebookV1 {
         inflicted_cap_per_mille: u32, killed_numerator: u32, killed_denominator: u32,
         supply_fire: SupplyFireRuleV1 { below_per_mille: u16, bp: u32 },
         leadership: LeadershipRuleV1 { base_bp: u32, command_weight: u32, pick_weight: u32, min_bp: u32, max_bp: u32 } },
-    pub cohesion: CohesionRuleV1 { per_inflicted: u32, base: u32, confusion: u32, recover_per_day: u32 },
+    pub cohesion: CohesionRuleV1 { per_inflicted: u32, base: u32, confusion_per_day: u32 /* one source's cost over siege.day_minutes of fighting, since 0.24.0 */, recover_per_day: u32 },
     pub morale: MoraleRuleV1 { sensitivity_default: u32, credibility_divisor: u32, shock_recover_per_day: u32 },
     pub break_rule: BreakRuleV1 { rout_cohesion_below: u32, rout_morale_margin: u32, walled_holds_from_grade: u8 },
     pub pursuit: PursuitRuleV1 { captured_per_mille_at_full: u32, wounded_left_per_mille: u32 },
@@ -322,6 +343,7 @@ pub struct EngagementStateV1 {
     pub id: EngagementId, pub host_revision: u64, pub kind: EngagementKind /* Field | Assault | Sortie | Relief | FerryFight | BridgeheadFight */,
     pub profile: ProfileId, pub site: EntityRef, pub fort: Option<(u8, bool)> /* grade, breach or gate open */,
     pub siege: Option<SiegeId>, pub crossing: Option<CrossingId>,
+    pub group: Option<EngagementGroupV1 { shared: Side, engagements: Vec<EngagementId>, shared_opened_men: u64 }> /* since 0.24.0 */,
     pub attacker: SideStateV1, pub defender: SideStateV1, pub environment: Option<(EnvironmentInputV1, SimTime)>,
     pub forecast: ForecastV1 { attacker_terms: Vec<(TermId, i64)>, defender_terms: Vec<(TermId, i64)>, ratio_bp: i64, band: ForecastBandId },
     pub opened_at: SimTime, pub last_step_at: SimTime, pub next_step_at: SimTime, pub steps_resolved: u32,
@@ -329,7 +351,9 @@ pub struct EngagementStateV1 {
     pub outcome: Option<EngagementOutcomeV1 { kind: AttackerPrevailed | Repulsed | Stalled | Abandoned, closed_at: SimTime, site_fell: bool }>,
 }
 pub struct SideStateV1 { pub forces: Vec<ForceId>, pub holders: Vec<KnowledgeHolderRef>,
-    pub input: Option<(ConditionInputV1, SimTime)>, pub morale_shock: u32, pub cohesion: u32, pub posture_after: Continuation, pub losses: LossTallyV1 }
+    pub input: Option<(ConditionInputV1, SimTime)>, pub morale_shock: u32, pub cohesion: u32, pub posture_after: Continuation, pub losses: LossTallyV1,
+    pub confusion_carry: u32 /* since 0.24.0: below siege.day_minutes */,
+    pub confusion_paid_to: SimTime /* since 0.24.0: the time the side's order confusion is paid up to; the opening time at first */ }
 
 pub struct EngagementStepsV1 { pub engagement: EngagementId, pub boundary_at: SimTime, pub steps: Vec<StepV1> }   // this boundary's steps
 pub struct StepV1 { pub index: u32, pub at: SimTime, pub attacker: SideStepV1, pub defender: SideStepV1,
@@ -349,7 +373,7 @@ pub struct SiegeStateV1 { pub id: SiegeId, pub host_revision: u64, pub site: Ent
     pub supply: SiegeSupplyInputV1 { days_of_stock: u64, ration: RationLevelId, evidence: Vec<DomainRecordVersionRef> },
     pub storm_on: StormRule /* Never | BreachOrGate */, pub assault_ordered: bool, pub sortie_ordered: bool,
     pub engagement: Option<EngagementId>, pub started_at: SimTime, pub next_day_at: SimTime,
-    pub status: SiegeStatus /* Open | Fell | Lifted */, pub end_cause: Option<SiegeEndCause /* Breach | GateOpened | Storm | Abandoned | Relieved | Withdrawn */> }
+    pub status: SiegeStatus /* Open | Fell | Lifted */, pub end_cause: Option<SiegeEndCause /* Breach | GateOpened | Storm | Abandoned | Relieved | Withdrawn | Surrendered (since 0.24.0) */> }
 
 pub struct CrossingStateV1 { pub id: CrossingId, pub host_revision: u64, pub force: ForceId, pub from: EntityRef, pub to: EntityRef, pub night: bool,
     pub defenders: Vec<ForceId>, pub holders: [Vec<KnowledgeHolderRef>; 2], pub inputs: [Option<(ConditionInputV1, SimTime)>; 2],
@@ -389,13 +413,15 @@ resend of an applied command is refused by its stale host revision.
 | `PlaceForce { force, expected_host_revision, location }` | location; refused while `engaged_in` is some, besieging, or crossing | controller |
 | `RetireForce { force, expected_host_revision }` | status Retired (the record retires at the next stepping boundary); refused while engaged, besieging, or crossing | controller |
 | `OpenEngagement { id, kind, profile?, site, fort: Option<(u8, bool)>, attackers, defenders, holders: [Vec; 2], inputs: [ConditionInputV1; 2], environment }` | creates `engagement`; every named force `At(site)`, not engaged, one owner per side; `kind` any of the six (an `Assault` with `fort` stands without a siege); forecast computed | controller of every attacker; defenders need none |
-| `JoinEngagement { engagement, expected_host_revision, side, forces }` | adds co-located forces to a side | controller of the joining forces |
+| `OpenGroupEngagements { kind, profile?, site, fort, side, groups: Vec<CommandGroupV1 { id, forces, holders, input }>, shared, shared_holders, shared_input, environment, max_minutes? }` (since 0.24.0) | creates one `engagement` per command group on `side`, each against the `shared` forces, in one engagement group; each admitted as an `OpenEngagement` would be, all before any opens; one owner over every command group, every force named once, no opening share of 0 | controller of every attacker, as `OpenEngagement` |
+| `JoinEngagement { engagement, expected_host_revision, side, forces }` | adds co-located forces to a side; refused on an engagement group's shared side | controller of the joining forces |
 | `SupplyInput { target: Engagement(id) \| Siege(id) \| Crossing(id), expected_host_revision, side: Option<Side>, condition: Option<ConditionInputV1>, environment: Option<EnvironmentInputV1> }` | the target's latest per-side or environment input; a siege or crossing hands its latest inputs to every engagement it opens | condition: a controller on that side or trusted; environment: trusted or either side's controller |
 | `OrderAction { engagement, expected_host_revision, side, action: Hold \| Withdraw \| Abandon }` | `Hold`/`Withdraw` set the side's posture for the next step; the attacker's `Abandon` closes the engagement `Abandoned` in the applying boundary (a `Held` engagement included), freeing its forces, and a defender's `Abandon` is a `Withdraw` (on a `Held` engagement it only sets `withdraw_ordered`, which takes effect when the engagement steps again) | controller on that side |
 | `ReviseStepProfile { engagement, expected_host_revision, profile }` | the step profile from the next step (`next_step_at = last_step_at + new step_minutes`) — promotion and demotion | trusted or either side's controller |
 | `InvestSite { id, site, profile, besiegers, defenders, holders, inputs, environment, work_bp, supply, naval?, storm_on }` | creates `siege`; forces at site; defenders may be empty (`Abandoned` at the first siege day) | controller of every besieger |
 | `ReviseSiege { siege, expected_host_revision, supply?, profile?, work_bp?, naval?: InterceptorRevisionV1 { Set(input) \| Withdraw }, gate_open_steps?: u32, assault: Option<bool>, sortie: bool, storm_on? }` | host inputs; `gate_open_steps` opens a gate for n steps (the host's betrayal or incident rule); `assault` orders or stands down the storm; `sortie` orders one when `sortie_ready_at` has passed | supply, profile, gate, naval, storm_on: trusted or the side's controller; `assault`: besiegers' controller; `sortie`: defenders' controller |
 | `LiftSiege { siege, expected_host_revision }` | status Lifted, cause Withdrawn | besiegers' controller |
+| `SurrenderSiege { siege, expected_host_revision }` (since 0.24.0) | status Fell, cause Surrendered; an assault in progress closes `AttackerPrevailed`, a sortie `Abandoned`, both with `site_fell`; every force leaves the siege, the defenders with their men and not dispersed; refused when the siege has no defender | trusted, or a controller of a defender |
 | `OrderCrossing { id, force, from, to, night, defenders, holders, inputs, environment, interceptor? }` | creates `crossing`; force `At(from)` | controller |
 | `ReviseCrossing { crossing, expected_host_revision, interceptor?: InterceptorRevisionV1 { Set(input) \| Withdraw }, night? }` | interceptor input (`Withdraw` removes it; JSON cannot tell `None` from `Some(None)`) | interceptor: trusted or the old or new interceptor's controller; night: the crossing force's controller |
 | `CancelCrossing { crossing, expected_host_revision }` | status Cancelled | controller |
@@ -559,14 +585,33 @@ profile's `step_scale_bp` once, in its own single division (a day profile of
 half-hour profile sets 10_000): `inflicted_per_mille = min(1000, floor(rate
 × step_scale_bp / 10^4))`; casualties `floor(own_engaged ×
 enemy_inflicted_per_mille / 1000)`, killed by `killed_numerator /
-killed_denominator`; cohesion loss `floor((rate × per_inflicted + base +
-order_confusion × confusion) × step_scale_bp / 10^4)`; morale shock
+killed_denominator`; cohesion loss `floor((rate × per_inflicted + base) ×
+step_scale_bp / 10^4)` (the order-confusion cost is the plugin's, below); morale shock
 `max(0, floor(rate × sensitivity × step_scale_bp / 10^5) −
 floor(floor(credibility / credibility_divisor) × step_scale_bp / 10^4))` (whole
 quanta of credibility, each scaled by the step, so credibility below one
 divisor relieves nothing). Every line is an ordered
 `i128` product with one floor division; the parametric resolver draws
 nothing.
+
+**Order confusion (since 0.24.0).** A source of order confusion costs a side
+a fixed cohesion per day of fighting, whatever the step length, so the cost
+does not follow `step_scale_bp`. The plugin charges it on the resolver's
+clamped `cohesion_after`, for any resolver. Each side keeps the time its
+confusion is paid up to, `SideStateV1::confusion_paid_to` (the opening time
+at first). A step at `at` owes `carry + order_confusion × confusion_per_day ×
+(at − confusion_paid_to)` cohesion-minutes, and nothing when `at` is not
+later; the side pays `owed / siege.day_minutes` whole points, carries
+`owed % siege.day_minutes` in `SideStateV1::confusion_carry` (0 at the
+opening, always below `siege.day_minutes`), and moves `confusion_paid_to` to
+`at`. For a lone engagement the span is the step length, so one source costs
+exactly `confusion_per_day` over one rulebook day: with `confusion_per_day`
+5 and a 1,440-minute day, 48 half-hour steps owe 48 × 150 = 7,200 = 5 × 1,440
+cohesion-minutes, and one day step owes the same. A resumed engagement
+starts its paid-up-to time afresh, so a held span costs nothing; a resumed
+member of an engagement group does so for its own side only and keeps the
+shared side's paid-up-to time, since that side fought on in the other
+members. A resolver leaves `order_confusion` alone.
 
 ## Composition of force and side state
 
@@ -600,9 +645,59 @@ One writer per field, and one rule for every derived value:
 - **Location** is the host's; `PlaceForce` is refused while engaged,
   besieging, or crossing, and a force leaves a fight only through
   `OrderAction { Abandon }`, a break, or the fight's close.
-- **Fall and dispersal.** When a siege ends `Fell`, every defender still at
-  the site has its remaining `present` moved to `dispersed` losses and
-  `battle.dispersed = true`; the host decides what a dispersed force becomes.
+- **Fall and dispersal.** When a siege ends `Fell` by any cause but
+  `Surrendered`, every defender still at the site has its remaining
+  `present` moved to `dispersed` losses and `battle.dispersed = true`; the
+  host decides what a dispersed force becomes. A siege that ends
+  `Surrendered` (since 0.24.0) disperses nobody: its defenders are released
+  with their men.
+
+### Engagement groups (0.24.0)
+
+Commands of one side that share no command fight "as separate engagements at
+the same place". `OpenGroupEngagements` opens one engagement per command
+group, each against the same forces of the other side; each engagement's
+record carries `group: Some(EngagementGroupV1)`.
+
+- **The split.** At every step the shared forces' present men are split over
+  the group's engagements still fighting (a held engagement counts), by
+  largest remainder of each one's own command group's present men, ties to
+  the earlier engagement id. The split is recomputed before each step, so it
+  follows the day's losses. An engagement whose share is 0 while the shared
+  forces still have men skips that step: its step time advances, the
+  resolver is not called, and only its time limit may close it. A
+  command group whose opening share would be 0 is refused at the opening.
+- **One shared side.** The shared side's cohesion, battle shock, and
+  order-confusion state (`confusion_carry` and `confusion_paid_to`) are one
+  figure. Each step moves it and copies it to every other open engagement
+  of the group, so the shared forces' losses and cohesion are counted once.
+  The shared side's order confusion is paid up to a time: the first
+  engagement whose step applies at a time pays for the minutes since, and
+  none pays for them again, even one that lags into a later boundary.
+- **One step grid.** The group's engagements step interleaved in time order.
+  `ReviseStepProfile` on one, from either side's controller, revises every
+  open one and resumes the held ones; a resumed engagement snaps to the
+  latest grid point at or before now, taken from the first open engagement
+  still stepping.
+- **Shared-side commands.** A `SupplyInput` condition or an `OrderAction`
+  for the shared side applies to every open engagement of the group (an
+  attacker's `Abandon` on the shared side closes them all), each advancing
+  its `host_revision`; a shared-side `SupplyInput` condition also resumes
+  the held ones on the group's grid. `JoinEngagement` refuses the shared
+  side.
+- **Held engagements.** A held engagement is not stepped, so it closes only
+  when the host resumes or abandons it. After a group-wide `Abandon` by the
+  shared defenders of a grouped relief lifts the siege, a held engagement of
+  the relief keeps the besiegers engaged in it until then.
+- **Bookkeeping.** The shared forces stand `engaged_in` the group's first
+  engagement still open. Each engagement's outcome signal carries only
+  that engagement's losses on a shared force. A report's band for the
+  shared side is measured against `shared_opened_men`, the shared forces'
+  men when the group opened; a member's shared-side `opened_men` is its
+  opening share.
+- **Not grouped.** Siege assaults: the forces of a siege are not free, so a
+  besieging side split into command groups fights one assault. A grouped
+  `Relief` is fought against the besiegers of one siege.
 
 ## Sieges
 
@@ -646,7 +741,13 @@ profile. Each siege day:
    or `Storm`, and the remaining defenders disperse (§9); no defender at the
    site → `Abandoned`; besiegers routed at the wall, or broken by a relief →
    `Lifted` with `Relieved`;
-   `LiftSiege` → `Withdrawn`. The siege's engagement summary and the signal
+   `LiftSiege` → `Withdrawn`; `SurrenderSiege` (since 0.24.0) → `Fell` with
+   `Surrendered`, an assault in progress closed `AttackerPrevailed` or a
+   sortie in progress `Abandoned`, both with `site_fell`, and the defenders
+   released with their men, not dispersed (a consumer that
+   must tell a surrender from a storm reads the siege's `end_cause`, since
+   the assault's summary reads `AttackerPrevailed` in both).
+   The siege's engagement summary and the signal
    carry `site_fell`; the plugin writes no occupation.
 
 ## Contested crossings
@@ -727,9 +828,11 @@ siege: Option<SiegeId>, crossing: Option<CrossingId> }`) and emits
 A host that wants a packet registers
 `MilitaryPlugin::with_outcome_signal(target_plugin, packet_type)` (encoded in
 the settle system's name and declared as a `plugin_ingress_targets` entry):
-the settle system then enqueues `EngagementOutcomeSignalV1` (the summary plus
-each force's `LossTallyV1` delta of the boundary) as next-boundary plugin
-ingress to that target. The target must be an ingress the named plugin
+the settle system then enqueues `EngagementOutcomeSignalV1` (the summary plus,
+for each force, the losses this engagement inflicted on it in the boundary,
+plus any dispersal; since 0.24.0 a force an engagement group shares reports
+only this engagement's part) as next-boundary plugin ingress to that target.
+The target must be an ingress the named plugin
 registered; the engine finds an undeclared target only when the first signal
 is scheduled and fails that boundary, so the starter registers one and the
 lifecycle test exercises it (§16 lists it).
@@ -1103,6 +1206,12 @@ Recorded as limits (not in 0.20.0):
   ≈ 2 KB for the run's life, and the plugin bounds its active set, not the
   store.
 - **Keyed draws stay indexed** for the run (engine finding G-71).
+- **Siege assaults are not grouped (0.24.0).** `OpenGroupEngagements` needs
+  free forces, and the forces of a siege are not free, so a besieging side
+  split into command groups fights one assault. A step records no separate
+  trace of the order-confusion cost, a confusion remainder below one point
+  is never charged once the engagement closes, and an assault closed by a
+  surrender reads like a storm in its summary.
 - **No second independent host yet.** Criterion (f) of the gap is met only
   when a host other than the reference starter adopts the crate.
 
@@ -1184,8 +1293,10 @@ sections above are updated to match.
   resolver now computes the unscaled per-step rate as an exact fraction
   (capped by `inflicted_cap_per_mille`) and every per-step quantity —
   inflicted, cohesion loss, morale shock, and the credibility relief — scales
-  it once (§8). `cohesion.confusion` multiplies `order_confusion` (the host
-  passes how many sources of confusion a side suffers).
+  it once (§8). `cohesion.confusion` multiplied `order_confusion` (the host
+  passes how many sources of confusion a side suffers); since 0.24.0 the
+  rulebook figure is `cohesion.confusion_per_day` and the plugin charges it
+  by step length, outside the resolver (§8).
 - **Walls hold.** A defender behind a closed fortification of grade
   `walled_holds_from_grade` or more never breaks (neither withdraws nor
   routs), as the host's model has it; the text said "never routs from

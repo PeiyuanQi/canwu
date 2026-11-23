@@ -159,6 +159,26 @@ with a machine-validated payload and declared core/component access.
   `seat_binding()`, never `run_configuration().seat_binding`, which stays as
   declared. A read-only run, or one with direct command history, cannot
   rebind.
+- Put a question to a captive (0.24.0) as a custody-addressed ticket: set
+  `custody_addressed: Some(DecisionCustodyAddress::new(custodian))` on the
+  `DecisionTicketDraft` you `Open`, assigned to the captive's own controller.
+  It opens only while the decision maker is alive and `Captive` or `Detained`
+  by exactly that custodian (`PersonAvailability::is_held_by`), and is then
+  exempt from the availability gates that refuse and cancel that person's
+  ordinary tickets. Give it no `DecisionAction::Command` option (refused with
+  `InvalidDecision`; a captive cannot issue commands) and apply the answer
+  yourself when it resolves. The boundary that ends that custody cancels it
+  with `decision_maker_dead`, `custody_ended`, or `custody_transferred`,
+  listed in `BoundaryPersonAvailabilityChange::cancelled_custody_tickets`; a
+  captive who goes missing is cancelled with `decision_maker_unavailable` in
+  `cancelled_tickets`, and a ticket whose controller acts for another person
+  who becomes unavailable with `controller_authority_unavailable` in that
+  person's `cancelled_controller_tickets`, so read all three lists. Any
+  change of custodian is a transfer; to ask again, open a new ticket that
+  names the new custodian. Every `DecisionTicketDraft` and `DecisionTicket`
+  literal names the field (`None` for an ordinary ticket).
+  Commitment format 9 (`canwu.commitment.decisions.v5`), decision archive
+  format 3.
 
 ## Read named records as a host (0.22.0)
 
@@ -369,6 +389,38 @@ with a machine-validated payload and declared core/component access.
   under a single-step lease whose envelope the host bound to that credit
   (`EligibilityEnvelopeV1::bound_to(CompletionOperationBindingV1::new(
   ResourceOperationKind::Credit, quantity))`).
+- Account capacity (0.24.0): when a store grows or shrinks, change the open
+  account's capacity with the host-only
+  `enqueue_resource_account_capacity(canwu, due_at,
+  &ResourceSetAccountCapacityRequestV1 { operation_key, account,
+  expected_account_revision, capacity_after, evidence })`, citing the current
+  version of a record of an adapter evidence kind (the completed works, for
+  example); a tracked command or adapter packet cannot carry it. A rise must
+  hold the balance; a lowering (or a bound on an unbounded account) must also
+  leave room for the escrow of every open transfer naming the account. A
+  closed account, a stale revision, and a completion lease locking the
+  account's current revision are recorded rejections, so send it while no
+  lease is open and take the next lease at the new revision. Resource state
+  format 7.
+- Facility condition, repair, and expansion (0.24.0): record wear, a flood,
+  or a raid on a standing facility with
+  `ProductionOperation::RecordFacilityCondition { facility,
+  expected_generation, condition_after_per_mille, lifecycle_after, cause,
+  evidence }` from the site's holder. It only lowers the condition;
+  `lifecycle_after` is `Damaged` at or below 250 ‰
+  (`FACILITY_DAMAGED_CONDITION_PER_MILLE`), else `Degraded` (or `Operational`
+  for a facility that still is); the evidence is the current version of your
+  own record with `semantic_digest =
+  canonical_hash("canwu.production.provider-evidence.v1", &record)`, where
+  `record` is the whole `canwu_api::DomainRecord` at the cited version, not
+  its payload. Create a
+  `FacilityProjectKind::Repair` project straight on a `Degraded` or `Damaged`
+  facility (a worn `Operational` one records `Degraded` first), and raise an
+  `Operational` facility's capacity with
+  `FacilityProjectKind::Expand { capacity_after }`, which lists every
+  capability at no less than its current figure. Every completed project
+  returns the facility `Operational` at 1,000 ‰. `FacilityProjectKind` is no
+  longer `Copy`; production archive blob format 4.
 - Resource and production continuation (0.20.0): a continuation checkpoint
   or seal taken while a completion lease's outcomes are hot now loads
   (resource state format 6, bucket formats 2: each hot terminal bucket and
@@ -461,7 +513,24 @@ with a machine-validated payload and declared core/component access.
   besieged force march off with `ReviseSiege { release, .. }` and place it
   in the same admission order; name a force that reached the far bank with
   `ReviseCrossing { defenders: Some(..), .. }`. A subject whose sides name
-  no holder queues no report. Payloads use `SCHEMA_VERSION` (2).
+  no holder queues no report. Since 0.24.0: when two or more command groups
+  of one side meet the same enemy forces without a shared command, open
+  `OpenGroupEngagements` (one `CommandGroupV1` per group, the enemy as
+  `shared`): each group fights its own engagement, and the shared forces'
+  losses and cohesion are counted once; a shared-side `SupplyInput` or
+  `OrderAction`, and a `ReviseStepProfile` on any member, reach every open
+  engagement of the group and advance each `host_revision`, so read them
+  again (a shared-side `SupplyInput` also resumes the held ones); siege
+  assaults are not grouped. When
+  a garrison yields, send `SurrenderSiege { siege, expected_host_revision }`:
+  the siege ends `Fell` by `SiegeEndCause::Surrendered` and the defenders
+  leave undispersed for you to take (read the siege's `end_cause`; the
+  assault's summary reads like a storm). Set the rulebook's
+  `cohesion.confusion_per_day` (it replaces `confusion`) to what one source
+  of `order_confusion` costs per day of fighting; the plugin charges it by
+  the time fought, and a custom `StepResolver` must not charge it. Payloads
+  use `SCHEMA_VERSION` (3); an engagement side literal adds
+  `confusion_carry: 0` and `confusion_paid_to` at the opening time.
 - Society (0.18.0): author intergroup relations with
   `IntergroupRelations::into_record` beside the root, revise many per
   packet with `intergroup_relation_revision_v1` (each change names the edge

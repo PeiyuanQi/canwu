@@ -156,6 +156,7 @@ sidebar:
 | [本地验收](/developer/production-economy/) | local acceptance | `ResourceTransferDispositionV1::AcceptLocal` | 当两个账户声明相同的地点范围时，不经运输执行即可结算尚未发运的转移，并引用精确的交接记录。 |
 | [地点范围](/developer/production-economy/) | place scope | `ResourceAccount::place_scope` | 由上层应用在场景安装账户时声明的账户存量地点标识，此后只有上层应用可以更改（`RescopeAccount`）；引擎从不推断它，未声明时不能本地验收。 |
 | [账户改换地点](/developer/production-economy/#本地验收) | account rescope | `ResourceOperationRequestV1::RescopeAccount`、`enqueue_resource_account_rescope` | 上层应用对账户地点范围的更改，须引用记载这次搬迁的那条记录的当前版本；持有人永远不能设置地点范围。 |
+| [账户容量变更](/developer/production-economy/#更改账户容量) | account capacity change | `ResourceOperationRequestV1::SetAccountCapacity`、`enqueue_resource_account_capacity` | 上层应用对未关闭账户容量的更改，须引用记载这次仓储变化的那条记录的当前版本。新容量必须装得下账户余额，调低时还要为以该账户为来源或目的地的未完结转移留出在途数量；账户创建之后，持有人不能更改容量。 |
 | [动用授权](/developer/production-economy/) | access grant | `ResourceAccessGrantV1`, `ResourceDemandSourcePolicyV1::Granted` | 授权保管人引用精确权限证据作出的记录化同意：被授权方可在有效期内、在上限以内动用授权方某一精确资源与单位版本的存量。每次扣减都由被授权方自己的完成租约授权，不会回退到其他账户。 |
 | [活动根](/architecture/resources-production/#随机性持久化与重放) | live root | `ResourceLiveRootV1`、`resource:runtime:v1` | 持久化资源根时不含分桶记录的那条领域记录：未关闭的需求及其分配、进行中的转移、租约、报告授权、观察头，以及分别计数常驻终态记录和活动记录的两本账。每个结算资源工作的边界都会读它。 |
 | [常驻终态记录](/architecture/resources-production/#归档终态记录) | hot terminal record | `ResourceHotTerminalEntryV1`、`ResourceState::hot_terminal_records` | 还没有通过归档提交离开资源根的终态记录（操作结果、已关闭的需求及其预留、已结算的转移、凭证）。它占用归档候选预算，每次恢复都要校验它。 |
@@ -171,6 +172,8 @@ sidebar:
 | [租约操作绑定](/developer/production-economy/#租约操作绑定) | lease operation binding | `CompletionOperationBindingV1`、`EligibilityEnvelopeV1::operation_binding`、`EligibilityEnvelopeV1::bound_to` | 可选的记录，写明完成租约所授权的唯一一项不可逆操作（种类、数量，终态转移处置还可以指定是哪一种），由租约的签发方写进资格信封，持有人不能写；把租约用于别的操作会被拒绝。 |
 | [归档查找索引](/architecture/resources-production/#归档终态记录) | archive lookup index | `ResourceArchiveLookupPageV1`, `ResourceArchiveIndexDirectoryV1::lookup_root` | 每次归档提交都会续写的累积索引，按内容寻址。检查某个键是否已归档时，只需读取归档头目录，再沿索引每层读一个经过认证的页，与模拟运行已经做过多少次归档提交无关。资源归档、生产归档、财政归档和参考包归档都使用这种格式的索引，各有自己的命名空间。恢复、精确重放或派生分支需要沿途每个归档头的索引页。 |
 | [在制品](/tutorials/cases/production-economy/) | work in progress | `WorkInProgress` | 已进入尚未完成的生产执行，并绑定精确工艺、设施、资源和证据的投入；既不是可用库存，也不是已结算产出。 |
+| [设施状况记录](/architecture/resources-production/#设施状况修复与扩建) | facility condition record | `ProductionOperation::RecordFacilityCondition`、`FacilityConditionCause` | 生产地点的持有人记下一座在用设施因磨损、灾害或敌对行为而状况下降，须引用一条提供方记录的当前版本。它从不调高状况；设施随后是 `Damaged`、`Degraded`，还是（高于界线且原本如此时）仍为 `Operational`，由引擎的 250 ‰ 界线决定。 |
+| [扩建项目](/architecture/resources-production/#设施状况修复与扩建) | expansion project | `FacilityProjectKind::Expand` | 把一座 `Operational` 设施的产能提高到项目写明的 `capacity_after` 的设施项目；和其他完成的项目一样，它交回设施的下一个代次，状态为 `Operational`，状况为 1,000 ‰。 |
 | [实际产出](/developer/production-economy/) | realized output | `realized_output_per_mille`, `realization_evidence` | 生产执行完成时以工艺名义产出的千分比表示的产出，按向下取整缩放后进入产出结算；任何非名义比例都需要工艺版本声明种类的精确证据记录。 |
 | [移动生命周期扩展](/tutorials/routing-transport/) | movement lifecycle extension | `canwu-movement`, `MovementPlugin` | 负责运输记录生命周期的可选扩展：准入移动命令、在到期时结算路段、让路段在出发前和途中滞留、分配运力池，并发布持有人相对的移动报告。事故、危险及其随机抽样仍属于应用系统。 |
 | [军事模拟扩展](/tutorials/military-domain/) | military simulation extension | `canwu-military` | 可选的交战引擎：在宿主安装的战斗规则册上负责部队、按战斗步推进的交战、围城、渡河作战和交战报告；不是通用战斗模型，也不拥有控制或占领。 |
@@ -186,6 +189,10 @@ sidebar:
 | [加入围城](/architecture/military/) | siege join | `JoinSiege` | 把地点上空闲的部队加入某场围城的围城方或守军，以及正在进行的攻城或出城反击的命令。 |
 | [撤出围城](/architecture/military/) | siege release | `ReviseSiegeV1::release` | 围城修订中把部队从围城一方撤出、使其可以重新布置的部分。 |
 | [交战时限](/architecture/military/) | engagement time limit | `OpenEngagementV1::max_minutes`, `EngagementStateV1::max_minutes` | 一场战斗在无人溃退时最多进行多久，到时以 `Stalled` 结束：取其种类规则的时限，或上层应用开战时指定的更短时限。 |
+| [指挥组](/architecture/military/#交战组) | command group | `CommandGroupV1` | 一方在同一地点由同一指挥统带的部队，有自己的报告持有人和战斗条件输入；交战组中的一个成员。 |
+| [交战组](/architecture/military/#交战组) | engagement group | `EngagementGroupV1`, `OpenGroupEngagements` | 一条 `OpenGroupEngagements` 命令为一方在同一地点的各个指挥组开启的一组交战：每个指挥组一场，对手都是对方的同一批部队。每个战斗步都把这批共用部队的人数分到各场交战，它们的损失和凝聚力只计一次。 |
+| [围城投降](/architecture/military/#围城与渡河) | siege surrender | `SurrenderSiege`, `SiegeEndCause::Surrendered` | 守军投降：围城以 `Fell`、原因 `Surrendered` 结束，正在进行的攻城或出城反击随之结束，守军带着人马离开，不会溃散，去向由上层应用决定。 |
+| [每日号令混乱代价](/architecture/military/#战斗步与结算器) | daily confusion cost | `CohesionRuleV1::confusion_per_day`, `SideStateV1::confusion_carry` | 一处号令混乱在规则册的一个作战日里让一方损失的凝聚力。插件按这一方从上次扣除到现在的作战时间扣除，并结转余数，所以无论战斗步配置如何，每天的代价都相同。 |
 | [军事补给参考消费者](/tutorials/cases/production-economy/) | force-supply reference consumer | `canwu-force-supply-reference` | 可替换的整合包，证明军事后勤可以消费公共资源 API，同时只拥有军队本地需求、战备、短缺后果和征发 saga；不是通用战斗模型。 |
 | [本地稀缺度投影](/tutorials/cases/production-economy/) | local scarcity projection | `LocalScarcityProjection` | 脱离式、持有人绑定的读取模型，解释可观察供给、需求、缓冲、路线可达性、安全与政策；不声称存在价格。 |
 | [价格压力投影](/tutorials/cases/production-economy/) | price-pressure projection | `PricePressureProjection` | 只有存在合格的价格证据和版本化解释规则时才生成的脱离式读取模型；既不形成市场，也不结算交易。 |
@@ -234,7 +241,7 @@ sidebar:
 | 中文规范写法 | English | 代码或 API | 含义与使用位置 |
 | --- | --- | --- | --- |
 | [角色](/developer/reading-state/) | actor | `PersonId` | 其知识和权限会约束视图或行动的人物或世界内主体。 |
-| [人物可用性](/developer/integration/) | person availability | `PersonAvailability` | 某个人物的核心生存状态与人身状态，只能由声明过的边界系统修改。未存活、被拘押或被俘的人物不能签发命令、作出决策，也不能作为控制者的权限人物；没有记录时视为存活且自由。 |
+| [人物可用性](/developer/integration/) | person availability | `PersonAvailability` | 某个人物的核心生存状态与人身状态，只能由声明过的边界系统修改。未存活、被拘押或被俘的人物不能签发命令、作出决策，也不能作为控制者的权限人物，唯一的例外是答复[在押人物票据](/architecture/decisions/#给在押人物的票据)；没有记录时视为存活且自由。 |
 | [生存状态](/developer/integration/) | life state | `LifeState` | `Alive`、`Dead` 或 `Missing`；人物可用性的一部分。 |
 | [人身状态](/developer/integration/) | custody state | `CustodyState` | `Free`、`Detained`、`Hostage`、`Captive`、`Hiding` 或 `Exile`；人物可用性的另一部分。默认只有 `Detained` 和 `Captive` 会阻止准入。 |
 | [人物创建](/architecture/settlement/) | person creation | `BoundaryDirective::CreatePerson`, `PersonDraft`, `PersonPlacement`, `BoundaryCreatedPerson` | 第 7 阶段根据应用草稿和来源证据创建人物、由引擎分配 ID 的指令。草稿可以带一个在 `WorldSnapshot` 投影中的落位（所属政府和所在地域），也可以不带。回执把该 ID 绑定到提出创建的插件、系统和相关标识；新人物从下一边界起可见。 |
@@ -290,6 +297,7 @@ sidebar:
 | [前序票据](/tutorials/cases/warlord-aid-decision/) | parent ticket | `DecisionTicket::parent_ticket` | 新票据所接续的终态票据：可以是同一决策者的票据（例如为另一控制者重新开启的已取消票据），也可以是经席位继任接续的票据。该关联会复制到新票据的决策轨迹上。 |
 | [席位继任](/tutorials/cases/warlord-aid-decision/) | seat succession | `DecisionControllerBinding::seat_id`, `DecisionTicket::parent_ticket` | 从终态票据到新票据的接续关系：新票据的指定控制者与原票据的控制者绑定同一个非空席位，因此继任者可以接续前任的决策，而不必是同一决策者。 |
 | [席位改绑](/architecture/decisions/) | seat rebinding | `rebind_seat`, `SeatRebindingRequest` | 上层应用输入，在运行继续时把运行的席位交给另一个已有人物。从准入它的结算边界起，席位相关的检查跟随新人物，该席位上代表旧人物行事的控制者的开启票据以 `seat_rebound` 取消。 |
+| [在押人物票据](/architecture/decisions/#给在押人物的票据) | custody-addressed ticket | `DecisionTicketDraft::custody_addressed`, `DecisionCustodyAddress` | 上层应用发给在押人物的决策票据，开启时写明决策者由哪个看管方看管。只要这段看管关系还在，票据就不受人物可用性检查的限制，在押人物通过自己的控制者作答；它不能带命令选项，看管关系结束时以 `decision_maker_dead`、`custody_ended` 或 `custody_transferred` 取消，在押人物失踪时以 `decision_maker_unavailable` 取消。 |
 | [决策选项](/tutorials/cases/warlord-aid-decision/) | decision option | `DecisionOption` | 决策票据提供的一个候选选择。 |
 | [决策尝试](/tutorials/cases/warlord-aid-decision/) | decision attempt | `DecisionAttemptRecord` | 一条已准入决策请求的权威记录，写明该请求被接受还是被拒绝。请求可以是注册控制者，也可以是开启票据、替换票据选项、为票据展期、改派票据、解决票据或取消票据。 |
 | [展期](/architecture/decisions/) | deadline extension | `DecisionMutation::ExtendDeadline` | 在票据 ID 不变的前提下把开启票据的截止时间推后，按票据版本校验。 |

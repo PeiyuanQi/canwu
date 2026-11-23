@@ -136,11 +136,23 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 - 抽样证据只能来自边界的 `ResolveDecisionRandomly`，而且只有 `Random` 控制者和用 `with_random_tie_break` 开启许可的 `Utility` 控制者接受它。因此 `Random` 票据只能由边界系统结算。
 - 嵌套命令的签发者和权限都从绑定推导：`Human` 策略对应 `Issuer::Human`，其他策略对应 `Issuer::Ai`，两者都带控制者 ID。`CommandAuthority` 的 `decision_origin` 取自绑定中的权限，席位、权限配置和命令主体也取自绑定。在声明了运行配置的运行中，`Issuer::Human` 还必须与运行当前生效的席位绑定（`SeatBinding`，由 `seat_binding()` 读取）和 `ControllerPolicy::HumanRoleBound` 一致，`Issuer::Ai` 的权限不能是 `NoResponsibleActor`。
 
-[人物可用性](/reference/terminology/)也会限制结算。人物死亡、失踪、被拘押或被俘时即为不可用。决策者不可用时，票据不能开启，也不能交给 `prepare_decision` 求值（`DecisionMakerUnavailable`）；控制者的权限人物不可用时，票据不能开启，不能交给 `prepare_decision` 求值，也不能结算（`IssuerUnavailable`）。人物在某个边界中变为不可用，该边界结束时（在本边界的随机决策生成之后）引擎取消相关的开启票据，原因记为 `decision_maker_unavailable` 或 `controller_authority_unavailable`，票据 ID 写入 `BoundaryPersonAvailabilityChange` 的 `cancelled_tickets` 和 `cancelled_controller_tickets`。
+[人物可用性](/reference/terminology/)也会限制结算。人物死亡、失踪、被拘押或被俘时即为不可用。决策者不可用时，票据不能开启，也不能交给 `prepare_decision` 求值（`DecisionMakerUnavailable`）；控制者的权限人物不可用时，票据不能开启，不能交给 `prepare_decision` 求值，也不能结算（`IssuerUnavailable`）。人物在某个边界中变为不可用，该边界结束时（在本边界的随机决策生成之后）引擎取消相关的开启票据，原因记为 `decision_maker_unavailable` 或 `controller_authority_unavailable`，票据 ID 写入 `BoundaryPersonAvailabilityChange` 的 `cancelled_tickets` 和 `cancelled_controller_tickets`。只有一种票据在决策者被看管期间不受这些规则限制，见[给在押人物的票据](#给在押人物的票据)。
 
 被取消的票据不会恢复。要继续这项决策，就开启新票据，并把 `parent_ticket` 设为被取消的票据。前序票据必须已经终止且尚未归档（见[决策历史归档](#决策历史归档)），而且要么与新票据的决策者相同，要么两张票据的控制者绑定了同一个 `seat_id`，即[席位继任](/reference/terminology/)。完整规则和两种接续方式见[已无法行事的人物](/developer/integration/#已无法行事的人物)。
 
 运行的席位本身可以用 `rebind_seat` 改绑到另一个已有人物，即[席位改绑](/reference/terminology/)。准入改绑的结算边界先于本边界准入的其他输入裁决它：新绑定从该边界起生效，该席位上代表旧人物行事的控制者的开启票据以 `seat_rebound` 取消，可以按席位继任接续；人物不存在、已死亡或失踪时，改绑记为被拒绝，其他状态不变。用法见[把运行的席位交给继任者](/developer/integration/#把运行的席位交给继任者)。
+
+### 给在押人物的票据
+
+被拘押或被俘的人物（下文统称在押人物）不能收到普通票据。看管方要问他的事，例如劝降，需要一种专门的票据：[在押人物票据](/reference/terminology/)。你的应用在开启票据时做标记，把 `DecisionTicketDraft::custody_addressed` 设为 `Some(DecisionCustodyAddress::new(custodian))`。标记在票据的整个生命周期内保持不变，是已承诺票据的一部分。
+
+- **何时可以开启。** 决策者必须是人物，存活，并且正被这个看管方俘获或拘押（`Captive` 或 `Detained`）；可以先用 `PersonAvailability::is_held_by(&custodian)` 检查。决策者已死亡或失踪时记为 `DecisionMakerUnavailable`，自由或由别人看管时记为 `InvalidDecision`。
+- **由谁作答。** 只要这段看管关系还在，票据就跳过上面的可用性检查：它可以开启、求值和结算，在押人物自己的控制者也可以作答，即使他本人就是这个控制者的权限人物。控制者代表的是另一个不可用的人物时，仍然会被拒绝。
+- **不能带命令选项。** 命令准入仍然拒绝在押的签发者，答复所带的命令永远无法执行。因此 `Open` 和 `ReplaceOptions` 会拒绝这类票据上的 `DecisionAction::Command` 选项（`InvalidDecision`）。票据结算后，由你的应用读取选中的选项，在自己的系统里落实这个答复。
+- **何时结束。** 人物可用性的变化一旦结束了这段看管关系，票据就在同一个边界结束时取消，即使这次变化让人物恢复可用。人物死亡时原因记为 `decision_maker_dead`，恢复可用时记为 `custody_ended`，改由别的看管方看管（或不再有看管方）时记为 `custody_transferred`。票据 ID 写入同一条 `BoundaryPersonAvailabilityChange` 的 `cancelled_custody_tickets`。有两种结束方式写在别处：在押人物失踪时，票据以 `decision_maker_unavailable` 取消，写入 `cancelled_tickets`；票据的控制者代表的是另一个人物，而这个人物变为不可用时，票据以 `controller_authority_unavailable` 取消，写入该人物的 `cancelled_controller_tickets`。所以三个列表都要读。
+- **移交之后。** 看管方只要变了就算移交，同一势力内部换人看管也一样。要继续提问，就另开一张写明新看管方的票据。
+
+同一人物的普通票据仍然按上文的规则被拒绝和取消。
 
 ## 策略能看到什么
 
@@ -187,7 +199,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 - 与玩家、外部服务或模型之间的通道：展示票据、解析答复，并确认提交答复的一方有权操作这个控制者。
 - 随机选择所需的边界系统、随机流声明和各选项的权重，也就是概率。
 - 非零且全局唯一的 `DecisionRequestId` 和 `CommandRequestId`，以及到期时间和优先级。
-- 人物死亡、被俘或获释的时机，由边界系统写入人物可用性；继任者的控制者和接续用的新票据。
+- 人物死亡、被俘或获释的时机，由边界系统写入人物可用性；继任者的控制者和接续用的新票据；向在押人物提问时，票据上的看管方，以及答复如何落实。
 - 如果要归档决策历史，还要提供归档存储（`DecisionArchiveStore`、`DecisionArchiveProvider`）。
 - 所有界面与呈现。
 

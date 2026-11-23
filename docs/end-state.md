@@ -70,10 +70,29 @@ recorded on the boundary evidence. The host may move an open ticket to another
 available controller with `Reassign` before that happens; once the kernel has
 cancelled it, when only the controller's authority person became unavailable,
 the decision continues as a new ticket for an available controller whose
-`parent_ticket` names the cancelled one. When the decision maker is unavailable, no ticket can be opened
-for that decision maker; a successor's decision is a new ticket of the
-successor, which may name the cancelled one as its parent when the successor's
-controller is bound to the same seat.
+`parent_ticket` names the cancelled one. When the decision maker is
+unavailable, no ordinary ticket can be opened for that decision maker; a
+successor's decision is a new ticket of the successor, which may name the
+cancelled one as its parent when the successor's controller is bound to the
+same seat.
+
+One exception is deliberate. Since 0.24.0 a host may put a question to a
+person in custody as a custody-addressed ticket: at `Open` it marks the
+ticket with the custodian who holds the decision maker
+(`DecisionTicketDraft::custody_addressed`). While the person stays alive and
+`Captive` or `Detained` by that custodian, the ticket is exempt from the
+rules above as they apply to the captive, so the captive answers through
+their own controller; a controller that acts for another unavailable person
+is still refused, and the ticket cancelled. Its options carry no command,
+because command admission still refuses the captive; the host applies the
+answer. When that custody ends, the kernel cancels the ticket at the end of
+the same boundary with a reason of its own: `decision_maker_dead` when the
+captive dies, `custody_ended` when the person is available again, and
+`custody_transferred` when another custodian, or none, now holds the person;
+a new question then needs a new ticket that names the new custodian. A
+captive who goes missing has the ticket cancelled with
+`decision_maker_unavailable`, as an ordinary ticket is. An unmarked ticket
+for the same person is refused and cancelled as before.
 
 Persons can also enter the world at runtime. A phase-7 `CreatePerson`
 directive supplies an application draft and provenance, with or without a
@@ -477,9 +496,13 @@ the packet's result, so a refusal needs room for its outcome only. Since
 live buckets with a custodian index per holder, so a boundary pays nothing
 per account it does not name; a provider settles up to 256 consumptions
 under one lease as a consumption batch; a finished lease leaves the root; and
-a host expires grants only through the expiry tick. The
-production archive keeps the same lookup index, its receipts leave the root,
-and a production output batch the resource plugin deferred still settles.
+a host expires grants only through the expiry tick. Since 0.24.0 the host
+application may change an open account's capacity, citing the current record
+of what changed the store: a capacity must hold the balance, and a lowering
+must also leave room for the stock of open transfers that name the account.
+The production archive keeps the same lookup index, its receipts leave the
+root, and a production output batch the resource plugin deferred still
+settles.
 Since 0.18.0 production scales by scope roots (one root per host-chosen
 scope, each with its own limits, read and written only when its packets
 name it), settles a holder's monthly operations as one batch command, and
@@ -497,10 +520,22 @@ output as a per-mille share of the nominal output, floor-scaling every output
 settlement; any non-nominal share must cite an exact evidence record of a kind
 the process revision declares and stay within its bound, so a shortfall or an
 unusually high yield remains cited evidence rather than a hidden multiplier.
+Since 0.24.0 a facility's condition can fall outside an incident: its site's
+holder records a fall because of wear, a hazard, or a hostile act, citing
+the current version of a provider record, and the engine's 250 ‰ line sets
+whether the facility is then damaged, degraded, or (above the line, if it
+still is) operational; a rise remains a project's. A repair project starts
+on a degraded or damaged facility as well as on one stopped for repair, and
+an expansion project raises an operational facility's capacity under the
+project's own evidence.
 
 Since 0.20.0 the military extension is an engagement engine whose every
 deciding number is a host rulebook parameter; it writes no occupation or
-control.
+control. Since 0.24.0 one side's command groups can each fight the same
+enemy forces in an engagement of their own, the enemy's losses and cohesion
+counted once; a garrison can surrender, which ends the siege and frees its
+forces undispersed for the host to take; and a source of order confusion
+costs a fixed cohesion per day of fighting, whatever the step length.
 
 Military logistics remains an independent consumer. The replaceable
 `canwu-force-supply-reference` integration submits recurring demands and typed

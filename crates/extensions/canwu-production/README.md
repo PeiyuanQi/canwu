@@ -39,8 +39,16 @@ facility: Planned -> Authorized -> Reserving -> InProgress -> Commissioning
 process/resource/technology bindings, WIP totals, half-open capacity intervals,
 facility generations, completion state, bounded collection sizes, and the
 256 MiB authoritative-state cap. Overlapping active allocations are sorted by
-facility, capability, interval, and allocation ID before validation; their sum
-may never exceed the facility's condition-adjusted integer capacity.
+facility, capability, interval, and allocation ID before validation. While
+any of the allocations that overlap at a time is still `Reserved`, their sum
+may not exceed the facility's condition-adjusted integer capacity
+(`FacilityAsset::usable_capacity`: capacity × condition ‰ for a standing
+facility, 0 for one stopped for repair). Once all of them are `Consumed`,
+the bound is the facility's nominal capacity. `StartExecution` turns its
+allocations `Consumed` before the state is validated, so an execution whose
+allocations overlap no reserved one starts within the nominal capacity
+whatever the facility's condition or lifecycle. A host that wants a worn
+facility to take less work sizes its allocations by `usable_capacity`.
 
 Commands use tracked Canwu ingress through `ProductionPlugin`. Expected domain
 rejections become stable `ProductionOperationOutcome` data instead of repeated
@@ -86,17 +94,80 @@ retained.
 The resource credit and output acknowledgement settle exactly the scaled
 quantities, so production and resource balances stay conserved.
 
-Facility construction and repair use the same authoritative completion path.
-A project names an existing planned/authorized or repairing facility generation,
-exact consumed resource inputs, exact provider and technology evidence, one
-activated certificate, and matching production/resource grants at its certified
-eligibility time. Creation validates the provider and technology evidence;
+Facility construction, repair, and expansion use the same authoritative
+completion path. A project names an existing facility generation, exact
+consumed resource inputs, exact provider and technology evidence, one
+activated certificate, and matching production/resource grants at its
+certified eligibility time. Its kind (`FacilityProjectKind`) says which
+facility it may name:
+
+- `Construction` builds a `Planned` or `Authorized` facility. It is refused
+  on an `Operational` one.
+- `Repair` restores a `Repairing`, `Degraded`, or `Damaged` facility (since
+  0.24.0; before, only a `Repairing` one), so a damaged facility needs no
+  `StopForRepair` choice first. A worn facility that is still `Operational`
+  records `Degraded` first (see "Recording a fall in condition").
+- `Expand { capacity_after }` (since 0.24.0) raises an `Operational`
+  facility's capacity. `capacity_after` is the whole capacity map of the
+  completed facility: every capability the facility has, at no less than its
+  current figure (none dropped, none lowered), every figure positive, every
+  name non-empty without leading or trailing whitespace and at most
+  `MAX_PRODUCTION_IDENTIFIER_BYTES` (160) long, at most
+  `MAX_FACILITY_CAPACITY_ENTRIES` (64) entries, and different from the
+  current capacity by a higher figure or a new capability
+  (`is_facility_capacity_expansion`).
+
+A facility has one open project at a time. A repair completes if the
+facility is `Repairing`, `Degraded`, or `Damaged` when the work ends, and an
+expansion if it is `Operational`, `Degraded`, `Damaged`, or `Repairing`, so
+a fall, an incident, or a stop for repair while the work runs strands
+neither. Creation validates the provider and technology evidence;
 progress rechecks only the live resource evidence, because the cited exact
 bodies cannot change. The reducer consumes the production grant on first
 progress, derives the commissioned next-generation operational asset and restored
 condition from the authoritative base, and never accepts a caller-authored
-result. Commissioning completes the production grant and makes the terminal
-project archive-eligible.
+result: every completed project yields the next generation `Operational` at
+1,000 ‰, and an expansion yields it with exactly `capacity_after`. An
+expansion therefore also restores the condition. Commissioning completes the
+production grant and makes the terminal project archive-eligible; the
+archive checks an expansion's resulting capacity
+(`PRODUCTION_ARCHIVE_BLOB_FORMAT_VERSION` 4).
+
+### Recording a fall in condition
+
+Since 0.24.0 a facility's condition can fall without an incident draw:
+`ProductionOperation::RecordFacilityCondition { facility, expected_generation, condition_after_per_mille, lifecycle_after, cause, evidence }`
+records a fall for `Wear`, a `Hazard` such as a flood or a fire, or a
+`Hostile` act such as a raid (`FacilityConditionCause`). It is an ordinary
+production operation of the site's holder.
+
+- **Which facility.** One that stands: `Operational`, `Degraded`, or
+  `Damaged`, at the generation `expected_generation` names. A `Repairing`,
+  planned, or retired facility takes no condition record.
+- **Falls only.** `condition_after_per_mille` is at most the current
+  condition. A rise is a project's.
+- **The lifecycle follows the damage line.** At or below
+  `FACILITY_DAMAGED_CONDITION_PER_MILLE` (250 ‰) `lifecycle_after` is
+  `Damaged`. Above it, it is `Degraded`, or `Operational` for a facility that
+  is still `Operational`; a `Damaged` facility above the line records
+  `Degraded`. A record that changes neither the condition nor the lifecycle
+  is refused.
+- **Evidence.** These rules run first, so a rejection does not reveal
+  whether a record exists. Then `evidence.version` must be the current exact
+  version of its record when the operation settles (any record kind, for
+  example your own flood record), and `evidence.semantic_digest` must equal
+  `canonical_hash("canwu.production.provider-evidence.v1", &record)`, where
+  `record` is the whole `canwu_api::DomainRecord` at the cited version, not
+  its payload. Neither `evidence.capability` nor `evidence.semantic_digest`
+  may be empty or only whitespace; that is checked with the first rules.
+  The binding's `kind` and `available_quantity` are not checked for
+  condition evidence. The outcome keeps the binding.
+
+The generation does not change. A facility whose condition reaches 0 leaves
+incident evaluation. Every refusal is the operation's recorded rejection:
+`invalid_authority` for a caller who does not hold the site or names another
+generation, `domain_record_not_found` for evidence that is not current, and
+`invalid_domain_record` for the rest.
 
 Degraded-facility choices are actual Canwu decision tickets. Use
 `degraded_facility_decision_ticket` to build the exact three-option command
@@ -334,6 +405,11 @@ The `g3_contract` tests demonstrate:
 - evidence-bounded realized output that floor-scales output settlement;
 - real persisted/forked/replayed degraded-facility decision branches;
 - operation-keyed incident draws with snapshot/replay/tamper checks;
+- a recorded condition fall on provider evidence and a repair straight on a
+  degraded facility
+  (`gap_g99_facility_condition_falls_on_provider_evidence_and_repair_restores_degraded`);
+- an expansion project that raises an operational facility's capacity
+  (`gap_g110_expansion_raises_an_operational_assets_capacity`);
 - distinct operator and delayed remote-owner observation cuts; and
 - archive restart, retention acknowledgement, damage/waste/output evidence,
   and archive-object tamper rejection.

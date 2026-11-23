@@ -46,7 +46,7 @@ resource simulation:
 
 ```toml
 [dependencies]
-canwu-resource = { version = "=0.23.0", optional = true }
+canwu-resource = { version = "=0.24.0", optional = true }
 
 [features]
 resource = ["dep:canwu-resource"]
@@ -62,9 +62,9 @@ hot terminal bucket when the root already holds terminal records.
 these, and refuses any other root. Activate
 `ResourcePlugin::new(adapter_evidence_kinds)` with the exact external record
 kinds allowed to prove adapter consumption, external-inflow credit, loss, or
-outflow, and those a completion lease or an account rescope cites. Production
-output credits do not use adapter ingress; they settle through the production
-output batch ingress.
+outflow, and those a completion lease, an account rescope, or an account
+capacity change cites. Production output credits do not use adapter ingress;
+they settle through the production output batch ingress.
 
 Player and institution decisions use tracked command ingress:
 
@@ -82,6 +82,9 @@ Player and institution decisions use tracked command ingress:
 - `enqueue_resource_account_rescope` queues the host application's move of an
   account to another place scope on `RESOURCE_ACCOUNT_RESCOPE_INGRESS` (see
   "Moving an account to another place").
+- `enqueue_resource_account_capacity` queues the host application's change of
+  an open account's capacity on `RESOURCE_ACCOUNT_CAPACITY_INGRESS` (see
+  "Changing an account's capacity").
 
 The plugin has one Phase 7 lifecycle writer, Phase 8 conservation/exact-version
 validation, bounded Phase 12 summary validation, and Phase 13 holder-relative
@@ -285,6 +288,59 @@ longer current or not of an adapter evidence kind are each a recorded
 rejection. Reservations, demands, and access grants that name the account
 carry over; an operation whose lease locked the earlier account revision is
 a `version_conflict` rejection, as after any account change.
+
+### Changing an account's capacity
+
+`ResourceAccount::capacity` is the most an account may hold (`None` for no
+bound), and a credit above it is refused. It is set when the account is
+created. Afterwards only the host application changes it (since 0.24.0):
+`enqueue_resource_account_capacity` queues
+`ResourceOperationRequestV1::SetAccountCapacity(ResourceSetAccountCapacityRequestV1)`
+with the expected account revision, `capacity_after` (or `None` to remove
+the bound), and the evidence of the change, an exact record version such as
+the completed works that enlarged a granary. Like a rescope, the operation
+needs no completion lease, advances the account revision, and leaves one
+`SetAccountCapacity` outcome that keeps the evidence. No holder sets a
+capacity after creation: a tracked command that carries the operation is
+rejected at admission with `InvalidAuthority`, `resource_adapter_ingress`
+refuses it with `InvalidAuthority`, an adapter packet that carries it is
+skipped with `failed_settlement_checks`, and a packet another plugin's
+boundary system schedules on the capacity ingress settles nothing, with a
+`failed_settlement_checks` skip event.
+
+What the new capacity must hold depends on its direction:
+
+- **A rise, or the same figure,** must hold the account's balance. Reserved
+  stock and the stock a protected floor keeps are part of the balance, so
+  they always fit.
+- **A lowering** (a capacity below the current one, or any capacity on an
+  account that had none) must also leave room for the escrow of every open
+  transfer that names the account as its source or destination. The rule is
+  there so that stock in flight that an acceptance or a return could still
+  credit keeps its room, but it counts every such transfer, also one on its
+  way back to another account, so it can refuse a capacity the stock would
+  in fact fit. Another credit may still fill that room first, as before.
+
+A capacity below what it must hold is the recorded rejection
+`capacity_exceeded`. A stale account revision (`version_conflict`), a closed
+account (`invalid_lifecycle`; a rescope accepts a closed account, a capacity
+change does not), and a completion lease, local or an external
+participant's, that locks the account's current revision
+(`invalid_lifecycle`) are recorded rejections too. So send the change while
+no lease is open on the account, and take the next lease at the new
+revision: an account that receives a production execution's output stays
+locked for that execution's whole run. Unlike a rescope, a capacity change
+is admitted while a transfer that is not terminal names the account.
+
+The evidence follows the rescope's rule: its record's current version, of
+one of the adapter evidence kinds the plugin was configured with, checked
+when the host queues the operation (`EvidenceUnavailable` from the call) and
+again at settlement from the current-version index (`version_conflict`, or
+`invalid_authority` for a kind that proves nothing). The engine checks that
+the evidence is current and of an allowed kind, not what the record says.
+Reservations, demands, access grants, and the protected floor carry over;
+an operation whose lease locked the earlier account revision is a
+`version_conflict` rejection, as after any account change.
 
 ### External inflow credit
 
@@ -650,8 +706,8 @@ the run. The reasons (`ResourceIngressSkipReasonV1`):
 - `failed_settlement_checks`: the packet does not decode or fails the checks
   its ingress makes at settlement (its tracked command, provider binding,
   certificate, boundary time, current evidence, or a refused credit of a
-  production output batch), or it is an account rescope another plugin
-  scheduled;
+  production output batch), or it is an account rescope or capacity change
+  another plugin scheduled;
 - `archive_backlog`, `reserved_capacity`, `root_limit`: its result does not
   fit the root; the same request settles once room returns. The detail of a
   `reserved_capacity` skip says when no archive commit or lease release can

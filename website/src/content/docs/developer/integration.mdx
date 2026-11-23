@@ -19,13 +19,13 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 ```toml
 [dependencies]
-canwu-api = "=0.23.0"
+canwu-api = "=0.24.0"
 ```
 
 - `canwu-api` 是受支持的对外 API，API 文档见 [docs.rs](https://docs.rs/canwu-api)。应用代码依赖它，以及实际用到的扩展 crate（例如 [`canwu-resource`](https://crates.io/crates/canwu-resource)）。扩展 crate 也发布在 crates.io 上，版本号请与 `canwu-api` 保持一致。不要直接依赖 `canwu-sim` 或其他运行时 crate。
-- `canwu-reference-world` 是一个可替换的小型示例世界，下面的最小流程会用到它。它没有发布到 crates.io，只能克隆 [GitHub 仓库](https://github.com/PeiyuanQi/canwu)获取源码（检出 `v0.23.0` 标签，与上面的版本对应）。可以直接在克隆的仓库里运行示例，也可以把它复制到自己的项目里当模板，改为依赖上面这个 crates.io 版本的 `canwu-api`。如果 `canwu-api` 一处来自 crates.io、另一处来自 Git，Cargo 会编译出两份互不相通的副本，类型无法混用。
+- `canwu-reference-world` 是一个可替换的小型示例世界，下面的最小流程会用到它。它没有发布到 crates.io，只能克隆 [GitHub 仓库](https://github.com/PeiyuanQi/canwu)获取源码（检出 `v0.24.0` 标签，与上面的版本对应）。可以直接在克隆的仓库里运行示例，也可以把它复制到自己的项目里当模板，改为依赖上面这个 crates.io 版本的 `canwu-api`。如果 `canwu-api` 一处来自 crates.io、另一处来自 Git，Cargo 会编译出两份互不相通的副本，类型无法混用。
 
-`=0.23.0` 会把引擎精确固定在这个发布版本。如果应用会保存存档，升级前请先确定旧存档的处理方式：参伍不迁移旧存档，可以保留旧引擎读取，或用自己的工具导出再导入（见[存档与重放](/developer/persistence/#版本与存档兼容)）。
+`=0.24.0` 会把引擎精确固定在这个发布版本。如果应用会保存存档，升级前请先确定旧存档的处理方式：参伍不迁移旧存档，可以保留旧引擎读取，或用自己的工具导出再导入（见[存档与重放](/developer/persistence/#版本与存档兼容)）。
 
 ## 最小接入流程
 
@@ -189,9 +189,9 @@ BoundaryDirective::SetPersonAvailability {
 | 情况 | 结果 |
 | --- | --- |
 | 命令的签发者、决策来源角色或机构的责任角色不可用 | 准入以 `IssuerUnavailable` 拒绝；带请求标识的命令会记录这次拒绝。 |
-| 决策票据的人物决策者不可用 | 票据不能开启或准备（`DecisionMakerUnavailable`）。 |
+| 决策票据的人物决策者不可用 | 票据不能开启或准备（`DecisionMakerUnavailable`），除非它是[发给这个在押人物的票据](#向在押人物提问)。 |
 | 票据的控制者所代表的权限人物不可用 | 票据不能开启、准备或结算（`IssuerUnavailable`）。 |
-| 某人物在一个结算边界中变为不可用 | 在该结算边界结束时取消其未关闭票据：由其担任决策者的，原因记为 `decision_maker_unavailable`；控制者代表其行事的，原因记为 `controller_authority_unavailable`。 |
+| 某人物在一个结算边界中变为不可用 | 在该结算边界结束时取消其未关闭票据：由其担任决策者的，原因记为 `decision_maker_unavailable`；控制者代表其行事的，原因记为 `controller_authority_unavailable`，但看管关系仍在的[在押人物票据](#向在押人物提问)除外。 |
 
 ### 接续被取消的决策
 
@@ -200,7 +200,42 @@ BoundaryDirective::SetPersonAvailability {
 - **只是控制者的权限人物不可用。** 为同一决策者开启新票据，指派给权限人物可用的控制者。
 - **决策者死亡或被俘。** 走席位继任：以继任者为决策者，把票据指派给一个与原票据控制者绑定同一 `seat_id` 的控制者。
 
-前序票据必须已经终止，并且仍在热决策历史中（即尚未移入决策归档）；已归档的前序票据会以 `TicketNotFound` 拒绝。决策者不同、席位也不同的前序票据会被拒绝。决策者仍不可用时，不能为其开启新票据。
+前序票据必须已经终止，并且仍在热决策历史中（即尚未移入决策归档）；已归档的前序票据会以 `TicketNotFound` 拒绝。决策者不同、席位也不同的前序票据会被拒绝。决策者仍不可用时，不能为其开启普通票据。
+
+### 向在押人物提问
+
+有时恰恰要由不可用的人物来作决定，例如看管方劝俘虏归降，或者许给他官职。这类问题要开一张*在押人物票据*，也就是写明了看管方的票据：
+
+```rust
+let custodian = EntityRef::Army(captor);
+let ticket = DecisionTicketDraft {
+    id,
+    definition: "summons.answer".to_owned(),
+    decision_maker: EntityRef::Person(captive),
+    assigned_controller: "controller.captive".to_owned(),
+    summary: "归降，或拒绝".to_owned(),
+    context,
+    options, // 任何选项都不能带命令
+    deadline: None,
+    parent_ticket: None,
+    custody_addressed: Some(DecisionCustodyAddress::new(custodian.clone())),
+};
+```
+
+只有人物存活，并且正被这个看管方（也就是你用 `with_custodian` 设置的那一个）俘获或拘押（`Captive` 或 `Detained`）时，票据才能开启。排入 `Open` 之前想先检查，可以读取 `canwu.person_availability(captive)`，再对取到的值调用 `is_held_by(&custodian)`；没有记录的人物视为自由。
+
+| 情况 | 结果 |
+| --- | --- |
+| 人物在押期间，由他自己的控制者作答 | 答复被接受。上表中的可用性检查不适用于这张票据。 |
+| 选项带有命令 | `Open` 和 `ReplaceOptions` 拒绝它（`InvalidDecision`）。在押人物不能签发命令，所以票据结算后，由你的应用在自己的系统里落实选中的选项。 |
+| 开启时人物并不由这个看管方看管 | 人物自由或由别人看管时记为 `InvalidDecision`，已死亡或失踪时记为 `DecisionMakerUnavailable`。 |
+| 人物死亡 | 以 `decision_maker_dead` 取消。 |
+| 人物获释、逃脱，或成为同一看管方的人质 | 以 `custody_ended` 取消：人物恢复可用，此后可以使用普通票据。 |
+| 改由别的看管方看管，或人物仍被俘但看管方被清空 | 以 `custody_transferred` 取消。为新的看管方另开一张票据。 |
+| 人物失踪 | 以 `decision_maker_unavailable` 取消。 |
+| 控制者代表的另一个人物变为不可用 | 以 `controller_authority_unavailable` 取消，写入该人物的 `cancelled_controller_tickets`。 |
+
+这些取消都发生在改变人物可用性的那个结算边界结束时（最后一行是另一个人物的可用性）。以 `decision_maker_dead`、`custody_ended` 或 `custody_transferred` 取消的票据写入 `BoundaryPersonAvailabilityChange` 的 `cancelled_custody_tickets`；失踪人物的票据写入 `cancelled_tickets`；以 `controller_authority_unavailable` 取消的票据写入另一个人物那条变化的 `cancelled_controller_tickets`，所以三个列表都要读。在同一看管方手中，`Captive` 与 `Detained` 之间的变化不会取消票据。标记只能在开启票据时设置；`DecisionTicketDraft` 和 `DecisionTicket` 的结构体字面量现在都要写出这个字段（普通票据写 `custody_addressed: None`）。
 
 ### 把运行的席位交给继任者
 

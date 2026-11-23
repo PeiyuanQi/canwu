@@ -8,10 +8,10 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.23.0`. A live `SimulationSnapshot` has:
+The workspace version is `0.24.0`. A live `SimulationSnapshot` has:
 
 - snapshot format `9`;
-- commitment format `8`;
+- commitment format `9`;
 - checkpoint/evidence-journal format `6`;
 - paged-checkpoint envelope format `7` and continuation checkpoint format `4`;
 - state revision format `3`;
@@ -25,6 +25,514 @@ The workspace version is `0.23.0`. A live `SimulationSnapshot` has:
 Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
+
+Version 0.24.0 is a pre-1.0 minor release. Its changes come from four
+packages. None has a proposal of its own: this entry, the rustdoc of the new
+items, and the crate READMEs are the contract.
+
+- Custody-addressed tickets (`canwu-decision`, `canwu-sim`, `canwu-api`:
+  downstream gap G-98).
+- Account capacity change (`canwu-resource`: downstream gap G-111).
+- Facility condition falls, repairs of degraded and damaged facilities, and
+  expansion projects (`canwu-production`: downstream gaps G-99 and G-110).
+- Engagement groups, siege surrender, and order confusion charged by the day
+  (`canwu-military`; the design text is updated in the
+  [military engagements proposal](proposals/military-engagements.md):
+  downstream gaps G-100 to G-102).
+
+What changed, in one list:
+
+- **A ticket a person in custody decides.** A host may put a question to a
+  `Captive` or `Detained` person as a decision ticket: it sets
+  `DecisionTicketDraft::custody_addressed` to
+  `Some(DecisionCustodyAddress::new(custodian))` at `DecisionMutation::Open`.
+  The mark is kept for the ticket's life (`DecisionTicket::custody_addressed`)
+  and is part of the committed ticket, so of the state hash. Such an `Open`
+  is admitted only while the decision maker is a person, alive, and `Captive`
+  or `Detained` by exactly that custodian
+  (`PersonAvailability::is_held_by(&custodian)`): a dead or missing decision
+  maker is refused with `DecisionMakerUnavailable`, one who is free or held
+  by another with `InvalidDecision`. While that custody holds, the mark
+  exempts the ticket from every availability gate: the decision-maker check
+  at `Open` and at preparation (`prepare_decision`, `drive_decision`,
+  `ResolveDecisionRandomly`), the controller-authority check at `Open`,
+  `Reassign`, `Resolve`, and preparation where the authority person is the
+  decision maker, and both passes of the end-of-boundary sweep. So the
+  captive's own controller answers it. An ordinary ticket for the same
+  person keeps every earlier rule: it is refused with
+  `DecisionMakerUnavailable` and, if open, cancelled with
+  `decision_maker_unavailable`.
+- **How custody ends a ticket.** A person availability change that ends the
+  custody a ticket is addressed in cancels the ticket at the end of the same
+  boundary, also when the change makes the person available. The reason
+  follows the new availability: `decision_maker_dead`
+  (`DECISION_MAKER_DEAD_REASON`) when the person dies, `custody_ended`
+  (`CUSTODY_ENDED_REASON`) when the person is available again, and
+  `custody_transferred` (`CUSTODY_TRANSFERRED_REASON`) when the person is
+  still `Captive` or `Detained` but held by another custodian, or by none.
+  The cancelled IDs are in the change's new
+  `BoundaryPersonAvailabilityChange::cancelled_custody_tickets`, in ticket-ID
+  order. A person who goes `Missing` has their custody-addressed tickets
+  cancelled with `decision_maker_unavailable`, listed in `cancelled_tickets`.
+  A custody-addressed ticket whose controller acts for another person who
+  becomes unavailable is cancelled with `controller_authority_unavailable`,
+  listed in that person's `cancelled_controller_tickets`, as an ordinary
+  ticket is. A transfer has no event of its own: it is any change whose new
+  custodian differs from the ticket's, and a question to the captive then
+  needs a new ticket that names the new custodian.
+- **No command options on a custody-addressed ticket.** Command admission
+  still refuses a captive issuer (`IssuerUnavailable`), so a command the
+  captive's answer carried could never be issued. `Open` and `ReplaceOptions`
+  refuse a `DecisionAction::Command` option on such a ticket with
+  `InvalidDecision`; the host reads the selected option and applies the
+  answer itself.
+- **A host can change an open account's capacity.**
+  `ResourceOperationRequestV1::SetAccountCapacity(ResourceSetAccountCapacityRequestV1 { operation_key, account, expected_account_revision, capacity_after, evidence })`
+  sets `ResourceAccount::capacity` to `capacity_after` (`None` removes the
+  bound) and advances the account revision. Only the host application sends
+  it, through `enqueue_resource_account_capacity(canwu, due_at, &request)`
+  on the new internal ingress `resource_account_capacity_v1`
+  (`RESOURCE_ACCOUNT_CAPACITY_INGRESS`); a tracked command that carries it
+  is rejected at admission with `InvalidAuthority`,
+  `resource_adapter_ingress` refuses it with `InvalidAuthority`, an adapter
+  packet that carries it is skipped with `failed_settlement_checks`, and a
+  packet another plugin schedules on the capacity ingress settles nothing
+  and leaves a `failed_settlement_checks` skip event. Like a rescope, it
+  needs no completion lease and leaves one outcome, of the new kind
+  `ResourceOperationKind::SetAccountCapacity`, that keeps `evidence` as its
+  one exact evidence item. The evidence is the record of whatever changed
+  the store, such as a completed works record: it must be its record's
+  current version when the host queues the request and again when it
+  settles, and of one of the adapter evidence kinds given to
+  `ResourcePlugin::new`.
+- **The capacity rule.** A capacity that is not lower than the current one
+  (a rise, or the same figure) must hold the account's balance; reserved
+  stock and the stock a protected floor keeps are part of the balance. A
+  lowering, which is a capacity below the current one or any capacity on an
+  account that had none, must also leave room for the escrow of every open
+  transfer that names the account as its source or destination, so stock in
+  flight that an acceptance or a return could still credit keeps its room.
+  This is stricter than the downstream gap row, which asked only for
+  `capacity_after` at or above the balance. A closed account is refused,
+  where a rescope accepts one. Reservations, demands, access grants, and the
+  protected floor carry over unchanged.
+- **Facility condition falls.**
+  `ProductionOperation::RecordFacilityCondition { facility, expected_generation, condition_after_per_mille, lifecycle_after, cause, evidence }`
+  records that a standing facility's condition fell because of wear, a
+  hazard, or a hostile act
+  (`FacilityConditionCause::{Wear, Hazard, Hostile}`). It is
+  admitted for the site's holder, on the named generation, while the
+  facility is `Operational`, `Degraded`, or `Damaged`, and only when
+  `condition_after_per_mille` is at most the current condition: a rise stays
+  a project's. `lifecycle_after` follows the engine's damage line,
+  `FACILITY_DAMAGED_CONDITION_PER_MILLE` (250): `Damaged` at or below it;
+  above it `Degraded`, or `Operational` for a facility that still is. A
+  record that changes neither the condition nor the lifecycle is refused.
+  The generation does not change, and a facility whose condition reaches 0
+  leaves incident evaluation.
+- **Evidence of a condition fall.** The holder, generation, and fall rules
+  run first, so a rejection does not reveal whether a record exists. Then
+  `evidence.version` must be the current exact version of its record when
+  the operation settles (the record may be of any kind), and
+  `evidence.semantic_digest` must be the
+  `canwu.production.provider-evidence.v1` hash of that record
+  (`canwu_api::canonical_hash`), where the hashed value is the whole
+  `canwu_api::DomainRecord` at the cited version, not its payload. Neither
+  `evidence.capability` nor `evidence.semantic_digest` may be empty or only
+  whitespace; that is checked with the first rules. The binding's `kind`
+  and `available_quantity` are not checked for condition evidence. The
+  outcome keeps the binding.
+- **Repairs start from a degraded or damaged facility.** A
+  `FacilityProjectKind::Repair` project is admitted on a `Degraded` or
+  `Damaged` facility as well as a `Repairing` one, and completes if the
+  facility is in any of the three when the work ends. A worn facility that is
+  still `Operational` above the line first records `Degraded` with
+  `RecordFacilityCondition`.
+- **Expansion projects.** `FacilityProjectKind::Expand { capacity_after }`
+  raises an `Operational` facility's capacity. `capacity_after` lists every
+  capability of the completed facility: each capability the facility has is
+  kept at no less than its current figure, so none is dropped or lowered;
+  every figure is positive; every name is non-empty, has no leading or
+  trailing whitespace, and is at most `MAX_PRODUCTION_IDENTIFIER_BYTES`
+  (160) long; there are at most `MAX_FACILITY_CAPACITY_ENTRIES` (64)
+  entries; and the capacity differs from the current one
+  (`is_facility_capacity_expansion`). The completed facility has exactly
+  that capacity and, like every completed project, is `Operational` at
+  1,000 ‰ in the next generation, also when the facility fell, was damaged,
+  or stopped for repair while the work ran. A `Construction` project on an
+  `Operational` facility is still refused.
+- **Engagement groups.**
+  `MilitaryCommandV1::OpenGroupEngagements(Box<OpenGroupEngagementsV1>)`
+  opens one engagement per command group of one side at one site, each
+  against the same forces of the other side. Each `CommandGroupV1` names its
+  engagement `id`, its `forces`, its report `holders`, and its own condition
+  `input`; the command names the `shared` forces with their holders and
+  input. Each group's engagement is admitted as an `OpenEngagement` would
+  be, and all are admitted before any opens; every command group belongs to
+  one owner, every force is named once, and a command group whose opening
+  share of the shared men would be 0 is refused. The engagements carry
+  `EngagementStateV1::group`, an `EngagementGroupV1 { shared, engagements,
+  shared_opened_men }`. At every step the shared forces' present men are
+  split over the group's engagements still fighting, in proportion to each
+  command group's present men, by largest remainder; an engagement whose
+  share is 0 while the shared forces still have men skips that step. The
+  group's engagements step interleaved in time order on one step grid, and
+  the shared side's cohesion, battle shock, and order-confusion state
+  (`confusion_carry` and `confusion_paid_to`) are one figure that each step
+  moves and copies to every open engagement of the group. The shared
+  forces' losses and cohesion are therefore counted once, and no span of
+  their order confusion is charged twice, across engagements or across
+  boundaries. The gap's case holds: two groups against one enemy force
+  resolve as two engagements on the same day.
+- **Orders on a shared side reach the whole group.** A `SupplyInput`
+  condition or an `OrderAction` for an engagement group's shared side
+  applies to every open engagement of the group and advances each one's
+  `host_revision`. A `ReviseStepProfile` on one engagement, from either
+  side's controller, revises every open engagement of the group and resumes
+  the held ones, so the group keeps one step grid: a resumed engagement
+  snaps to the latest grid point at or before now. A shared-side
+  `SupplyInput` condition resumes the held ones in the same way. An order or
+  input for a command group's own side changes that engagement only.
+- **Siege surrender.**
+  `MilitaryCommandV1::SurrenderSiege { siege, expected_host_revision }`, from
+  a trusted issuer or a controller of a defender, ends the siege `Fell` with
+  the new end cause `SiegeEndCause::Surrendered`. An assault in progress
+  closes `AttackerPrevailed`, a sortie in progress `Abandoned`, both with
+  `site_fell`. The defenders are not dispersed: each leaves the siege and
+  the fight with its men, free at the site for the host to take.
+- **Order confusion costs by the day.** `CohesionRuleV1::confusion` is
+  replaced by `confusion_per_day`: the cohesion one source of order
+  confusion costs a side over one rulebook day of fighting
+  (`siege.day_minutes`). The plugin charges it after the resolver, by the
+  time fought: each side keeps the time its confusion is paid up to
+  (`SideStateV1::confusion_paid_to`, the opening time at first), and a step
+  at `at` owes `confusion_carry + order_confusion × confusion_per_day × (at −
+  confusion_paid_to)` cohesion-minutes, pays `owed / siege.day_minutes`
+  whole points, carries `owed % siege.day_minutes` in
+  `SideStateV1::confusion_carry`, and moves the paid-up-to time to `at`.
+  For a lone engagement that span is the step
+  length, so one source costs exactly `confusion_per_day` a day at a
+  half-hour profile and at a day profile alike. `ParametricStepResolver` no
+  longer reads `order_confusion`; its cohesion loss is
+  `floor((rate × per_inflicted + base) × step_scale_bp / 10^4)`, with `rate`
+  the unscaled per-step rate of the proposal's §8.
+
+**Same version only.** Canwu crates depend only on the exact same version of
+each other: every first-party crate requires `=0.24.0` of every other
+first-party crate it uses, and a host pins `canwu-api = "=0.24.0"` and the
+same version of every extension. Nothing written by 0.23.0 is read by
+0.24.0. There is no migration and no decoding of an old shape: the exact
+engine-version check refuses every 0.23.0 snapshot, checkpoint journal, paged
+checkpoint, continuation checkpoint, replay journal, evidence segment, and
+scenario that records its engine version; a commitment at format 8, a
+decision archive blob or receipt at format 2, a resource root at state
+format 6, a production archive blob at format 3, and a military payload at
+schema version 2 are refused by their format as well; and a run that
+registers the resource, production, or military plugin would also be refused
+by that plugin's semantic hash. Retain the 0.23.0 engine to read 0.23.0
+data.
+
+Formats and hashes that change, each deliberately versioned:
+
+| Item | 0.23.0 | 0.24.0 | What changed |
+| --- | --- | --- | --- |
+| Snapshot, commitment, checkpoint/evidence-journal, paged-checkpoint, and continuation-checkpoint formats; state revision, admission cursor, and exact replay formats | 9, 8, 6, 7, 4; 3, 3, 3 | 9, 9, 6, 7, 4; 3, 3, 3 | commitment 9 commits to decision state through `canwu.commitment.decisions.v5`; the others keep their numbers because their own layout is unchanged (see below the table); the engine version in every checkpoint hash changes, as with any version change |
+| Decision commitment | `canwu.commitment.decisions.v4` | `canwu.commitment.decisions.v5` | the same inputs (the controllers, the hot-history root, the archive receipt root, the admission batch); the new tag marks that a committed ticket may carry a custody address, so the decision root, the commitment roots, and the hashes over them change, also for a run with no marked ticket; a format 8 commitment is refused by its format as well as its engine version |
+| `DecisionTicketDraft` and `DecisionTicket` (decision ingress, replay journal, snapshot and checkpoint decision state, continuation checkpoint, hot history, archive blobs) | — | `custody_addressed: Option<DecisionCustodyAddress>` | omitted when `None`, so an ordinary ticket serializes as before; load refuses a marked ticket whose decision maker is not a person, whose custodian is the decision maker or is not an entity of the run, or that carries a command option |
+| `DECISION_ARCHIVE_FORMAT_VERSION` (archive blob, receipt, verified archive commit) | 2 | 3 | an archived ticket may carry its custody address; a blob records no engine version, so its format alone names its shape, and a format 2 blob or receipt is refused |
+| `BoundaryPersonAvailabilityChange::cancelled_custody_tickets` (in `BoundaryRecord::person_availability_changes`) | — | new field, omitted while empty | a member of the boundary hash material (`canwu.boundary-record.v1`), so of the boundary chain; snapshot validation recomputes it with the other two cancellation lists |
+| `RESOURCE_STATE_FORMAT_VERSION` (the resource root) | 6 | 7 | an outcome may be of kind `SetAccountCapacity`, and an account's capacity may change after it is created; the archive blob format (1) and both bucket formats (2) are unchanged, as for `RescopeAccount` in 0.19.0 |
+| `RESOURCE_SEMANTIC_HASH` | `6fbe0308…159a` | `a5286b07…c018` | BLAKE3 of the line recorded in the constant's rustdoc; the descriptor also gains the internal ingress `resource_account_capacity_v1` |
+| `PRODUCTION_ARCHIVE_BLOB_FORMAT_VERSION` | 3 | 4 | an archived project may be of kind `Expand` and an archived outcome a `RecordFacilityCondition`; a blob of any other format is refused; an archived `Expand` project's resulting asset must have exactly `capacity_after` |
+| `PRODUCTION_SEMANTIC_HASH` | `eded5044…6d9e` | `c9cdf797…7afc` | BLAKE3 of the line recorded in the constant's rustdoc; the runtime record's encoding gains the new project kind and operation, and no format number of the root changes |
+| `canwu-military` payloads (`SCHEMA_VERSION`) | 2 | 3 | the engagement record gains `group`, each side `confusion_carry` and `confusion_paid_to`, the rulebook's cohesion rule `confusion_per_day` in place of `confusion`, and a siege may end `Surrendered`; the plugin keeps one schema version for all its payloads, so no 0.23.0 military record or rulebook loads |
+| `MilitaryCommandV1` (the `military_command_v1` and `military_apply_v1` payloads in the journals) | 18 variants | 20 variants | adds `OpenGroupEngagements` and `SurrenderSiege` |
+| `canwu-military` plugin descriptor | version `0.21.0` | version `0.24.0` | the plugin version is part of its semantic hash, so the hash changes; the `engagement_report` and `engagement_outcome` knowledge schemas are unchanged |
+
+Why the snapshot, checkpoint/evidence-journal, paged-checkpoint, and
+continuation-checkpoint formats stay: the custody mark is an optional field
+of the ticket those files already carry, and `cancelled_custody_tickets` an
+optional field of a boundary record they already carry. Both are written only
+when set, so a run with no custody-addressed ticket writes each of them in
+the same layout as before (only the engine version, the commitment format,
+and the commitment roots and hashes change), and none of their own fields,
+envelopes, or page layouts changes. The commitment format moves because
+its decision root tags
+what a committed ticket may carry, exactly as it did for option biases in
+0.21.0, and the decision archive format moves because an archive blob records
+no engine version. The state-revision, admission-cursor, and exact-replay
+formats do not describe tickets and are untouched. A 0.23.0 file of any of
+these kinds is still refused, by the exact engine-version check.
+
+Semantic identities that differ from 0.23.0: `canwu-resource`,
+`canwu-production`, and `canwu-military`. The other first-party plugins keep
+their semantic hash constants; every `GuardedUtilityPolicy` hash is
+unchanged, since the custody mark is ticket content. As with any version
+change, first-party plugins that take their plugin version from the crate
+version report a new one.
+
+New and changed public contracts, by crate:
+
+- `canwu-decision`: `DecisionCustodyAddress { custodian: EntityRef }` (new,
+  with `new`); `DecisionTicketDraft::custody_addressed` and
+  `DecisionTicket::custody_addressed` (new fields);
+  `DECISION_ARCHIVE_FORMAT_VERSION` is 3. `Open` and `ReplaceOptions` refuse,
+  as recorded decision attempts with `InvalidDecision`, a mark on a ticket
+  whose decision maker is not a person, a custodian equal to the decision
+  maker, and a `DecisionAction::Command` option on a marked ticket. The
+  availability check runs first, so a marked `Open` whose decision maker is
+  dead or missing is `DecisionMakerUnavailable` even when the custodian
+  equals the decision maker. The mark is set only at `Open`; no mutation
+  adds or removes it.
+- `canwu-sim`, re-exported by `canwu-api`: `DecisionCustodyAddress`;
+  `PersonAvailability::is_held_by(&EntityRef)` (new: alive and `Captive` or
+  `Detained` by exactly that custodian); `CUSTODY_ENDED_REASON`,
+  `DECISION_MAKER_DEAD_REASON`, and `CUSTODY_TRANSFERRED_REASON` (new);
+  `BoundaryPersonAvailabilityChange::cancelled_custody_tickets` (new field);
+  `COMMITMENT_FORMAT_VERSION` is 9. A custody-addressed `Open` whose
+  decision maker is not held by the ticket's custodian is a recorded
+  rejection (`DecisionMakerUnavailable` when that person is dead or missing,
+  `InvalidDecision` when free or held by another); preparation of such
+  a ticket once its custody no longer holds returns
+  `DecisionMakerUnavailable`. No error code is new.
+- `canwu-api`: re-exports only; no method is added to `Canwu`,
+  `CompactedCanwu`, or `CanwuRun`.
+- `canwu-resource`: `ResourceSetAccountCapacityRequestV1`,
+  `ResourceOperationRequestV1::SetAccountCapacity`,
+  `ResourceOperationKind::SetAccountCapacity`,
+  `enqueue_resource_account_capacity`, and
+  `RESOURCE_ACCOUNT_CAPACITY_INGRESS` (new); `RESOURCE_STATE_FORMAT_VERSION`
+  is 7. The enqueue call refuses a reserved operation key and evidence that
+  is not its record's current version (`EvidenceUnavailable`), queuing
+  nothing. At settlement each refusal is the operation's recorded rejection:
+  `not_found` (no such account), `version_conflict` (a stale account
+  revision, or evidence no longer current), `invalid_lifecycle` (a closed
+  account, or a completion lease, local or an external participant's, that
+  locks the account's current revision), `capacity_exceeded` (the rule
+  above), and `invalid_authority` (evidence that is not of an adapter
+  evidence kind). A result that does not fit the root is skipped with a
+  `RESOURCE_INGRESS_SKIPPED_EVENT`, as for any resource packet.
+  `ResourceState::apply_operation` on a detached root has no simulation view
+  and does not read the evidence; the plugin does.
+- `canwu-production`: `ProductionOperation::RecordFacilityCondition`,
+  `FacilityConditionCause`, `FACILITY_DAMAGED_CONDITION_PER_MILLE`,
+  `FacilityProjectKind::Expand`, `is_facility_capacity_expansion`, and
+  `MAX_FACILITY_CAPACITY_ENTRIES` (new); `FacilityProjectKind` is no longer
+  `Copy`; `PRODUCTION_ARCHIVE_BLOB_FORMAT_VERSION` is 4. Every refusal is the
+  operation's recorded rejection: a caller who does not hold the site or
+  names another generation (`invalid_authority`); a rise, a lifecycle off the
+  damage line, a facility that is not standing, a record that changes
+  nothing, a capability or digest that is empty or only whitespace, or a
+  digest that differs from the record's hash (`invalid_domain_record`);
+  evidence that is not its record's
+  current version (`domain_record_not_found`); an `Expand` on a facility that
+  is not `Operational` or whose `capacity_after` is not an expansion
+  (`invalid_domain_record`). State validation refuses a completed project
+  whose result does not have its kind's capacity, and an open `Expand` that
+  is no longer an expansion over the generation it started from.
+- `canwu-military`: `MilitaryCommandV1::OpenGroupEngagements` and
+  `MilitaryCommandV1::SurrenderSiege` (new variants);
+  `OpenGroupEngagementsV1`, `CommandGroupV1`, and `EngagementGroupV1` (new);
+  `EngagementStateV1::group`, `SideStateV1::confusion_carry`, and
+  `SideStateV1::confusion_paid_to` (new fields);
+  `SiegeEndCause::Surrendered` (new variant);
+  `CohesionRuleV1::confusion_per_day` replaces `confusion`; `SCHEMA_VERSION`
+  is 3. `JoinEngagement` refuses a joiner on an engagement group's shared
+  side. Each outcome signal's `force_losses` carries, for a force an
+  engagement group shares, only that engagement's losses on it (plus any
+  dispersal in the boundary). A report's band for an engagement group's
+  shared side is measured against `EngagementGroupV1::shared_opened_men`,
+  the shared forces' men when the group opened. Activation refuses an
+  engagement whose group is longer than the rulebook's `open_engagements`
+  limit, an engagement whose group does not list the engagement itself or
+  is not in ascending order, a side whose
+  `confusion_carry` is not below `siege.day_minutes`, and a side whose
+  `confusion_paid_to` is before the engagement opened or, outside a group,
+  after its last step. A refused command is a recorded rejection
+  (`canwu.military.command_rejected.v1`), as before.
+
+The source-incompatible changes are the new public fields
+(`DecisionTicketDraft::custody_addressed`,
+`DecisionTicket::custody_addressed`,
+`BoundaryPersonAvailabilityChange::cancelled_custody_tickets`,
+`EngagementStateV1::group`, `SideStateV1::confusion_carry`, and
+`SideStateV1::confusion_paid_to`), which break
+a struct literal outside the workspace; the renamed
+`CohesionRuleV1::confusion_per_day`; the new variants of
+`ResourceOperationRequestV1`, `ResourceOperationKind`, `ProductionOperation`,
+`FacilityProjectKind`, `MilitaryCommandV1`, and `SiegeEndCause`, which break
+an exhaustive match; and `FacilityProjectKind` losing `Copy`. No `&mut self`
+method is added to `Canwu`. The release is therefore a minor version.
+
+Version 0.24.0 also changes these behaviours, which are visible to existing
+code and runs:
+
+- **Order confusion.** A rulebook that set `cohesion.confusion` must set
+  `confusion_per_day`, and the unit changes with the name: the old figure
+  was charged every step and scaled by the profile's `step_scale_bp`; the new
+  one is a cost per rulebook day of fighting, charged at every step in
+  proportion to the minutes fought. The downstream gap row (G-102) records
+  what the old unit cost its host: one source cost at least 48 a day on a
+  half-hour profile (`step_scale_bp` 10,000) and at least 23.04 a day on a
+  1,440-minute profile (`step_scale_bp` 230,400), which are the costs of the
+  smallest old figure, 1; its rulebook figure of 5 came to 5 a half-hour
+  step and about 115 on such a day step. These figures are the row's, not
+  recomputed here. With `confusion_per_day: 5` one source costs 5
+  a day on both profiles. The synthetic rulebook of
+  `canwu-military-reference-content` keeps the figure 50, now per day; its
+  fixtures set no source of confusion, so their results do not change. A
+  host `StepResolver` that charged `order_confusion` itself must stop, or
+  the cost is charged twice.
+- **Outcome signals of shared forces.** `force_losses` in an outcome signal
+  is this engagement's losses on each force, plus any dispersal. For a lone
+  engagement nothing changes.
+- **Repairs.** A `Repair` project that 0.23.0 refused on a `Degraded` or
+  `Damaged` facility is now admitted, without the `StopForRepair` choice
+  first.
+- **Facilities at condition 0.** A facility whose condition reaches 0, that
+  stops for repair, or that retires now leaves the incident due index in the
+  same operation; in 0.23.0 such an operation on a facility with an incident
+  risk could be rejected by the index check.
+- **A completed project no longer pins its facility.** State validation
+  compared a completed project's result with the facility as it is now; it
+  now compares the site and, while the facility is still at the result's
+  generation, the capacity. A condition fall, an incident, a retirement, or
+  a later project on a facility whose completed project is still in the
+  root is therefore valid.
+- **Decisions.** Nothing changes in the rules for a ticket without the
+  mark: the same refusals, the same cancellation reasons
+  (`decision_maker_unavailable`, `controller_authority_unavailable`, and
+  `seat_rebound`), and the same serialized ticket. The decision commitment
+  tag, and with it the commitment roots and hashes, changes for every run
+  with decision state.
+
+Upgrading from 0.23.0, for hosts and plugin authors:
+
+- **Pin `=0.24.0`** for `canwu-api` and every extension. Nothing earlier
+  loads.
+- **Struct literals and matches.** Add `custody_addressed: None` to every
+  `DecisionTicketDraft` and `DecisionTicket` struct literal, and
+  `cancelled_custody_tickets: Vec::new()` to literals of
+  `BoundaryPersonAvailabilityChange`. Add the `SetAccountCapacity` arm to
+  exhaustive matches on `ResourceOperationRequestV1` and
+  `ResourceOperationKind`, the `RecordFacilityCondition` arm on
+  `ProductionOperation`, the `Expand { .. }` arm on `FacilityProjectKind`
+  (and clone the kind where code copied it), and the `OpenGroupEngagements`,
+  `SurrenderSiege`, and `Surrendered` arms on `MilitaryCommandV1` and
+  `SiegeEndCause`. Military payload literals add `group: None` on an
+  engagement and, on each side, `confusion_carry: 0` and `confusion_paid_to`
+  set to the engagement's opening time.
+- **A captor's question.** Open the ticket with
+  `custody_addressed: Some(DecisionCustodyAddress::new(captor))`, assigned to
+  the captive's own controller, with options that carry no command; check
+  first with `PersonAvailability::is_held_by(&captor)` if the custody may
+  have changed. Apply the answer in your own system when the ticket
+  resolves. Read the endings from all three lists of an availability
+  change: `cancelled_custody_tickets` (death, release, transfer) and
+  `cancelled_tickets` (a captive who goes missing) on the captive's change,
+  and `cancelled_controller_tickets` on the change of another person the
+  ticket's controller acts for, when that person becomes unavailable. A
+  move to another custodian of the same polity is a transfer and cancels
+  the ticket, so open a new ticket that names the new custodian after it.
+- **A store that grows or shrinks.** Queue
+  `enqueue_resource_account_capacity` citing the current version of the
+  record that proves the change, of a kind passed to `ResourcePlugin::new`.
+  Send it while no completion lease locks the account's current revision,
+  and take the next lease at the new revision: an account that receives a
+  production execution's output stays locked for that execution's whole
+  run. A host that modelled an enlarged store as a second account can keep
+  one account and raise its capacity instead.
+- **Wear, floods, and raids on a facility.** Write your own record of the
+  cause, then send `RecordFacilityCondition` citing its current version,
+  with `semantic_digest` set to
+  `canonical_hash("canwu.production.provider-evidence.v1", &record)`, where
+  `record` is the whole `canwu_api::DomainRecord` at the cited version, not
+  its payload, and `lifecycle_after` chosen by the 250 ‰ line. To repair,
+  create a `Repair` project straight on the `Degraded` or `Damaged`
+  facility. To enlarge an `Operational` facility, create an `Expand` project
+  whose `capacity_after` lists every capability.
+- **A military host** renames `confusion` to `confusion_per_day` in its
+  rulebook and sets the cost of one source per day; rebuilds its rulebook
+  and scenario records with the 0.24.0 types (schema version 3); opens
+  `OpenGroupEngagements` where two or more command groups of one side meet
+  the same enemy forces without a shared command; sends `SurrenderSiege`
+  when a garrison yields, then decides what its freed forces become; and
+  tells a surrender from a storm by the siege's `end_cause`, since the
+  assault's summary reads `AttackerPrevailed` with `site_fell` in both
+  cases.
+- **Saves.** Write a fresh continuation checkpoint, snapshot, or checkpoint
+  journal with 0.24.0, and start new decision, resource, and production
+  archives; nothing from 0.23.0 loads.
+
+Known limits carried by this release:
+
+- Custody-addressed tickets: the mark is set only at `Open`, so an existing
+  ticket cannot become custody-addressed; such a ticket offers no command
+  option, and the host applies the answer; the controller-authority
+  exemption covers only a controller whose authority person is the decision
+  maker, so a controller that acts for another unavailable person is still
+  refused, and its ticket is cancelled with
+  `controller_authority_unavailable` in that person's
+  `cancelled_controller_tickets`; a captive who goes `Missing` is cancelled
+  with `decision_maker_unavailable` in `cancelled_tickets`, not in the
+  custody list; a captive who becomes a `Hostage` of the same custodian is
+  available again, so that ticket ends with `custody_ended`, while a change
+  between `Captive` and `Detained` under the same custodian keeps it; a
+  transfer is
+  detected only as a changed custodian, so the engine cannot tell a move
+  within one polity from a move to another; a custody-addressed `Open` for a
+  person not held by the named custodian is `InvalidDecision`, with no error
+  code of its own.
+- Account capacity change: only the host application sends it, and the
+  engine checks that its evidence is current and of an allowed kind, not
+  what the record says; a completion lease that locks the account's current
+  revision refuses the change until the lease ends; a lowering counts the
+  escrow of every open transfer that names the account at either end, also
+  a transfer that is on its way back to another account, so it can refuse a
+  capacity the stock would in fact fit; other credits may still fill the
+  room a lowering left for stock in flight; a closed account's capacity
+  cannot change.
+- Facility condition and projects: a condition never rises through
+  `RecordFacilityCondition`; a `Repairing`, planned, or retired facility
+  takes no condition record; a worn `Operational` facility above 250 ‰ must
+  record `Degraded` before a `Repair` is admitted; every completed project,
+  an `Expand` included, returns the facility `Operational` at 1,000 ‰, so an
+  expansion also restores the condition; a facility has one open project at
+  a time, so it cannot be expanded while it is repaired; the evidence check
+  is the record's currency, its digest, and a non-empty capability, never
+  what the record says, and the binding's `kind` and `available_quantity`
+  are not checked; an `Expand` names the whole capacity map, at most 64
+  capabilities. Unchanged from earlier releases, and now stated in the
+  crate README: while any of the allocations that overlap at a time is still
+  `Reserved`, their sum may not exceed `FacilityAsset::usable_capacity`
+  (the condition-adjusted capacity); once all of them are `Consumed`, the
+  bound is the nominal capacity. `StartExecution` turns its allocations
+  `Consumed` before the state is validated, so an execution whose
+  allocations overlap no reserved one starts within the nominal capacity
+  whatever the facility's condition or lifecycle. A host that wants a worn
+  facility to take less work sizes its allocations by `usable_capacity`.
+- Military: siege assaults are not grouped. The forces of a siege are not
+  free, so a besieging side split into command groups still fights one
+  assault, and a host that models the split keeps its own stand-in there.
+  Every command group of an engagement group belongs to one owner, the
+  shared side takes no joiner, and a command group too small to take a
+  share of the shared men cannot open one. A host that holds the
+  `expected_host_revision` of several engagements of a group reads them
+  again after a shared-side input, order, or profile revision, which
+  advances every open one. A held engagement is not stepped, so it closes
+  only when the host resumes or abandons it: after a group-wide `Abandon`
+  by the shared defenders of a grouped relief lifts the siege, a held
+  engagement of the relief keeps the besiegers engaged in it until then.
+  The "day" of `confusion_per_day` is the rulebook's `siege.day_minutes`. A
+  resumed engagement starts its confusion afresh, so a held span costs
+  nothing; a resumed member of a group does so for its own side only and
+  keeps the shared side's paid-up-to time, since that side fought on in the
+  other members. A confusion remainder below one cohesion point is never charged
+  once the engagement closes, and a step records no separate trace of the
+  confusion cost (its `cohesion_after` includes it).
+  An assault closed by a surrender reads like a storm in its summary; the
+  siege's `end_cause` tells them apart. A share of the shared forces is
+  recomputed before every step, so it follows the losses of the day.
 
 Version 0.23.0 is a pre-1.0 minor release. Its changes come from three
 packages, each with its own proposal:

@@ -519,7 +519,7 @@ the actor of `DecisionAuthority::Actor` or the responsible actor of
 are unaffected. Host preparation through `prepare_decision` and
 `drive_decision` applies the same two checks before evaluating a policy.
 
-A ticket that a person in custody decides, such as a captor's question to his
+A ticket that a person in custody decides, such as a captor's question to a
 captive, carries `DecisionTicketDraft::custody_addressed`, a
 `DecisionCustodyAddress { custodian }` that the host sets at `Open` and the
 ticket keeps for its life; it is part of the committed ticket. Such an `Open`
@@ -1330,6 +1330,23 @@ custodian's stock; only an access grant does. The resource plugin semantic hash
 and holder-report knowledge schema cover these operations, and fields left at
 their defaults are omitted from the canonical encoding.
 
+`ResourceAccount::capacity` is set when an account is created and, since
+0.24.0, changed only by the host application's `SetAccountCapacity`
+(`enqueue_resource_account_capacity`, citing the current version of a record
+of an adapter evidence kind, such as the record of the works that changed
+the store). A capacity that is not lower than the current one must hold the
+account's balance. A lowering, which is a capacity below the current one or
+any capacity on an account that had none, must also leave room for the
+escrow of every open transfer that names the account as source or
+destination. A closed account, a stale account revision, and a completion
+lease that locks the account's current revision are recorded rejections. A
+tracked command that carries the operation is rejected at admission with
+`InvalidAuthority`; `resource_adapter_ingress` refuses it with
+`InvalidAuthority`, and an adapter packet that carries it is skipped with
+`failed_settlement_checks`. Unlike a rescope, a capacity change is admitted
+while a transfer that is not terminal names the account; reservations,
+demands, access grants, and the protected floor carry over.
+
 A delegated access grant (`ResourceAccessGrantV1`) records a
 grantor custodian's consent that a grantee may draw on its stock of one exact
 resource and unit revision, up to `cap_quantity` within the half-open window
@@ -1420,7 +1437,13 @@ site form such as household work, distributed workshop, government workshop,
 or concentrated plant is revisioned data rather than a universal building
 level. Roads, canals, fortifications, institutions, money, trade, and combat
 remain outside this extension unless a replaceable integration explicitly
-composes them.
+composes them. A standing facility's condition falls through an incident, a
+degraded-facility choice, or, since 0.24.0, the site holder's
+`RecordFacilityCondition`; it rises only through a completed facility
+project, which returns the next generation `Operational` at 1,000 ‰. A
+project is a `Construction` on a planned or authorized facility, a `Repair`
+on a `Repairing`, `Degraded`, or `Damaged` one, or, since 0.24.0, an
+`Expand { capacity_after }` on an `Operational` one.
 
 `ProductionOperation::CompleteExecution` may carry
 `realized_output_per_mille` and `realization_evidence`. Phase 7 floor-scales
@@ -1559,7 +1582,12 @@ admits a step packet, which the optional wake system, the host's trusted
 settles (public plugin ingress, so it adds no boundary) produces; each step
 is written with every per-step quantity, and a closed fight leaves a
 create-only summary. The plugin writes only its own records: a fallen site
-is a fact in the summary, never an occupation. See the
+is a fact in the summary, never an occupation. Since 0.24.0
+`OpenGroupEngagements` opens one engagement per command group of one side
+against shared enemy forces, whose losses and cohesion are counted once;
+`SurrenderSiege` ends a siege with its defenders released, not dispersed;
+and the order-confusion cost is a rulebook figure per day of fighting that
+the plugin prorates by step length. See the
 [military engagements proposal](proposals/military-engagements.md) and its
 0.21.0 [revisions](proposals/military-engagement-revisions.md).
 
@@ -2167,13 +2195,14 @@ validation recomputes all three lists.
 
 A custody-addressed ticket (see the decision framework) is exempt from both
 cancellations while its decision maker stays alive and `Captive` or `Detained`
-by its custodian. Any change of his that ends that custody, including one that
-makes him available, cancels it at the end of the same boundary with
-`DECISION_MAKER_DEAD_REASON` (`decision_maker_dead`) when he dies,
-`CUSTODY_ENDED_REASON` (`custody_ended`) when he is available, and
-`CUSTODY_TRANSFERRED_REASON` (`custody_transferred`) when another custodian, or
-none, holds him; the new custodian opens a ticket of his own. A person who goes missing
-has his custody-addressed tickets cancelled with
+by its custodian. Any availability change of that person that ends the
+custody, including one that makes the person available, cancels it at the end
+of the same boundary with `DECISION_MAKER_DEAD_REASON` (`decision_maker_dead`)
+when the person dies, `CUSTODY_ENDED_REASON` (`custody_ended`) when the person
+is available, and `CUSTODY_TRANSFERRED_REASON` (`custody_transferred`) when
+another custodian, or none, holds the person; a new question then needs a new
+ticket that names the new custodian. A person who goes missing has their
+custody-addressed tickets cancelled with
 `DECISION_MAKER_UNAVAILABLE_REASON` in `cancelled_tickets`. A transfer has no
 event of its own: it is a change whose new custodian differs from the
 ticket's.

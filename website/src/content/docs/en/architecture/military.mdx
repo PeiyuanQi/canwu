@@ -84,9 +84,25 @@ The resolver is a type: `MilitaryPlugin<R: StepResolver>`. `ParametricStepResolv
 
 The engine owns everything around the call: it clamps the outcome to the rulebook's ranges, applies the break rule (a defender behind closed walls of the rulebook's grade never breaks), applies pursuit on a rout, and decides whether the fight continues. Step profiles let one fight run on a daily step while another is promoted to half-hour steps (`ReviseStepProfile`).
 
+One cost does not follow the step scale: order confusion. Each source of confusion your condition input reports (`order_confusion`) costs that side the rulebook's `cohesion.confusion_per_day` over one rulebook day of fighting, the [daily confusion cost](/en/reference/terminology/). The engine charges it after the resolver, for the time fought since the side was last charged, and carries any remainder to the next step, so one source costs the same per day on a half-hour profile and on a daily one, and no stretch of time is charged twice. Do not charge it again in a resolver of your own.
+
+### Engagement groups
+
+Sometimes two bodies of troops on one side reach the same enemy at the same place and neither answers to the other. They do not fight as one side: each is a [command group](/en/reference/terminology/) and fights an engagement of its own, against the same enemy forces. `OpenGroupEngagements` opens these together as an [engagement group](/en/reference/terminology/). You name each command group's engagement, forces, report holders, and condition input. You name the enemy's forces, holders, and input only once; that side is the *shared* side.
+
+- **The enemy is split, not doubled.** At every step the shared forces' present men are divided over the engagements still fighting, in proportion to each command group's present men. Their losses and cohesion are counted once, and their daily confusion cost is charged once.
+- **The engagements step together.** They share one schedule of step times. `ReviseStepProfile` on one, from a controller on either side, revises every open one and resumes any that are held; a resumed engagement continues from the latest shared step time at or before now.
+- **Orders for the shared side reach every engagement.** A `SupplyInput` condition or an `OrderAction` for the shared side applies to each open engagement of the group and advances the host revision of each; a shared-side `SupplyInput` also resumes any that are held. After one of these, or a `ReviseStepProfile`, read every engagement's revision again before your next command names its `expected_host_revision`. Orders for a command group's own side change only its engagement.
+- **Each engagement closes on its own.** One command group may break while another fights on; the shared forces stay engaged until the last engagement of the group closes. A held engagement is not stepped, so it stays open, and keeps the shared forces engaged, until you resume or abandon it. Each outcome signal lists only the losses its own engagement inflicted.
+- **Limits.** All command groups must belong to one owner. The shared side takes no `JoinEngagement`. A command group so small that its share of the enemy would be zero men is refused at the opening; if losses later bring an engagement's share to zero while the enemy still has men, that engagement skips the step. Siege assaults are not grouped: a besieging side fights one assault.
+
 ### Sieges and crossings
 
-A siege day computes investment from the besiegers' men and any naval control, emplaces guns and then bombards the walls toward the grade's breach threshold, and opens an assault when ordered or, with `storm_on: BreachOrGate`, the day a breach or a gate opens. A sortie opens when ordered and the defenders' cooldown has passed; a relief is an engagement you open against the besiegers. Defenders breaking at the wall make the siege fall and disperse the defenders still there; besiegers routed lift it. A second force joins a besieged site with `JoinSiege`, and enters on its side any assault or sortie under way; `ReviseSiege { release }` lets a force on either side that is not fighting leave, so you can place it elsewhere. A siege whose last defender leaves falls `Abandoned` at its next siege day, and `LiftSiege` ends one whose last besieger leaves.
+A siege day computes investment from the besiegers' men and any naval control, emplaces guns and then bombards the walls toward the grade's breach threshold, and opens an assault when ordered or, with `storm_on: BreachOrGate`, the day a breach or a gate opens. A sortie opens when ordered and the defenders' cooldown has passed; a relief is an engagement you open against the besiegers. Defenders breaking at the wall make the siege fall and disperse the defenders still there; besiegers routed lift it.
+
+A garrison can also yield. `SurrenderSiege`, a [siege surrender](/en/reference/terminology/), is sent by a defender's controller or a trusted issuer (one listed in the rulebook's `trusted_issuers`). The siege ends as fallen with the end cause `Surrendered`, and any assault or sortie in progress closes. The defenders keep their men and are not dispersed; your game decides what becomes of them. An assault closed this way reads like a storm in its summary (`AttackerPrevailed`, `site_fell`), so read the siege's `end_cause` to tell the two apart.
+
+A second force joins a besieged site with `JoinSiege`, and enters on its side any assault or sortie under way; `ReviseSiege { release }` lets a force on either side that is not fighting leave, so you can place it elsewhere. A siege whose last defender leaves falls `Abandoned` at its next siege day, and `LiftSiege` ends one whose last besieger leaves.
 
 A crossing sends one wave per wave interval. An interceptor whose control is high enough catches a wave by threshold or by a keyed draw; a caught wave fights a ferry fight and turns back; a landed wave may fight a bridgehead fight against the defenders on the far bank, which the order names and `ReviseCrossing { defenders }` revises when a force reaches that bank later. Your game moves the force when the crossing completes.
 
@@ -108,12 +124,12 @@ Two random streams, `crossing-interception` and `step-contingency`, are drawn by
 - Forces and their revisions (muster, desertion, wounded returns) and their placement on arrival.
 - Engagements, sieges, and crossings opened from your own contact rules, with each side's report holders.
 - One condition input per side and one environment input a day, derived from your supply, pay, command, and weather records, cited as evidence.
-- Your own rules the engine does not decide: betrayal (`ReviseSiege { gate_open_steps }`), storming doctrine, rations, naval patrols, promotion of a fight.
+- Your own rules the engine does not decide: betrayal (`ReviseSiege { gate_open_steps }`), storming doctrine, rations, naval patrols, promotion of a fight, which forces fight apart as command groups, and when a garrison surrenders.
 - What follows a fight: control, occupation, population, stores, and player text, from the summary or the outcome signal.
 
 ## Limits and budgets
 
-Every collection the engine keeps has a cap in the rulebook's limits: forces, components per force, forces and holders per side, open engagements, sieges, and crossings, step bytes, draws per step, and the report queue. A boundary without a step packet does no stepping work; a stepping boundary costs in proportion to the open engagements and the forces in them. A closed fight leaves about 2 KB of records for the life of the run. The engine has two sides per engagement, no automatic contact, and banded enemy figures in its reports.
+Every collection the engine keeps has a cap in the rulebook's limits: forces, components per force, forces and holders per side, open engagements, sieges, and crossings, step bytes, draws per step, and the report queue. A boundary without a step packet does no stepping work; a stepping boundary costs in proportion to the open engagements and the forces in them. A closed fight leaves about 2 KB of records for the life of the run. The engine has two sides per engagement, no automatic contact, banded enemy figures in its reports, and no engagement groups inside a siege assault.
 
 ## Try it
 
@@ -130,3 +146,4 @@ The walkthrough [Run the engagement engine](/en/tutorials/military-domain/) expl
 - [Extend with plugins](/en/developer/extensions/): writing your own resolver, or a plugin that replaces this one
 - [Military engagements design](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/military-engagements.md): the contract this extension implements, with its implementation notes
 - [Military engagement revisions](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/military-engagement-revisions.md): the timed step, siege joins and releases, revised crossing defenders, and shorter fights added in 0.21.0
+- [Versioning, 0.24.0 entry](https://github.com/PeiyuanQi/canwu/blob/main/docs/versioning.md): engagement groups, siege surrender, and the daily confusion cost, with what changes for rulebooks and saves

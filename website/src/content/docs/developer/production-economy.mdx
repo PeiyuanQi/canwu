@@ -279,6 +279,33 @@ canwu.enqueue_command(
 - 终结凭证会锁定精确的交接记录。作为带请求标识的命令时，`AcceptLocal` 必须来自目的地保管人；经适配器输入时，交接记录必须是提供方的来源记录。
 - 交换的两条腿可以都对同一条交接记录做本地验收，但不能在同一个边界中：第一条腿的终结凭证从激活到完成一直锁定这条记录的精确版本。可以在同一模拟时刻的下一个边界结算第二条腿（上层应用可以在同一时刻结算多个边界；等第一次验收结算之后，在各持有人的租约冷却允许时再为第二条腿取租约），也可以为每条腿各用一条交接记录。
 
+## 更改账户容量
+
+账户的 `capacity`（容量）是它最多能存放的数量：超出容量的入账会被拒绝，`None` 表示不设上限。容量由场景或 `CreateAccount` 设定。仓储本身发生变化时，例如粮仓加盖了几间仓房，或一场火烧掉了一部分，上层应用通过[账户容量变更](/reference/terminology/)更改这个未关闭账户的容量：
+
+```rust
+enqueue_resource_account_capacity(
+    &mut canwu,
+    due_at,
+    &ResourceSetAccountCapacityRequestV1 {
+        operation_key,
+        account,
+        expected_account_revision,
+        capacity_after: Some(100),
+        evidence, // 记载这次工程的那条记录的当前版本
+    },
+)?;
+```
+
+- **只有上层应用可以发送。** 带请求标识的命令或适配器数据包如果携带 `SetAccountCapacity`，会被拒绝，所以持有人不能自己改动仓储的容量。
+- **证据。** 与更改地点范围相同：证据必须是某条记录的当前版本，记录种类必须是传给 `ResourcePlugin::new` 的种类之一；排入请求时检查一次，结算时再检查一次。引擎只检查证据是否为当前版本、种类是否允许，不检查它记载的内容。
+- **调高或保持不变时**，新容量必须装得下账户余额。已预留的存量和受保护存量底线留住的存量都算在余额里。
+- **调低时**（新值更低，或给原本不设上限的账户加上上限），还必须为每一项以该账户为来源或目的地的未完结转移留出在途数量。已经在路上的存量不会因此无处可放。
+- **拒绝**都会记录在案：容量太小记为 `capacity_exceeded`；账户修订号已过时或证据不再是当前版本，记为 `version_conflict`；账户已关闭，或有完成租约锁定账户的当前修订号，记为 `invalid_lifecycle`；账户不存在记为 `not_found`；证据的记录种类不是传给 `ResourcePlugin::new` 的种类之一，记为 `invalid_authority`。
+- **时机。** 在账户上没有未结束的租约时发送，下一份租约按新的修订号去取。接收生产执行产出的账户，在这次执行的整个过程中都处于锁定状态。
+
+这个操作不需要完成租约，会让账户修订号前进。引用该账户的资源预留、需求、动用授权和受保护存量底线都保持不变，操作结果会保留证据。与更改地点范围不同，有未完结的转移以该账户为来源或目的地时，它仍然可以进行。
+
 ## 外部流入入账
 
 来源为 `ResourceCreditSourceV1::ExternalInflow(DomainRecordVersionRef)` 的 `Credit` 把来自模型账户之外的价值记入账户，例如贡赋或从外地购入的物资，它与 `ExternalOutflow` 相对应。它计入 `ConservationTotalsV1::external_inflow`，已应用的结果把所引用的记录版本保留为证据。
@@ -318,6 +345,6 @@ canwu.enqueue_command(
 
 ## 版本与存档
 
-请从同一发布线精确固定 `canwu-api`、`canwu-resource`、`canwu-production` 的版本和插件语义哈希。加载时恢复存档中的参伍快照，并按你传入的插件重新验证扩展记录。0.20.0 的资源状态格式为 6、两类资源桶的格式为 2；在完成租约进行中写出的接续检查点或封存可以加载。另见[存档兼容性](/developer/persistence/#版本与存档兼容)。
+请从同一发布线精确固定 `canwu-api`、`canwu-resource`、`canwu-production` 的版本和插件语义哈希。加载时恢复存档中的参伍快照，并按你传入的插件重新验证扩展记录。0.24.0 的资源状态格式为 7、两类资源桶的格式为 2；在完成租约进行中写出的接续检查点或封存可以加载。另见[存档兼容性](/developer/persistence/#版本与存档兼容)。
 
 继续阅读[粮食、生产与军事补给案例](/tutorials/cases/production-economy/)与[机制决议](/proposals/production-economy-mechanism/)。
