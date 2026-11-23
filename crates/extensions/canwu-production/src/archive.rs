@@ -33,9 +33,11 @@ pub const PRODUCTION_ARCHIVE_LOOKUP_PAGE_NAMESPACE: &str = "canwu.production.arc
 const PRODUCTION_ARCHIVE_LOOKUP_KEY_DOMAIN: &str = "canwu.production.archive-lookup-key.v1";
 
 /// Format of [`ProductionArchiveBlobV1`]. Version 3 adds residue records and
-/// the decision receipts and lease outcomes an execution archives; a blob of
-/// any other version is refused.
-pub const PRODUCTION_ARCHIVE_BLOB_FORMAT_VERSION: u32 = 3;
+/// the decision receipts and lease outcomes an execution archives. Version 4
+/// adds the `Expand` project kind and the `RecordFacilityCondition`
+/// operation to archived projects and outcomes; a blob of any other version
+/// is refused.
+pub const PRODUCTION_ARCHIVE_BLOB_FORMAT_VERSION: u32 = 4;
 
 /// The host application's store of production archive objects and retention
 /// handles.
@@ -2199,6 +2201,7 @@ fn validate_facility_project_archive_record(
         || record.resulting_asset.generation != project.resulting_generation
         || record.resulting_asset.lifecycle != crate::FacilityLifecycle::Operational
         || record.resulting_asset.condition_per_mille != 1_000
+        || !crate::model::project_result_capacity_is_valid(project, &record.resulting_asset)
     {
         return Err(invalid(
             "production facility-project archive identity, terminal time, or result is invalid",

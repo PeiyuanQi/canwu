@@ -7680,3 +7680,756 @@ fn sealed_run_admits_only_current_production_evidence_and_replays_exactly() {
     .expect("the sealed save restores");
     validate_production_runtime(&restored).expect("the restored production runtime validates");
 }
+
+/// Application-owned record that reports a facility's wear, hazard, or
+/// hostile damage.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ConditionReportPayload {
+    condition_per_mille: u16,
+}
+
+struct ConditionReport;
+
+impl DomainRecordType for ConditionReport {
+    type Payload = ConditionReportPayload;
+    type Class = canwu_api::DomainValueKindClass;
+
+    const NAMESPACE: &'static str = "fixture.works";
+    const NAME: &'static str = "condition-report";
+}
+
+fn condition_report() -> TypedDomainRecordRef<ConditionReport> {
+    TypedDomainRecordRef::new("works:flood-report")
+}
+
+/// Owns the condition report and rewrites it at every daily boundary, so a
+/// run holds superseded versions of it.
+struct ConditionEvidencePlugin;
+
+impl canwu_api::SimulationPlugin for ConditionEvidencePlugin {
+    fn name(&self) -> &'static str {
+        "fixture-works"
+    }
+
+    fn version(&self) -> &'static str {
+        "1"
+    }
+
+    fn semantic_hash(&self) -> &'static str {
+        "00000000000000000000000000000000000000000000000000000000000000d3"
+    }
+
+    fn register(
+        &self,
+        registrar: &mut canwu_api::PluginRegistrar<'_>,
+    ) -> Result<(), canwu_api::CanwuError> {
+        let schema = canwu_api::DomainRecordSchema::for_record::<ConditionReport>();
+        let key = schema.state_key();
+        registrar.register_record_schema(schema)?;
+        let mut touch = canwu_api::BoundarySystemContract::new(
+            "touch-condition-report-fixture",
+            BoundaryPhase::DomainDeltaProposal,
+            canwu_api::SystemCadence::Daily,
+        );
+        touch.reads = vec![key.clone()];
+        touch.writes = vec![key];
+        touch.visibility = canwu_api::StateVisibility::SameBoundary;
+        registrar.register_boundary_system(touch, touch_condition_report_fixture)
+    }
+}
+
+fn touch_condition_report_fixture(
+    view: &canwu_api::SimulationView<'_>,
+    _context: &canwu_api::BoundaryContext,
+) -> Result<canwu_api::BoundaryProposal, canwu_api::CanwuError> {
+    let report = view
+        .typed_domain_record(&condition_report())?
+        .expect("fixture condition report");
+    let mut payload = report.decode_payload::<ConditionReport>()?;
+    payload.condition_per_mille -= 1;
+    Ok(canwu_api::BoundaryProposal {
+        directives: vec![canwu_api::BoundaryDirective::MutateRecord {
+            mutation: canwu_api::DomainRecordMutation::Update {
+                record: canwu_api::DomainRecordDraft::from_typed(condition_report(), &payload)?,
+                expected_version: report.version,
+            },
+            summary: "Advance the condition report fixture".to_owned(),
+        }],
+        ..canwu_api::BoundaryProposal::default()
+    })
+}
+
+/// Settles an accepted commissioning of `project`, advanced to
+/// `Commissioning` in `state`, through the canonical production and resource
+/// ingress until the project is completed. The run starts and settles at the
+/// project's creation time.
+fn complete_project_through_ingress(
+    state: ProductionState,
+    project_id: &FacilityProjectId,
+    holder: &KnowledgeHolderRef,
+    seed: u64,
+) -> ProductionState {
+    let at = state.facility_projects[project_id].created_at;
+    let resource = resource_state_for_project(&state, &state.facility_projects[project_id]);
+    let mut scenario = scenario_with_production(state);
+    scenario.start_time = at;
+    scenario
+        .domain_records
+        .extend(resource.into_records().expect("resource project root"));
+    let production_plugin = ProductionPlugin;
+    let resource_plugin = ResourcePlugin::default();
+    let mut canwu =
+        Canwu::new_with_plugins(seed, scenario, &[&production_plugin, &resource_plugin])
+            .expect("project completion runtime");
+    enqueue_tracked_production_operation(
+        &mut canwu,
+        holder,
+        1,
+        &format!("{project_id}:commission"),
+        ProductionOperation::AcceptFacilityCommissioning {
+            project: project_id.clone(),
+        },
+    );
+    for boundary in 0..8 {
+        canwu
+            .settle_boundary(BoundaryRequest::at(at))
+            .unwrap_or_else(|error| panic!("project boundary {boundary}: {error}"));
+        if production_state(&canwu)
+            .facility_projects
+            .get(project_id)
+            .is_some_and(|project| project.lifecycle == FacilityProjectLifecycle::Completed)
+        {
+            break;
+        }
+    }
+    let completed = production_state(&canwu);
+    assert_eq!(
+        completed.facility_projects[project_id].lifecycle,
+        FacilityProjectLifecycle::Completed
+    );
+    completed
+}
+
+/// Applies each `(step, operation)` to `state` at the epoch, under the
+/// operation ID `{prefix}:{step}`.
+fn apply_steps(
+    state: &mut ProductionState,
+    holder: &KnowledgeHolderRef,
+    prefix: &str,
+    steps: Vec<(&str, ProductionOperation)>,
+) {
+    apply_steps_at(state, holder, prefix, SimTime::EPOCH, steps);
+}
+
+/// Applies each `(step, operation)` to `state` at `at`, under the operation
+/// ID `{prefix}:{step}`.
+fn apply_steps_at(
+    state: &mut ProductionState,
+    holder: &KnowledgeHolderRef,
+    prefix: &str,
+    at: SimTime,
+    steps: Vec<(&str, ProductionOperation)>,
+) {
+    for (step, operation) in steps {
+        state
+            .apply_operation(
+                &command(state, holder, &format!("{prefix}:{step}"), operation),
+                at,
+            )
+            .unwrap_or_else(|error| panic!("{prefix} {step}: {error}"));
+    }
+}
+
+/// Creates, authorizes, and fully advances `project` in `state` at its
+/// creation time, which leaves it `Commissioning` with its derived result.
+fn advance_project_to_commissioning(
+    state: &mut ProductionState,
+    holder: &KnowledgeHolderRef,
+    project: FacilityProject,
+) {
+    let project_id = project.id.clone();
+    let at = project.created_at;
+    apply_steps_at(
+        state,
+        holder,
+        project_id.as_str(),
+        at,
+        vec![
+            (
+                "create",
+                ProductionOperation::CreateFacilityProject { project },
+            ),
+            (
+                "authorize",
+                ProductionOperation::AuthorizeFacilityProject {
+                    project: project_id.clone(),
+                },
+            ),
+            (
+                "advance",
+                ProductionOperation::AdvanceFacilityProject {
+                    project: project_id.clone(),
+                    completed_units: 10,
+                },
+            ),
+        ],
+    );
+    assert_eq!(
+        state.facility_projects[&project_id].lifecycle,
+        FacilityProjectLifecycle::Commissioning
+    );
+}
+
+fn record_condition(
+    facility: &FacilityAssetId,
+    generation: u64,
+    condition: u16,
+    lifecycle: FacilityLifecycle,
+    cause: FacilityConditionCause,
+    evidence: ProductionEvidenceBinding,
+) -> ProductionOperation {
+    ProductionOperation::RecordFacilityCondition {
+        facility: facility.clone(),
+        expected_generation: generation,
+        condition_after_per_mille: condition,
+        lifecycle_after: lifecycle,
+        cause,
+        evidence,
+    }
+}
+
+#[test]
+fn gap_g99_facility_condition_falls_on_provider_evidence_and_repair_restores_degraded() {
+    // (a) A provider-evidenced fall is admitted and moves the lifecycle
+    // across the 250 per mille line; (b) a rise is a recorded rejection, as
+    // are a reading on the wrong side of the line, a record that changes
+    // nothing, a superseded evidence version, and a digest that is not the
+    // record body's. The fall rules run before the evidence is resolved. The
+    // run replays exactly.
+    let (mut production, holder, _site, facility) = base_state();
+    production
+        .facilities
+        .get_mut(&facility)
+        .expect("facility")
+        .capacity
+        .insert("bench".to_owned(), 10);
+    let report_draft = canwu_api::DomainRecordDraft::from_typed(
+        condition_report(),
+        &ConditionReportPayload {
+            condition_per_mille: 202,
+        },
+    )
+    .expect("condition report draft");
+    // A facility on a site another holder holds.
+    let foreign_site = ProductionSiteId::new("production:foreign-site").expect("site ID");
+    let foreign = FacilityAssetId::new("production:foreign-facility").expect("facility ID");
+    production.sites.insert(
+        foreign_site.clone(),
+        ProductionSite {
+            id: foreign_site.clone(),
+            holder: KnowledgeHolderRef::Person(PersonId::new(2)),
+            place: EntityRef::Territory(TerritoryId::new(1)),
+            form: ProductionSiteForm::DistributedWorkshop,
+            active: true,
+        },
+    );
+    let mut foreign_asset = production.facilities[&facility].clone();
+    foreign_asset.id = foreign.clone();
+    foreign_asset.site = foreign_site;
+    production.facilities.insert(foreign.clone(), foreign_asset);
+    let mut scenario = scenario_with_production(production);
+    scenario.domain_records.push(canwu_api::DomainRecord {
+        reference: report_draft.reference,
+        owner: "fixture-works".to_owned(),
+        class: canwu_api::DomainRecordClass::Record,
+        version: 1,
+        lifecycle: canwu_api::DomainRecordLifecycle::Active,
+        payload: report_draft.payload,
+        references: report_draft.references,
+    });
+    let production_plugin = ProductionPlugin;
+    let evidence_plugin = ConditionEvidencePlugin;
+    let plugins: [&dyn canwu_api::SimulationPlugin; 2] = [&production_plugin, &evidence_plugin];
+    let mut canwu =
+        Canwu::new_with_plugins(215, scenario, &plugins).expect("facility condition runtime");
+    // Two daily boundaries rewrite the report: version 3 is current and
+    // version 2 is superseded but retained. Epoch boundaries below leave it.
+    for _ in 0..2 {
+        canwu
+            .settle_boundary(
+                BoundaryRequest::at(SimTime::EPOCH).with_cadence(canwu_api::SystemCadence::Daily),
+            )
+            .expect("daily condition report boundary");
+    }
+    let current_report = current_record_version(&canwu, condition_report());
+    assert_eq!(current_report.version, 3);
+    let superseded = superseded_record_version(&canwu, &current_report);
+    let digest = canwu_api::canonical_hash(
+        "canwu.production.provider-evidence.v1",
+        canwu
+            .typed_domain_record(&condition_report())
+            .expect("current condition report"),
+    )
+    .expect("condition report digest");
+    let binding = |version: &DomainRecordVersionRef, digest: &str| ProductionEvidenceBinding {
+        kind: ProductionRequirementKind::Maintenance,
+        capability: "flood-damage".to_owned(),
+        version: version.clone(),
+        semantic_digest: digest.to_owned(),
+        available_quantity: 200,
+    };
+    let hazard = |condition, lifecycle, evidence| {
+        record_condition(
+            &facility,
+            1,
+            condition,
+            lifecycle,
+            FacilityConditionCause::Hazard,
+            evidence,
+        )
+    };
+    let mut request_id = 0;
+    let mut settle = |canwu: &mut Canwu, operation_id: &str, operation| {
+        request_id += 1;
+        enqueue_tracked_production_operation(canwu, &holder, request_id, operation_id, operation);
+        settle_at_epoch(canwu, &format!("{operation_id} command boundary"));
+        settle_at_epoch(canwu, &format!("{operation_id} apply boundary"));
+        production_state(canwu).operation_outcomes
+            [&ProductionOperationOutcomeId::new(operation_id).expect("operation ID")]
+            .clone()
+    };
+    let assert_rejected = |outcome: &ProductionOperationOutcome, code: &str| {
+        assert_eq!(
+            outcome.disposition,
+            ProductionOperationDisposition::Rejected,
+            "{}",
+            outcome.id
+        );
+        assert_eq!(
+            outcome.rejection_code.as_deref(),
+            Some(code),
+            "{}: {:?}",
+            outcome.id,
+            outcome.rejection_message
+        );
+    };
+
+    for (operation_id, operation, code) in [
+        (
+            "production:condition:superseded-evidence",
+            hazard(
+                200,
+                FacilityLifecycle::Damaged,
+                binding(&superseded, &digest),
+            ),
+            "domain_record_not_found",
+        ),
+        (
+            // A reading on the wrong side of the line that cites a
+            // superseded version is refused for the reading: the evidence is
+            // never resolved.
+            "production:condition:wrong-line-on-superseded-evidence",
+            hazard(
+                200,
+                FacilityLifecycle::Degraded,
+                binding(&superseded, &digest),
+            ),
+            "invalid_domain_record",
+        ),
+        (
+            // A record on another holder's facility that cites a superseded
+            // version is refused for authority, so it does not learn whether
+            // that version is current.
+            "production:condition:non-holder-on-superseded-evidence",
+            record_condition(
+                &foreign,
+                1,
+                200,
+                FacilityLifecycle::Damaged,
+                FacilityConditionCause::Hostile,
+                binding(&superseded, &digest),
+            ),
+            "invalid_authority",
+        ),
+        (
+            "production:condition:foreign-digest",
+            hazard(
+                200,
+                FacilityLifecycle::Damaged,
+                binding(&current_report, &"0".repeat(64)),
+            ),
+            "invalid_domain_record",
+        ),
+    ] {
+        let outcome = settle(&mut canwu, operation_id, operation);
+        assert_rejected(&outcome, code);
+        let asset = &production_state(&canwu).facilities[&facility];
+        assert_eq!(asset.condition_per_mille, 1_000, "{operation_id}");
+        assert_eq!(asset.lifecycle, FacilityLifecycle::Operational);
+    }
+
+    let fall = settle(
+        &mut canwu,
+        "production:condition:flood",
+        hazard(
+            200,
+            FacilityLifecycle::Damaged,
+            binding(&current_report, &digest),
+        ),
+    );
+    assert_eq!(fall.disposition, ProductionOperationDisposition::Applied);
+    let fallen = production_state(&canwu);
+    let asset = &fallen.facilities[&facility];
+    assert_eq!(asset.condition_per_mille, 200);
+    assert_eq!(asset.lifecycle, FacilityLifecycle::Damaged);
+    assert_eq!(asset.generation, 1, "a recorded fall keeps the generation");
+    assert_eq!(asset.usable_capacity("bench"), 2);
+
+    for (operation_id, condition, lifecycle) in [
+        (
+            "production:condition:rise",
+            600,
+            FacilityLifecycle::Degraded,
+        ),
+        (
+            "production:condition:wrong-side-of-line",
+            150,
+            FacilityLifecycle::Degraded,
+        ),
+        (
+            "production:condition:no-change",
+            200,
+            FacilityLifecycle::Damaged,
+        ),
+    ] {
+        let outcome = settle(
+            &mut canwu,
+            operation_id,
+            hazard(condition, lifecycle, binding(&current_report, &digest)),
+        );
+        assert_rejected(&outcome, "invalid_domain_record");
+        assert_eq!(
+            production_state(&canwu).facilities[&facility],
+            fallen.facilities[&facility],
+            "{operation_id} leaves the facility as it was"
+        );
+    }
+    let settled = production_state(&canwu);
+    let replayed = Canwu::replay_from_journal(&plugins, &canwu.replay_journal())
+        .expect("facility condition replay");
+    assert_eq!(production_state(&replayed), settled);
+
+    // A fall to 0 takes a facility out of the incident due index, so the
+    // root still validates.
+    let evidence = binding(&current_report, &digest);
+    let (mut risky, holder, _, facility) = base_state();
+    {
+        let asset = risky.facilities.get_mut(&facility).expect("facility");
+        asset.incident_risk_per_mille = 500;
+        asset.incident_max_severity_per_mille = 100;
+    }
+    risky.rebuild_runtime_indexes().expect("incident due index");
+    assert!(risky.incident_due_index.contains(&facility));
+    apply_steps(
+        &mut risky,
+        &holder,
+        "production:condition",
+        vec![(
+            "destroyed",
+            record_condition(
+                &facility,
+                1,
+                0,
+                FacilityLifecycle::Damaged,
+                FacilityConditionCause::Hostile,
+                evidence.clone(),
+            ),
+        )],
+    );
+    assert!(!risky.incident_due_index.contains(&facility));
+    risky
+        .validate()
+        .expect("a facility at 0 per mille leaves the incident due index");
+
+    // (c) A repair admitted on a degraded asset completes through canonical
+    // ingress and returns it Operational at 1,000 per mille in the next
+    // generation. A fall recorded after the completion, while the project is
+    // still hot, validates, and the project's archive record verifies.
+    let (mut state, holder, site, facility) = base_state();
+    apply_steps(
+        &mut state,
+        &holder,
+        "production:condition",
+        vec![(
+            "wear",
+            record_condition(
+                &facility,
+                1,
+                600,
+                FacilityLifecycle::Degraded,
+                FacilityConditionCause::Wear,
+                evidence.clone(),
+            ),
+        )],
+    );
+    let process_id = ProcessRevisionId::new("production:household-process:v1").expect("process");
+    let project = facility_project(
+        &mut state,
+        &holder,
+        &site,
+        &facility,
+        &process_id,
+        "degraded-repair",
+        FacilityProjectKind::Repair,
+        SimTime::EPOCH,
+    );
+    let project_id = project.id.clone();
+    advance_project_to_commissioning(&mut state, &holder, project);
+    let mut completed = complete_project_through_ingress(state, &project_id, &holder, 216);
+    let repaired = &completed.facilities[&facility];
+    assert_eq!(repaired.generation, 2);
+    assert_eq!(repaired.lifecycle, FacilityLifecycle::Operational);
+    assert_eq!(repaired.condition_per_mille, 1_000);
+    apply_steps(
+        &mut completed,
+        &holder,
+        "production:condition",
+        vec![(
+            "wear-after-repair",
+            record_condition(
+                &facility,
+                2,
+                900,
+                FacilityLifecycle::Degraded,
+                FacilityConditionCause::Wear,
+                evidence,
+            ),
+        )],
+    );
+    completed
+        .validate()
+        .expect("a hot completed project does not pin its asset's condition");
+    assert_eq!(
+        completed.facility_projects[&project_id].lifecycle,
+        FacilityProjectLifecycle::Completed
+    );
+    let prepared = completed
+        .prepare_production_archive(1, &())
+        .expect("repair project archive");
+    assert_eq!(prepared.selected_projects, vec![project_id]);
+    prepared
+        .store_and_verify(&TestProductionArchiveStore::default())
+        .expect("the repair archive record verifies");
+}
+
+#[test]
+fn gap_g110_expansion_raises_an_operational_assets_capacity() {
+    let (mut state, holder, site, facility) = base_state();
+    let process_id = ProcessRevisionId::new("production:household-process:v1").expect("process");
+    let capacity_after = BTreeMap::from([("bench".to_owned(), 3), ("machine".to_owned(), 1)]);
+    let project = facility_project(
+        &mut state,
+        &holder,
+        &site,
+        &facility,
+        &process_id,
+        "expansion",
+        FacilityProjectKind::Expand {
+            capacity_after: capacity_after.clone(),
+        },
+        SimTime::EPOCH,
+    );
+
+    // (b) An expansion that does not raise the capacity, or that drops a
+    // capability, (c) a construction on an operational asset, and an
+    // expansion of an asset that is not operational, are refused.
+    let current = state.facilities[&facility].capacity.clone();
+    let dropped = BTreeMap::from([("bench".to_owned(), 3)]);
+    let mut degraded = state.clone();
+    {
+        let asset = degraded.facilities.get_mut(&facility).expect("facility");
+        asset.lifecycle = FacilityLifecycle::Degraded;
+        asset.condition_per_mille = 600;
+    }
+    for (label, base, kind) in [
+        (
+            "unchanged capacity",
+            &state,
+            FacilityProjectKind::Expand {
+                capacity_after: current,
+            },
+        ),
+        (
+            "dropped capability",
+            &state,
+            FacilityProjectKind::Expand {
+                capacity_after: dropped,
+            },
+        ),
+        ("construction", &state, FacilityProjectKind::Construction),
+        (
+            "degraded asset",
+            &degraded,
+            FacilityProjectKind::Expand {
+                capacity_after: capacity_after.clone(),
+            },
+        ),
+    ] {
+        let mut refused = base.clone();
+        let mut candidate = project.clone();
+        candidate.kind = kind;
+        let error = refused
+            .apply_operation(
+                &command(
+                    &refused,
+                    &holder,
+                    "production:expansion:refused",
+                    ProductionOperation::CreateFacilityProject { project: candidate },
+                ),
+                SimTime::EPOCH,
+            )
+            .expect_err(label);
+        assert_eq!(
+            error.code,
+            canwu_api::ErrorCode::InvalidDomainRecord,
+            "{label}"
+        );
+    }
+
+    // (a) The expansion completes at exactly its capacity, even after the
+    // asset fell to Degraded and stopped for repair while the work ran, and
+    // the archive record of the completed project verifies.
+    let project_id = project.id.clone();
+    let mut order = work_order("production:order:expansion", &holder, &process_id, &site);
+    order.lifecycle = WorkOrderLifecycle::Authorized;
+    let order_id = order.id.clone();
+    state.work_orders.insert(order_id.clone(), order);
+    apply_steps(
+        &mut state,
+        &holder,
+        project_id.as_str(),
+        vec![
+            (
+                "create",
+                ProductionOperation::CreateFacilityProject { project },
+            ),
+            (
+                "authorize",
+                ProductionOperation::AuthorizeFacilityProject {
+                    project: project_id.clone(),
+                },
+            ),
+            (
+                "advance-half",
+                ProductionOperation::AdvanceFacilityProject {
+                    project: project_id.clone(),
+                    completed_units: 5,
+                },
+            ),
+            (
+                "wear",
+                record_condition(
+                    &facility,
+                    1,
+                    600,
+                    FacilityLifecycle::Degraded,
+                    FacilityConditionCause::Wear,
+                    ProductionEvidenceBinding {
+                        kind: ProductionRequirementKind::Maintenance,
+                        capability: "workshop-wear".to_owned(),
+                        version: version::<ConditionReport>("works:flood-report"),
+                        semantic_digest: "digest-workshop-wear".to_owned(),
+                        available_quantity: 600,
+                    },
+                ),
+            ),
+            (
+                "stop-for-repair",
+                ProductionOperation::ResolveDegradedFacility {
+                    work_order: order_id,
+                    facility: facility.clone(),
+                    choice: DegradedFacilityChoice::StopForRepair,
+                    decision_ticket: canwu_api::DecisionTicketId::new(1),
+                },
+            ),
+        ],
+    );
+    assert_eq!(
+        state.facilities[&facility].lifecycle,
+        FacilityLifecycle::Repairing
+    );
+    apply_steps(
+        &mut state,
+        &holder,
+        project_id.as_str(),
+        vec![(
+            "advance-rest",
+            ProductionOperation::AdvanceFacilityProject {
+                project: project_id.clone(),
+                completed_units: 5,
+            },
+        )],
+    );
+    assert_eq!(
+        state.facility_projects[&project_id].lifecycle,
+        FacilityProjectLifecycle::Commissioning
+    );
+    assert_eq!(
+        state.facility_projects[&project_id]
+            .resulting_asset
+            .as_ref()
+            .expect("derived expansion result")
+            .capacity,
+        capacity_after
+    );
+    let completed = complete_project_through_ingress(state, &project_id, &holder, 217);
+    let expanded = &completed.facilities[&facility];
+    assert_eq!(expanded.generation, 2);
+    assert_eq!(expanded.lifecycle, FacilityLifecycle::Operational);
+    assert_eq!(expanded.condition_per_mille, 1_000);
+    assert_eq!(expanded.capacity, capacity_after);
+    assert_eq!(expanded.usable_capacity("bench"), 3);
+    let prepared = completed
+        .prepare_production_archive(1, &())
+        .expect("expansion project archive");
+    assert_eq!(
+        prepared.blob.project_records[0].resulting_asset.capacity,
+        capacity_after
+    );
+    prepared
+        .store_and_verify(&TestProductionArchiveStore::default())
+        .expect("the expansion archive record verifies");
+
+    // A second level runs to completion while the first project is still hot
+    // (Completed, not archived). The completion cooldown admits its lease a
+    // minute later.
+    let level_two = BTreeMap::from([("bench".to_owned(), 5), ("machine".to_owned(), 1)]);
+    let mut next = cite_seeded_versions(&completed);
+    let second = facility_project(
+        &mut next,
+        &holder,
+        &site,
+        &facility,
+        &process_id,
+        "expansion-level-two",
+        FacilityProjectKind::Expand {
+            capacity_after: level_two.clone(),
+        },
+        SimTime::from_minutes(1),
+    );
+    assert_eq!(second.base_generation, 2);
+    let second_id = second.id.clone();
+    advance_project_to_commissioning(&mut next, &holder, second);
+    let leveled = complete_project_through_ingress(next, &second_id, &holder, 218);
+    assert_eq!(
+        leveled.facility_projects[&project_id].lifecycle,
+        FacilityProjectLifecycle::Completed,
+        "the first level is still hot"
+    );
+    let expanded = &leveled.facilities[&facility];
+    assert_eq!(expanded.generation, 3);
+    assert_eq!(expanded.capacity, level_two);
+    leveled
+        .validate()
+        .expect("a hot completed project accepts a later generation of its asset");
+}

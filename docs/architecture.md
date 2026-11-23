@@ -1427,7 +1427,10 @@ therefore reads only current versions: every exact domain-record version that
 a `StartExecution` or `CreateFacilityProject` cites, or reads through a cited
 record such as an adoption's application or an observation's attempt, must be
 the current version of its record when the operation is applied, as must
-realization evidence.
+realization evidence and the provider evidence of a
+`RecordFacilityCondition`. A condition record's holder, generation, and fall
+rules run before its evidence is resolved, and its `semantic_digest` must be
+the provider-evidence hash of that current record body.
 `AdvanceFacilityProject` does not reread a project's provider and technology
 evidence, whose exact bodies and bindings its creation already validated, and
 rechecks only its live resource evidence. A compact run therefore admits and
