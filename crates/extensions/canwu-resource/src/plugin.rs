@@ -47,14 +47,17 @@ pub const RESOURCE_DEFERRED_INGRESS: &str = "resource_deferred_packet_v1";
 /// handed out only through [`enqueue_resource_account_rescope`]; a packet
 /// another plugin's boundary system schedules on it settles nothing.
 pub const RESOURCE_ACCOUNT_RESCOPE_INGRESS: &str = "resource_account_rescope_v1";
+/// Internal ingress of the host application's account capacity change
+/// ([`crate::ResourceOperationRequestV1::SetAccountCapacity`]). Its permit is
+/// handed out only through [`enqueue_resource_account_capacity`]; a packet
+/// another plugin's boundary system schedules on it settles nothing.
+pub const RESOURCE_ACCOUNT_CAPACITY_INGRESS: &str = "resource_account_capacity_v1";
 pub const RESOURCE_REPORT_KNOWLEDGE: &str = "resource_report";
-/// BLAKE3, lowercase hex, of `canwu-resource plugin semantic hash 0.20.0:
-/// identity-only evidence of hot terminal records and held completion state,
-/// current observation sources, completion reports given up without an
-/// observation head, report holders that cannot receive knowledge refused`
-/// (one line, one space after each comma and colon).
+/// BLAKE3, lowercase hex, of `canwu-resource plugin semantic hash 0.24.0:
+/// host account capacity change, a lowering keeps room for open transfer
+/// escrow` (one line, one space after each comma and colon).
 pub const RESOURCE_SEMANTIC_HASH: &str =
-    "6fbe03085ee5cde95721728f49cc32b6aa48f0eccc1ad2a17fd73f1f8e7f159a";
+    "a5286b07e7cc18174b5c9609e8f198613347a765b0c53f0549a15ca0f7aac018";
 
 const RESOURCE_REPORT_SCHEMA_HASH: &str =
     "2e271b9ea79404e662ba51360ce8061421ae896c1e70b09e99feb8d0de01a007";
@@ -64,6 +67,7 @@ static RESOURCE_ALLOCATION_INGRESS_PERMIT: OnceLock<PluginIngressPermit> = OnceL
 static RESOURCE_ARCHIVE_INGRESS_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static RESOURCE_ARCHIVE_RETENTION_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static RESOURCE_ACCOUNT_RESCOPE_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
+static RESOURCE_ACCOUNT_CAPACITY_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceArchiveIngressReceiptV1 {
@@ -816,6 +820,24 @@ impl SimulationPlugin for ResourcePlugin {
             return Err(CanwuError::new(
                 ErrorCode::InvalidPluginRegistration,
                 "resource account rescope permit changed across registrations",
+            ));
+        }
+        let capacity_permit = registrar.register_internal_ingress(PluginIngressDescriptor {
+            name: RESOURCE_ACCOUNT_CAPACITY_INGRESS.to_owned(),
+            description:
+                "Change one resource account's capacity to what the host application names"
+                    .to_owned(),
+            class: IngressClass::ScheduledSystem,
+            payload_schema: PayloadSchema::Any,
+        })?;
+        if RESOURCE_ACCOUNT_CAPACITY_PERMIT
+            .set(capacity_permit.clone())
+            .is_err()
+            && RESOURCE_ACCOUNT_CAPACITY_PERMIT.get() != Some(&capacity_permit)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                "resource account capacity permit changed across registrations",
             ));
         }
         registrar.register_ingress(PluginIngressDescriptor {
@@ -1611,6 +1633,11 @@ fn packet_operation_keys(packet_type: &str, payload: &Value) -> Vec<crate::Resou
                 .map(|request| vec![request.operation_key])
                 .unwrap_or_default()
         }
+        RESOURCE_ACCOUNT_CAPACITY_INGRESS => {
+            decoded::<crate::ResourceSetAccountCapacityRequestV1>(payload)
+                .map(|request| vec![request.operation_key])
+                .unwrap_or_default()
+        }
         RESOURCE_DEFERRED_INGRESS => decoded::<ResourceDeferredPacketV1>(payload)
             .map(|deferred| packet_operation_keys(&deferred.packet_type, &deferred.payload))
             .unwrap_or_default(),
@@ -1771,6 +1798,9 @@ fn settle_lifecycle_on<'s, S: crate::HotTerminalSource<'s>>(
             }
             RESOURCE_ACCOUNT_RESCOPE_INGRESS => {
                 settle_rescope_packet(view, context, ingress, payload, state, &mut settlement)?;
+            }
+            RESOURCE_ACCOUNT_CAPACITY_INGRESS => {
+                settle_capacity_packet(view, context, ingress, payload, state, &mut settlement)?;
             }
             RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS => {
                 settle_expiry_tick(view, context, ingress.id, state, &mut settlement)?;
@@ -2544,19 +2574,94 @@ fn settle_rescope_packet(
         return Ok(());
     };
     let evidence = request.evidence.clone();
-    let operation = ResourceOperationRequestV1::RescopeAccount(request);
+    settle_host_account_operation(
+        view,
+        context,
+        ingress,
+        &ResourceOperationRequestV1::RescopeAccount(request),
+        &evidence,
+        HostAccountOperation::RESCOPE,
+        state,
+        out,
+    )
+}
+
+/// Settles the host application's change of an account's capacity as
+/// [`settle_rescope_packet`] settles a rescope: only the host application
+/// changes a capacity, through [`enqueue_resource_account_capacity`].
+fn settle_capacity_packet(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    ingress: &IngressRecord,
+    payload: &Value,
+    state: &mut crate::ResourceState,
+    out: &mut LifecycleSettlement,
+) -> Result<(), CanwuError> {
+    let Ok(request) = decode::<crate::ResourceSetAccountCapacityRequestV1>(
+        payload,
+        "resource account capacity change",
+    ) else {
+        out.skip_undecodable(ingress.id, "resource account capacity change");
+        return Ok(());
+    };
+    let evidence = request.evidence.clone();
+    settle_host_account_operation(
+        view,
+        context,
+        ingress,
+        &ResourceOperationRequestV1::SetAccountCapacity(request),
+        &evidence,
+        HostAccountOperation::CAPACITY,
+        state,
+        out,
+    )
+}
+
+/// How a host-only account operation is named in its skip details and
+/// evidence refusals.
+#[derive(Clone, Copy)]
+struct HostAccountOperation {
+    /// The operation, as in "resource account {name} evidence".
+    name: &'static str,
+    /// The skip detail of a packet another plugin scheduled.
+    foreign_detail: &'static str,
+}
+
+impl HostAccountOperation {
+    const RESCOPE: Self = Self {
+        name: "rescope",
+        foreign_detail: "an account rescope is the host application's; one another plugin scheduled settles nothing",
+    };
+    const CAPACITY: Self = Self {
+        name: "capacity change",
+        foreign_detail: "an account capacity change is the host application's; one another plugin scheduled settles nothing",
+    };
+}
+
+/// Settles one decoded host-only account operation that cites `evidence`.
+#[allow(clippy::too_many_arguments)]
+fn settle_host_account_operation(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    ingress: &IngressRecord,
+    operation: &ResourceOperationRequestV1,
+    evidence: &canwu_api::DomainRecordVersionRef,
+    what: HostAccountOperation,
+    state: &mut crate::ResourceState,
+    out: &mut LifecycleSettlement,
+) -> Result<(), CanwuError> {
     let operation_key = operation.operation_key();
     if PacketOrigin::of(ingress) != PacketOrigin::Host {
         out.skip(
             ingress.id,
             crate::ResourceIngressSkipReasonV1::FailedSettlementChecks,
             Some(&operation_key),
-            "an account rescope is the host application's; one another plugin scheduled settles nothing",
+            what.foreign_detail,
             EventHolder::Nobody,
         );
         return Ok(());
     }
-    // `enqueue_resource_account_rescope` refuses such a packet.
+    // The host's enqueue function refuses such a packet.
     if operation.names_reserved_operation_key() {
         out.skip(
             ingress.id,
@@ -2571,14 +2676,14 @@ fn settle_rescope_packet(
     if !out.operation_key_is_free(
         view,
         state,
-        &operation,
+        operation,
         &request_digest,
         ingress.id,
         EventHolder::Nobody,
     )? {
         return Ok(());
     }
-    let refusal = match rescope_evidence_refusal(view, &evidence) {
+    let refusal = match host_account_evidence_refusal(view, evidence, what) {
         Ok(refusal) => refusal,
         Err(error) => {
             out.skip(
@@ -2592,7 +2697,7 @@ fn settle_rescope_packet(
         }
     };
     match state
-        .settle_operation_refused_by(&operation, Some(context.at), refusal.as_ref())
+        .settle_operation_refused_by(operation, Some(context.at), refusal.as_ref())
         .map_err(resource_canwu_error)?
     {
         crate::OperationSettlement::Settled(_) => out.changed = true,
@@ -2608,38 +2713,39 @@ fn settle_rescope_packet(
     Ok(())
 }
 
-/// What the simulation view holds against the evidence of an account
-/// rescope, or `None`: a version that is not its record's current version,
-/// or a record that is not of a declared adapter evidence kind. Only the
-/// current-version index is read, never retained evidence, so a sealed run
-/// and its exact replay find the same.
-fn rescope_evidence_refusal(
+/// What the simulation view holds against the evidence of a host-only
+/// account operation (a rescope or a capacity change), or `None`: a version
+/// that is not its record's current version, or a record that is not of a
+/// declared adapter evidence kind. Only the current-version index is read,
+/// never retained evidence, so a sealed run and its exact replay find the
+/// same.
+fn host_account_evidence_refusal(
     view: &SimulationView<'_>,
     evidence: &canwu_api::DomainRecordVersionRef,
+    what: HostAccountOperation,
 ) -> Result<Option<crate::ResourceError>, CanwuError> {
+    let name = what.name;
     // The lifecycle system reads its own records and the production runtime
     // for itself; of the records it reads, only the declared adapter
-    // evidence kinds prove a move. A record it does not read at all is
-    // refused below, by the read.
+    // evidence kinds prove a move or a works. A record it does not read at
+    // all is refused below, by the read.
     let kind = &evidence.record.kind;
     if kind.namespace == PLUGIN_NAMESPACE
         || (kind.namespace == "canwu.production" && kind.name == "runtime")
     {
-        return Ok(Some(crate::ResourceError::Authority(
-            "resource account rescope evidence must be a record of a declared adapter evidence kind"
-                .to_owned(),
-        )));
+        return Ok(Some(crate::ResourceError::Authority(format!(
+            "resource account {name} evidence must be a record of a declared adapter evidence kind"
+        ))));
     }
     match is_current_version(view, evidence) {
         Ok(true) => Ok(None),
-        Ok(false) => Ok(Some(crate::ResourceError::VersionConflict(
-            "resource account rescope evidence is not its record's current version".to_owned(),
-        ))),
+        Ok(false) => Ok(Some(crate::ResourceError::VersionConflict(format!(
+            "resource account {name} evidence is not its record's current version"
+        )))),
         Err(error) if error.code == ErrorCode::UndeclaredStateRead => {
-            Ok(Some(crate::ResourceError::Authority(
-                "resource account rescope evidence is of a record kind the resource plugin does not read"
-                    .to_owned(),
-            )))
+            Ok(Some(crate::ResourceError::Authority(format!(
+                "resource account {name} evidence is of a record kind the resource plugin does not read"
+            ))))
         }
         Err(error) => Err(error),
     }
@@ -3372,8 +3478,9 @@ fn validate_adapter_packet(
 /// Refuses what adapter ingress never carries. Production output credits
 /// settle only through [`RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS`], which
 /// binds every output leg of one execution to the source version production
-/// pinned on it, and an account rescope only through the host application's
-/// [`RESOURCE_ACCOUNT_RESCOPE_INGRESS`].
+/// pinned on it, an account rescope only through the host application's
+/// [`RESOURCE_ACCOUNT_RESCOPE_INGRESS`], and an account capacity change only
+/// through its [`RESOURCE_ACCOUNT_CAPACITY_INGRESS`].
 fn reject_adapter_production_credit(
     request: &ResourceOperationRequestV1,
 ) -> Result<(), CanwuError> {
@@ -3389,6 +3496,12 @@ fn reject_adapter_production_credit(
         return Err(CanwuError::new(
             ErrorCode::InvalidAuthority,
             "an account's place scope is changed only by the host application",
+        ));
+    }
+    if matches!(request, ResourceOperationRequestV1::SetAccountCapacity(_)) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "an account's capacity is changed only by the host application",
         ));
     }
     Ok(())
@@ -4698,7 +4811,8 @@ fn adapter_source_matches(packet: &ResourceAdapterOperationV1) -> bool {
         | ResourceOperationRequestV1::Completion(_)
         | ResourceOperationRequestV1::IssueAccessGrant(_)
         | ResourceOperationRequestV1::RevokeAccessGrant(_)
-        | ResourceOperationRequestV1::RescopeAccount(_) => false,
+        | ResourceOperationRequestV1::RescopeAccount(_)
+        | ResourceOperationRequestV1::SetAccountCapacity(_) => false,
     }
 }
 
@@ -4813,6 +4927,12 @@ fn validate_resource_authority(
             return Err(CanwuError::new(
                 ErrorCode::InvalidAuthority,
                 "an account's place scope is changed only by the host application",
+            ));
+        }
+        ResourceOperationRequestV1::SetAccountCapacity(_) => {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "an account's capacity is changed only by the host application",
             ));
         }
         ResourceOperationRequestV1::CancelTransfer(request) => {
@@ -5213,6 +5333,56 @@ pub fn enqueue_resource_account_rescope<H: canwu_api::CanwuRun + ?Sized>(
         PluginIngressRequest::new(
             PLUGIN_NAME,
             RESOURCE_ACCOUNT_RESCOPE_INGRESS,
+            due_at,
+            encode(request)?,
+        ),
+        permit,
+    )
+}
+
+/// Queues the host application's change of one account's capacity
+/// ([`crate::ResourceSetAccountCapacityRequestV1`]). Takes either runtime
+/// handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+///
+/// This is the only way to change an account's capacity after it is created:
+/// a tracked command, an adapter packet, or a packet another plugin's boundary
+/// system schedules cannot carry the operation. The evidence must be its
+/// record's current version now, read from the current-version index, or the
+/// call refuses it; settlement reads it again. Every refusal at settlement (a
+/// capacity below the balance, or for a lowering below the balance and the
+/// escrow of the account's open transfers; a stale account revision; a closed
+/// account; a completion lease locking its current revision; evidence that is
+/// no longer current or not of one of the plugin's adapter evidence kinds) is
+/// the operation's recorded rejection, and a result that does not fit the
+/// root is skipped with a [`crate::RESOURCE_INGRESS_SKIPPED_EVENT`].
+pub fn enqueue_resource_account_capacity<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
+    due_at: SimTime,
+    request: &crate::ResourceSetAccountCapacityRequestV1,
+) -> Result<canwu_api::IngressReceipt, CanwuError> {
+    reject_reserved_operation_key(&ResourceOperationRequestV1::SetAccountCapacity(
+        request.clone(),
+    ))?;
+    if canwu
+        .current_domain_record_version(&request.evidence.record)?
+        .as_ref()
+        != Some(&request.evidence)
+    {
+        return Err(CanwuError::new(
+            ErrorCode::EvidenceUnavailable,
+            "resource account capacity change evidence is not its record's current version",
+        ));
+    }
+    let permit = RESOURCE_ACCOUNT_CAPACITY_PERMIT.get().ok_or_else(|| {
+        CanwuError::new(
+            ErrorCode::PluginNotActive,
+            "resource plugin must be active before account capacity ingress",
+        )
+    })?;
+    canwu.enqueue_permitted_plugin_ingress(
+        PluginIngressRequest::new(
+            PLUGIN_NAME,
+            RESOURCE_ACCOUNT_CAPACITY_INGRESS,
             due_at,
             encode(request)?,
         ),
