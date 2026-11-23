@@ -53,7 +53,7 @@ pub const TERM_RESOLVER_CLAMPED: &str = "canwu.military:resolver-clamped";
 pub const TERM_RESOLVER_FAILED: &str = "canwu.military:resolver-failed";
 pub const TERM_PURSUIT: &str = "canwu.military:pursuit";
 
-pub(crate) const PLUGIN_VERSION: &str = "0.21.0";
+pub(crate) const PLUGIN_VERSION: &str = "0.24.0";
 pub(crate) const SETTLE_SYSTEM: &str = "settle-engagements-v1";
 pub(crate) const WAKE_SYSTEM: &str = "wake-engagements-on-cadence-v1";
 pub(crate) const PUBLISH_SYSTEM: &str = "publish-engagement-reports-v1";
@@ -608,11 +608,25 @@ fn validate_records<R: StepResolver>(records: &[DomainRecord]) -> Result<(), Can
                     "an engagement runs longer than its kind rule allows",
                 ));
             }
+            if engagement
+                .group
+                .as_ref()
+                .is_some_and(|group| group.engagements.len() > limits.open_engagements as usize)
+            {
+                return Err(invalid("an engagement group exceeds the limits"));
+            }
             for side in [&engagement.attacker, &engagement.defender] {
                 if side.forces.len() > limits.forces_per_side as usize
                     || side.holders.len() > limits.holders_per_side as usize
                 {
                     return Err(invalid("an engagement side exceeds the limits"));
+                }
+                // The carry is below one cohesion point (one rulebook day of
+                // cohesion-minutes), or a side would owe a rout's worth.
+                if side.confusion_carry >= rulebook.siege.day_minutes {
+                    return Err(invalid(
+                        "an engagement side carries a whole order-confusion point",
+                    ));
                 }
             }
         } else if kind.matches_type::<EngagementStepsRecord>() {

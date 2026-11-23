@@ -40,9 +40,12 @@ impl ResolverIdentity {
 /// The function from a step's input and draws to its outcome.
 ///
 /// The plugin owns everything around the call: it assembles the input,
-/// performs every draw the resolver asks for, clamps the outcome, splits
+/// performs every draw the resolver asks for, clamps the outcome, charges
+/// each side's order-confusion cost (prorated by step length, see
+/// [`crate::CohesionRuleV1`]) on the resolver's `cohesion_after`, splits
 /// casualties over components, applies the break rule and pursuit, and
-/// decides whether the engagement continues.
+/// decides whether the engagement continues. A resolver leaves
+/// `order_confusion` to the plugin.
 pub trait StepResolver: Default + Send + Sync + 'static {
     const IDENTITY: ResolverIdentity;
 
@@ -438,13 +441,11 @@ fn take_blows(
         i128::from(rulebook.lines.killed_denominator),
     );
     let cohesion = &rulebook.cohesion;
-    let fixed = i128::from(cohesion.base).saturating_add(product(&[
-        i128::from(side.condition.order_confusion),
-        i128::from(cohesion.confusion),
-    ]));
+    // The order-confusion cost is the plugin's, prorated by step length
+    // after the resolver (`CohesionRuleV1::confusion_per_day`).
     let cohesion_loss = mul_div(
         product(&[numerator, i128::from(cohesion.per_inflicted)])
-            .saturating_add(product(&[fixed, denominator])),
+            .saturating_add(product(&[i128::from(cohesion.base), denominator])),
         scale,
         denominator.saturating_mul(BP),
     );

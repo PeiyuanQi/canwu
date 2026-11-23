@@ -12,9 +12,13 @@ use canwu_api::{
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt::{Display, Formatter};
 
-/// The schema version every payload carries: 2 since 0.21.0, when the
-/// engagement record gained its own `max_minutes`.
-pub const SCHEMA_VERSION: u32 = 2;
+/// The schema version every payload carries: 3 since 0.24.0, when the
+/// engagement record gained its engagement `group` and each side its
+/// `confusion_carry`, the rulebook's cohesion rule `confusion_per_day`
+/// replaced the per-step `confusion`, and a siege may end `Surrendered`
+/// (2 since 0.21.0, when the engagement record gained its own
+/// `max_minutes`).
+pub const SCHEMA_VERSION: u32 = 3;
 /// The longest identifier the plugin accepts.
 pub const MAX_ID_BYTES: usize = 192;
 /// The longest siege or crossing identifier: the plugin derives the

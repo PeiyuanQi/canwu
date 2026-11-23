@@ -327,7 +327,8 @@ pub fn synthetic_rulebook_v1() -> CombatRulebookV1 {
         cohesion: CohesionRuleV1 {
             per_inflicted: 4,
             base: 1,
-            confusion: 50,
+            // Per rulebook day since 0.24.0 (was per step), prorated by step length.
+            confusion_per_day: 50,
             recover_per_day: 10,
         },
         morale: MoraleRuleV1 {
