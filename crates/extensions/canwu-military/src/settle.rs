@@ -6,9 +6,10 @@ use crate::PLUGIN_NAME;
 use crate::command::{AppliedCommandV1, StepPacketV1, add_minutes, apply};
 use crate::crossing::{CrossingStateV1, CrossingStatus, WaveV1};
 use crate::engagement::{
-    Continuation, EngagementOutcomeKind, EngagementOutcomeSignalV1, EngagementOutcomeV1,
-    EngagementStateV1, EngagementStatus, EngagementStepsV1, EngagementSummaryV1, ForceLossDeltaV1,
-    HoldReason, RiverBand, Side, SideStateV1, SideStepV1, SideSummaryV1, StepV1,
+    Continuation, EngagementGroupV1, EngagementOutcomeKind, EngagementOutcomeSignalV1,
+    EngagementOutcomeV1, EngagementStateV1, EngagementStatus, EngagementStepsV1,
+    EngagementSummaryV1, ForceLossDeltaV1, HoldReason, RiverBand, Side, SideStateV1, SideStepV1,
+    SideSummaryV1, StepV1,
 };
 use crate::force::{ComponentValuesV1, ForceStateV1, LossTallyV1, SideTermsV1};
 use crate::ids::{
@@ -31,7 +32,7 @@ use crate::resolver::{
 };
 use crate::rulebook::{
     CombatRulebookV1, EngagementKind, FortUse, InterceptMode, KindRuleV1, MAX_DAYS_PER_BOUNDARY,
-    TerrainRowV1,
+    StepProfileV1, TerrainRowV1,
 };
 use crate::siege::{SiegeEndCause, SiegeStateV1, SiegeStatus, StormRule};
 use canwu_api::{
@@ -74,15 +75,20 @@ pub(crate) struct Run<'v, 'a> {
     registry: Option<CombatRegistryV1>,
     registry_base: Option<CombatRegistryV1>,
     rulebook: Option<Rc<CombatRulebookV1>>,
-    loss_deltas: BTreeMap<ForceId, LossTallyV1>,
+    loss_deltas: BTreeMap<LossKey, LossTallyV1>,
 }
+
+/// A force's losses in this pass, by the engagement that inflicted them
+/// (`None`: a siege's dispersal), so a force an engagement group shares
+/// reports each engagement's losses once.
+type LossKey = (ForceId, Option<EngagementId>);
 
 pub(crate) struct RunCheckpoint {
     records: BTreeMap<DomainRecordRef, Staged>,
     directives: usize,
     registry: Option<CombatRegistryV1>,
     rulebook: Option<Rc<CombatRulebookV1>>,
-    loss_deltas: BTreeMap<ForceId, LossTallyV1>,
+    loss_deltas: BTreeMap<LossKey, LossTallyV1>,
 }
 
 fn decode_value<T: DeserializeOwned>(value: &Value) -> Result<T, CanwuError> {
@@ -323,13 +329,32 @@ impl<'v, 'a> Run<'v, 'a> {
         );
     }
 
-    fn add_losses(&mut self, force: &ForceId, tally: &LossTallyV1) {
+    fn add_losses(
+        &mut self,
+        force: &ForceId,
+        engagement: Option<&EngagementId>,
+        tally: &LossTallyV1,
+    ) {
         if !tally.is_zero() {
             self.loss_deltas
-                .entry(force.clone())
+                .entry((force.clone(), engagement.cloned()))
                 .or_default()
                 .add(tally);
         }
+    }
+
+    /// A force's losses in this pass from `engagement` and from dispersal.
+    fn engagement_losses(&self, force: &ForceId, engagement: &EngagementId) -> LossTallyV1 {
+        let mut total = LossTallyV1::default();
+        for key in [
+            (force.clone(), Some(engagement.clone())),
+            (force.clone(), None),
+        ] {
+            if let Some(tally) = self.loss_deltas.get(&key) {
+                total.add(tally);
+            }
+        }
+        total
     }
 
     /// Queues a report: a progress item replaces the subject's queued
@@ -614,8 +639,21 @@ fn step_due<R: StepResolver>(
     let Some(registry) = run.registry().cloned() else {
         return Ok(());
     };
+    // An engagement group steps together, at its first open engagement.
+    let mut stepped = BTreeSet::new();
     for id in &registry.open_engagements {
-        step_engagement::<R>(run, &rulebook, id, packet, up)?;
+        if stepped.contains(id) {
+            continue;
+        }
+        let Some(engagement) = run.get(&engagement_reference(id))? else {
+            run.registry_mut()?.open_engagements.remove(id);
+            continue;
+        };
+        let members = engagement
+            .group
+            .map_or_else(|| vec![id.clone()], |group| group.engagements);
+        stepped.extend(members.iter().cloned());
+        step_engagements::<R>(run, &rulebook, &members, packet, up)?;
     }
     for id in &registry.open_sieges {
         advance_siege(run, &rulebook, id, up)?;
@@ -687,6 +725,11 @@ pub(crate) struct OpenSpec {
     /// The host's shorter duration; `None` takes the kind rule's.
     pub max_minutes: Option<u32>,
     pub opened_at: SimTime,
+    /// The engagement group, for an engagement `OpenGroupEngagements` opens.
+    pub group: Option<EngagementGroupV1>,
+    /// The shared side's men this engagement opens with (the forecast's and
+    /// `opened_men`); every step splits the shared men afresh.
+    pub group_share: Option<u64>,
 }
 
 /// The men-weighted floor mean of the forces' terms (traits intersected),
@@ -879,9 +922,26 @@ pub(crate) fn open_engagement(
         .or_else(|| kind_rule.terrain.clone())
         .ok_or_else(|| invalid("an engagement opens on a terrain"))?;
     let mut forces = load_forces(run, spec.attackers.iter().chain(&spec.defenders).cloned())?;
+    // A group's shared forces are engaged in the group's first engagement
+    // still open (`close_engagement` hands them on).
+    let shared: &[ForceId] = match &spec.group {
+        Some(group) => match group.shared {
+            Side::Attacker => &spec.attackers,
+            Side::Defender => &spec.defenders,
+        },
+        None => &[],
+    };
+    let engaged_in = |id: &ForceId| match &spec.group {
+        Some(group) if shared.contains(id) => group
+            .engagements
+            .first()
+            .cloned()
+            .unwrap_or_else(|| spec.id.clone()),
+        _ => spec.id.clone(),
+    };
     for force in forces.values_mut() {
         force.recover(rulebook, spec.opened_at);
-        force.battle.engaged_in = Some(spec.id.clone());
+        force.battle.engaged_in = Some(engaged_in(&force.id));
     }
     for id in &spec.attackers {
         if let Some(force) = forces.get_mut(id) {
@@ -895,7 +955,18 @@ pub(crate) fn open_engagement(
     }
     let attacker_condition = attacker_input.0.clone();
     let defender_condition = defender_input.0.clone();
-    let side = |ids: &[ForceId], holders: &[KnowledgeHolderRef], input, cap: Option<u64>| {
+    // The men each side opens with: its cap, and a group's shared side its
+    // share.
+    let mut opening = spec.men_caps;
+    if let (Some(group), Some(share)) = (&spec.group, spec.group_share) {
+        let cap = &mut opening[group.shared.index()];
+        *cap = Some(cap.map_or(share, |cap| cap.min(share)));
+    }
+    let side = |ids: &[ForceId],
+                holders: &[KnowledgeHolderRef],
+                input,
+                cap: Option<u64>,
+                opening: Option<u64>| {
         let members: Vec<&ForceStateV1> = ids.iter().filter_map(|id| forces.get(id)).collect();
         let (_, cohesion, shock, men) = aggregate(&members);
         SideStateV1 {
@@ -906,9 +977,11 @@ pub(crate) fn open_engagement(
             cohesion,
             posture_after: Continuation::Continue,
             losses: LossTallyV1::default(),
-            opened_men: cap.map_or(men, |cap| cap.min(men)),
+            opened_men: opening.map_or(men, |cap| cap.min(men)),
             men_cap: cap,
             withdraw_ordered: false,
+            confusion_carry: 0,
+            confusion_paid_to: spec.opened_at,
         }
     };
     let attacker = side(
@@ -916,17 +989,19 @@ pub(crate) fn open_engagement(
         &spec.holders[0],
         attacker_input,
         spec.men_caps[0],
+        opening[0],
     );
     let defender = side(
         &spec.defenders,
         &spec.holders[1],
         defender_input,
         spec.men_caps[1],
+        opening[1],
     );
     let forecast = {
         let parts = [
-            side_parts(&forces, &spec.attackers, spec.men_caps[0]),
-            side_parts(&forces, &spec.defenders, spec.men_caps[1]),
+            side_parts(&forces, &spec.attackers, opening[0]),
+            side_parts(&forces, &spec.defenders, opening[1]),
         ];
         let members = [
             spec.attackers
@@ -986,6 +1061,7 @@ pub(crate) fn open_engagement(
         terrain: spec.terrain.clone(),
         siege: spec.siege.clone(),
         crossing: spec.crossing.clone(),
+        group: spec.group.clone(),
         attacker,
         defender,
         environment: Some(environment),
@@ -1143,6 +1219,7 @@ struct SidePlan {
     wounded_left: u64,
     pursuit: u64,
     cohesion_after: u32,
+    confusion_carry: u32,
     shock: u32,
     continuation: Continuation,
     step: SideStepV1,
@@ -1159,17 +1236,21 @@ fn plan_side(
     men: u64,
     walled: bool,
     age: u32,
+    confusion: (u32, u32),
 ) -> (SidePlan, bool) {
     let inflicted = out.inflicted_per_mille.min(1_000);
     let casualties = out.casualties.min(men);
     let killed = out.killed.min(casualties);
-    let cohesion_after = out.cohesion_after.min(terms.cohesion_cap.min(1_000));
+    let resolved_cohesion = out.cohesion_after.min(terms.cohesion_cap.min(1_000));
+    // The order-confusion cost, after the resolver's clamp.
+    let (confusion_cost, confusion_carry) = confusion;
+    let cohesion_after = resolved_cohesion.saturating_sub(confusion_cost);
     let shock = out.morale_shock;
     let morale_after = morale.saturating_sub(shock);
     let clamped = inflicted != out.inflicted_per_mille
         || casualties != out.casualties
         || killed != out.killed
-        || cohesion_after != out.cohesion_after
+        || resolved_cohesion != out.cohesion_after
         || morale_after != out.morale_after;
     let rule = &rulebook.break_rule;
     let mut continuation = if walled {
@@ -1216,6 +1297,7 @@ fn plan_side(
             wounded_left,
             pursuit,
             cohesion_after,
+            confusion_carry,
             shock,
             continuation,
             step: SideStepV1 {
@@ -1240,6 +1322,7 @@ fn plan_side(
 /// applies them.
 fn allocate_side(
     run: &mut Run<'_, '_>,
+    engagement: &EngagementId,
     forces: &mut BTreeMap<ForceId, ForceStateV1>,
     parts: &[(ForceId, ComponentId, u64)],
     plan: &SidePlan,
@@ -1274,7 +1357,7 @@ fn allocate_side(
             component.present = component.present.saturating_sub(tally.total());
             component.losses.add(&tally);
         }
-        run.add_losses(force_id, &tally);
+        run.add_losses(force_id, Some(engagement), &tally);
         total.add(&tally);
     }
     total
@@ -1306,10 +1389,58 @@ fn oversized(rulebook: &CombatRulebookV1, step: &StepV1) -> Result<bool, CanwuEr
     Ok(bytes.len() > rulebook.limits.step_bytes as usize)
 }
 
-fn minutes_between(from: SimTime, to: SimTime) -> i64 {
+pub(crate) fn minutes_between(from: SimTime, to: SimTime) -> i64 {
     to.checked_sub(from).map_or(0, SimDuration::as_minutes)
 }
 
+/// A side's order-confusion cost for `step_minutes` of fighting (the
+/// minutes since it was paid up to) and the remainder it carries on:
+/// `carry + order_confusion × confusion_per_day × step_minutes`
+/// cohesion-minutes, paid in whole points of one rulebook day
+/// (`siege.day_minutes`).
+fn confusion_cost(
+    rulebook: &CombatRulebookV1,
+    condition: &crate::ConditionInputV1,
+    carry: u32,
+    step_minutes: u32,
+) -> (u32, u32) {
+    let day = u128::from(rulebook.siege.day_minutes.max(1));
+    let owed = u128::from(carry).saturating_add(
+        u128::from(condition.order_confusion)
+            .saturating_mul(u128::from(rulebook.cohesion.confusion_per_day))
+            .saturating_mul(u128::from(step_minutes)),
+    );
+    (
+        u32::try_from(owed / day).unwrap_or(u32::MAX),
+        u32::try_from(owed % day).unwrap_or(0),
+    )
+}
+
+/// The order-confusion cost `side` owes for a step at `at`: for the minutes
+/// since it was paid up to, or nothing (its carry kept) when `at` is not
+/// later.
+fn unpaid_confusion(
+    rulebook: &CombatRulebookV1,
+    side: &SideStateV1,
+    condition: &crate::ConditionInputV1,
+    at: SimTime,
+) -> (u32, u32) {
+    let minutes = minutes_between(side.confusion_paid_to, at);
+    if minutes <= 0 {
+        return (0, side.confusion_carry);
+    }
+    confusion_cost(
+        rulebook,
+        condition,
+        side.confusion_carry,
+        u32::try_from(minutes).unwrap_or(u32::MAX),
+    )
+}
+
+/// One step of `engagement` at `at`, each side fighting with at most the
+/// men `caps` names (its own cap, or its share of an engagement group's
+/// shared forces); each side pays order confusion for the minutes from its
+/// `confusion_paid_to` to `at` (nothing when `at` is not later).
 fn one_step<R: StepResolver>(
     run: &mut Run<'_, '_>,
     rulebook: &CombatRulebookV1,
@@ -1318,6 +1449,7 @@ fn one_step<R: StepResolver>(
     packet: IngressId,
     version: u64,
     at: SimTime,
+    caps: [Option<u64>; 2],
 ) -> Result<StepResult, CanwuError> {
     let held = |reason| Ok(StepResult::Held { reason, step: None });
     let (Some(kind_rule), Some(profile)) = (
@@ -1351,16 +1483,8 @@ fn one_step<R: StepResolver>(
     };
     let fort = effective_fort(run, kind_rule, engagement, at)?;
     let parts = [
-        side_parts(
-            forces,
-            &engagement.attacker.forces,
-            engagement.attacker.men_cap,
-        ),
-        side_parts(
-            forces,
-            &engagement.defender.forces,
-            engagement.defender.men_cap,
-        ),
+        side_parts(forces, &engagement.attacker.forces, caps[0]),
+        side_parts(forces, &engagement.defender.forces, caps[1]),
     ];
     let men: [u64; 2] = [
         parts[0]
@@ -1518,6 +1642,7 @@ fn one_step<R: StepResolver>(
         men[0],
         false,
         ages[0],
+        unpaid_confusion(rulebook, &engagement.attacker, &attacker_input, at),
     );
     let (defender_plan, defender_clamped) = plan_side(
         rulebook,
@@ -1530,6 +1655,7 @@ fn one_step<R: StepResolver>(
         men[1],
         walled,
         ages[1],
+        unpaid_confusion(rulebook, &engagement.defender, &defender_input, at),
     );
     let mut step_terms = outcome.terms.clone();
     if attacker_clamped || defender_clamped {
@@ -1562,10 +1688,12 @@ fn one_step<R: StepResolver>(
         (Side::Attacker, &attacker_plan, &parts[0]),
         (Side::Defender, &defender_plan, &parts[1]),
     ] {
-        let tally = allocate_side(run, forces, side_parts, plan);
+        let tally = allocate_side(run, &engagement.id, forces, side_parts, plan);
         let state = engagement.side_mut(side);
         state.losses.add(&tally);
         state.cohesion = plan.cohesion_after;
+        state.confusion_carry = plan.confusion_carry;
+        state.confusion_paid_to = state.confusion_paid_to.max(at);
         state.morale_shock = state.morale_shock.saturating_add(plan.shock);
         state.posture_after = plan.continuation;
         let shock = state.morale_shock;
@@ -1604,113 +1732,320 @@ fn one_step<R: StepResolver>(
     Ok(StepResult::Applied { step, close })
 }
 
-fn step_engagement<R: StepResolver>(
+/// One engagement of a stepping batch.
+struct Stepping {
+    engagement: EngagementStateV1,
+    profile: Option<StepProfileV1>,
+    version: u64,
+    /// Due this boundary: it steps and is written.
+    due: bool,
+    left: i64,
+    steps: Vec<StepV1>,
+    close: Option<CloseInfo>,
+    hold: Option<HoldReason>,
+    /// Not due, but its shared side was moved by another engagement of its
+    /// group: written at the end of the batch.
+    touched: bool,
+}
+
+impl Stepping {
+    const fn done(&self) -> bool {
+        self.close.is_some() || self.hold.is_some()
+    }
+
+    /// Still fighting at `at` (held included): not closed before it; an
+    /// engagement closed in an earlier boundary is closed at `at` too.
+    fn fighting_at(&self, at: SimTime) -> bool {
+        match (&self.close, &self.engagement.outcome) {
+            (Some(close), _) => close.at >= at,
+            (None, Some(outcome)) => outcome.closed_at > at,
+            (None, None) => true,
+        }
+    }
+
+    /// Open after this batch: neither closed before it nor closing in it.
+    fn stays_open(&self) -> bool {
+        self.close.is_none() && !self.engagement.is_closed()
+    }
+}
+
+/// The present men of the active forces `ids` names.
+fn present_men(forces: &BTreeMap<ForceId, ForceStateV1>, ids: &[ForceId]) -> u64 {
+    ids.iter()
+        .filter_map(|id| forces.get(id))
+        .filter(|force| force.is_active())
+        .fold(0_u64, |sum, force| sum.saturating_add(force.men()))
+}
+
+/// The men each side of `batch[index]` fights a step at `at` with: its own
+/// cap and, in an engagement group, the shared side's share: the shared
+/// forces' present men split by largest remainder over the group's
+/// engagements still fighting at `at` (held ones included), weighted by each
+/// one's own command group's present men (ties to the earlier engagement). A
+/// group with no men of its own takes no share, so its step closes on its own
+/// side's empty ranks; a group with men but a share of 0 skips the step
+/// ([`step_engagements`]).
+fn group_caps(
+    batch: &[Stepping],
+    index: usize,
+    forces: &BTreeMap<ForceId, ForceStateV1>,
+    at: SimTime,
+) -> [Option<u64>; 2] {
+    let engagement = &batch[index].engagement;
+    let mut caps = [engagement.attacker.men_cap, engagement.defender.men_cap];
+    let Some(group) = &engagement.group else {
+        return caps;
+    };
+    let shared = group.shared;
+    let own = shared.other();
+    let mut weights = Vec::new();
+    let mut position = 0;
+    for (member_index, member) in batch.iter().enumerate() {
+        if member_index == index {
+            position = weights.len();
+        } else if !member.fighting_at(at)
+            || member
+                .engagement
+                .group
+                .as_ref()
+                .is_none_or(|other| other.shared != shared)
+        {
+            continue;
+        }
+        weights.push(present_men(forces, &member.engagement.side(own).forces));
+    }
+    if weights[position] == 0 {
+        return caps;
+    }
+    let men = present_men(forces, &engagement.side(shared).forces);
+    let share = largest_remainder(men, &weights)[position];
+    let cap = &mut caps[shared.index()];
+    *cap = Some(cap.map_or(share, |cap| cap.min(share)));
+    caps
+}
+
+/// Steps the engagements `ids` (one, or every engagement of one engagement
+/// group) due by `up`: their steps interleaved in time order (ties to the
+/// earlier engagement), over one map of their forces, so a group's shared
+/// forces carry every engagement's losses, cohesion, and shock once. After
+/// each step of a group, the stepping engagement's shared-side cohesion,
+/// shock, confusion carry and paid-up-to time are copied into every other
+/// open engagement of
+/// the group, and every open engagement so moved is written (held ones
+/// included). An engagement whose share of the shared men is 0 while the
+/// shared forces still have men skips the step: its step time advances, the
+/// resolver is not called, and only the stall check may close it.
+fn step_engagements<R: StepResolver>(
     run: &mut Run<'_, '_>,
     rulebook: &CombatRulebookV1,
-    id: &EngagementId,
+    ids: &[EngagementId],
     packet: IngressId,
     up: SimTime,
 ) -> Result<(), CanwuError> {
-    let reference = engagement_reference(id);
-    let Some(mut engagement) = run.get(&reference)? else {
-        run.registry_mut()?.open_engagements.remove(id);
-        return Ok(());
-    };
-    if engagement.status != EngagementStatus::Open || engagement.next_step_at > up {
+    let mut batch = Vec::new();
+    for id in ids {
+        let reference = engagement_reference(id);
+        let Some(engagement) = run.get(&reference)? else {
+            continue;
+        };
+        let profile = rulebook.step_profiles.get(&engagement.profile).cloned();
+        let mut due = false;
+        let mut left = 0;
+        let mut version = 0;
+        if engagement.status == EngagementStatus::Open
+            && engagement.next_step_at <= up
+            && let Some(profile) = &profile
+            && let Some(committed) = run.committed_version(reference.as_untyped())?
+        {
+            let step_minutes = i64::from(profile.step_minutes.max(1));
+            let elapsed = minutes_between(engagement.last_step_at, up) / step_minutes;
+            left = elapsed.min(i64::from(profile.max_steps_per_boundary));
+            version = committed;
+            due = true;
+        }
+        batch.push(Stepping {
+            engagement,
+            profile,
+            version,
+            due,
+            left,
+            steps: Vec::new(),
+            close: None,
+            hold: None,
+            touched: false,
+        });
+    }
+    if !batch.iter().any(|member| member.due) {
         return Ok(());
     }
-    let Some(profile) = rulebook.step_profiles.get(&engagement.profile).cloned() else {
-        return Ok(());
-    };
-    let max_minutes = engagement.max_minutes;
-    let step_minutes = i64::from(profile.step_minutes.max(1));
-    let elapsed = minutes_between(engagement.last_step_at, up) / step_minutes;
-    let count = elapsed.min(i64::from(profile.max_steps_per_boundary));
-    let Some(version) = run.committed_version(reference.as_untyped())? else {
-        return Ok(());
-    };
-    let mut forces = load_forces(
-        run,
-        engagement.forces().cloned().collect::<Vec<_>>().into_iter(),
-    )?;
-    let mut steps = Vec::new();
-    let mut close = None;
-    let mut hold = None;
-    for _ in 0..count {
-        let at = add_minutes(engagement.last_step_at, profile.step_minutes)?;
-        match one_step::<R>(
-            run,
-            rulebook,
-            &mut engagement,
-            &mut forces,
-            packet,
-            version,
-            at,
-        )? {
-            StepResult::Applied { step, close: ends } => {
-                steps.push(step);
-                engagement.last_step_at = at;
-                engagement.steps_resolved += 1;
-                if let Some(ends) = ends {
-                    close = Some(ends);
-                    break;
-                }
+    let ids: BTreeSet<ForceId> = batch
+        .iter()
+        .flat_map(|member| member.engagement.forces().cloned())
+        .collect();
+    let mut forces = load_forces(run, ids.into_iter())?;
+    loop {
+        let mut next: Option<(SimTime, usize)> = None;
+        for (index, member) in batch.iter().enumerate() {
+            let Some(profile) = &member.profile else {
+                continue;
+            };
+            if !member.due || member.left <= 0 || member.done() {
+                continue;
             }
-            StepResult::Held { reason, step } => {
-                if let Some(step) = step {
-                    steps.push(step);
-                    engagement.last_step_at = at;
-                    engagement.steps_resolved += 1;
-                }
-                hold = Some(reason);
-                break;
-            }
-            StepResult::Ended(ends) => {
-                close = Some(ends);
-                break;
+            let at = add_minutes(member.engagement.last_step_at, profile.step_minutes)?;
+            if next.is_none_or(|(earliest, _)| at < earliest) {
+                next = Some((at, index));
             }
         }
-        if minutes_between(engagement.opened_at, at) >= i64::from(max_minutes) {
-            close = Some(CloseInfo {
+        let Some((at, index)) = next else {
+            break;
+        };
+        let caps = group_caps(&batch, index, &forces, at);
+        let group = batch[index].engagement.group.clone();
+        // A share of 0 while the shared forces still have men: this group
+        // fights no one this step (no resolver call, no close).
+        let skip = group.as_ref().is_some_and(|group| {
+            caps[group.shared.index()] == Some(0)
+                && present_men(&forces, &batch[index].engagement.side(group.shared).forces) > 0
+        });
+        let member = &mut batch[index];
+        member.left -= 1;
+        if skip {
+            member.engagement.last_step_at = at;
+            // The group's own side fought no one: it owes nothing for it.
+            if let Some(group) = &group {
+                let own = member.engagement.side_mut(group.shared.other());
+                own.confusion_paid_to = own.confusion_paid_to.max(at);
+            }
+        } else {
+            match one_step::<R>(
+                run,
+                rulebook,
+                &mut member.engagement,
+                &mut forces,
+                packet,
+                member.version,
+                at,
+                caps,
+            )? {
+                StepResult::Applied { step, close } => {
+                    member.steps.push(step);
+                    member.engagement.last_step_at = at;
+                    member.engagement.steps_resolved += 1;
+                    member.close = close;
+                }
+                StepResult::Held { reason, step } => {
+                    if let Some(step) = step {
+                        member.steps.push(step);
+                        member.engagement.last_step_at = at;
+                        member.engagement.steps_resolved += 1;
+                    }
+                    member.hold = Some(reason);
+                }
+                StepResult::Ended(close) => member.close = Some(close),
+            }
+        }
+        // The shared side's cohesion, shock, confusion carry and paid-up-to
+        // time are one figure: as this step left it, in every other open
+        // engagement of the group.
+        if let Some(group) = &group {
+            let side = batch[index].engagement.side(group.shared);
+            let figure = (
+                side.cohesion,
+                side.morale_shock,
+                side.confusion_carry,
+                side.confusion_paid_to,
+            );
+            for (other_index, other) in batch.iter_mut().enumerate() {
+                if other_index == index || !other.stays_open() {
+                    continue;
+                }
+                let other_side = other.engagement.side_mut(group.shared);
+                let before = (
+                    other_side.cohesion,
+                    other_side.morale_shock,
+                    other_side.confusion_carry,
+                    other_side.confusion_paid_to,
+                );
+                if before != figure {
+                    other_side.cohesion = figure.0;
+                    other_side.morale_shock = figure.1;
+                    other_side.confusion_carry = figure.2;
+                    other_side.confusion_paid_to = figure.3;
+                    other.touched = true;
+                }
+            }
+        }
+        let member = &mut batch[index];
+        if !member.done()
+            && minutes_between(member.engagement.opened_at, at)
+                >= i64::from(member.engagement.max_minutes)
+        {
+            member.close = Some(CloseInfo {
                 kind: EngagementOutcomeKind::Stalled,
                 routed: [Vec::new(), Vec::new()],
                 site_fell: false,
                 at,
             });
-            break;
         }
     }
-    engagement.next_step_at = add_minutes(engagement.last_step_at, profile.step_minutes)?;
-    if !steps.is_empty() {
-        run.put(
-            &engagement_steps_reference(id),
-            &EngagementStepsV1 {
-                schema_version: SCHEMA_VERSION,
-                engagement: id.clone(),
-                boundary_at: run.at,
-                steps,
-            },
+    write_forces(run, &forces)?;
+    for member in batch {
+        // An open engagement of the group that did not step (held, or off
+        // this boundary) keeps the shared side's figure as the group left it.
+        if !member.due && member.touched && member.stays_open() {
+            run.put(
+                &engagement_reference(&member.engagement.id),
+                &member.engagement,
+            )?;
+            continue;
+        }
+        let Stepping {
+            mut engagement,
+            profile: Some(profile),
+            due: true,
+            steps,
+            close,
+            hold,
+            ..
+        } = member
+        else {
+            continue;
+        };
+        let id = engagement.id.clone();
+        engagement.next_step_at = add_minutes(engagement.last_step_at, profile.step_minutes)?;
+        if !steps.is_empty() {
+            run.put(
+                &engagement_steps_reference(&id),
+                &EngagementStepsV1 {
+                    schema_version: SCHEMA_VERSION,
+                    engagement: id.clone(),
+                    boundary_at: run.at,
+                    steps,
+                },
+            )?;
+        }
+        if let Some(reason) = hold {
+            engagement.status = EngagementStatus::Held { reason };
+            run.emit(
+                ENGAGEMENT_HELD_EVENT,
+                format!("engagement {id} held: {reason:?}"),
+                affected(&engagement),
+            );
+        }
+        if let Some(close) = close {
+            close_engagement(run, rulebook, engagement, close, None)?;
+            continue;
+        }
+        run.put(&engagement_reference(&id), &engagement)?;
+        run.queue_report(
+            rulebook,
+            ReportSubjectV1::Engagement(id.clone()),
+            false,
+            [&engagement.attacker.holders, &engagement.defender.holders],
         )?;
     }
-    if let Some(reason) = hold {
-        engagement.status = EngagementStatus::Held { reason };
-        run.emit(
-            ENGAGEMENT_HELD_EVENT,
-            format!("engagement {id} held: {reason:?}"),
-            affected(&engagement),
-        );
-    }
-    if let Some(close) = close {
-        return close_engagement(run, rulebook, engagement, close, Some(forces));
-    }
-    write_forces(run, &forces)?;
-    run.put(&reference, &engagement)?;
-    run.queue_report(
-        rulebook,
-        ReportSubjectV1::Engagement(id.clone()),
-        false,
-        [&engagement.attacker.holders, &engagement.defender.holders],
-    )
+    Ok(())
 }
 
 /// Closes an engagement: its summary, its forces freed, its retirement and
@@ -1737,10 +2072,30 @@ pub(crate) fn close_engagement(
         closed_at: close.at,
         site_fell: close.site_fell,
     });
+    // A group's shared forces stay engaged while another engagement of the
+    // group is open: in the first one still open.
+    let mut handover = None;
+    let mut shared: &[ForceId] = &[];
+    if let Some(group) = &engagement.group {
+        shared = &engagement.side(group.shared).forces;
+        for other in group.engagements.iter().filter(|other| *other != &id) {
+            if run
+                .get(&engagement_reference(other))?
+                .is_some_and(|state| !state.is_closed())
+            {
+                handover = Some(other.clone());
+                break;
+            }
+        }
+    }
     for force in forces.values_mut() {
         if force.battle.engaged_in.as_ref() == Some(&id) {
-            force.battle.engaged_in = None;
-            force.battle.posture = None;
+            if let Some(next) = handover.as_ref().filter(|_| shared.contains(&force.id)) {
+                force.battle.engaged_in = Some(next.clone());
+            } else {
+                force.battle.engaged_in = None;
+                force.battle.posture = None;
+            }
         }
     }
     write_forces(run, &forces)?;
@@ -1812,7 +2167,7 @@ pub(crate) fn close_engagement(
             .forces()
             .map(|force| ForceLossDeltaV1 {
                 force: force.clone(),
-                losses: run.loss_deltas.get(force).copied().unwrap_or_default(),
+                losses: run.engagement_losses(force, &id),
             })
             .collect();
         run.directives
@@ -1887,8 +2242,9 @@ fn siege_after_fight(
     }
 }
 
-/// Ends a siege: its forces released, a fall dispersing the defenders still
-/// at the site, its retirement and closing report queued.
+/// Ends a siege: its forces released, a fall (but a surrender) dispersing
+/// the defenders still at the site, its retirement and closing report
+/// queued.
 pub(crate) fn end_siege(
     run: &mut Run<'_, '_>,
     rulebook: &CombatRulebookV1,
@@ -1921,7 +2277,9 @@ pub(crate) fn end_siege(
         {
             force.battle.siege_role = None;
         }
+        // A garrison that surrendered keeps its men: the host takes them.
         if status == SiegeStatus::Fell
+            && cause != SiegeEndCause::Surrendered
             && defender
             && force.is_active()
             && force.location.is_at(&siege.site)
@@ -1937,7 +2295,7 @@ pub(crate) fn end_siege(
                 component.present = 0;
             }
             force.battle.dispersed = true;
-            run.add_losses(id, &dispersed);
+            run.add_losses(id, None, &dispersed);
         }
         entities.push(EntityRef::Domain(reference.as_untyped().clone()));
         run.put(&reference, &force)?;
@@ -2231,6 +2589,8 @@ fn open_siege_fight(
             men_caps: [None, None],
             max_minutes: None,
             opened_at: day,
+            group: None,
+            group_share: None,
         }
     } else {
         OpenSpec {
@@ -2250,6 +2610,8 @@ fn open_siege_fight(
             men_caps: [None, None],
             max_minutes: None,
             opened_at: day,
+            group: None,
+            group_share: None,
         }
     };
     open_engagement(run, rulebook, spec)?;
@@ -2453,6 +2815,8 @@ fn crossing_wave(
                     men_caps: [None, Some(wave)],
                     max_minutes: None,
                     opened_at: at,
+                    group: None,
+                    group_share: None,
                 },
             )?;
             engagement = Some(id);
@@ -2491,6 +2855,8 @@ fn crossing_wave(
                     men_caps: [Some(crossing.landed), None],
                     max_minutes: None,
                     opened_at: at,
+                    group: None,
+                    group_share: None,
                 },
             )?;
             engagement = Some(id);

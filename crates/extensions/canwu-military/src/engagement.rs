@@ -50,8 +50,9 @@ pub struct ConditionInputV1 {
     pub posture: PostureId,
     /// The side's surprise for the kind's `posture_steps`; 0 means none (10^4).
     pub surprise_bp: u32,
-    /// How many sources of order confusion the side suffers (each costs the
-    /// rulebook's `cohesion.confusion` a step).
+    /// How many sources of order confusion the side suffers: each costs the
+    /// rulebook's `cohesion.confusion_per_day` over one rulebook day of
+    /// fighting, prorated by step length.
     pub order_confusion: u32,
     pub defense_halved: bool,
     /// The host records the input was derived from: cited on the step,
@@ -131,12 +132,70 @@ pub struct SideStateV1 {
     pub cohesion: u32,
     pub posture_after: Continuation,
     pub losses: LossTallyV1,
-    /// The side's men when it entered the fight (joiners added).
+    /// The side's men when it entered the fight (joiners added); on an
+    /// engagement group's shared side, this engagement's opening share of
+    /// the shared forces' men ([`EngagementGroupV1::shared_opened_men`] is
+    /// the whole).
     pub opened_men: u64,
     /// The most men the side fights with (a crossing wave or bridgehead).
     pub men_cap: Option<u64>,
     /// A `Withdraw` order the next step carries out.
     pub withdraw_ordered: bool,
+    /// The order-confusion cost the side owes below one whole cohesion
+    /// point, in cohesion-minutes (below the rulebook's `siege.day_minutes`):
+    /// carried from step to step so a day of steps costs exactly
+    /// `order_confusion × confusion_per_day` (since 0.24.0).
+    pub confusion_carry: u32,
+    /// The time the side's order confusion is paid up to (since 0.24.0): a
+    /// step at `at` pays for the minutes from here to `at` (nothing when
+    /// `at` is not later) and moves it to `at`. It starts at the open time.
+    /// Outside an engagement group it is the last step time (or, after a
+    /// held step, earlier), checked on load; a resumed engagement starts it
+    /// afresh,
+    /// so a held span costs nothing. On a group's shared side it is part of
+    /// the group's one figure, so the shared side pays each minute once,
+    /// whichever member steps it, in whatever boundary.
+    pub confusion_paid_to: SimTime,
+}
+
+/// The engagements one `OpenGroupEngagements` opened (since 0.24.0): one
+/// per command group of one side at one site, each against the same forces
+/// of the other side, the `shared` side.
+///
+/// At every step the shared forces' present men are split over the group's
+/// engagements still fighting (a held engagement counts as still fighting),
+/// by largest remainder of each one's own command group's present men (ties
+/// to the earlier engagement id); an engagement whose share is 0 while the
+/// shared forces still have men skips that step (no resolver call, no
+/// close). The shared side's cohesion, battle shock and order-confusion
+/// carry and paid-up-to time ([`SideStateV1::confusion_paid_to`]) are one
+/// figure: each step moves it and copies it into every other open
+/// engagement of the group. The shared side's order confusion is paid up to
+/// that time: the first member whose step applies at a time pays for the
+/// minutes since, and no member pays for them again, even one lagging in a
+/// later boundary. The group's engagements keep one step grid (a profile
+/// revision on one revises and resumes every open member; a resumed member
+/// snaps to the latest grid point at or before now, taken from the first
+/// open member still stepping) and step interleaved in time order, so the
+/// shared forces' losses and cohesion are each counted once. A shared-side
+/// condition input or order applies to every open member, bumping each
+/// one's `host_revision`. The shared forces stand `engaged_in` the group's
+/// first engagement still open.
+///
+/// A held member is not stepped, so it closes only when the host resumes or
+/// abandons it: after a group-wide `Abandon` by the shared defenders lifts
+/// a relieved siege, a held member of the relief keeps the besiegers
+/// engaged in it until then.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EngagementGroupV1 {
+    /// The side whose forces every engagement of the group shares.
+    pub shared: Side,
+    /// Every engagement of the group, this one included, ascending.
+    pub engagements: Vec<EngagementId>,
+    /// The shared forces' present men when the group opened, before the
+    /// split: the whole that each member's shared-side `opened_men` is a
+    /// share of.
+    pub shared_opened_men: u64,
 }
 
 /// One traced forecast term.
@@ -207,6 +266,9 @@ pub struct EngagementStateV1 {
     pub terrain: Option<TerrainClassId>,
     pub siege: Option<SiegeId>,
     pub crossing: Option<CrossingId>,
+    /// The engagement group this engagement belongs to, when
+    /// `OpenGroupEngagements` opened it (since 0.24.0).
+    pub group: Option<EngagementGroupV1>,
     pub attacker: SideStateV1,
     pub defender: SideStateV1,
     pub environment: Option<(EnvironmentInputV1, SimTime)>,
@@ -255,6 +317,17 @@ impl EngagementStateV1 {
             || self.max_minutes == 0
             || self.attacker.forces.is_empty()
             || self.defender.forces.is_empty()
+            || self.group.as_ref().is_some_and(|group| {
+                !group.engagements.contains(&self.id)
+                    || group.engagements.windows(2).any(|pair| pair[0] >= pair[1])
+            })
+            || [&self.attacker, &self.defender].into_iter().any(|side| {
+                // Paid from the open on; outside a group, never past the
+                // last step (a group's sides may run ahead of a lagging or
+                // re-gridded member).
+                side.confusion_paid_to < self.opened_at
+                    || (self.group.is_none() && side.confusion_paid_to > self.last_step_at)
+            })
         {
             return Err(invalid(format!("engagement {} is invalid", self.id)));
         }
@@ -328,6 +401,11 @@ pub struct SideSummaryV1 {
 
 /// The durable record of a closed engagement
 /// (record `canwu.military:engagement_summary`, create-only).
+///
+/// An assault closed by a garrison's surrender (`SurrenderSiege`, since
+/// 0.24.0) reads `AttackerPrevailed` with `site_fell`, as for a storm, and
+/// lists no routed forces: a consumer that must tell the two apart reads the
+/// siege's `end_cause` ([`crate::SiegeEndCause::Surrendered`]).
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EngagementSummaryV1 {
     pub schema_version: u32,
@@ -345,10 +423,15 @@ pub struct EngagementSummaryV1 {
     pub crossing: Option<CrossingId>,
 }
 
-/// One force's losses in the boundary that closed an engagement.
+/// One force's losses in the boundary that closed an engagement: the
+/// losses this engagement inflicted on it, plus any dispersal in that
+/// boundary (a force shared by an engagement group reports only this
+/// engagement's part of its losses).
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ForceLossDeltaV1 {
+    /// The force.
     pub force: ForceId,
+    /// This engagement's losses on the force, plus any dispersal.
     pub losses: LossTallyV1,
 }
 

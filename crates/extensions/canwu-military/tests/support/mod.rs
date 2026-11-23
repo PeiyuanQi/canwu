@@ -298,7 +298,7 @@ pub fn rulebook(identity: &ResolverIdentity, mode: InterceptMode) -> CombatRuleb
         cohesion: CohesionRuleV1 {
             per_inflicted: 4,
             base: 1,
-            confusion: 50,
+            confusion_per_day: 50,
             recover_per_day: 10,
         },
         morale: MoraleRuleV1 {

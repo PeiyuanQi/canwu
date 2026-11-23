@@ -62,6 +62,10 @@ pub enum SiegeEndCause {
     Abandoned,
     Relieved,
     Withdrawn,
+    /// The garrison yielded (`SurrenderSiege`, since 0.24.0): the site fell
+    /// and its defenders were released to the host with their men, never
+    /// dispersed.
+    Surrendered,
 }
 
 /// A siege (record `canwu.military:siege`).

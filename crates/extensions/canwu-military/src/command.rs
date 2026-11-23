@@ -3,7 +3,8 @@
 
 use crate::crossing::{CrossingStateV1, CrossingStatus, InterceptorInputV1};
 use crate::engagement::{
-    ConditionInputV1, EngagementOutcomeKind, EngagementStatus, EnvironmentInputV1, Side,
+    ConditionInputV1, EngagementGroupV1, EngagementOutcomeKind, EngagementStatus,
+    EnvironmentInputV1, Side,
 };
 use crate::force::{
     BattleStateV1, ComponentStateV1, ComponentValuesV1, ForceStateV1, ForceStatus, LocationV1,
@@ -19,7 +20,8 @@ use crate::rulebook::{
     CombatRulebookV1, EngagementKind, MAX_COMPONENT_MEN, MAX_INPUT_BP, MAX_VALUE, bounded,
 };
 use crate::settle::{
-    CloseInfo, OpenSpec, Run, close_engagement, end_siege, finish_crossing, open_engagement,
+    CloseInfo, OpenSpec, Run, close_engagement, end_siege, finish_crossing, minutes_between,
+    open_engagement,
 };
 use crate::siege::{
     SiegeEndCause, SiegeStateV1, SiegeStatus, SiegeSupplyInputV1, SiteProfileV1, StormRule,
@@ -85,6 +87,59 @@ pub struct OpenEngagementV1 {
     /// How long the fight may run before it closes `Stalled`: `None` takes
     /// the kind rule's `max_minutes`; a value must be from 1 to the kind
     /// rule's (a one-day fight of a kind whose rule runs several days).
+    pub max_minutes: Option<u32>,
+}
+
+/// One command group of an [`OpenGroupEngagementsV1`] (since 0.24.0): the
+/// engagement it fights, its forces, its report holders, and its own
+/// condition input.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CommandGroupV1 {
+    /// The engagement this command group fights.
+    pub id: EngagementId,
+    /// The group's own forces, on the command groups' side; their present
+    /// men weight the group's share of the shared forces.
+    pub forces: Vec<ForceId>,
+    /// Who receives this engagement's reports on the group's side.
+    pub holders: Vec<KnowledgeHolderRef>,
+    /// The group's own condition input for its side of the engagement.
+    pub input: ConditionInputV1,
+}
+
+/// One engagement per command group of one side at one site, each against
+/// the same forces of the other side (since 0.24.0).
+///
+/// Each group's engagement is admitted as an `OpenEngagement` of the group's
+/// forces on `side` against `shared` would be (every one before any opens);
+/// every group is one owner's, and every force is named once. The
+/// engagements form one engagement group ([`crate::EngagementGroupV1`]): the
+/// shared forces' men are split over them, their losses and cohesion count
+/// once, and they step interleaved in time order. A group whose opening
+/// share of the shared men would be 0 is refused.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OpenGroupEngagementsV1 {
+    /// The kind of every engagement.
+    pub kind: EngagementKind,
+    /// `None` takes the rulebook's default profile.
+    pub profile: Option<ProfileId>,
+    /// The site every engagement is fought at.
+    pub site: EntityRef,
+    /// As `OpenEngagementV1::fort`, for every engagement.
+    pub fort: Option<(u8, bool)>,
+    /// The side the command groups fight on; the other side is shared.
+    pub side: Side,
+    /// The command groups, one engagement each (at least one, at most
+    /// `MAX_OPEN_WORK`, ids distinct, no force in two).
+    pub groups: Vec<CommandGroupV1>,
+    /// The forces every engagement shares, on the other side.
+    pub shared: Vec<ForceId>,
+    /// Who receives every engagement's reports on the shared side.
+    pub shared_holders: Vec<KnowledgeHolderRef>,
+    /// The shared side's condition input, one for every engagement.
+    pub shared_input: ConditionInputV1,
+    /// The environment of every engagement.
+    pub environment: EnvironmentInputV1,
+    /// As `OpenEngagementV1::max_minutes`, for every engagement.
     pub max_minutes: Option<u32>,
 }
 
@@ -176,6 +231,11 @@ pub enum MilitaryCommandV1 {
         expected_host_revision: u64,
     },
     OpenEngagement(Box<OpenEngagementV1>),
+    /// Opens one engagement per command group of one side at one site,
+    /// against shared forces (since 0.24.0).
+    OpenGroupEngagements(Box<OpenGroupEngagementsV1>),
+    /// Joins free forces at the site to one side of an open engagement; an
+    /// engagement group's shared side takes no joiner.
     JoinEngagement {
         engagement: EngagementId,
         expected_host_revision: u64,
@@ -193,6 +253,12 @@ pub enum MilitaryCommandV1 {
         side: Side,
         forces: Vec<ForceId>,
     },
+    /// Supplies a side's condition input and/or the environment to an
+    /// engagement, siege or crossing; a held engagement resumes. On an
+    /// engagement group's shared side the condition applies to every open
+    /// member of the group (held ones resume, on the group's step grid), and
+    /// each member's `host_revision` is bumped, which makes a host's queued
+    /// commands against those members stale.
     SupplyInput {
         target: InputTargetV1,
         expected_host_revision: u64,
@@ -200,12 +266,26 @@ pub enum MilitaryCommandV1 {
         condition: Option<ConditionInputV1>,
         environment: Option<EnvironmentInputV1>,
     },
+    /// Orders one side of an engagement to hold, withdraw or abandon. On an
+    /// engagement group's shared side the order applies to every open
+    /// member of the group (a shared attacker's `Abandon` closes them all)
+    /// and each member's `host_revision` is bumped, which makes a host's
+    /// queued commands against those members stale. A held member is not
+    /// stepped, so after a group-wide `Abandon` by the shared defenders
+    /// lifts a relieved siege, a held member of the relief keeps the
+    /// besiegers engaged in it until the host resumes or abandons it.
     OrderAction {
         engagement: EngagementId,
         expected_host_revision: u64,
         side: Side,
         action: SideAction,
     },
+    /// Revises an engagement's step profile, from a controller of either
+    /// side (or a trusted issuer); a held engagement resumes. In an
+    /// engagement group it revises, and resumes, every open member, so the
+    /// group keeps one step grid (a resumed member snaps to the latest grid
+    /// point at or before now), and each member's `host_revision` is bumped,
+    /// which makes a host's queued commands against those members stale.
     ReviseStepProfile {
         engagement: EngagementId,
         expected_host_revision: u64,
@@ -214,6 +294,19 @@ pub enum MilitaryCommandV1 {
     InvestSite(Box<InvestSiteV1>),
     ReviseSiege(Box<ReviseSiegeV1>),
     LiftSiege {
+        siege: SiegeId,
+        expected_host_revision: u64,
+    },
+    /// The garrison yields (since 0.24.0), from a trusted issuer or a
+    /// controller of a defender: in the applying boundary the siege's
+    /// assault in progress closes `AttackerPrevailed` (a sortie in progress
+    /// closes `Abandoned`) with the site fallen, and the siege ends `Fell` by
+    /// `Surrendered`. The defenders are not dispersed: each leaves the siege
+    /// and the fight with its men, free at the site for the host to take.
+    /// The closed assault's summary reads as a storm's would
+    /// (`AttackerPrevailed`, `site_fell`): read the siege's `end_cause` to
+    /// tell a surrender from a storm.
+    SurrenderSiege {
         siege: SiegeId,
         expected_host_revision: u64,
     },
@@ -402,6 +495,7 @@ fn host_entities(command: &MilitaryCommandV1) -> Vec<EntityRef> {
         }
         MilitaryCommandV1::PlaceForce { location: at, .. } => location(at),
         MilitaryCommandV1::OpenEngagement(open) => vec![open.site.clone()],
+        MilitaryCommandV1::OpenGroupEngagements(open) => vec![open.site.clone()],
         MilitaryCommandV1::InvestSite(invest) => vec![invest.site.clone()],
         MilitaryCommandV1::OrderCrossing(order) => vec![order.from.clone(), order.to.clone()],
         _ => Vec::new(),
@@ -412,6 +506,14 @@ fn host_entities(command: &MilitaryCommandV1) -> Vec<EntityRef> {
 }
 
 fn command_holders(command: &MilitaryCommandV1) -> Vec<&KnowledgeHolderRef> {
+    if let MilitaryCommandV1::OpenGroupEngagements(open) = command {
+        return open
+            .groups
+            .iter()
+            .flat_map(|group| &group.holders)
+            .chain(&open.shared_holders)
+            .collect();
+    }
     let holders = match command {
         MilitaryCommandV1::OpenEngagement(open) => &open.holders,
         MilitaryCommandV1::InvestSite(invest) => &invest.holders,
@@ -476,6 +578,13 @@ fn range_checks(command: &MilitaryCommandV1) -> Result<(), CanwuError> {
             Ok(())
         }
         MilitaryCommandV1::OpenEngagement(open) => inputs(&open.inputs, &open.environment),
+        MilitaryCommandV1::OpenGroupEngagements(open) => {
+            for group in &open.groups {
+                group.input.check_ranges()?;
+            }
+            open.shared_input.check_ranges()?;
+            open.environment.check_ranges()
+        }
         MilitaryCommandV1::SupplyInput {
             condition,
             environment,
@@ -536,6 +645,32 @@ fn static_checks(command: &MilitaryCommandV1) -> Result<(), CanwuError> {
             }
             disjoint_sides(&open.attackers, &open.defenders)?;
             distinct_holders(&open.holders)?;
+        }
+        MilitaryCommandV1::OpenGroupEngagements(open) => {
+            if open.groups.is_empty()
+                || open.shared.is_empty()
+                || open.groups.iter().any(|group| group.forces.is_empty())
+            {
+                return Err(payload(
+                    "an engagement group needs command groups and shared forces, each with forces",
+                ));
+            }
+            if open.groups.len() > crate::MAX_OPEN_WORK as usize {
+                return Err(payload("an engagement group has too many command groups"));
+            }
+            let ids: BTreeSet<&EngagementId> = open.groups.iter().map(|group| &group.id).collect();
+            if ids.len() != open.groups.len() {
+                return Err(payload("an engagement is named twice"));
+            }
+            let grouped: Vec<ForceId> = open
+                .groups
+                .iter()
+                .flat_map(|group| group.forces.iter().cloned())
+                .collect();
+            disjoint_sides(&grouped, &open.shared)?;
+            for group in &open.groups {
+                distinct_holders(&[group.holders.clone(), open.shared_holders.clone()])?;
+            }
         }
         MilitaryCommandV1::JoinEngagement { forces, .. }
         | MilitaryCommandV1::JoinSiege { forces, .. } => {
@@ -837,6 +972,7 @@ pub(crate) fn apply(
             Ok(())
         }
         MilitaryCommandV1::OpenEngagement(open) => open_command(run, issuer, open),
+        MilitaryCommandV1::OpenGroupEngagements(open) => open_group_command(run, issuer, open),
         MilitaryCommandV1::JoinEngagement {
             engagement,
             expected_host_revision,
@@ -891,7 +1027,7 @@ pub(crate) fn apply(
         } => {
             let rulebook = require_rulebook(run)?;
             let reference = engagement_reference(engagement);
-            let mut state = run
+            let state = run
                 .get(&reference)?
                 .ok_or_else(|| missing(format!("engagement {engagement} does not exist")))?;
             if state.is_closed() {
@@ -910,14 +1046,23 @@ pub(crate) fn apply(
                 .step_profiles
                 .get(profile)
                 .ok_or_else(|| payload(format!("step profile {profile} is unknown")))?;
-            state.profile = profile.clone();
-            if matches!(state.status, EngagementStatus::Held { .. }) {
-                resume(&mut state, run.at, step.step_minutes);
-            } else {
-                state.next_step_at = add_minutes(state.last_step_at, step.step_minutes)?;
+            // An engagement group keeps one step grid: every open engagement
+            // of it takes the new profile.
+            let siblings = group_siblings(run, &state)?;
+            let grid = group_grid(&state, &siblings);
+            let at = run.at;
+            for member in std::iter::once(state).chain(siblings) {
+                let mut member = member;
+                member.profile = profile.clone();
+                if matches!(member.status, EngagementStatus::Held { .. }) {
+                    resume_on_grid(&mut member, grid, at, step.step_minutes)?;
+                } else {
+                    member.next_step_at = add_minutes(member.last_step_at, step.step_minutes)?;
+                }
+                member.host_revision += 1;
+                run.put(&engagement_reference(&member.id), &member)?;
             }
-            state.host_revision += 1;
-            run.put(&reference, &state)
+            Ok(())
         }
         MilitaryCommandV1::InvestSite(invest) => invest_site(run, issuer, invest),
         MilitaryCommandV1::ReviseSiege(revise) => revise_siege(run, issuer, revise),
@@ -947,6 +1092,10 @@ pub(crate) fn apply(
                 at,
             )
         }
+        MilitaryCommandV1::SurrenderSiege {
+            siege,
+            expected_host_revision,
+        } => surrender_siege(run, issuer, siege, *expected_host_revision),
         MilitaryCommandV1::OrderCrossing(order) => order_crossing(run, issuer, order),
         MilitaryCommandV1::ReviseCrossing {
             crossing,
@@ -1059,6 +1208,65 @@ pub(crate) fn add_minutes(at: SimTime, minutes: u32) -> Result<SimTime, CanwuErr
         .ok_or_else(|| reject(ErrorCode::InvalidDuration, "military time overflow"))
 }
 
+/// The other engagements of `state`'s engagement group still open (held
+/// ones included), ascending; none for an engagement outside a group.
+fn group_siblings(
+    run: &Run<'_, '_>,
+    state: &crate::EngagementStateV1,
+) -> Result<Vec<crate::EngagementStateV1>, CanwuError> {
+    let Some(group) = &state.group else {
+        return Ok(Vec::new());
+    };
+    let mut siblings = Vec::new();
+    for id in group.engagements.iter().filter(|id| **id != state.id) {
+        if let Some(sibling) = run.get(&engagement_reference(id))?
+            && !sibling.is_closed()
+        {
+            siblings.push(sibling);
+        }
+    }
+    Ok(siblings)
+}
+
+/// The group's step grid: the last step time of its first engagement still
+/// stepping (open, not held), if any.
+fn group_grid(
+    state: &crate::EngagementStateV1,
+    siblings: &[crate::EngagementStateV1],
+) -> Option<SimTime> {
+    std::iter::once(state)
+        .chain(siblings)
+        .find(|member| member.status == EngagementStatus::Open)
+        .map(|member| member.last_step_at)
+}
+
+/// Puts a held engagement back to stepping: on its group's step grid (from
+/// the grid's last point at or before `at`), or from `at` when no
+/// engagement of the group is stepping.
+fn resume_on_grid(
+    state: &mut crate::EngagementStateV1,
+    grid: Option<SimTime>,
+    at: SimTime,
+    step_minutes: u32,
+) -> Result<(), CanwuError> {
+    let Some(grid) = grid else {
+        resume(state, at, step_minutes);
+        return Ok(());
+    };
+    let step = i64::from(step_minutes.max(1));
+    let behind = minutes_between(grid, at).max(0) / step * step;
+    let last = grid
+        .checked_add(SimDuration::minutes(behind))
+        .ok_or_else(|| reject(ErrorCode::InvalidDuration, "military time overflow"))?;
+    state.status = EngagementStatus::Open;
+    state.last_step_at = last;
+    state.next_step_at = add_minutes(last, step_minutes)?;
+    // The shared side kept fighting in the stepping members: its figure
+    // stands; the group's own side starts its confusion afresh.
+    forgive_idle(state, true);
+    Ok(())
+}
+
 /// Puts a held engagement back to stepping from now.
 fn resume(state: &mut crate::EngagementStateV1, at: SimTime, step_minutes: u32) {
     state.status = EngagementStatus::Open;
@@ -1066,6 +1274,22 @@ fn resume(state: &mut crate::EngagementStateV1, at: SimTime, step_minutes: u32) 
     state.next_step_at = at
         .checked_add(SimDuration::minutes(i64::from(step_minutes)))
         .unwrap_or(at);
+    forgive_idle(state, false);
+}
+
+/// A resumed engagement owes no order confusion for its held span: each
+/// side's paid-up-to time moves to its last step time, but a group's shared
+/// side when `keep_shared` (it fought on elsewhere in the group).
+fn forgive_idle(state: &mut crate::EngagementStateV1, keep_shared: bool) {
+    let shared = state.group.as_ref().map(|group| group.shared);
+    let last = state.last_step_at;
+    for side in [Side::Attacker, Side::Defender] {
+        if keep_shared && shared == Some(side) {
+            continue;
+        }
+        let side = state.side_mut(side);
+        side.confusion_paid_to = side.confusion_paid_to.max(last);
+    }
 }
 
 fn install_rulebook(run: &mut Run<'_, '_>, rulebook: &CombatRulebookV1) -> Result<(), CanwuError> {
@@ -1128,16 +1352,16 @@ fn register_force(
     run.create(&force_reference(&force.id), force)
 }
 
-fn open_command(
-    run: &mut Run<'_, '_>,
+/// What admits one engagement a command opens, against the staged state:
+/// its identifier, kind, profile, inputs, sides, and the issuer's control of
+/// the attackers. Returns the profile and, for a relief, the besiegers'
+/// siege. It changes nothing.
+fn check_open(
+    run: &Run<'_, '_>,
+    rulebook: &CombatRulebookV1,
     issuer: &Issuer,
     open: &OpenEngagementV1,
-) -> Result<(), CanwuError> {
-    let rulebook = require_rulebook(run)?;
-    let open_count = run.registry_mut()?.open_engagements.len();
-    if open_count >= rulebook.limits.open_engagements as usize {
-        return Err(over("the open engagement limit is reached"));
-    }
+) -> Result<(ProfileId, Option<SiegeId>), CanwuError> {
     if run.exists_any(engagement_reference(&open.id).as_untyped())? {
         return Err(payload(format!("engagement {} exists already", open.id)));
     }
@@ -1160,13 +1384,13 @@ fn open_command(
     if !rulebook.step_profiles.contains_key(&profile) {
         return Err(payload(format!("step profile {profile} is unknown")));
     }
-    check_side_size(&rulebook, &open.attackers)?;
-    check_side_size(&rulebook, &open.defenders)?;
-    check_holders(&rulebook, &open.holders)?;
+    check_side_size(rulebook, &open.attackers)?;
+    check_side_size(rulebook, &open.defenders)?;
+    check_holders(rulebook, &open.holders)?;
     for input in &open.inputs {
-        check_condition(&rulebook, input)?;
+        check_condition(rulebook, input)?;
     }
-    check_environment(&rulebook, &open.environment)?;
+    check_environment(rulebook, &open.environment)?;
     if open.environment.terrain.is_none() && kind_rule.terrain.is_none() {
         return Err(payload(
             "neither the environment nor the kind names a terrain",
@@ -1200,7 +1424,7 @@ fn open_command(
                 force.id
             )));
         }
-        if !controls(&rulebook, issuer, force) {
+        if !controls(rulebook, issuer, force) {
             return Err(authority(format!(
                 "the issuer does not control {}",
                 force.id
@@ -1229,6 +1453,20 @@ fn open_command(
     }
     single_owner(&attackers)?;
     single_owner(&defenders)?;
+    Ok((profile, siege))
+}
+
+fn open_command(
+    run: &mut Run<'_, '_>,
+    issuer: &Issuer,
+    open: &OpenEngagementV1,
+) -> Result<(), CanwuError> {
+    let rulebook = require_rulebook(run)?;
+    let open_count = run.registry_mut()?.open_engagements.len();
+    if open_count >= rulebook.limits.open_engagements as usize {
+        return Err(over("the open engagement limit is reached"));
+    }
+    let (profile, siege) = check_open(run, &rulebook, issuer, open)?;
     let at = run.at;
     open_engagement(
         run,
@@ -1253,8 +1491,129 @@ fn open_command(
             men_caps: [None, None],
             max_minutes: open.max_minutes,
             opened_at: at,
+            group: None,
+            group_share: None,
         },
     )
+}
+
+/// The engagement one command group of an `OpenGroupEngagements` fights.
+fn group_engagement(open: &OpenGroupEngagementsV1, group: &CommandGroupV1) -> OpenEngagementV1 {
+    let (sides, holders, inputs) = match open.side {
+        Side::Attacker => (
+            [group.forces.clone(), open.shared.clone()],
+            [group.holders.clone(), open.shared_holders.clone()],
+            [group.input.clone(), open.shared_input.clone()],
+        ),
+        Side::Defender => (
+            [open.shared.clone(), group.forces.clone()],
+            [open.shared_holders.clone(), group.holders.clone()],
+            [open.shared_input.clone(), group.input.clone()],
+        ),
+    };
+    let [attackers, defenders] = sides;
+    OpenEngagementV1 {
+        id: group.id.clone(),
+        kind: open.kind,
+        profile: open.profile.clone(),
+        site: open.site.clone(),
+        fort: open.fort,
+        attackers,
+        defenders,
+        holders,
+        inputs,
+        environment: open.environment.clone(),
+        max_minutes: open.max_minutes,
+    }
+}
+
+/// Opens one engagement per command group, each against the shared forces,
+/// in one engagement group; every engagement is admitted before any opens.
+fn open_group_command(
+    run: &mut Run<'_, '_>,
+    issuer: &Issuer,
+    open: &OpenGroupEngagementsV1,
+) -> Result<(), CanwuError> {
+    let rulebook = require_rulebook(run)?;
+    let open_count = run.registry_mut()?.open_engagements.len();
+    if open_count.saturating_add(open.groups.len()) > rulebook.limits.open_engagements as usize {
+        return Err(over("the open engagement limit is reached"));
+    }
+    let mut groups: Vec<&CommandGroupV1> = open.groups.iter().collect();
+    groups.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut admitted = Vec::new();
+    let mut siege = None;
+    let mut group_forces = Vec::new();
+    for group in &groups {
+        let engagement = group_engagement(open, group);
+        let (profile, relieved) = check_open(run, &rulebook, issuer, &engagement)?;
+        if !admitted.is_empty() && relieved != siege {
+            return Err(payload(
+                "a relief is fought against the besiegers of one siege",
+            ));
+        }
+        siege = relieved;
+        for id in &group.forces {
+            group_forces.push(load_force(run, id)?);
+        }
+        admitted.push((engagement, profile));
+    }
+    // One side is one owner, over every command group.
+    single_owner(&group_forces)?;
+    let shared_men = open.shared.iter().try_fold(0_u64, |sum, id| {
+        load_force(run, id).map(|force| sum.saturating_add(force.men()))
+    })?;
+    let weights: Vec<u64> = groups
+        .iter()
+        .map(|group| {
+            group_forces
+                .iter()
+                .filter(|force| group.forces.contains(&force.id))
+                .fold(0_u64, |sum, force| sum.saturating_add(force.men()))
+        })
+        .collect();
+    let shares = crate::largest_remainder(shared_men, &weights);
+    // A group with no share would fight no one: its first step would close
+    // as a win over forces the other groups still fight.
+    if let Some((group, _)) = groups.iter().zip(&shares).find(|(_, share)| **share == 0) {
+        return Err(payload(format!(
+            "command group {} would take no share of the shared forces' men",
+            group.id
+        )));
+    }
+    let membership = EngagementGroupV1 {
+        shared: open.side.other(),
+        engagements: groups.iter().map(|group| group.id.clone()).collect(),
+        shared_opened_men: shared_men,
+    };
+    let at = run.at;
+    for ((engagement, profile), share) in admitted.into_iter().zip(shares) {
+        open_engagement(
+            run,
+            &rulebook,
+            OpenSpec {
+                id: engagement.id,
+                kind: engagement.kind,
+                profile,
+                site: engagement.site,
+                fort: engagement.fort,
+                terrain: None,
+                siege: siege.clone(),
+                crossing: None,
+                attackers: engagement.attackers,
+                defenders: engagement.defenders,
+                holders: engagement.holders,
+                inputs: engagement.inputs.map(|input| Some((input, at))),
+                environment: Some((engagement.environment, at)),
+                men_caps: [None, None],
+                max_minutes: engagement.max_minutes,
+                opened_at: at,
+                group: Some(membership.clone()),
+                group_share: Some(share),
+            },
+        )?;
+    }
+    Ok(())
 }
 
 fn join_engagement(
@@ -1274,6 +1633,13 @@ fn join_engagement(
         return Err(payload("the engagement is closed"));
     }
     check_revision(state.host_revision, expected, "the engagement")?;
+    if state
+        .group
+        .as_ref()
+        .is_some_and(|group| group.shared == side)
+    {
+        return Err(payload("an engagement group's shared side takes no joiner"));
+    }
     let mut all = state.side(side).forces.clone();
     all.extend(forces.iter().cloned());
     check_side_size(&rulebook, &all)?;
@@ -1482,11 +1848,23 @@ fn supply_input(
                 return Err(payload("the engagement is closed"));
             }
             check_revision(state.host_revision, expected, "the engagement")?;
+            let siblings = group_siblings(run, &state)?;
+            let grid = group_grid(&state, &siblings);
+            // A shared side's condition is the shared forces' one: it is
+            // every open engagement of the group's.
+            let mut shared = None;
             if let (Some(condition), Some(side)) = (condition, side) {
                 if !controls_any(run, &rulebook, issuer, state.side(side).forces.iter())? {
                     return Err(authority("the issuer controls no force on that side"));
                 }
                 state.side_mut(side).input = Some((condition.clone(), at));
+                if state
+                    .group
+                    .as_ref()
+                    .is_some_and(|group| group.shared == side)
+                {
+                    shared = Some((condition, side));
+                }
             }
             if let Some(environment) = environment {
                 if !controls_any(run, &rulebook, issuer, state.forces())? {
@@ -1506,15 +1884,26 @@ fn supply_input(
                 }
                 state.environment = Some((environment.clone(), at));
             }
+            let step = rulebook
+                .step_profiles
+                .get(&state.profile)
+                .map_or(1, |profile| profile.step_minutes);
             if matches!(state.status, EngagementStatus::Held { .. }) {
-                let step = rulebook
-                    .step_profiles
-                    .get(&state.profile)
-                    .map_or(1, |profile| profile.step_minutes);
-                resume(&mut state, at, step);
+                resume_on_grid(&mut state, grid, at, step)?;
             }
             state.host_revision += 1;
-            run.put(&reference, &state)
+            run.put(&reference, &state)?;
+            if let Some((condition, side)) = shared {
+                for mut sibling in siblings {
+                    sibling.side_mut(side).input = Some((condition.clone(), at));
+                    if matches!(sibling.status, EngagementStatus::Held { .. }) {
+                        resume_on_grid(&mut sibling, grid, at, step)?;
+                    }
+                    sibling.host_revision += 1;
+                    run.put(&engagement_reference(&sibling.id), &sibling)?;
+                }
+            }
+            Ok(())
         }
         InputTargetV1::Siege(id) => {
             let mut state = open_siege(run, id)?;
@@ -1593,7 +1982,7 @@ fn order_action(
 ) -> Result<(), CanwuError> {
     let rulebook = require_rulebook(run)?;
     let reference = engagement_reference(engagement);
-    let mut state = run
+    let state = run
         .get(&reference)?
         .ok_or_else(|| missing(format!("engagement {engagement} does not exist")))?;
     if state.is_closed() {
@@ -1603,30 +1992,46 @@ fn order_action(
     if !controls_any(run, &rulebook, issuer, state.side(side).forces.iter())? {
         return Err(authority("the issuer controls no force on that side"));
     }
-    state.host_revision += 1;
-    match action {
-        SideAction::Hold => state.side_mut(side).withdraw_ordered = false,
-        SideAction::Withdraw => state.side_mut(side).withdraw_ordered = true,
-        SideAction::Abandon if side == Side::Defender => {
-            state.side_mut(side).withdraw_ordered = true;
+    // A shared side's order is the shared forces' one: it is every open
+    // engagement of the group's.
+    let siblings = if state
+        .group
+        .as_ref()
+        .is_some_and(|group| group.shared == side)
+    {
+        group_siblings(run, &state)?
+    } else {
+        Vec::new()
+    };
+    let at = run.at;
+    for member in std::iter::once(state).chain(siblings) {
+        let mut member = member;
+        member.host_revision += 1;
+        match action {
+            SideAction::Hold => member.side_mut(side).withdraw_ordered = false,
+            SideAction::Withdraw => member.side_mut(side).withdraw_ordered = true,
+            SideAction::Abandon if side == Side::Defender => {
+                member.side_mut(side).withdraw_ordered = true;
+            }
+            SideAction::Abandon => {
+                close_engagement(
+                    run,
+                    &rulebook,
+                    member,
+                    CloseInfo {
+                        kind: EngagementOutcomeKind::Abandoned,
+                        routed: [Vec::new(), Vec::new()],
+                        site_fell: false,
+                        at,
+                    },
+                    None,
+                )?;
+                continue;
+            }
         }
-        SideAction::Abandon => {
-            let at = run.at;
-            return close_engagement(
-                run,
-                &rulebook,
-                state,
-                CloseInfo {
-                    kind: EngagementOutcomeKind::Abandoned,
-                    routed: [Vec::new(), Vec::new()],
-                    site_fell: false,
-                    at,
-                },
-                None,
-            );
-        }
+        run.put(&engagement_reference(&member.id), &member)?;
     }
-    run.put(&reference, &state)
+    Ok(())
 }
 
 fn open_siege(run: &Run<'_, '_>, id: &SiegeId) -> Result<SiegeStateV1, CanwuError> {
@@ -1864,6 +2269,64 @@ fn revise_siege(
     }
     state.host_revision += 1;
     run.put(&siege_reference(&revise.siege), &state)
+}
+
+/// Ends a siege by its garrison's surrender: the fight in progress closed
+/// with the site fallen, the siege `Fell` by `Surrendered`, and every force
+/// released from it, the defenders with their men.
+fn surrender_siege(
+    run: &mut Run<'_, '_>,
+    issuer: &Issuer,
+    siege: &SiegeId,
+    expected: u64,
+) -> Result<(), CanwuError> {
+    let rulebook = require_rulebook(run)?;
+    let mut state = open_siege(run, siege)?;
+    check_revision(state.host_revision, expected, "the siege")?;
+    if !trusted(&rulebook, issuer) && !controls_any(run, &rulebook, issuer, state.defenders.iter())?
+    {
+        return Err(authority("a surrender is the defenders' act"));
+    }
+    if state.defenders.is_empty() {
+        return Err(payload("the siege has no defenders to surrender"));
+    }
+    let fight = match state.engagement.take() {
+        Some(id) => run
+            .get(&engagement_reference(&id))?
+            .filter(|engagement| !engagement.is_closed()),
+        None => None,
+    };
+    state.host_revision += 1;
+    let at = run.at;
+    end_siege(
+        run,
+        &rulebook,
+        &mut state,
+        SiegeStatus::Fell,
+        SiegeEndCause::Surrendered,
+        at,
+    )?;
+    if let Some(engagement) = fight {
+        // The besiegers are an assault's attackers and a sortie's defenders.
+        let kind = if engagement.kind == EngagementKind::Sortie {
+            EngagementOutcomeKind::Abandoned
+        } else {
+            EngagementOutcomeKind::AttackerPrevailed
+        };
+        close_engagement(
+            run,
+            &rulebook,
+            engagement,
+            CloseInfo {
+                kind,
+                routed: [Vec::new(), Vec::new()],
+                site_fell: true,
+                at,
+            },
+            None,
+        )?;
+    }
+    Ok(())
 }
 
 fn order_crossing(

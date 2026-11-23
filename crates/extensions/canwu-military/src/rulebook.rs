@@ -267,13 +267,23 @@ pub struct LineRulesV1 {
     pub leadership: LeadershipRuleV1,
 }
 
-/// Cohesion loss a step: `floor((inflicted × per_inflicted + base +
-/// order_confusion × confusion) × step_scale_bp / 10^4)`.
+/// Cohesion loss a step: the resolver's `floor((inflicted × per_inflicted +
+/// base) × step_scale_bp / 10^4)`, then the plugin's order-confusion cost.
+///
+/// The confusion cost follows the step's length, not its effect scale (since
+/// 0.24.0): each step owes `order_confusion × confusion_per_day ×
+/// step_minutes` in units of a cohesion point per rulebook day
+/// (`siege.day_minutes`), and the side pays the whole points of what it owes
+/// plus the remainder it carries ([`crate::SideStateV1::confusion_carry`]).
+/// One source therefore costs exactly `confusion_per_day` over one rulebook
+/// day of fighting, whatever the profile.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CohesionRuleV1 {
     pub per_inflicted: u32,
     pub base: u32,
-    pub confusion: u32,
+    /// The cohesion one source of order confusion costs a side over one
+    /// rulebook day of fighting.
+    pub confusion_per_day: u32,
     pub recover_per_day: u32,
 }
 
@@ -643,7 +653,10 @@ impl CombatRulebookV1 {
         for (value, label) in [
             (self.cohesion.per_inflicted, "cohesion.per_inflicted"),
             (self.cohesion.base, "cohesion.base"),
-            (self.cohesion.confusion, "cohesion.confusion"),
+            (
+                self.cohesion.confusion_per_day,
+                "cohesion.confusion_per_day",
+            ),
             (self.cohesion.recover_per_day, "cohesion.recover_per_day"),
             (
                 self.morale.sensitivity_default,

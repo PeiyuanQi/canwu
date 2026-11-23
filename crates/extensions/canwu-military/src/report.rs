@@ -409,6 +409,13 @@ fn engagement_part(
     let own = engagement.side(side);
     let enemy = engagement.side(side.other());
     let opened = enemy.opened_men.max(1);
+    // A shared enemy's present men are all the shared forces': measured
+    // against their whole opening men, not this engagement's share.
+    let enemy_whole = engagement
+        .group
+        .as_ref()
+        .filter(|group| group.shared == side.other())
+        .map_or(opened, |group| group.shared_opened_men.max(1));
     EngagementPartV1 {
         kind: engagement.kind,
         forecast_band: engagement.forecast.band.clone(),
@@ -427,7 +434,7 @@ fn engagement_part(
             })
             .unwrap_or_default(),
         enemy_strength_band: rulebook
-            .band((men[side.other().index()].saturating_mul(1_000) / opened).min(1_000)),
+            .band((men[side.other().index()].saturating_mul(1_000) / enemy_whole).min(1_000)),
         posture: own.posture_after,
         steps: engagement.steps_resolved,
         outcome: engagement.outcome.map(|outcome| outcome.kind),
