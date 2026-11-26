@@ -1348,6 +1348,20 @@ fn reachable_archived_receipt_references(
         .collect()
 }
 
+/// What a seal or a release moves out of the retained journals: from the
+/// archived cut `start` to the settled `cut`, the retained events, commands,
+/// and attempts at or below the cut, the run's current dependencies, and the
+/// continuation closure below the cut.
+struct SettledEvidence {
+    start: EvidenceCursor,
+    cut: EvidenceCursor,
+    event_count: usize,
+    command_count: usize,
+    attempt_count: usize,
+    dependencies: Vec<EvidenceDependency>,
+    pins: super::continuation::PinnedEvidence,
+}
+
 /// Exact idempotency entries for tracked requests, built from journal slices
 /// by a seal and by a continuation checkpoint of an unsealed run.
 #[derive(Default)]
@@ -2399,9 +2413,14 @@ pub struct CheckpointJournal {
 ///
 /// This opt-in runtime preserves current authoritative state, deterministic
 /// commitments, idempotency, and continuation behavior while retaining only
-/// the evidence appended since the most recent seal or continuation restore.
-/// Every returned segment is part of the permanent replay record and must be
-/// stored contiguously by the caller. A runtime restored from a checkpoint
+/// the evidence appended since the most recent seal, release, or
+/// continuation restore.
+/// For a host that restores from compact or paged checkpoints and their
+/// segments, or replays from them, each returned segment is part of the
+/// replay record and is stored contiguously. A host whose saves are
+/// continuation checkpoints keeps none and releases instead
+/// ([`Self::release_evidence`]). A seal after a release starts a new chain
+/// that serves archived-evidence reads only. A runtime restored from a checkpoint
 /// and its journal retains its whole supplied prefix, so its first
 /// seal starts at the zero cut and replaces every earlier segment for later
 /// checkpoints.
@@ -2624,7 +2643,8 @@ impl CompactedSimulation {
 
     /// Captures current state and the total journal cut without cloning sealed evidence.
     ///
-    /// A continuation-restored run returns
+    /// A run restored from a continuation checkpoint, or one that released
+    /// its evidence ([`Self::release_evidence`]), returns
     /// [`ErrorCode::HistoryUnavailable`]: restoring a compact checkpoint
     /// needs every segment since genesis. Use
     /// [`Self::continuation_checkpoint`] instead.
@@ -2647,7 +2667,9 @@ impl CompactedSimulation {
     }
 
     /// Where this run's history begins when it was restored from a
-    /// continuation checkpoint; `None` for a run that holds its history.
+    /// continuation checkpoint or released its evidence
+    /// ([`Self::release_evidence`]), at its last release; `None` for a run
+    /// that holds its history.
     #[must_use]
     pub const fn continuation_base(&self) -> Option<&super::ContinuationBase> {
         self.simulation.state.evidence.continuation_base.as_ref()
@@ -2730,6 +2752,11 @@ impl CompactedSimulation {
 
     /// Clones the retained evidence tail after `start`. Caller-owned sealed
     /// prefixes must be supplied separately when restoring the checkpoint.
+    /// `start` must not precede the first evidence this runtime retains:
+    /// where its last seal ended; if it was restored from a continuation
+    /// checkpoint or released its evidence since, the cut of
+    /// [`Self::continuation_base`]; or the zero cut
+    /// (`sealed_evidence_cursor().or_else(|| continuation_base().map(|b| b.cut)).unwrap_or_default()`).
     pub fn journal_segment_since(
         &self,
         start: EvidenceCursor,
@@ -2739,6 +2766,10 @@ impl CompactedSimulation {
 
     /// Prepares an incremental content-addressed checkpoint for the compact
     /// runtime without rehydrating archived evidence or decision payloads.
+    ///
+    /// After a continuation restore or a release ([`Self::release_evidence`])
+    /// it returns [`ErrorCode::HistoryUnavailable`]: the run no longer holds
+    /// the history it needs.
     pub fn prepare_paged_checkpoint(
         &self,
         source: Option<&PagedSimulationCheckpoint>,
@@ -2841,7 +2872,7 @@ impl CompactedSimulation {
             .enqueue_decision_archive_commit(at, 0, verified)
     }
 
-    /// Seals and releases the settled part of the retained evidence.
+    /// Seals and drops the settled part of the retained evidence.
     ///
     /// Each journal moves to its settled cut: events, commands, and attempts
     /// up to the admission cursors, the others to their end. Work in flight
@@ -2856,12 +2887,82 @@ impl CompactedSimulation {
     /// order for save restoration or replay. After a checkpoint-and-journal
     /// restore, the first seal starts at the zero cut and replaces the
     /// restored prefix.
+    ///
+    /// Segments serve a host that restores from a compact or paged
+    /// checkpoint and its segments, or replays from them. A host whose saves
+    /// are continuation checkpoints reads no segment and keeps none: it calls
+    /// [`Self::release_evidence`] instead, which frees the same memory
+    /// without building the segment or its archive index. After a release
+    /// the next seal starts a new segment chain at the release's cut.
     pub fn seal_evidence(&mut self) -> Result<Option<EvidenceJournalSegment>, CanwuError> {
         // The persistent evidence structures make this copy constant-size
         // apart from the retained tail.
         let before = self.simulation.fork();
         match self.simulation.seal_retained_evidence() {
             Ok(segment) => Ok(segment),
+            Err(error) => {
+                self.simulation.restore_from_fork(before);
+                Err(error)
+            }
+        }
+    }
+
+    /// Releases the settled part of the retained evidence without sealing
+    /// it: what a host that keeps no segment calls in place of a seal.
+    ///
+    /// A host whose saves are continuation checkpoints never reads a
+    /// segment, since the continuation checkpoint at a cut is the same for an
+    /// unsealed, a sealed, a released, and a continuation-restored run. Such
+    /// a host keeps no segment and releases instead of sealing. A release
+    /// moves each journal to the settled cut and pins the continuation
+    /// closure exactly as [`Self::seal_evidence`] does, so pending ingress,
+    /// the causes of pending work, payload-required declarations, and the
+    /// identity facts of declared versions and packets survive it, and, as
+    /// after a seal, every later receipt, checkpoint hash, state hash, and
+    /// continuation checkpoint is the one the run gets without it. It copies
+    /// no record into a segment and encodes and hashes none into an archive
+    /// index; it returns the cuts it released between. A record version the closure
+    /// does not pin is gone from the run, as after a seal.
+    ///
+    /// As after a seal, every read of retained evidence sees only evidence
+    /// after the cut: [`Self::boundaries`], [`Self::events`],
+    /// [`Self::outbox_entries`], the API's `visible_changes_since`,
+    /// `evaluation_traces`, and `explain`, the bodies of record versions the
+    /// closure does not pin, and [`Self::load_archived_evidence_segment`].
+    /// Unlike a seal, a release leaves no segment to read that evidence back
+    /// from, so the outbox delivery identities of the released boundaries are
+    /// gone for good ([`Self::outbox_entries_for_segment`] needs a segment). A
+    /// host drains [`Self::outbox_entries`], and any other retained read it
+    /// needs, before it releases.
+    ///
+    /// A release ends the run's history at its cut, as a continuation
+    /// restore does. [`Self::continuation_base`] moves to the cut, with no
+    /// continuation hash; the run drops its segment headers and archived
+    /// evidence receipts; and [`Self::sealed_evidence_cursor`] answers
+    /// `None` until the run seals again. The run can no longer write a
+    /// compact or paged checkpoint, or a snapshot or replay journal from
+    /// segments ([`ErrorCode::HistoryUnavailable`]), so a host
+    /// that wants one writes it before its first release. Segments sealed
+    /// before the release no longer chain to the run. A later seal is
+    /// allowed and starts a new chain at the release's cut, as the first
+    /// seal after a continuation restore does; its segments serve the run's
+    /// archived-evidence reads, not a restore or a replay. Each later release
+    /// moves the base to its own cut.
+    ///
+    /// It is refused wherever a seal or a continuation checkpoint is refused:
+    /// with `PluginNotActive` while the plugin registry is not active, and
+    /// with `ArchiveNotReady` when a dependency was declared after its
+    /// evidence was sealed or released. A refused release leaves the run
+    /// unchanged. Nothing settled past the archived cut returns `None` and
+    /// changes nothing, so a release straight after a seal keeps the run's
+    /// history and segment chain. A fork made before a release keeps what
+    /// the release dropped.
+    pub fn release_evidence(&mut self) -> Result<Option<super::EvidenceRelease>, CanwuError> {
+        // The persistent evidence structures make this copy constant-size
+        // apart from the retained tail.
+        let before = self.simulation.fork();
+        match self.simulation.release_retained_evidence() {
+            Ok(release) => Ok(release),
             Err(error) => {
                 self.simulation.restore_from_fork(before);
                 Err(error)
@@ -3401,6 +3502,10 @@ impl CompactedSimulation {
 
     /// Reconstructs a validated full snapshot from the supplied sealed prefix
     /// plus the currently retained tail.
+    ///
+    /// After a continuation restore or a release ([`Self::release_evidence`])
+    /// it returns [`ErrorCode::HistoryUnavailable`]: the run no longer holds
+    /// the history it needs.
     pub fn snapshot_with_segments(
         &self,
         segments: Vec<EvidenceJournalSegment>,
@@ -3410,6 +3515,10 @@ impl CompactedSimulation {
     }
 
     /// Produces the ordinary exact-replay journal after validating the supplied archive.
+    ///
+    /// After a continuation restore or a release ([`Self::release_evidence`])
+    /// it returns [`ErrorCode::HistoryUnavailable`]: the run no longer holds
+    /// the history it needs.
     pub fn replay_journal_with_segments(
         &self,
         segments: Vec<EvidenceJournalSegment>,
@@ -3856,6 +3965,74 @@ impl Simulation {
         )
     }
 
+    /// Resolves what a seal or a release moves: the cut, the continuation
+    /// closure below it, and how many retained events, commands, and
+    /// attempts lie at or below it. `None` when nothing is settled past the
+    /// archived cut. A dependency whose evidence the run can no longer read
+    /// (declared after its evidence was sealed or released) fails with
+    /// `ArchiveNotReady`, as a continuation checkpoint does.
+    fn settled_evidence(&self) -> Result<Option<SettledEvidence>, CanwuError> {
+        let start = self.state.evidence.archived;
+        let cut = self.settled_cut()?;
+        if start == cut {
+            return Ok(None);
+        }
+        let dependencies = self.evidence_dependencies()?;
+        let needs = self.continuation_needs(&dependencies)?;
+        let pins = self.closure_pins(&needs, &cut)?;
+        let settled = |count: u64, archived: u64| {
+            usize::try_from(count - archived)
+                .map_err(|_| invalid_snapshot_error("sealed journal slice exceeds platform range"))
+        };
+        Ok(Some(SettledEvidence {
+            start,
+            cut,
+            event_count: settled(cut.event_count, start.event_count)?,
+            command_count: settled(cut.command_count, start.command_count)?,
+            attempt_count: settled(cut.command_attempt_count, start.command_attempt_count)?,
+            dependencies,
+            pins,
+        }))
+    }
+
+    /// Moves every journal to the settled cut, as a seal and a release both
+    /// do: the archived request tables, history flags, sealed time index, and
+    /// boundary head take over from the dropped records, the closure becomes
+    /// the pinned evidence, and requests past the outcome retention retire.
+    /// The caller has refreshed the checkpoint hash, which feeds the dropped
+    /// records to the journal commitments first.
+    fn drop_settled_evidence(
+        &mut self,
+        settled: SettledEvidence,
+        tables: ArchivedRequestTables,
+        (legacy, tracked, unqueued): (bool, bool, bool),
+        sealed_times: super::state::EvidenceTimeIndex,
+    ) {
+        let kept_from = self.request_outcomes_kept_from();
+        let evidence = &mut self.state.evidence;
+        evidence.archived_boundary_head = evidence.boundary_head_hash().map(str::to_owned);
+        evidence.archived_legacy_commands |= legacy;
+        evidence.archived_tracked_attempts |= tracked;
+        evidence.archived_unqueued_command_history |= unqueued;
+        evidence.archived_command_requests.extend(tables.commands);
+        evidence.archived_ingress_requests.extend(tables.ingress);
+        evidence.archived_decision_requests.extend(tables.decisions);
+        evidence
+            .archived_decision_command_requests
+            .extend(tables.decision_commands);
+        evidence.sealed_times = sealed_times;
+        evidence.archived = settled.cut;
+        evidence.events.drain(..settled.event_count);
+        evidence.seal_command_history(settled.command_count, settled.attempt_count);
+        // Only sealed outcomes retire, each with its own queued receipt, so
+        // no retained attempt loses the receipt that marks it queued.
+        evidence.retire_command_requests(kept_from);
+        evidence.boundaries.clear();
+        evidence.random_draws.clear();
+        evidence.pinned = settled.pins;
+        self.state.scheduler.cancelled_ingress.clear();
+    }
+
     /// Seals the settled part of every journal and keeps the continuation
     /// closure below the new cut as pinned evidence.
     ///
@@ -3865,29 +4042,17 @@ impl Simulation {
     /// A dependency whose evidence the run can no longer read (declared after
     /// its evidence was sealed) fails with `ArchiveNotReady`.
     fn seal_retained_evidence(&mut self) -> Result<Option<EvidenceJournalSegment>, CanwuError> {
-        let start = self.state.evidence.archived;
-        let cut = self.settled_cut()?;
-        if start == cut {
+        let Some(settled) = self.settled_evidence()? else {
             return Ok(None);
-        }
-        let dependencies = self.evidence_dependencies()?;
-        let needs = self.continuation_needs(&dependencies)?;
-        let pins = self.closure_pins(&needs, &cut)?;
-        let sealed = |count: u64, archived: u64| {
-            usize::try_from(count - archived)
-                .map_err(|_| invalid_snapshot_error("sealed journal slice exceeds platform range"))
         };
-        let event_count = sealed(cut.event_count, start.event_count)?;
-        let command_count = sealed(cut.command_count, start.command_count)?;
-        let attempt_count = sealed(cut.command_attempt_count, start.command_attempt_count)?;
         let evidence = &self.state.evidence;
         let mut segment = EvidenceJournalSegment {
             format_version: CHECKPOINT_JOURNAL_FORMAT_VERSION,
-            start,
-            end: cut,
-            events: evidence.events[..event_count].to_vec(),
-            commands: evidence.commands[..command_count].to_vec(),
-            command_attempts: evidence.command_attempts[..attempt_count].to_vec(),
+            start: settled.start,
+            end: settled.cut,
+            events: evidence.events[..settled.event_count].to_vec(),
+            commands: evidence.commands[..settled.command_count].to_vec(),
+            command_attempts: evidence.command_attempts[..settled.attempt_count].to_vec(),
             ingress: evidence.ingress.to_vec(),
             boundaries: evidence.boundaries.to_vec(),
             random_draws: evidence.random_draws.to_vec(),
@@ -3915,7 +4080,7 @@ impl Simulation {
         // would hash every record again for nothing; each kept receipt's
         // Merkle path is still checked against the header it will be
         // verified against when its segment is loaded.
-        let reachable = reachable_archived_receipt_references(&dependencies);
+        let reachable = reachable_archived_receipt_references(&settled.dependencies);
         let (archive, receipts) =
             evidence_archive_index_with_receipts(&segment, ReceiptSelection::Kept(&reachable))?;
         for receipt in &receipts {
@@ -3923,40 +4088,15 @@ impl Simulation {
         }
         let header = archive.header.clone();
         segment.archive = Some(archive);
-        let (legacy, tracked, unqueued) = self.history_flags_of(
+        let flags = self.history_flags_of(
             &segment.commands,
             &segment.command_attempts,
             &segment.ingress,
         );
-        let kept_from = self.request_outcomes_kept_from();
-
-        let evidence = &mut self.state.evidence;
-        evidence.archived_boundary_head = segment
-            .boundaries
-            .last()
-            .map(|record| record.hash.clone())
-            .or_else(|| evidence.archived_boundary_head.clone());
-        evidence.archived_legacy_commands |= legacy;
-        evidence.archived_tracked_attempts |= tracked;
-        evidence.archived_unqueued_command_history |= unqueued;
-        evidence.archived_command_requests.extend(tables.commands);
-        evidence.archived_ingress_requests.extend(tables.ingress);
-        evidence.archived_decision_requests.extend(tables.decisions);
-        evidence
-            .archived_decision_command_requests
-            .extend(tables.decision_commands);
-        let mut sealed_times = evidence.sealed_times.clone();
+        let mut sealed_times = self.state.evidence.sealed_times.clone();
         sealed_times.extend_from_segment(&segment);
-        evidence.sealed_times = sealed_times;
-        evidence.archived = cut;
-        evidence.events.drain(..event_count);
-        evidence.seal_command_history(command_count, attempt_count);
-        // Only sealed outcomes retire, each with its own queued receipt, so
-        // no retained attempt loses the receipt that marks it queued.
-        evidence.retire_command_requests(kept_from);
-        evidence.boundaries.clear();
-        evidence.random_draws.clear();
-        self.state.scheduler.cancelled_ingress.clear();
+        self.drop_settled_evidence(settled, tables, flags, sealed_times);
+
         let evidence = &mut self.state.evidence;
         evidence.archived_segment_headers.push_back(header);
         retain_reachable_archived_evidence_receipts(
@@ -3972,8 +4112,52 @@ impl Simulation {
                 return Err(archive_error("archived evidence receipt was duplicated"));
             }
         }
-        evidence.pinned = pins;
         Ok(Some(segment))
+    }
+
+    /// Releases the settled part of every journal as a seal does, but copies
+    /// nothing into a segment and builds no archive index. The run's history
+    /// then begins at the cut, as if it had been restored from a continuation
+    /// checkpoint written there: the segment headers and archived evidence
+    /// receipts are dropped and the continuation base moves to the cut. It
+    /// is refused wherever a seal or a continuation checkpoint is.
+    fn release_retained_evidence(&mut self) -> Result<Option<super::EvidenceRelease>, CanwuError> {
+        self.ensure_runtime_ready()?;
+        let Some(settled) = self.settled_evidence()? else {
+            return Ok(None);
+        };
+        // Feeds the records about to be dropped to the journal commitments.
+        self.refresh_checkpoint_hash()?;
+        let evidence = &self.state.evidence;
+        let events = &evidence.events[..settled.event_count];
+        let commands = &evidence.commands[..settled.command_count];
+        let attempts = &evidence.command_attempts[..settled.attempt_count];
+        let tables = self.archived_request_tables(attempts, &evidence.ingress)?;
+        let flags = self.history_flags_of(commands, attempts, &evidence.ingress);
+        let mut sealed_times = evidence.sealed_times.clone();
+        sealed_times.extend_from_slices(
+            events,
+            commands,
+            attempts,
+            &evidence.ingress,
+            &evidence.boundaries,
+            &evidence.random_draws,
+        );
+        let release = super::EvidenceRelease {
+            start: settled.start,
+            end: settled.cut,
+        };
+        self.drop_settled_evidence(settled, tables, flags, sealed_times);
+        let checkpoint_hash = self.state.metadata.checkpoint_hash.clone();
+        let evidence = &mut self.state.evidence;
+        evidence.archived_segment_headers = im::Vector::new();
+        evidence.archived_evidence_receipts = im::OrdMap::new();
+        evidence.continuation_base = Some(super::ContinuationBase {
+            cut: release.end,
+            checkpoint_hash,
+            continuation_hash: None,
+        });
+        Ok(Some(release))
     }
 
     pub(super) fn checkpoint_state(&self) -> SimulationSnapshot {
@@ -4612,14 +4796,17 @@ impl Simulation {
     /// moved into sealed segments since it was created or restored. `None`
     /// until it seals: it has never sealed, it was restored with its whole
     /// journal (whose first seal starts again at the zero cut), or it was
-    /// restored from a continuation checkpoint and has not sealed since. A
-    /// continuation restore holds no sealed segment, so its base is not a
-    /// seal; [`super::ContinuationBase::cut`] says where its history begins.
+    /// restored from a continuation checkpoint or released its evidence
+    /// ([`CompactedSimulation::release_evidence`]) and has not sealed since.
+    /// A continuation restore and a release hold no sealed segment, so their
+    /// base is not a seal; [`super::ContinuationBase::cut`] says where the
+    /// run's history begins.
     #[must_use]
     pub fn sealed_evidence_cursor(&self) -> Option<EvidenceCursor> {
-        // Only a seal adds a segment header, every seal adds one, and no
-        // restore carries one, so the headers are this run's own seals and
-        // the archived cut is where the last of them ended.
+        // Only a seal adds a segment header, every seal adds one, no restore
+        // carries one, and a release drops them all, so the headers are this
+        // run's own seals since its last release and the archived cut is
+        // where the last of them ended.
         let evidence = &self.state.evidence;
         (!evidence.archived_segment_headers.is_empty()).then_some(evidence.archived)
     }

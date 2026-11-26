@@ -55,7 +55,9 @@ resources, names, and source data outside Canwu core.
    Use a continuation checkpoint (`continuation_checkpoint`, restored with
    `from_continuation_checkpoint_verified`) to continue a long run, seal
    retained evidence as it grows, and keep a replay journal for the runs a
-   finding cites, since a continuation runtime cannot produce one.
+   finding cites, since a continuation runtime cannot produce one; write the
+   replay journal of a run a finding cites before that run's first release
+   (`release_evidence`).
 7. Fix each extension's settlement knobs with the experiment identity: the
    society transfer settlement mode (`Batch` by default; `OneByOne` only when
    each transfer must see the previous one's result), the fiscal appointment

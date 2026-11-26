@@ -11,16 +11,16 @@
 //! they settle before every other fiscal packet, a stale or duplicate commit
 //! ends as a no-op, and an acknowledgement retires its handle once. On a run
 //! that has sealed, a book whose citations its last seal has not covered is
-//! refused at preparation; a run restored from a continuation checkpoint has
-//! sealed nothing until it seals. A sealed run archives exactly as its
-//! unsealed fork, a restore from its sealed segments, and its exact replay
-//! do.
+//! refused at preparation; a run restored from a continuation checkpoint, or
+//! one that released its evidence, has sealed nothing until it seals. A
+//! sealed run archives exactly as its unsealed fork, a restore from its
+//! sealed segments, and its exact replay do.
 
 mod support;
 
 use canwu_api::{
-    BoundaryRequest, Canwu, CompactedCanwu, EntityRef, GovernmentId, KnowledgeHolderRef, PersonId,
-    SimTime,
+    ArchiveStore, BoundaryRequest, Canwu, CompactedCanwu, EntityRef, ErrorCode, GovernmentId,
+    KnowledgeHolderRef, PersonId, SimTime,
 };
 use canwu_fiscal::{
     FISCAL_ARCHIVE_BLOB_NAMESPACE, FISCAL_ARCHIVE_INDEX_DIRECTORY_NAMESPACE,
@@ -974,6 +974,96 @@ fn a_continuation_restored_run_archives_citations_newer_than_its_base_until_it_s
     assert_eq!(again.sealed_evidence_cursor(), Some(segment.end));
     archive_compact(&mut again, &store);
     assert!(sealed_fiscal_state(&again).books().next().is_none());
+}
+
+/// A run that releases its evidence holds no sealed segment, as after a
+/// continuation restore (downstream gap G-119): a book whose citation its
+/// last seal did not cover is refused before the release and archives after
+/// it. A seal token prepared before the release is stale after it. Once the
+/// run seals again, its own cut applies, and the new seal starts at the
+/// release's cut.
+#[test]
+fn a_released_run_archives_citations_its_last_seal_did_not_cover() {
+    let fixture = Fixture::new();
+    let mut canwu = fixture.runtime(scenario(|_| {}));
+    canwu
+        .settle_boundary(BoundaryRequest::at(canwu.time()))
+        .expect("a quiet boundary");
+    let mut run = canwu.into_compacted().expect("compact interface");
+    let evidence = MemoryEvidenceArchive::default();
+    let earlier = seal(&mut run, &evidence);
+    let scope = treasury_scope(0);
+    let quote = close_quoted_book(&mut run, &scope, "2026");
+    let store = MemoryArchiveStore::default();
+    assert_eq!(
+        prepare_fiscal_archive(&run, 64, &store).expect_err("the quote is newer than the seal"),
+        FiscalArchiveError::UnsealedCitations {
+            scope_binding_id: scope.clone(),
+            accounting_cycle_id: "2026".to_owned(),
+        }
+    );
+    let stale = run
+        .prepare_evidence_seal()
+        .expect("a seal is prepared")
+        .expect("retained evidence exists");
+    evidence
+        .store_evidence_segment(&stale.segment)
+        .expect("the segment is stored");
+
+    let release = run
+        .release_evidence()
+        .expect("the run releases")
+        .expect("the settled tail releases");
+    assert_eq!(release.start, earlier.end);
+    assert_eq!(
+        run.commit_evidence_seal(&stale.token, &evidence)
+            .expect_err("a token prepared before the release is stale")
+            .code,
+        ErrorCode::StaleSealToken
+    );
+    assert!(
+        matches!(
+            quote.established_by,
+            canwu_api::DomainRecordVersionSource::BoundaryChange { boundary, .. }
+                if boundary.get() > earlier.end.boundary_count
+                    && boundary.get() <= release.end.boundary_count
+        ),
+        "the release dropped the quote's boundary"
+    );
+    assert_eq!(
+        run.sealed_evidence_cursor(),
+        None,
+        "a release is not a seal"
+    );
+    assert_eq!(
+        run.continuation_base().map(|base| base.cut),
+        Some(release.end)
+    );
+    archive_compact(&mut run, &store);
+    assert!(
+        sealed_fiscal_state(&run).books().next().is_none(),
+        "the book is archived"
+    );
+
+    // A seal after the release starts a new chain at its cut, and a
+    // citation newer than that seal is refused until the run seals or
+    // releases again.
+    let later = seal(&mut run, &evidence);
+    assert_eq!(later.start, release.end);
+    assert_eq!(run.sealed_evidence_cursor(), Some(later.end));
+    close_quoted_book(&mut run, &scope, "2027");
+    assert_eq!(
+        prepare_fiscal_archive(&run, 64, &store).expect_err("the quote is newer than the seal"),
+        FiscalArchiveError::UnsealedCitations {
+            scope_binding_id: scope.clone(),
+            accounting_cycle_id: "2027".to_owned(),
+        }
+    );
+    run.release_evidence()
+        .expect("the run releases")
+        .expect("the settled tail releases");
+    archive_compact(&mut run, &store);
+    assert!(sealed_fiscal_state(&run).books().next().is_none());
 }
 
 /// A run that closes, archives, and publishes across a seal does so exactly

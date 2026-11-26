@@ -1392,7 +1392,7 @@ fn continuation_checkpoints_agree_and_restore_runs_with_pending_work() {
     assert_eq!(
         restored
             .continuation_base()
-            .map(|base| base.continuation_hash.as_str()),
+            .and_then(|base| base.continuation_hash.as_deref()),
         Some(hash.as_str())
     );
     assert_eq!(

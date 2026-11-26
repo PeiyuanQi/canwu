@@ -6,14 +6,19 @@
 //! restores and replays the run, and panics instead of returning an error.
 //!
 //! With the feature on, every [`crate::Canwu`] keeps a shadow run: a compact
-//! fork made before the first mutation, sealed before every later mutation,
-//! and replaced from time to time by a run restored from its own
-//! continuation checkpoint. Every mutation runs on both, and the gate panics
-//! with a `continuation gate:` message when a result, the checkpoint hash,
-//! or the authoritative state hash differs; when the shadow cannot seal or
-//! write a continuation checkpoint; when the unsealed run's continuation
-//! checkpoint differs from the shadow's; or when an exact replay of the
-//! unsealed run reaches a different checkpoint hash.
+//! fork made before the first mutation, whose settled evidence is dropped
+//! before every later mutation, by a seal and a release
+//! ([`crate::CompactedCanwu::release_evidence`]) in turn, and replaced from
+//! time to time by a run restored from its own continuation checkpoint. No
+//! gate step on the shadow needs its history or a segment: the gate never
+//! writes a compact or paged checkpoint of the shadow, never rebuilds its
+//! outbox or replays it from segments, and replays only the unsealed run, so
+//! the shadow may release wherever it may seal. Every mutation runs on both,
+//! and the gate panics with a `continuation gate:` message when a result, the
+//! checkpoint hash, or the authoritative state hash differs; when the shadow
+//! cannot seal, release, or write a continuation checkpoint; when the
+//! unsealed run's continuation checkpoint differs from the shadow's; or when
+//! an exact replay of the unsealed run reaches a different checkpoint hash.
 //!
 //! The gate proves state equality (checkpoint hashes and the continuation
 //! round trip). It restores and replays with the run's own plugin registry,
@@ -33,15 +38,18 @@
 //! answers from everything the run has loaded, and from the run's provider
 //! only for an object the run never loaded. A test that deliberately
 //! declares evidence the shadow cannot hold yet leaves the shadow unable to
-//! write a continuation checkpoint or to seal, and expects that panic under
-//! the feature. There are two such tests:
+//! write a continuation checkpoint or to seal or release, and expects that
+//! panic under the feature. There are two such tests:
 //! `a_packet_first_declared_after_its_seal_is_not_ready` in `canwu-api`
 //! declares evidence after its seal, and
 //! `a_noncanonical_payload_continuation_is_refused_on_both_handles` in
 //! `canwu-technology` starts from a scenario record that names a version only
-//! boundary 2 creates, so the shadow cannot seal at revision 0. The second
-//! sees the gate through `canwu-technology`'s own `continuation-gate`
-//! feature, which only turns this one on.
+//! boundary 2 creates, so the shadow cannot seal at revision 0. That failing
+//! drop is always a seal, not a release: the dependency exists from
+//! construction, so the first drop that finds anything settled fails, and
+//! the shadow turns to releasing only after a drop that moved evidence. The
+//! second test sees the gate through `canwu-technology`'s own
+//! `continuation-gate` feature, which only turns this one on.
 
 use canwu_sim::{CanwuError, CompactedSimulation, PluginArchiveObjectProvider, Simulation};
 use std::collections::BTreeMap;
@@ -144,6 +152,10 @@ pub(crate) struct Gate {
     /// Replay the unsealed run once the shadow has settled this many
     /// boundaries.
     next_replay: u64,
+    /// Whether the shadow's next drop of settled evidence is a release
+    /// rather than a seal. It flips after each drop that moved evidence, so
+    /// seals and releases alternate whatever the order of the calls.
+    release_next: bool,
 }
 
 fn fail(message: &str) -> ! {
@@ -170,7 +182,8 @@ fn excerpt(text: &str, at: usize) -> &str {
 }
 
 impl Gate {
-    /// The shadow, made from `primary` if there is none, and sealed.
+    /// The shadow, made from `primary` if there is none, with its settled
+    /// evidence sealed or released.
     pub(crate) fn prepare(&mut self, primary: &Simulation) -> Option<&mut CompactedSimulation> {
         if self.shadow.is_none() {
             let mut shadow = primary
@@ -196,11 +209,23 @@ impl Gate {
                 .clear();
         }
         let shadow = self.shadow.as_deref_mut()?;
-        if let Err(error) = shadow.seal_evidence() {
-            fail(&format!(
-                "the sealed run cannot seal at revision {}: {error:?}",
+        let (action, dropped) = if self.release_next {
+            (
+                "release",
+                shadow.release_evidence().map(|release| release.is_some()),
+            )
+        } else {
+            (
+                "seal",
+                shadow.seal_evidence().map(|segment| segment.is_some()),
+            )
+        };
+        match dropped {
+            Ok(moved) => self.release_next ^= moved,
+            Err(error) => fail(&format!(
+                "the sealed run cannot {action} at revision {}: {error:?}",
                 shadow.revision()
-            ));
+            )),
         }
         Some(shadow)
     }

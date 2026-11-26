@@ -84,8 +84,8 @@ cargo test --locked --workspace --features canwu-api/continuation-gate,canwu-tec
   million-candidate law probe.
 - The continuation gate, the `continuation-gate` feature of `canwu-api`, is a
   release test that CI and applications never enable. It shadows every
-  `Canwu` in every workspace test with a sealed run, restores the shadow from
-  continuation checkpoints, replays the run exactly, and panics on any
+  `Canwu` in every workspace test with a compact run that seals and releases
+  its evidence in turn, restores the shadow from continuation checkpoints, replays the run exactly, and panics on any
   divergence. It proves state equality (checkpoint hashes and the
   continuation round trip) with the run's own plugin registry, not that the
   public restore and replay paths accept the checkpoint or the journal. Lint

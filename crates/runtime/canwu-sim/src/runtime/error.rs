@@ -67,8 +67,11 @@ pub enum ErrorCode {
     InvalidSnapshot,
     IdentifierExhausted,
     LegacyReplayUnavailable,
-    /// A continuation-restored run was asked for history before its base:
-    /// a full snapshot, a replay journal, or a compact checkpoint.
+    /// A run restored from a continuation checkpoint, or one that released
+    /// its evidence (`release_evidence`), was asked for history before its
+    /// base: a full snapshot, a replay journal, or a compact or paged
+    /// checkpoint. Write such a save before the first release, or save with
+    /// a continuation checkpoint.
     HistoryUnavailable,
     LateIngress,
     MissingIdempotencyKey,

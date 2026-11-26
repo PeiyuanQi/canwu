@@ -2359,11 +2359,12 @@ fn archive_candidates<H: CanwuRun + ?Sized>(
 /// sealed segment. Such a book is refused with
 /// [`FiscalArchiveError::UnsealedCitations`]; seal, then archive. The cut is
 /// the run's own, so a host cannot pass a wrong one. A run that has not
-/// sealed since it was created or restored (a `Canwu`, a never-sealed
-/// `CompactedCanwu`, one restored from a checkpoint and its journal, or one
-/// restored from a continuation checkpoint, until its next seal) refuses
-/// none: a continuation restore holds no sealed segment, so its base is not
-/// a seal. Such a run's archived books' citations reach a sealed segment
+/// sealed since it was created, restored, or last released (a `Canwu`, a
+/// never-sealed `CompactedCanwu`, one restored from a checkpoint and its
+/// journal or from a continuation checkpoint, or one that released its
+/// evidence with `release_evidence`, until its next seal) refuses none: a
+/// continuation restore and a release hold no sealed segment, so their base
+/// is not a seal. Such a run's archived books' citations reach a sealed segment
 /// only at its next seal: a host that keeps segments seals before each
 /// continuation checkpoint, or those versions are in no segment it keeps.
 ///

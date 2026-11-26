@@ -1187,14 +1187,14 @@ impl SimulationView<'_> {
     ///
     /// Returns them for the committed current version of a record, for a
     /// version proposed earlier in this boundary and not superseded since, and
-    /// for an initial-scenario version. Any other version returns `None` even while it is retained,
-    /// because `seal_evidence` can remove its existence proof, body, and time
-    /// while exact replay keeps them. A rule whose outcome must match exact
-    /// replay relies on this instead of [`Self::domain_record_version`] and
-    /// [`Self::evidence_time`]. The committed current version still resolves
-    /// after an earlier system in this boundary proposes a newer one. Either
-    /// the exact record-kind read or the administrative domain-record read
-    /// grants access.
+    /// for an initial-scenario version. Any other version returns `None` even
+    /// while it is retained, because `seal_evidence` or `release_evidence` can
+    /// remove its existence proof, body, and time while exact replay keeps
+    /// them. A rule whose outcome must match exact replay relies on this
+    /// instead of [`Self::domain_record_version`] and [`Self::evidence_time`].
+    /// The committed current version still resolves after an earlier system
+    /// in this boundary proposes a newer one. Either the exact record-kind
+    /// read or the administrative domain-record read grants access.
     pub fn replay_stable_domain_record_version(
         &self,
         reference: &DomainRecordVersionRef,
@@ -1277,11 +1277,11 @@ impl SimulationView<'_> {
     /// This supports next-boundary operation finalization without granting a
     /// plugin unrestricted access to unrelated knowledge payloads.
     ///
-    /// The read scans retained boundary evidence. After `seal_evidence`
-    /// removes the publishing boundary it returns nothing for that boundary,
-    /// while exact replay, which retains every boundary, still returns the
-    /// change. It must not drive a decision that has to replay exactly once
-    /// the publishing boundary may have been sealed. To find the records a
+    /// The read scans retained boundary evidence. After `seal_evidence` or
+    /// `release_evidence` removes the publishing boundary it returns nothing
+    /// for that boundary, while exact replay, which retains every boundary,
+    /// still returns the change. It must not drive a decision that has to
+    /// replay exactly once the publishing boundary may have been sealed. To find the records a
     /// new record supersedes, use [`Self::knowledge_heads`], which reads
     /// committed state.
     pub fn knowledge_changes_by_correlation(

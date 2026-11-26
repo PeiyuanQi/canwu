@@ -1746,8 +1746,9 @@ books the commit takes), never the whole fiscal state. A commit may cite
 only records whose evidence lies at or below the run's sealed cut (where
 its last seal ended), which the helpers read from the run itself
 (`sealed_evidence_cursor`), so a host cannot pass a wrong cut; a run that
-has not sealed since it was created or restored refuses nothing (a
-continuation restore holds no sealed segment, so its base is not a seal),
+has not sealed since it was created, restored, or last released refuses
+nothing (a continuation restore and a release hold no sealed segment, so
+their base is not a seal),
 so a sealing host seals at each save, before it writes a continuation
 checkpoint, if every archived citation is to lie in a sealed segment.
 
@@ -2886,6 +2887,39 @@ carried evidence records, the pending set, the keyed entries' evidence, the
 settled cut) is bound only by the host-stored hash, so the checkpoint is
 ground truth for the host alone. See the
 [continuation checkpoint proposal](proposals/continuation-checkpoint.md).
+
+Since 0.26.0 a host whose saves are continuation checkpoints, and which
+therefore reads no segment, releases its evidence instead of sealing it:
+`CompactedCanwu::release_evidence` moves every journal to the settled cut and
+pins the continuation closure exactly as a seal does, but copies no record
+into a segment and hashes none into an archive index, and returns the cuts it
+released between (`EvidenceRelease`). As after a seal, every later receipt,
+hash, and continuation checkpoint is the one the run gets without the
+release. As after a seal, every read of retained evidence (boundaries, events,
+the outbox, visible changes, evaluation traces, explanations, unpinned
+record-version bodies, archived segments) sees only evidence after the cut.
+Unlike a seal, a release leaves no segment to read that evidence back from, so
+the outbox delivery identities of the released boundaries are gone for good,
+and a host drains what it needs before it releases. The rule for what follows
+is that a release ends the run's history at its cut, as a continuation restore
+at that cut would: the run drops its segment headers and archived evidence
+receipts, `continuation_base` moves to the cut (with `continuation_hash`
+`None`), `sealed_evidence_cursor` reads `None` until the run seals again, and a
+compact or paged checkpoint and a snapshot or replay journal from segments
+return `HistoryUnavailable`. A later seal is allowed and starts a new segment
+chain at the release's cut; segments
+sealed before a release no longer chain to the run, so exact replay needs a
+full save written before the first release. A release is refused, changing
+nothing, wherever a seal or a continuation checkpoint is refused
+(`ArchiveNotReady`, `PluginNotActive`), and a release with nothing settled
+past the archived cut returns `None` and changes nothing. A released run
+differs from a sealed one only in its segment headers, archived evidence
+receipts, and continuation base, which nothing at boundary time reads; it
+writes the continuation checkpoint that a restore at that cut writes and
+settles alike afterwards. The continuation gate's compact shadow seals and
+releases in turn, since no gate step on the shadow needs its history or a
+segment, and `a_released_run_continues_in_lockstep` compares sealed,
+released, alternating, and restored runs with an unsealed one.
 
 Boundary emissions enter the next boundary's admission cut, so an emitting
 boundary remains retained until a later completed boundary admits those events.

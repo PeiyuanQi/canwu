@@ -477,15 +477,17 @@ kinds share names the same object it did when everything was hot.
   ended is refused at preparation (`FiscalArchiveError::UnsealedCitations`)
   until a seal covers it: seal, then archive. The cut is the run's own; a
   host cannot pass a wrong one. A run that has not sealed since it was
-  created or restored (a `Canwu`, a `CompactedCanwu` that has never sealed,
-  or one restored from a checkpoint and its journal or from a continuation
-  checkpoint, until its next seal) refuses nothing, and the versions its
-  archived books cited reach a sealed segment only at its next seal. A
-  continuation restore holds no sealed segment, so its base is not a seal:
-  a host that saves only by continuation checkpoint and never seals
-  archives freely in every session. So every archived citation is in a
-  sealed segment only if the host seals before it writes a continuation
-  checkpoint: a host that keeps segments seals at each save. Preparation refuses
+  created, restored, or last released (a `Canwu`, a `CompactedCanwu` that
+  has never sealed, one restored from a checkpoint and its journal or from
+  a continuation checkpoint, or one that released its evidence with
+  `release_evidence`, until its next seal) refuses nothing, and the
+  versions its archived books cited reach a sealed segment only at its next
+  seal. A continuation restore and a release hold no sealed segment, so
+  their base is not a seal: a host that saves only by continuation
+  checkpoint and releases instead of sealing archives freely in every
+  session. So every archived citation is in a sealed segment only if the
+  host seals before it writes a continuation checkpoint: a host that keeps
+  segments seals at each save. Preparation refuses
   (`FiscalArchiveError::Backpressure`) while the archive head holds
   `MAX_FISCAL_ARCHIVE_PENDING_HANDLES` (64) unacknowledged retention handles,
   of applied or stale commits.

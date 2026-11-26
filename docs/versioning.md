@@ -26,6 +26,137 @@ Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
 
+**Unreleased / 0.26.0.**
+
+**Evidence release without a segment (`canwu-sim`, `canwu-api`: downstream
+gap G-119).** It has no proposal of its own: this entry and the rustdoc of
+`CompactedCanwu::release_evidence`, `CompactedCanwu::seal_evidence`,
+`EvidenceRelease`, and `ContinuationBase` are the contract.
+
+What changed:
+
+- **A release.** `CompactedCanwu::release_evidence()` (and
+  `CompactedSimulation::release_evidence()`) drops the retained evidence to
+  the settled cut as `seal_evidence` does: events, commands, and attempts up
+  to the admission cursors and ingress, boundaries, and draws to their end,
+  with the continuation closure (pending ingress, the causes of pending
+  work, payload-required declarations, and the identity facts of declared
+  versions and packets) pinned in memory, the request index, history flags,
+  and time index extended, and requests past the outcome retention retired.
+  It copies no record into a segment and encodes and hashes none into an
+  archive index (in Canwu's seal profile the index is 2.3 s of a 3.3 s seal
+  of 450,060 record changes, and dropping the segment another 0.7 s;
+  `docs/proposals/paged-restore-budget-and-seal-cost.md`). It returns
+  `Ok(Some(EvidenceRelease { start, end }))`, the cuts it released between,
+  or `Ok(None)`, changing nothing, when nothing settled past the archived
+  cut. A record version the closure does not pin is gone from the run, as
+  after a seal. As after a seal, every later receipt, checkpoint hash,
+  state hash, and continuation checkpoint is the one the run gets without
+  the release.
+- **What a release loses.** As after a seal, every read of retained evidence
+  sees only evidence after the cut: `boundaries`, `events`,
+  `outbox_entries`, `CanwuViewer::visible_changes_since`,
+  `CanwuViewer::evaluation_traces`, `explain`, the bodies of record versions
+  the closure does not pin, and `load_archived_evidence_segment`. Unlike a
+  seal, a release leaves no segment to read that evidence back from, so the
+  outbox delivery identities of the released boundaries are gone for good
+  (`outbox_entries_for_segment` needs a segment).
+- **Who releases.** A host whose saves are continuation checkpoints reads no
+  segment, since the continuation checkpoint at a cut is the same for an
+  unsealed, a sealed, a released, and a continuation-restored run. Such a
+  host keeps no segment and releases where it would seal; the rustdoc of
+  `seal_evidence` now says so.
+- **The rule after a release.** A release ends the run's history at its cut,
+  as a continuation restore at that cut does. The run drops its
+  segment headers and archived evidence receipts; `continuation_base()`
+  moves to the cut, with `continuation_hash: None` and the run's checkpoint
+  hash; `sealed_evidence_cursor()` reads `None` until the run seals again;
+  and `checkpoint`, `prepare_paged_checkpoint`, `snapshot_with_segments`,
+  and `replay_journal_with_segments` return `HistoryUnavailable`. A later
+  seal is allowed and starts a new segment chain at the release's cut, as
+  the first seal after a continuation restore does: its segment's `start` is
+  the release's `end`, it does not chain to segments sealed before the
+  release, and it serves the run's archived-evidence reads
+  (`archived_evidence_receipt`, `load_archived_evidence_segment`), not a
+  restore or a replay. Seals and releases may alternate; each release moves
+  the base to its own cut.
+  Exact replay of a released run needs a full save written before its first
+  release. A seal token prepared before a release is refused at commit
+  (`StaleSealToken`).
+- **Refusals.** A release is refused, and leaves the run unchanged, wherever
+  a seal or a continuation checkpoint is refused: `ArchiveNotReady` when a
+  dependency was declared after its evidence was sealed or released, and
+  `PluginNotActive` while the plugin registry is not active.
+- **The fiscal archive.** Because `sealed_evidence_cursor()` reads `None`
+  after a release, `canwu-fiscal`'s `prepare_fiscal_archive` refuses no book
+  with `UnsealedCitations` because of it, as after a continuation restore;
+  once the run seals again, that seal's cut applies. No other first-party
+  extension reads the sealed cursor, the segment headers, or the receipts:
+  their boundaries read current records, replay-stable versions, the
+  journal counters, and the pinned closure, which a release leaves as a seal
+  does, so the law, correspondence, technology, resource, and production
+  contracts read "a sealed run and its replay decide alike" for a released
+  run too.
+- **The continuation gate.** The gate's compact shadow now seals and
+  releases in turn before each gated mutation, instead of only sealing. No
+  gate step on the shadow needs its history or a segment (it restores the
+  shadow from its continuation checkpoint and replays only the unsealed
+  run), so it may release wherever it may seal. A released run differs from
+  a sealed one only in its segment headers, archived evidence receipts, and
+  continuation base, which nothing at boundary time reads; it writes the
+  continuation checkpoint that a restore at that cut writes and settles
+  alike afterwards. `a_released_run_continues_in_lockstep` compares sealed,
+  released, alternating, and restored runs with an unsealed (gated) one.
+
+Formats and hashes: no persisted format changes. The snapshot, commitment,
+checkpoint and evidence-journal, paged-checkpoint, continuation checkpoint
+(4), state revision, admission cursor, and replay revision formats, every
+hash domain, and every plugin semantic hash are unchanged; `ContinuationBase`
+is not persisted (a restore builds it). Only the engine version changes with
+the workspace version.
+
+Source-incompatible changes: `ContinuationBase::continuation_hash` is now
+`Option<String>` (`Some` after a continuation restore, `None` after a
+release), which breaks code that reads it as a `String` or builds the
+struct; `continuation_base()` is also `Some` after a release, not only after
+a restore.
+
+Upgrading, for hosts and plugin authors:
+
+- A host that saves only continuation checkpoints and seals only to free
+  memory replaces `seal_evidence` (and the segment it then dropped) with
+  `release_evidence` at the same points. Write any compact or paged
+  checkpoint, or snapshot or replay journal from segments, before the first
+  release.
+- A host drains `outbox_entries()`, and any other read of retained evidence
+  it needs, before it releases: a release keeps no segment to rebuild them
+  from.
+- A host that keeps segments keeps sealing; a release ends its segment
+  chain.
+- Code that reads `continuation_base().continuation_hash` reads it with
+  `.as_deref()`; `None` means a release set the base. A release replaces a
+  restore's base, so a host that checks a loaded run's identity does so
+  right after the load, before its first release, for example with
+  `run.continuation_base().is_none_or(|base| base.continuation_hash.as_deref() != Some(saved_hash.as_str()))`
+  as the mismatch test; the verified restore has already compared the hash.
+  Code that took `continuation_base().is_some()` to mean "restored from a
+  continuation checkpoint" now also sees a released run.
+- Plugin authors change nothing: what a boundary can read after a release is
+  what it can read after a seal.
+
+Known limits:
+
+- A fork made before a release keeps what the release dropped, and memory
+  shared with a live fork is freed only when the fork is dropped.
+- A release still computes the continuation closure, the request tables, and
+  the time index over the released records, as a seal does; only the
+  segment copy and the archive index are skipped. Its cost was not
+  measured.
+- A released run cannot be exactly replayed or audited from segments; keep a
+  full save from before the first release for that.
+- Outbox delivery identities and retained-evidence reads of the released
+  boundaries are gone for good; there is no segment to read them from.
+
 Version 0.25.0 is a pre-1.0 minor release. Its change comes from one
 package: settled fiscal executions leave the hot book (`canwu-fiscal`, with
 the `canwu-ming-fiscal-reference` adapter: downstream gap G-118). It has no

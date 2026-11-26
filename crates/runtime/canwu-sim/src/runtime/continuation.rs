@@ -581,13 +581,38 @@ pub struct ContinuationCheckpoint {
     pub continuation_hash: String,
 }
 
-/// Where a continuation-restored run's history begins.
+/// Where the history of a run restored from a continuation checkpoint, or of
+/// a run that released its evidence, begins.
+///
+/// The run holds no evidence before `cut` and no sealed segment that reaches
+/// below it, so it cannot write a full snapshot, a replay journal, or a
+/// compact or paged checkpoint ([`super::ErrorCode::HistoryUnavailable`]).
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ContinuationBase {
-    /// The settled cut of the checkpoint the run was restored from.
+    /// The settled cut of the checkpoint the run was restored from, or the
+    /// cut of its last release
+    /// ([`super::CompactedSimulation::release_evidence`]).
     pub cut: EvidenceCursor,
+    /// The run's checkpoint hash at the base.
     pub checkpoint_hash: String,
-    pub continuation_hash: String,
+    /// The continuation hash of the checkpoint the run was restored from;
+    /// `None` when a release set the base, which writes no checkpoint. A
+    /// release replaces a restore's base, so check a restored run's hash
+    /// before its first release; the verified restore has already compared
+    /// it.
+    pub continuation_hash: Option<String>,
+}
+
+/// What [`super::CompactedSimulation::release_evidence`] dropped: the
+/// retained evidence from `start` to the settled cut `end`, where the run's
+/// history now begins.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EvidenceRelease {
+    /// Where the retained evidence began: the end of the run's last seal or
+    /// release, its continuation base, or the zero cut.
+    pub start: EvidenceCursor,
+    /// The settled cut the journals moved to, as a seal moves them.
+    pub end: EvidenceCursor,
 }
 
 #[derive(Serialize)]
@@ -1470,7 +1495,7 @@ impl Simulation {
             return Err(CanwuError::new(
                 ErrorCode::HistoryUnavailable,
                 format!(
-                    "{operation} needs the run's history, which a continuation-restored run does not hold"
+                    "{operation} needs the run's history, which a continuation-restored or released run does not hold; write it before restoring from a continuation checkpoint or releasing, or save with `continuation_checkpoint`"
                 ),
             ));
         }
@@ -1711,7 +1736,7 @@ impl Simulation {
             continuation_base: Some(ContinuationBase {
                 cut: settled_cut,
                 checkpoint_hash: expected_checkpoint_hash.clone(),
-                continuation_hash,
+                continuation_hash: Some(continuation_hash),
             }),
         };
         // The archived request tables are in place, so the restored history

@@ -1624,7 +1624,8 @@ pub struct FiscalAuthorityBinding {
 /// auditor is the application's to decide. A basis named here, in
 /// [`FiscalAuditFinding::entered_by`], in a nomination, or in `rebound_by` is
 /// not declared as required evidence: no decision reads it again, and after
-/// `seal_evidence` a superseded version may no longer be provable.
+/// `seal_evidence` or `release_evidence` a superseded version may no longer be
+/// provable.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalAuditBinding {
     pub id: String,

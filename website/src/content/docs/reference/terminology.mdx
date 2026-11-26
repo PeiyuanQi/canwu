@@ -200,6 +200,8 @@ sidebar:
 
 ## 证据、随机性与持久化
 
+{/* Owner to confirm: the 0.26.0 term 证据释放 (evidence release, G-119). */}
+
 | 中文规范写法 | English | 代码或 API | 含义与使用位置 |
 | --- | --- | --- | --- |
 | [事件](/architecture/events/) | event | `SimEvent` | 权威证据中的可序列化因果记录，不是 UI 通知。 |
@@ -227,6 +229,7 @@ sidebar:
 | 记录值分块 | record-value chunk | `STATE_PAGE_VALUE_CHUNK_BYTES`、`MAX_PAGED_RECORD_BYTES` | 分页检查点中，长度超过 1 MiB 的领域记录被切成的每个按内容寻址的 1 MiB 页。记录的叶页按顺序列出它的分块，没有变化的分块不会再存一次，最大 512 MiB 的记录都能分页；更长的记录会让准备分页检查点以 `value_out_of_range` 失败，绝不会让边界失败。 |
 | [接续检查点](/developer/persistence/#接续检查点) | continuation checkpoint | `ContinuationCheckpoint`、`continuation_checkpoint`、`CompactedCanwu::from_continuation_checkpoint_verified` | 不带证据历史就能继续运行的存档：当前状态、接续闭包、操作定址抽样明细、请求索引、时间索引、边界账，以及可续写的日志承诺。在同一个切点上，无论运行是否封存过，它都逐字节相同；不需要任何证据日志段就能恢复成 `CompactedCanwu`，并按上层应用保存的 `continuation_hash` 校验。它包含真值，不能交给玩家、智能体或远程客户端。 |
 | 接续闭包 | continuation closure | `PinnedEvidenceRecords`、`UnadmittedEvidence` | 仍在进行中的工作可能还要读取载荷的证据：待处理输入及其有依据事实、待处理工作的原因、需要保留载荷的依赖，以及尚未准入的尾部。它只取决于当前状态和切点，与运行何时封存无关；封存把它作为**固定证据**（pinned evidence）保留在封存切点之下。 |
+| [证据释放](/developer/persistence/#接续检查点) | evidence release | `CompactedCanwu::release_evidence`、`EvidenceRelease` | 像封存一样把紧凑运行保留的证据丢弃到已结算切点并保留接续闭包，但不构建日志段，也不构建归档索引：存档都是接续检查点、不保留日志段的上层应用用它代替封存。与封存之后一样，之后的每个回执、哈希和接续检查点都不变。它让运行的历史从它的切点开始，和接续恢复一样：`continuation_base` 移到该切点，`sealed_evidence_cursor` 在下次封存之前为 `None`，需要历史的存档会被拒绝，之后的封存从该切点开始新的日志段链。 |
 | 有依据事实 | provenance fact | `PluginIngressProvenanceFact` | 封存为一条待处理或已声明的输入记录保留的、ID 之外的信息：产生它的边界及其签发者、目标插件、数据包类型和状态（待处理、已准入或已撤回），或者“不是任何边界产生的”。记录封存之后，`plugin_ingress_matches` 和撤回读取这条事实，所以封存过的运行与未封存的运行回答一致。 |
 | 最新日志 | journal frontier | `JournalFrontiers`、`JournalFrontier` | 一条日志的可续写 BLAKE3 承诺可导出的状态：条目数、字节长度、链接值和未完成的分块，最多约 2.8 KB。接续检查点带着五条，所以恢复后的运行续写同样的承诺流，之后每个边界都得到相同的检查点哈希。 |
 | [运行句柄契约](/developer/persistence/#接续检查点) | run handle contract | `canwu_api::CanwuRun`、`typed_domain_record` | `Canwu` 和 `CompactedCanwu` 都实现的上层应用 trait：当前状态读取、按种类读取记录（`domain_records_of_kind`）、运行自己持有的那一份记录（`domain_record_shared`，即 `domain_record` 读到的那份，每次写入都会换成新的一份）、任意持有人的当前知识记录（`knowledge_heads`、`knowledge_current_records`）、不受封存影响的记录版本、日志计数器、边界账、待处理输入和规范化输入。扩展的上层应用辅助函数接受任何 `CanwuRun`，所以带归档的运行或从接续检查点恢复的运行与完整历史的运行用同样的调用驱动。它不结算任何内容，它的读取都是受信任的上层应用读取。 |

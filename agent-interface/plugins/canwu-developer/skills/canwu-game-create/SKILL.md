@@ -50,9 +50,12 @@ person-by-place-by-domain matrices.
    research output, and the run explorer.
 6. Save and restore with exact plugin rehydration. Use a continuation
    checkpoint (`continuation_checkpoint`, restored with
-   `from_continuation_checkpoint_verified`) as the player's save, seal retained
-   evidence as the run grows, keep a full snapshot or replay journal only where
-   exact replay or debugging needs it, and use `fork()` for a continuation with
+   `from_continuation_checkpoint_verified`) as the player's save. Such a save
+   keeps no segment, so as the run grows release retained evidence
+   (`CompactedCanwu::release_evidence`) instead of sealing it, after draining
+   `outbox_entries()` if the game sends effects outside. Keep a full snapshot
+   or replay journal only where exact replay or debugging needs it, and write
+   it before the first release. Use `fork()` for a continuation with
    different inputs.
 7. Choose each extension's settlement knobs before the run starts: the society
    transfer settlement mode (`Batch` by default; `OneByOne` only when each

@@ -82,7 +82,8 @@ pub enum FiscalArchiveError {
     /// the run's last seal ended ([`canwu_api::CanwuRun::sealed_evidence_cursor`]).
     /// Seal first, then archive, so that every citation of an archived book
     /// is in a sealed segment once the book's declaration of it ends. A run
-    /// that has not sealed since it was created or restored refuses none.
+    /// that has not sealed since it was created, restored, or last released
+    /// (`release_evidence`) refuses none.
     UnsealedCitations {
         scope_binding_id: String,
         accounting_cycle_id: String,

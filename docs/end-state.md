@@ -327,7 +327,10 @@ current state, the journal frontiers, the pinned evidence the run still
 needs, and every keyed draw under one hash, restores to a runtime that settles,
 seals, and forks as the uninterrupted run does, and is the host's ground
 truth; only a full snapshot, replay journal, or checkpoint journal needs the
-history.
+history. Since 0.26.0 a host that saves only continuation checkpoints
+releases its evidence (`release_evidence`) instead of sealing it, which
+frees the same memory without building a segment or its archive index and
+ends the run's history at the release's cut.
 Post-Format-8 work may add richer historical research adapters, branch metadata
 and lineage, world/outcome comparison across branches, and external dataset
 provenance. Provider-backed exact legal and decision hydration, typed

@@ -60,7 +60,8 @@ pub(super) struct RuntimeEvidence {
     /// The continuation closure below the archived cut.
     pub(super) pinned: super::continuation::PinnedEvidence,
     /// Where history begins for a run restored from a continuation
-    /// checkpoint; `None` for a run that holds its history.
+    /// checkpoint, or that released its evidence, at its last release;
+    /// `None` for a run that holds its history.
     pub(super) continuation_base: Option<super::ContinuationBase>,
 }
 

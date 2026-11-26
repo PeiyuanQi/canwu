@@ -14,9 +14,12 @@
 //! byte-equal continuation checkpoints. Each answers `sealed_evidence_cursor`
 //! as its own seals say: `None` until it seals after it is created or
 //! restored, a continuation restore included, then the end of its last
-//! sealed segment. The scenario runs on a 1 MiB thread,
-//! so a debug build proves the runtime fits the smallest common thread
-//! stack.
+//! sealed segment. The first lockstep runs on a 1 MiB thread, so a debug
+//! build proves the runtime fits the smallest common thread stack.
+//!
+//! A run that releases its evidence instead of sealing it keeps the same
+//! closure and joins a lockstep of its own; a release, like a seal, is
+//! refused where the closure cannot be built.
 
 #![allow(clippy::too_many_lines, clippy::unnecessary_wraps)]
 
@@ -1192,6 +1195,344 @@ fn pending_ingress_lists_the_same_queue_in_every_run() {
     );
 }
 
+/// What a compact run of the release lockstep does every fifth day.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Keep {
+    Seal,
+    Release,
+    /// Releases on odd fifths and seals on even ones.
+    Alternate,
+}
+
+/// Releases a compact run's settled evidence and checks what the release
+/// leaves (G-119): the retained journals hold only what settled after the
+/// cut, no segment or receipt is kept, the history begins at the cut, the
+/// continuation checkpoint is unchanged, and every released tally version
+/// is known only if the closure pins it. Returns the release and whether
+/// the closure pinned an event's payload, kept a released version, dropped
+/// one, and whether the release dropped a receipt an earlier seal kept.
+fn release_and_check(
+    run: &mut CompactedCanwu,
+    unsealed: &Canwu,
+    tally_versions: &[canwu_api::DomainRecordVersionRef],
+    previous_end: canwu_api::EvidenceCursor,
+    d: i64,
+) -> (canwu_api::EvidenceRelease, (bool, bool, bool, bool)) {
+    let (before, before_hash) = run
+        .continuation_checkpoint()
+        .expect("the continuation checkpoint builds");
+    let journal_end = run.evidence_cursor().expect("the journal end");
+    // The receipts an earlier seal kept: one for each current dependency it
+    // archived (the declared event, a record version, watched ingress).
+    let receipted: Vec<EvidenceRef> = (1..=journal_end.event_count)
+        .map(|id| EvidenceRef::Event(canwu_api::EventId::new(id)))
+        .chain(
+            (1..=journal_end.ingress_count)
+                .map(|id| EvidenceRef::Ingress(canwu_api::IngressId::new(id))),
+        )
+        .chain(
+            (1..=journal_end.command_count)
+                .map(|id| EvidenceRef::Command(canwu_api::CommandId::new(id))),
+        )
+        .chain(
+            tally_versions
+                .iter()
+                .cloned()
+                .map(EvidenceRef::DomainRecordVersion),
+        )
+        .filter(|reference| run.archived_evidence_receipt(reference).is_some())
+        .collect();
+    let release = run
+        .release_evidence()
+        .expect("a run with work in flight releases")
+        .expect("the settled tail releases");
+    assert_eq!(release.start, previous_end, "day {d}");
+    assert_eq!(release.end, before.settled_cut, "day {d}");
+    assert_eq!(run.evidence_cursor().expect("the journal end"), journal_end);
+
+    // A release changes no continuation checkpoint: the closure, the
+    // unadmitted tail, and the indexes are what the seal would keep.
+    let (after, after_hash) = run
+        .continuation_checkpoint()
+        .expect("the continuation checkpoint builds after a release");
+    assert_eq!(after_hash, before_hash, "day {d}");
+    assert_eq!(after, before, "day {d}");
+    assert!(
+        !after.pending_ingress.is_empty(),
+        "pending ingress, day {d}"
+    );
+    assert_eq!(run.pending_ingress().count(), after.pending_ingress.len());
+
+    // Only what settled after the cut is retained.
+    let cut = release.end;
+    assert!(run.boundaries().is_empty(), "day {d}");
+    assert!(run.random_draws().is_empty(), "day {d}");
+    assert!(run.ingress_log().is_empty(), "day {d}");
+    assert!(
+        run.events()
+            .iter()
+            .all(|event| event.id.get() > cut.event_count)
+    );
+    assert_eq!(run.events().len(), after.unadmitted.events.len());
+    assert!(
+        run.commands()
+            .iter()
+            .all(|command| command.id.get() > cut.command_count)
+    );
+    assert!(
+        run.command_attempts()
+            .iter()
+            .all(|attempt| attempt.id.get() > cut.command_attempt_count)
+    );
+
+    // No segment, index, or receipt: the history begins at the cut.
+    assert_eq!(
+        run.sealed_evidence_cursor(),
+        None,
+        "a release is not a seal"
+    );
+    let base = run.continuation_base().expect("a released run has a base");
+    assert_eq!(base.cut, cut);
+    assert_eq!(base.continuation_hash, None);
+    assert_eq!(base.checkpoint_hash, run.checkpoint_hash());
+    for reference in &receipted {
+        assert!(
+            run.archived_evidence_receipt(reference).is_none(),
+            "{reference:?} keeps its receipt at day {d}"
+        );
+    }
+    assert_eq!(
+        run.load_archived_evidence_segment(
+            &EvidenceRef::Event(canwu_api::EventId::new(1)),
+            &EmptyArchive,
+        )
+        .expect_err("no receipt is kept")
+        .code,
+        ErrorCode::EvidenceUnavailable
+    );
+    for code in [
+        run.checkpoint().map(|_| ()),
+        run.snapshot_with_segments(Vec::new()).map(|_| ()),
+        run.replay_journal_with_segments(Vec::new()).map(|_| ()),
+    ]
+    .map(|result| result.expect_err("no history before the base").code)
+    {
+        assert_eq!(code, ErrorCode::HistoryUnavailable, "day {d}");
+    }
+    assert!(
+        run.release_evidence().expect("an idle release").is_none(),
+        "nothing is left to release at day {d}"
+    );
+
+    // A released tally version is known only through the closure, and its
+    // body only if the closure keeps it; the unsealed run keeps them all.
+    let current = run
+        .current_domain_record_version(&tally())
+        .expect("the current version");
+    let (mut kept_seen, mut dropped_seen) = (false, false);
+    for version in tally_versions
+        .iter()
+        .filter(|version| Some(*version) != current.as_ref())
+    {
+        let body_kept = after
+            .pinned
+            .record_versions
+            .iter()
+            .any(|pin| pin.version == *version);
+        let kept = body_kept || after.known_record_versions.contains(version);
+        assert!(unsealed.domain_record_version_evidence_exists(version));
+        assert!(unsealed.domain_record_version(version).is_some());
+        assert_eq!(
+            run.domain_record_version_evidence_exists(version),
+            kept,
+            "{version:?} at day {d}"
+        );
+        assert_eq!(run.domain_record_version(version).is_some(), body_kept);
+        kept_seen |= kept;
+        dropped_seen |= !kept;
+    }
+    (
+        release,
+        (
+            !after.pinned.events.is_empty(),
+            kept_seen,
+            dropped_seen,
+            !receipted.is_empty(),
+        ),
+    )
+}
+
+/// A run that releases its evidence instead of sealing it (downstream gap
+/// G-119) continues exactly as the unsealed run, a sealed run, a run that
+/// alternates releases and seals, and a run restored from the releasing
+/// run's continuation checkpoint: every receipt, checkpoint hash, state
+/// hash, and pending queue agrees, and every run writes byte-equal
+/// continuation checkpoints. Each answers `sealed_evidence_cursor` and
+/// `continuation_base` as its own seals and releases say: a release ends the
+/// history at its cut, and a later seal starts a new chain there.
+#[test]
+fn a_released_run_continues_in_lockstep() {
+    const DAYS: i64 = 30;
+    const RESTORE_AT: i64 = 12;
+    let plugins = plugins();
+    let unsealed = Canwu::new_with_plugins(1605, scenario(), &plugins).expect("fixture starts");
+    let mut keeps = vec![None];
+    let mut runs = vec![];
+    for keep in [Keep::Seal, Keep::Release, Keep::Alternate] {
+        keeps.push(Some(keep));
+        runs.push(Run::Compact(
+            unsealed.fork().into_compacted().expect("compact copy"),
+        ));
+    }
+    runs.insert(0, Run::Unsealed(unsealed));
+    // What each run answers: its last seal's end, its base, and where its
+    // retained evidence begins.
+    let mut cuts: Vec<Option<canwu_api::EvidenceCursor>> = vec![None; runs.len()];
+    let mut bases: Vec<Option<canwu_api::EvidenceCursor>> = vec![None; runs.len()];
+    let mut starts = vec![canwu_api::EvidenceCursor::default(); runs.len()];
+    let mut tally_versions = Vec::new();
+    let (mut payload_pinned, mut version_kept, mut version_dropped) = (false, false, false);
+    let mut chained_seal = false;
+    let mut receipt_dropped = false;
+
+    for d in 1..=DAYS {
+        let at = day(d);
+        let revision = runs[0].revision();
+        let request = dispatch_on(d).map(|(id, n)| command(id, revision, n));
+        let receipts: Vec<_> = runs
+            .iter_mut()
+            .map(|run| run.step(at, request.clone()))
+            .collect();
+        assert!(
+            receipts.windows(2).all(|pair| pair[0] == pair[1]),
+            "receipts differ at day {d}"
+        );
+        let hashes: Vec<_> = runs.iter().map(Run::hashes).collect();
+        assert!(
+            hashes.windows(2).all(|pair| pair[0] == pair[1]),
+            "hashes differ at day {d}"
+        );
+        if let Some(version) = runs[0]
+            .handle()
+            .current_domain_record_version(&tally())
+            .expect("the tally's version")
+        {
+            tally_versions.push(version);
+        }
+
+        if d % 5 == 0 {
+            let (first, rest) = runs.split_at_mut(1);
+            let Run::Unsealed(unsealed) = &first[0] else {
+                unreachable!("the first run is unsealed");
+            };
+            for (index, run) in rest.iter_mut().enumerate() {
+                let index = index + 1;
+                let Run::Compact(compact) = run else {
+                    unreachable!("the other runs are compact");
+                };
+                let release = match keeps[index].expect("a compact run keeps") {
+                    Keep::Seal => false,
+                    Keep::Release => true,
+                    Keep::Alternate => (d / 5) % 2 == 1,
+                };
+                if release {
+                    let (released, (payload, kept, dropped, receipts)) =
+                        release_and_check(compact, unsealed, &tally_versions, starts[index], d);
+                    receipt_dropped |= receipts;
+                    payload_pinned |= payload;
+                    version_kept |= kept;
+                    version_dropped |= dropped;
+                    cuts[index] = None;
+                    bases[index] = Some(released.end);
+                    starts[index] = released.end;
+                } else {
+                    let segment = compact
+                        .seal_evidence()
+                        .expect("a run with work in flight seals")
+                        .expect("the settled tail seals");
+                    // After a release the next seal starts a new chain at
+                    // the release's cut, and the history still begins there.
+                    assert_eq!(segment.start, starts[index], "day {d}");
+                    if bases[index].is_some() {
+                        chained_seal = true;
+                        assert_eq!(
+                            compact
+                                .snapshot_with_segments(vec![segment.clone()])
+                                .expect_err("no history before the base")
+                                .code,
+                            ErrorCode::HistoryUnavailable
+                        );
+                    }
+                    cuts[index] = Some(segment.end);
+                    starts[index] = segment.end;
+                    // A release straight after a seal has nothing settled to
+                    // drop: it returns `None` and keeps the run's history and
+                    // segment chain.
+                    let base = compact.continuation_base().cloned();
+                    assert_eq!(
+                        compact.release_evidence().expect("a release after a seal"),
+                        None,
+                        "day {d}"
+                    );
+                    assert_eq!(compact.sealed_evidence_cursor(), Some(segment.end));
+                    assert_eq!(compact.continuation_base().cloned(), base, "day {d}");
+                }
+            }
+        }
+
+        if d == RESTORE_AT {
+            let (checkpoint, hash) = runs[2].continuation();
+            let json = checkpoint.to_json().expect("checkpoint JSON");
+            let restored =
+                CompactedCanwu::from_continuation_checkpoint_json_verified(&json, &hash, &plugins)
+                    .expect("a released run's checkpoint restores");
+            runs.push(Run::Compact(restored));
+            keeps.push(Some(Keep::Release));
+            cuts.push(None);
+            bases.push(Some(checkpoint.settled_cut));
+            starts.push(checkpoint.settled_cut);
+        }
+
+        let answered: Vec<_> = runs.iter().map(Run::sealed_cut).collect();
+        assert_eq!(answered, cuts, "sealed evidence cursors at day {d}");
+        let answered_bases: Vec<_> = runs
+            .iter()
+            .map(|run| match run {
+                Run::Unsealed(_) => None,
+                Run::Compact(compact) => compact.continuation_base().map(|base| base.cut),
+            })
+            .collect();
+        assert_eq!(answered_bases, bases, "continuation bases at day {d}");
+        let pending: Vec<IngressRecord> = runs[0].handle().pending_ingress().cloned().collect();
+        for run in &runs[1..] {
+            assert_eq!(
+                run.handle().pending_ingress().cloned().collect::<Vec<_>>(),
+                pending,
+                "pending ingress differs at day {d}"
+            );
+        }
+        if d % 5 == 0 || d % 5 == 1 {
+            let checkpoints: Vec<_> = runs
+                .iter()
+                .map(|run| {
+                    let (checkpoint, hash) = run.continuation();
+                    (checkpoint.to_json().expect("JSON"), hash)
+                })
+                .collect();
+            assert!(
+                checkpoints.windows(2).all(|pair| pair[0] == pair[1]),
+                "continuation checkpoints differ at day {d}"
+            );
+        }
+    }
+    assert_eq!(runs.len(), 5, "the restored run joined");
+    assert!(payload_pinned, "a release pinned a payload-required event");
+    assert!(version_kept, "a released version stayed known");
+    assert!(version_dropped, "a released version became unreachable");
+    assert!(chained_seal, "a seal followed a release");
+    assert!(receipt_dropped, "a release dropped a receipt a seal kept");
+}
+
 /// Changes the first leaf of a JSON subtree, if it has one.
 fn alter_first_leaf(value: &mut Value) -> bool {
     match value {
@@ -1648,6 +1989,73 @@ fn a_packet_first_declared_after_its_seal_is_not_ready() {
         panic!("the next seal needs the declared note");
     };
     assert_eq!(error.code, ErrorCode::ArchiveNotReady);
+}
+
+/// A release is refused exactly where a seal is (G-119): an ingress record
+/// first declared after a release or a seal moved it out, and no longer
+/// held, leaves both runs unable to write a continuation checkpoint, seal,
+/// or release, each with `ArchiveNotReady`, and the refused release leaves
+/// the run unchanged. Both runs are compact from the start, so the
+/// continuation gate shadows neither.
+#[test]
+fn a_release_is_refused_where_a_seal_is() {
+    let plugins: [&dyn SimulationPlugin; 1] = [&LateDeclaration];
+    let note = |at: SimTime, declare: Value| {
+        PluginIngressRequest::new(LATE, "note", at, json!({ "declare": declare }))
+    };
+    let daily = |at: SimTime| BoundaryRequest::at(at).with_cadence(SystemCadence::Daily);
+    let mut released = Canwu::new_with_plugins(1606, scenario(), &plugins)
+        .expect("fixture starts")
+        .into_compacted()
+        .expect("compact interface");
+    let first = released
+        .enqueue_plugin_ingress(note(day(1), Value::Null))
+        .expect("the first note queues")
+        .ingress_id;
+    released.settle_boundary(daily(day(1))).expect("day 1");
+    let mut sealed = released.fork();
+    let release = released
+        .release_evidence()
+        .expect("the run releases")
+        .expect("the tail releases");
+    let segment = sealed
+        .seal_evidence()
+        .expect("the run seals")
+        .expect("the tail seals");
+    assert_eq!(release.end, segment.end);
+    assert!(
+        released.ingress_log().is_empty() && sealed.ingress_log().is_empty(),
+        "both runs moved the first note out"
+    );
+
+    let declare = note(day(2), json!(first.get()));
+    for run in [&mut released, &mut sealed] {
+        run.enqueue_plugin_ingress(declare.clone())
+            .expect("the second note queues");
+        run.settle_boundary(daily(day(2))).expect("day 2");
+    }
+    assert_eq!(released.checkpoint_hash(), sealed.checkpoint_hash());
+    for run in [&mut released, &mut sealed] {
+        let cursor = run.evidence_cursor().expect("the journal end");
+        let base = run.continuation_base().cloned();
+        let sealed_cut = run.sealed_evidence_cursor();
+        let boundaries = run.boundaries().len();
+        let hash = run.checkpoint_hash().to_owned();
+        let codes = [
+            run.continuation_checkpoint().map(|_| ()),
+            run.release_evidence().map(|_| ()),
+            run.seal_evidence().map(|_| ()),
+        ]
+        .map(|result| result.expect_err("the declared note is gone").code);
+        assert_eq!(codes, [const { ErrorCode::ArchiveNotReady }; 3]);
+        assert_eq!(run.evidence_cursor().expect("the journal end"), cursor);
+        assert_eq!(run.continuation_base().cloned(), base);
+        assert_eq!(run.sealed_evidence_cursor(), sealed_cut);
+        assert_eq!(run.boundaries().len(), boundaries);
+        assert_eq!(run.checkpoint_hash(), hash);
+    }
+    assert_eq!(released.sealed_evidence_cursor(), None);
+    assert_eq!(sealed.sealed_evidence_cursor(), Some(segment.end));
 }
 
 /// Ingress that a scheduled directive issued would carry its cause but not

@@ -491,12 +491,12 @@ fn assessment_kinds() -> Vec<canwu_api::DomainRecordKind> {
 /// Checks an assessment's evidence when its command is admitted.
 ///
 /// Every exact domain-record version it names must be the current version of
-/// its record, or an initial-scenario version. `seal_evidence` can remove
-/// another version's existence proof, body, and establishment time while
-/// exact replay keeps them, so accepting one would let a compact run decide
-/// differently from its replay. The exact reference still fixes the cited
-/// meaning after the record changes. Generic citations are still checked
-/// against retained evidence.
+/// its record, or an initial-scenario version. `seal_evidence` or
+/// `release_evidence` can remove another version's existence proof, body,
+/// and establishment time while exact replay keeps them, so accepting one
+/// would let a compact run decide differently from its replay. The exact
+/// reference still fixes the cited meaning after the record changes. Generic
+/// citations are still checked against retained evidence.
 fn validate_assessment_evidence(
     view: &SimulationView<'_>,
     core: &AssessmentCore,

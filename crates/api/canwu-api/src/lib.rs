@@ -2,7 +2,8 @@
 //!
 //! The `continuation-gate` feature is a release test, not part of the
 //! supported API: applications must never enable it. It shadows every
-//! [`Canwu`] with a sealed run and panics on any divergence.
+//! [`Canwu`] with a compact run that seals and releases its evidence in turn,
+//! and panics on any divergence.
 
 #![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
 
@@ -124,10 +125,11 @@ pub use canwu_sim::{
 };
 pub use canwu_sim::{
     BoundaryIngressProvenance, CONTINUATION_CHECKPOINT_FORMAT_VERSION, ContinuationBase,
-    ContinuationCheckpoint, CurrentRecordVersion, EvidenceTimeRun, EvidenceTimes, HistoryFlags,
-    JournalFrontier, JournalFrontiers, KeyedDrawEntry, PinnedEvidenceRecords, PinnedRecordVersion,
-    PluginIngressProvenanceFact, PluginIngressStatus, RequestIndex, RetiredRequestRange,
-    SettledCommandRequest, SettledDecisionRequest, SettledQueuedCommand, UnadmittedEvidence,
+    ContinuationCheckpoint, CurrentRecordVersion, EvidenceRelease, EvidenceTimeRun, EvidenceTimes,
+    HistoryFlags, JournalFrontier, JournalFrontiers, KeyedDrawEntry, PinnedEvidenceRecords,
+    PinnedRecordVersion, PluginIngressProvenanceFact, PluginIngressStatus, RequestIndex,
+    RetiredRequestRange, SettledCommandRequest, SettledDecisionRequest, SettledQueuedCommand,
+    UnadmittedEvidence,
 };
 // How long a tracked command request's exact outcome answers a retry (E-28).
 pub use canwu_sim::{DEFAULT_REQUEST_OUTCOME_RETENTION, MAX_REQUEST_OUTCOME_RETENTION};
@@ -195,7 +197,8 @@ pub struct Canwu {
 mod continuation_gate;
 
 /// Runs a mutation on the run, and with the continuation gate also on its
-/// sealed shadow with clones of the bracketed arguments, comparing the two.
+/// compact shadow, which seals and releases its evidence in turn, with clones
+/// of the bracketed arguments, comparing the two.
 macro_rules! gated {
     ($self:ident, $name:literal, [$($arg:ident),*], |$sim:ident| $call:expr) => {{
         #[cfg(feature = "continuation-gate")]
@@ -221,7 +224,9 @@ macro_rules! gated {
     }};
 }
 
-/// Public API for a live runtime whose sealed evidence segments are stored by the caller.
+/// Public API for a live runtime that drops its settled evidence from memory:
+/// by sealing it into segments the caller stores, or, for a host whose saves
+/// are continuation checkpoints, by releasing it ([`Self::release_evidence`]).
 ///
 /// Like [`Canwu`], it is `Send` and not promised to be `Sync`.
 pub struct CompactedCanwu {
@@ -299,7 +304,8 @@ pub trait CanwuRun {
     /// together.
     fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError>;
     /// Where the run's last seal ended, or `None` until it seals after it is
-    /// created or restored; see [`CompactedCanwu::sealed_evidence_cursor`].
+    /// created, restored, or released; see
+    /// [`CompactedCanwu::sealed_evidence_cursor`].
     fn sealed_evidence_cursor(&self) -> Option<EvidenceCursor>;
     /// The boundaries of the half-open window `from..to`.
     fn boundaries_between(&self, from: SimTime, to: SimTime) -> Result<BoundaryWindow, CanwuError>;
@@ -2031,7 +2037,9 @@ impl CompactedCanwu {
     }
 
     /// Where this run's history begins when it was restored from a
-    /// continuation checkpoint; `None` for a run that holds its history.
+    /// continuation checkpoint or released its evidence
+    /// ([`Self::release_evidence`]), at its last release; `None` for a run
+    /// that holds its history.
     #[must_use]
     pub fn continuation_base(&self) -> Option<&ContinuationBase> {
         self.simulation.continuation_base()
@@ -2115,12 +2123,13 @@ impl CompactedCanwu {
     }
 
     /// Where this run's last seal ended: the end of the last segment it
-    /// sealed since it was created or restored. `None` until it seals: it
-    /// has never sealed, it was restored with its whole journal (whose first
-    /// seal starts again at the zero cut), or it was restored from a
-    /// continuation checkpoint and has not sealed since. A continuation
-    /// restore holds no sealed segment, so its base is not a seal;
-    /// [`Self::continuation_base`] says where its history begins.
+    /// sealed since it was created, restored, or last released. `None` until
+    /// it seals: it has never sealed, it was restored with its whole journal
+    /// (whose first seal starts again at the zero cut), or it was restored
+    /// from a continuation checkpoint or released its evidence
+    /// ([`Self::release_evidence`]) and has not sealed since. A continuation
+    /// restore and a release hold no sealed segment, so their base is not a
+    /// seal; [`Self::continuation_base`] says where its history begins.
     #[must_use]
     pub fn sealed_evidence_cursor(&self) -> Option<EvidenceCursor> {
         self.simulation.sealed_evidence_cursor()
@@ -2357,14 +2366,22 @@ impl CompactedCanwu {
         explain(&self.simulation, request)
     }
 
+    /// A compact checkpoint of current state, which restores with the run's
+    /// sealed prefix (see [`Self::journal_segment_since`]) plus its retained
+    /// tail.
+    ///
+    /// After a continuation restore or a release ([`Self::release_evidence`])
+    /// it returns [`ErrorCode::HistoryUnavailable`]: the run no longer holds
+    /// the history it needs.
     pub fn checkpoint(&self) -> Result<SimulationCheckpoint, CanwuError> {
         self.simulation.checkpoint()
     }
 
     /// Clones the retained evidence after `start`, which must not precede the
-    /// first evidence this runtime retains: where its last seal ended, or,
-    /// before it seals, the base of the continuation checkpoint it was
-    /// restored from.
+    /// first evidence this runtime retains: where its last seal ended; if it
+    /// was restored from a continuation checkpoint or released its evidence
+    /// since, the cut of [`Self::continuation_base`]; or the zero cut
+    /// (`sealed_evidence_cursor().or_else(|| continuation_base().map(|b| b.cut)).unwrap_or_default()`).
     ///
     /// A checkpoint of current state restores from the host's prefix followed
     /// by this segment from that prefix's end, omitted when it is empty. The
@@ -2382,6 +2399,10 @@ impl CompactedCanwu {
     /// Prepares a content-addressed paged checkpoint of current state without
     /// rehydrating sealed evidence or archived decision payloads. See
     /// [`Canwu::prepare_paged_checkpoint`].
+    ///
+    /// After a continuation restore or a release ([`Self::release_evidence`])
+    /// it returns [`ErrorCode::HistoryUnavailable`]: the run no longer holds
+    /// the history it needs.
     pub fn prepare_paged_checkpoint(
         &self,
         source: Option<&PagedSimulationCheckpoint>,
@@ -2418,8 +2439,69 @@ impl CompactedCanwu {
             .load_archived_evidence_segment(reference, provider)
     }
 
+    /// Seals the settled part of the retained evidence into a segment and
+    /// drops it from memory, pinning the continuation closure; `None`
+    /// when nothing settled. A seal refused with
+    /// [`ErrorCode::ArchiveNotReady`] (a dependency declared after its
+    /// evidence was sealed) leaves the run unchanged.
+    ///
+    /// The caller keeps every non-empty segment in cursor order to restore
+    /// from a compact or paged checkpoint and its segments, or to replay. A
+    /// host whose saves are continuation checkpoints reads no segment and
+    /// keeps none: it calls [`Self::release_evidence`] instead, which frees
+    /// the same memory without building the segment or its archive index.
+    /// After a release the next seal starts a new segment chain at the
+    /// release's cut.
     pub fn seal_evidence(&mut self) -> Result<Option<EvidenceJournalSegment>, CanwuError> {
         self.simulation.seal_evidence()
+    }
+
+    /// Releases the settled part of the retained evidence without sealing
+    /// it: what a host that keeps no segment, such as one whose saves are
+    /// continuation checkpoints, calls in place of a seal.
+    ///
+    /// The journals move to the settled cut and the continuation closure
+    /// (pending ingress, the causes of pending work, payload-required
+    /// declarations, and the identity facts of declared versions and
+    /// packets) is pinned exactly as by [`Self::seal_evidence`], so, as after
+    /// a seal, every later receipt, checkpoint hash, state hash, and
+    /// continuation checkpoint is the one the run gets without the release.
+    /// No record is copied into a segment or encoded into an archive index.
+    /// It returns the cuts it released between, or `None`, changing nothing,
+    /// when nothing settled past the archived cut. A record version the closure does not
+    /// pin is gone from the run, as after a seal.
+    ///
+    /// As after a seal, every read of retained evidence sees only evidence
+    /// after the cut: [`Self::boundaries`], [`Self::events`],
+    /// [`Self::outbox_entries`], `CanwuViewer::visible_changes_since`,
+    /// `CanwuViewer::evaluation_traces`, [`Self::explain`], the bodies of
+    /// record versions the closure does not pin, and
+    /// [`Self::load_archived_evidence_segment`]. Unlike a seal, a release
+    /// leaves no segment to read that evidence back from, so the outbox
+    /// delivery identities of the released boundaries are gone for good
+    /// ([`Self::outbox_entries_for_segment`] needs a segment). A host drains
+    /// [`Self::outbox_entries`], and any other retained read it needs, before
+    /// it releases.
+    ///
+    /// A release ends the run's history at its cut, as a continuation
+    /// restore does: [`Self::continuation_base`] moves to the cut, with no
+    /// continuation hash, and [`Self::sealed_evidence_cursor`] answers `None`
+    /// until the run seals again. [`Self::checkpoint`],
+    /// [`Self::prepare_paged_checkpoint`], [`Self::snapshot_with_segments`],
+    /// and [`Self::replay_journal_with_segments`] then return
+    /// [`ErrorCode::HistoryUnavailable`], so write any compact or paged
+    /// checkpoint, or snapshot or replay journal from segments, before the
+    /// first release. Segments sealed before a release no longer chain to the
+    /// run; a later seal starts a new chain at the release's cut and serves
+    /// archived-evidence reads, not a restore or a replay.
+    ///
+    /// It is refused wherever a seal or a continuation checkpoint is: with
+    /// [`ErrorCode::ArchiveNotReady`] when a dependency was declared after
+    /// its evidence was sealed or released, and with
+    /// [`ErrorCode::PluginNotActive`] while the plugin registry is not
+    /// active. A refused release leaves the run unchanged.
+    pub fn release_evidence(&mut self) -> Result<Option<EvidenceRelease>, CanwuError> {
+        self.simulation.release_evidence()
     }
 
     pub fn prepare_evidence_seal(&self) -> Result<Option<PreparedEvidenceSeal>, CanwuError> {
@@ -2434,6 +2516,12 @@ impl CompactedCanwu {
         self.simulation.commit_evidence_seal(token, provider)
     }
 
+    /// A full snapshot from the run's sealed prefix (see
+    /// [`Self::journal_segment_since`]) plus its retained tail.
+    ///
+    /// After a continuation restore or a release ([`Self::release_evidence`])
+    /// it returns [`ErrorCode::HistoryUnavailable`]: the run no longer holds
+    /// the history it needs.
     pub fn snapshot_with_segments(
         &self,
         segments: Vec<EvidenceJournalSegment>,
@@ -2441,6 +2529,12 @@ impl CompactedCanwu {
         self.simulation.snapshot_with_segments(segments)
     }
 
+    /// A replay journal from the run's sealed prefix (see
+    /// [`Self::journal_segment_since`]) plus its retained tail.
+    ///
+    /// After a continuation restore or a release ([`Self::release_evidence`])
+    /// it returns [`ErrorCode::HistoryUnavailable`]: the run no longer holds
+    /// the history it needs.
     pub fn replay_journal_with_segments(
         &self,
         segments: Vec<EvidenceJournalSegment>,

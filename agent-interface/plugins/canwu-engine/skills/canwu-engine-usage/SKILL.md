@@ -297,7 +297,13 @@ with a machine-validated payload and declared core/component access.
   with ingress pending and an unadmitted tail. A seal that returns
   `ArchiveNotReady` names a declared dependency the run no longer holds, so
   check an ingress record with `SimulationView::ingress_is_declarable` before
-  a plugin declares it.
+  a plugin declares it. Since 0.26.0 a host whose saves are only
+  continuation checkpoints keeps no segment and calls `release_evidence`
+  instead: it frees the same memory without building a segment or archive
+  index, and ends the run's history at its cut, so write any compact or
+  paged checkpoint, or snapshot from segments, before the first release.
+  Drain `outbox_entries()`, and any other read of retained evidence the host
+  needs, before releasing: no segment is left to rebuild them from.
 - A plugin never declares an initial-scenario record version as
   payload-required: it stays readable after every seal, and since 0.18.0 the
   engine refuses such a declaration in an initial-scenario record when the
@@ -310,7 +316,8 @@ with a machine-validated payload and declared core/component access.
   created or restored refuses nothing. Since 0.21.0 a continuation restore is
   not a seal: `sealed_evidence_cursor()` is `None` until the restored run
   seals, and until then it archives freely, so a host that never seals
-  archives in every session.
+  archives in every session. A release is not a seal either: after
+  `release_evidence` the cursor is `None` until the run seals again.
 - A refusal is never a failed boundary: an inadmissible packet is a recorded
   rejection, a skipped packet with a traced reason
   (`canwu.resource.ingress_skipped.v1`, `canwu.production.ingress_refused.v1`,

@@ -80,8 +80,8 @@ pub use canwu_decision::{
 };
 pub use continuation::{
     BoundaryIngressProvenance, CONTINUATION_CHECKPOINT_FORMAT_VERSION, ContinuationBase,
-    ContinuationCheckpoint, CurrentRecordVersion, EvidenceTimeRun, EvidenceTimes, HistoryFlags,
-    JournalFrontier, JournalFrontiers, PinnedEvidenceRecords, PinnedRecordVersion,
+    ContinuationCheckpoint, CurrentRecordVersion, EvidenceRelease, EvidenceTimeRun, EvidenceTimes,
+    HistoryFlags, JournalFrontier, JournalFrontiers, PinnedEvidenceRecords, PinnedRecordVersion,
     PluginIngressProvenanceFact, PluginIngressStatus, RequestIndex, RetiredRequestRange,
     SettledCommandRequest, SettledDecisionRequest, SettledQueuedCommand, UnadmittedEvidence,
 };
