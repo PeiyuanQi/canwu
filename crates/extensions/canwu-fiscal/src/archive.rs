@@ -802,7 +802,9 @@ impl FiscalState {
     /// first `book_limit` closed books in (scope, cycle) order, and their
     /// offices; see [`crate::prepare_fiscal_archive`], which reads them from a
     /// run, for what the commit holds and when it is refused. `sealed_cut` is
-    /// the run's [`canwu_api::CanwuRun::sealed_evidence_cursor`].
+    /// the run's [`canwu_api::CanwuRun::sealed_evidence_cursor`]. A book with
+    /// settled requests needs its scope's settled buckets too.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn prepare_archive_batch(
         &self,
         book_limit: usize,
@@ -815,7 +817,11 @@ impl FiscalState {
         if self.archive.pending_handles.len() >= MAX_FISCAL_ARCHIVE_PENDING_HANDLES {
             return Err(FiscalArchiveError::Backpressure);
         }
-        let books = self.archive_selection(book_limit);
+        let whole = self
+            .whole_books(&self.archive_selection(book_limit))
+            .map_err(|error| mismatch(error.message))?;
+        let books: Vec<(&FiscalScopeBinding, &FiscalCycleBook)> =
+            whole.iter().map(|(scope, book)| (*scope, book)).collect();
         let receipts: Vec<_> = self.archive.applied_receipts().collect();
         if books.is_empty() && receipts.is_empty() {
             return Err(FiscalArchiveError::NothingToArchive);
@@ -909,6 +915,31 @@ impl FiscalState {
             directory,
             retention,
         })
+    }
+
+    /// The whole books of a selection: each hot book with the settled
+    /// requests of its cycle, which its scope's settled buckets hold, merged
+    /// back (see [`FiscalCycleBook::merged`]). An archived book is the whole
+    /// book, so the blob format does not change, and its totals are the hot
+    /// book's, which count what moved out.
+    ///
+    /// Refuses a book whose loaded settled entries do not add up to its
+    /// settled figures (its scope's buckets were not loaded, or are stale),
+    /// rather than archive it without its settled requests.
+    fn whole_books<'s>(
+        &'s self,
+        books: &[(&'s FiscalScopeBinding, &'s FiscalCycleBook)],
+    ) -> Result<Vec<(&'s FiscalScopeBinding, FiscalCycleBook)>, CanwuError> {
+        books
+            .iter()
+            .map(|(scope, book)| {
+                let whole = book.merged(
+                    self.scope_settled(&scope.id)
+                        .flat_map(|bucket| bucket.entries.values()),
+                )?;
+                Ok((*scope, whole))
+            })
+            .collect()
     }
 
     /// The pages of a commit of `receipts` and `books` prepared from
@@ -1089,6 +1120,9 @@ impl FiscalState {
                         })?;
                     books.push((&ledger.scope, book));
                 }
+                let whole = self.whole_books(&books)?;
+                let books: Vec<(&FiscalScopeBinding, &FiscalCycleBook)> =
+                    whole.iter().map(|(scope, book)| (*scope, book)).collect();
                 (
                     self.archive_pages(&commit.expected_source_root, &receipts, &books)?,
                     completed_totals(self, &books)?,
@@ -1192,8 +1226,17 @@ impl FiscalState {
     }
 
     /// Takes one closed book out of its ledger and into its office's
-    /// archived part of the cycle.
+    /// archived part of the cycle, and its settled requests out of its
+    /// scope's settled buckets: the archived book carries them. Emptying a
+    /// bucket raises no watermark.
     fn archive_hot_book(&mut self, selected: &FiscalArchiveBookRefV1) -> Result<(), CanwuError> {
+        for id in crate::records::settled_bucket_ids(&selected.scope_binding_id) {
+            if let Some(bucket) = self.settled.get_mut(&id) {
+                bucket
+                    .entries
+                    .retain(|_, entry| entry.accounting_cycle_id != selected.accounting_cycle_id);
+            }
+        }
         let ledger = self.ledger_mut(&selected.scope_binding_id)?;
         let book = ledger
             .books

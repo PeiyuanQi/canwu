@@ -19,8 +19,21 @@ pub const FISCAL_CONTENT_SCHEMA_VERSION: u32 = 1;
 /// observer binding's granularity and cadence, an office's mechanisms and its
 /// observers' granularity and cadence, the report schedule record, and the
 /// root's earliest due time and parked flag in place of its list of queue
-/// pages.
-pub const FISCAL_RUNTIME_SCHEMA_VERSION: u32 = 6;
+/// pages. Version 7 moves a settled execution request and its receipts out of
+/// their book into a settled bucket (`canwu.fiscal:settled`, see
+/// [`FiscalSettledBucket`]), and gives a book the per-assessment figures of
+/// what moved out ([`FiscalCycleBook::settled`]).
+pub const FISCAL_RUNTIME_SCHEMA_VERSION: u32 = 7;
+/// Settled buckets each scope has: a settled execution request and its
+/// receipts are kept in the bucket of its scope that the digest of its
+/// request ID names (see [`FiscalSettledBucket`]). Fixed for a run.
+///
+/// The number trades records against write size: every bucket is a record
+/// that keeps its sealed receipt for good and that every seal enumerates,
+/// while a receipt that settles or follows up a request rewrites its bucket,
+/// about `1 / FISCAL_SETTLED_BUCKETS` of the scope's settled requests not
+/// yet archived.
+pub const FISCAL_SETTLED_BUCKETS: usize = 8;
 /// Scope bindings a run may have, one ledger each.
 pub const MAX_FISCAL_SCOPE_BINDINGS: usize = 1_048_576;
 /// Authority bindings one institution's office holds.
@@ -887,8 +900,9 @@ pub enum FiscalAppointmentDecision {
 ///
 /// Every evidence version it cites claims that request of that scope: per
 /// scope, or as the part of aggregated [`FiscalExecutionEvidence`] that
-/// names the scope. Settlement records the receipt in the book that holds
-/// the request, or refuses it with one `canwu.fiscal.ingress_rejected.v1`
+/// names the scope. Settlement records the receipt with its request, in the
+/// book that holds it or, once the request is settled, in its settled bucket
+/// (see [`FiscalSettledBucket`]), or refuses it with one `canwu.fiscal.ingress_rejected.v1`
 /// event whose summary ends with the stable reason (see
 /// [`FISCAL_RECEIPT_REQUEST_UNKNOWN`] and the constants after it); a refused
 /// receipt changes nothing and consumes nothing, and the packets after it
@@ -914,8 +928,9 @@ pub struct FiscalExecutionReceiptPacket {
 /// other field holds for every part. A receipt of a scope that cites it
 /// settles the part naming that scope, at the part's quantity, and is
 /// refused as a receipt citing per-scope evidence is: a part naming a scope
-/// with no such hot request with [`FISCAL_RECEIPT_REQUEST_UNKNOWN`], one
-/// above what its request still authorizes with
+/// with no such request, hot or settled, with
+/// [`FISCAL_RECEIPT_REQUEST_UNKNOWN`], one above what its request still
+/// authorizes (for a settled request, any fulfilling quantity) with
 /// [`FISCAL_RECEIPT_QUANTITY_EXCEEDED`], and a receipt of a scope the
 /// evidence names no part for, or any receipt citing evidence that breaks
 /// these rules, with [`FISCAL_RECEIPT_CLAIM_MISMATCH`]. One exact version
@@ -1480,11 +1495,12 @@ pub const FISCAL_INGRESS_INVALID_REJECTION: &str = "invalid_packet";
 /// changes nothing and its action ID is not consumed.
 pub const FISCAL_INGRESS_ORIGIN_REJECTION: &str = "unauthorized_origin";
 
-/// Reason a receipt is refused when its scope holds no hot execution request
-/// with its request ID: the scope or request does not exist, or the request's
-/// book was archived.
+/// Reason a receipt is refused when its scope holds no execution request
+/// with its request ID, in a hot book or in a settled bucket: the scope or
+/// request does not exist, or the request's book was archived.
 pub const FISCAL_RECEIPT_REQUEST_UNKNOWN: &str = "request_unknown";
-/// Reason a receipt is refused when its request's book is closed.
+/// Reason a receipt is refused when its request's book is closed, whether
+/// the request is in the book or settled.
 pub const FISCAL_RECEIPT_CYCLE_CLOSED: &str = "cycle_closed";
 /// Reason a receipt is refused when it cites no evidence, or more than
 /// [`MAX_FISCAL_EVIDENCE_PER_RECORD`] versions.
@@ -1502,16 +1518,20 @@ pub const FISCAL_RECEIPT_EVIDENCE_NOT_CURRENT: &str = "evidence_not_current";
 /// aggregated [`FiscalExecutionEvidence`].
 pub const FISCAL_RECEIPT_CLAIM_MISMATCH: &str = "claim_mismatch";
 /// Reason a receipt is refused when it would fulfil more than its request
-/// authorizes.
+/// authorizes; a settled request is fulfilled exactly, so only a `Rejected`
+/// or `Excused` receipt of it is accepted.
 pub const FISCAL_RECEIPT_QUANTITY_EXCEEDED: &str = "quantity_exceeded";
 /// Reason a receipt is refused when an external operation it cites already
-/// settled a receipt of its scope's hot books, or repeats within it.
+/// settled a receipt of its scope that is not archived (in a hot book or a
+/// settled bucket), or repeats within it.
 pub const FISCAL_RECEIPT_OPERATION_REUSED: &str = "operation_reused";
 /// Reason a receipt is refused when an evidence version it cites already
-/// settled a receipt of its scope's hot books.
+/// settled a receipt of its scope that is not archived (in a hot book or a
+/// settled bucket).
 pub const FISCAL_RECEIPT_EVIDENCE_REUSED: &str = "evidence_reused";
-/// Reason a receipt is refused when a hot receipt of its scope has its ID
-/// with other content.
+/// Reason a receipt is refused when a receipt of its scope that is not
+/// archived (in a hot book or a settled bucket) has its ID with other
+/// content.
 pub const FISCAL_RECEIPT_ID_CONFLICT: &str = "receipt_id_conflict";
 /// Reason a historical-context change is refused when its year lies outside
 /// the catalog's historical scope.
@@ -2211,6 +2231,153 @@ pub struct FiscalCycleBook {
     pub execution_receipts: BTreeMap<String, FiscalExecutionReceipt>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub audits: BTreeMap<String, FiscalAuditFinding>,
+    /// What moved out of the book, per assessment: a request leaves
+    /// `execution_requests`, with all of its receipts, for its scope's settled
+    /// bucket ([`FiscalSettledBucket`]) when its fulfilled quantity reaches its
+    /// own, and these figures keep what the book's totals, invariants, and
+    /// caps need of it, so the book does not grow with what settled. An
+    /// archived book is the whole book: its settled requests are merged back
+    /// and this map is empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settled: BTreeMap<String, FiscalSettledFigures>,
+}
+
+/// What the requests of one assessment that moved out of their book sum to:
+/// see [`FiscalCycleBook::settled`].
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalSettledFigures {
+    /// Requests that moved out.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub requests: u32,
+    /// Their receipts, of every disposition.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub receipts: u32,
+    /// The quantities of the `Collect` requests among them.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub collection_requested: u64,
+    /// Their fulfilled quantities, by kind.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub collected: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub remitted: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub disbursed: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub reserved: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub returned: u64,
+}
+
+impl FiscalSettledFigures {
+    /// Adds one settled request and its receipts.
+    pub(crate) fn add(&mut self, entry: &FiscalSettledExecution) -> Result<(), CanwuError> {
+        let receipts = u32::try_from(entry.receipts.len())
+            .map_err(|_| invalid("fiscal settled receipt count overflowed"))?;
+        self.requests = self
+            .requests
+            .checked_add(1)
+            .ok_or_else(|| invalid("fiscal settled request count overflowed"))?;
+        self.receipts = self
+            .receipts
+            .checked_add(receipts)
+            .ok_or_else(|| invalid("fiscal settled receipt count overflowed"))?;
+        let request = &entry.request;
+        if request.kind == FiscalExecutionKind::Collect {
+            checked_add(
+                &mut self.collection_requested,
+                request.quantity,
+                "settled collection total",
+            )?;
+        }
+        let target = match request.kind {
+            FiscalExecutionKind::Collect => &mut self.collected,
+            FiscalExecutionKind::Remit => &mut self.remitted,
+            FiscalExecutionKind::Disburse => &mut self.disbursed,
+            FiscalExecutionKind::Reserve => &mut self.reserved,
+            FiscalExecutionKind::Return => &mut self.returned,
+        };
+        checked_add(target, entry.fulfilled()?, "settled fulfilled total")
+    }
+
+    /// Counts one more receipt of a settled request.
+    pub(crate) fn add_receipt(&mut self) -> Result<(), CanwuError> {
+        self.receipts = self
+            .receipts
+            .checked_add(1)
+            .ok_or_else(|| invalid("fiscal settled receipt count overflowed"))?;
+        Ok(())
+    }
+}
+
+/// One settled execution request with all of its receipts, as its scope's
+/// settled bucket keeps it while its book is hot.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalSettledExecution {
+    /// The cycle of the book the request belongs to.
+    pub accounting_cycle_id: String,
+    pub request: FiscalExecutionRequest,
+    /// Keyed by receipt ID.
+    pub receipts: BTreeMap<String, FiscalExecutionReceipt>,
+}
+
+impl FiscalSettledExecution {
+    /// The quantity the request's `Fulfilled` and `Partial` receipts sum to.
+    pub fn fulfilled(&self) -> Result<u64, CanwuError> {
+        fulfilled_quantity(self.receipts.values())
+    }
+}
+
+/// The quantity the fulfilling receipts among `receipts` sum to.
+pub(crate) fn fulfilled_quantity<'a>(
+    receipts: impl IntoIterator<Item = &'a FiscalExecutionReceipt>,
+) -> Result<u64, CanwuError> {
+    receipts
+        .into_iter()
+        .filter(|receipt| receipt.disposition.counts_as_fulfillment())
+        .try_fold(0_u64, |total, receipt| total.checked_add(receipt.quantity))
+        .ok_or_else(|| invalid("fiscal receipt total overflowed"))
+}
+
+/// One settled bucket of one scope: the settled execution requests, with
+/// their receipts, whose request IDs' digest names the bucket (see
+/// [`crate::fiscal_settled_reference`]). The payload of a
+/// `canwu.fiscal:settled` record, identity `{scope}/{bucket}`.
+///
+/// A request moves here from its book when its fulfilled quantity reaches
+/// its own, written once with the receipt that settles it; a later
+/// `Rejected` or `Excused` receipt of it is added here. Its entry leaves
+/// when its book is archived, and the archived book carries it. A bucket is
+/// never retired: an emptied one stays as an empty record. Its record
+/// declares, as required evidence, the boundary-established versions its
+/// receipts cite, as a ledger does for its hot receipts.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalSettledBucket {
+    pub scope: String,
+    /// The bucket's number, below [`FISCAL_SETTLED_BUCKETS`].
+    pub bucket: u32,
+    /// Keyed by request ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub entries: BTreeMap<String, FiscalSettledExecution>,
+}
+
+impl FiscalSettledBucket {
+    /// An empty bucket.
+    #[must_use]
+    pub fn new(scope: impl Into<String>, bucket: u32) -> Self {
+        Self {
+            scope: scope.into(),
+            bucket,
+            entries: BTreeMap::new(),
+        }
+    }
+
+    /// The evidence versions its receipts cite.
+    pub(crate) fn citations(&self) -> impl Iterator<Item = &DomainRecordVersionRef> {
+        self.entries
+            .values()
+            .flat_map(|entry| entry.receipts.values())
+            .flat_map(|receipt| receipt.external_evidence.iter())
+    }
 }
 
 impl FiscalCycleBook {
@@ -2226,7 +2393,148 @@ impl FiscalCycleBook {
             execution_requests: BTreeMap::new(),
             execution_receipts: BTreeMap::new(),
             audits: BTreeMap::new(),
+            settled: BTreeMap::new(),
         }
+    }
+
+    /// Execution requests of the book, hot and moved out.
+    #[must_use]
+    pub fn request_count(&self) -> usize {
+        self.execution_requests.len()
+            + self
+                .settled
+                .values()
+                .map(|figures| figures.requests as usize)
+                .sum::<usize>()
+    }
+
+    /// Execution receipts of the book, hot and moved out.
+    #[must_use]
+    pub fn receipt_count(&self) -> usize {
+        self.execution_receipts.len()
+            + self
+                .settled
+                .values()
+                .map(|figures| figures.receipts as usize)
+                .sum::<usize>()
+    }
+
+    /// The quantity the hot request `request_id`'s fulfilling receipts sum
+    /// to.
+    pub(crate) fn fulfilled(&self, request_id: &str) -> Result<u64, CanwuError> {
+        fulfilled_quantity(
+            self.execution_receipts
+                .values()
+                .filter(|receipt| receipt.request_id == request_id),
+        )
+    }
+
+    /// The hot requests whose fulfilled quantity has reached their own.
+    pub(crate) fn settled_requests(&self) -> Result<Vec<String>, CanwuError> {
+        let mut settled = Vec::new();
+        for request in self.execution_requests.values() {
+            if self.fulfilled(&request.id)? == request.quantity {
+                settled.push(request.id.clone());
+            }
+        }
+        Ok(settled)
+    }
+
+    /// Takes a hot request and all of its receipts out of the book, adds them
+    /// to the figures of its assessment, and returns them. Nothing changes
+    /// when it fails.
+    pub(crate) fn take_settled(
+        &mut self,
+        request_id: &str,
+    ) -> Result<FiscalSettledExecution, CanwuError> {
+        let request = self
+            .execution_requests
+            .get(request_id)
+            .ok_or_else(|| invalid("a settled fiscal request is not in its book"))?
+            .clone();
+        let receipts: BTreeMap<String, FiscalExecutionReceipt> = self
+            .execution_receipts
+            .iter()
+            .filter(|(_, receipt)| receipt.request_id == request_id)
+            .map(|(id, receipt)| (id.clone(), receipt.clone()))
+            .collect();
+        let entry = FiscalSettledExecution {
+            accounting_cycle_id: self.accounting_cycle_id.clone(),
+            request,
+            receipts,
+        };
+        let mut figures = self
+            .settled
+            .get(&entry.request.assessment_id)
+            .cloned()
+            .unwrap_or_default();
+        figures.add(&entry)?;
+        self.settled
+            .insert(entry.request.assessment_id.clone(), figures);
+        self.execution_requests.remove(request_id);
+        for id in entry.receipts.keys() {
+            self.execution_receipts.remove(id);
+        }
+        Ok(entry)
+    }
+
+    /// The whole book: this book with `entries`, the settled requests of its
+    /// cycle, merged back into its requests and receipts, and no figures of
+    /// what moved out. What an archived book holds.
+    ///
+    /// `entries` are every settled entry of this book's scope (the entries of
+    /// its settled buckets in [`FiscalState::settled`]); entries of another
+    /// cycle are skipped. Entries are matched by cycle only, so pass
+    /// only this book's scope's entries. The entries of this cycle must add
+    /// up to the book's [`FiscalCycleBook::settled`] figures exactly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when they do not (for example, the scope's buckets
+    /// were not loaded, or are stale), or when an entry's request or receipt
+    /// ID is also in the book.
+    pub fn merged<'a>(
+        &self,
+        entries: impl IntoIterator<Item = &'a FiscalSettledExecution>,
+    ) -> Result<Self, CanwuError> {
+        let mut book = self.clone();
+        let mut figures: BTreeMap<String, FiscalSettledFigures> = BTreeMap::new();
+        for entry in entries {
+            if entry.accounting_cycle_id != book.accounting_cycle_id {
+                continue;
+            }
+            figures
+                .entry(entry.request.assessment_id.clone())
+                .or_default()
+                .add(entry)?;
+            if book
+                .execution_requests
+                .insert(entry.request.id.clone(), entry.request.clone())
+                .is_some()
+            {
+                return Err(invalid(
+                    "a settled fiscal request is also in its book, so the whole book cannot be built",
+                ));
+            }
+            for (id, receipt) in &entry.receipts {
+                if book
+                    .execution_receipts
+                    .insert(id.clone(), receipt.clone())
+                    .is_some()
+                {
+                    return Err(invalid(
+                        "a settled fiscal receipt is also in its book, so the whole book cannot be built",
+                    ));
+                }
+            }
+        }
+        if figures != book.settled {
+            return Err(invalid(
+                "the settled requests of a fiscal book do not add up to its settled figures: its scope's settled buckets are missing or stale",
+            ));
+        }
+        book.settled.clear();
+        Ok(book)
     }
 
     #[must_use]
@@ -2285,11 +2593,15 @@ impl FiscalCycleBook {
                     receipt.quantity,
                 )
             }),
+            self.settled
+                .iter()
+                .map(|(assessment_id, figures)| (assessment_id.as_str(), figures)),
         )
     }
 
     /// The evidence versions the book's hot objects cite: its assessments'
-    /// commutation quotes and its receipts' evidence.
+    /// commutation quotes and its hot receipts' evidence. Its settled
+    /// requests' receipts are cited by their settled bucket.
     pub(crate) fn citations(&self) -> impl Iterator<Item = &DomainRecordVersionRef> {
         self.assessments
             .values()
@@ -2413,7 +2725,8 @@ fn sum(left: u64, right: u64) -> Result<u64, CanwuError> {
 /// partition order, from the fields of its objects that they depend on:
 /// each assessment's ID, unit, payment form, and quantity; each remission's
 /// assessment and quantity; each execution request's ID, assessment, and
-/// kind; and each receipt's request, disposition, and quantity. Both
+/// kind; each receipt's request, disposition, and quantity; and the figures
+/// of the requests that moved out, per assessment. Both
 /// [`FiscalCycleBook::totals`] and the report system's read of a book in its
 /// record ([`BookFigures`]) compute them here.
 pub(crate) fn cycle_totals<'a>(
@@ -2422,6 +2735,7 @@ pub(crate) fn cycle_totals<'a>(
     remissions: impl IntoIterator<Item = (&'a str, u64)>,
     requests: impl IntoIterator<Item = (&'a str, &'a str, FiscalExecutionKind)>,
     receipts: impl IntoIterator<Item = (&'a str, FiscalReceiptDisposition, u64)>,
+    settled: impl IntoIterator<Item = (&'a str, &'a FiscalSettledFigures)>,
 ) -> Result<Vec<FiscalCycleTotal>, CanwuError> {
     let mut totals = BTreeMap::<(&str, FiscalPaymentForm), FiscalCycleTotal>::new();
     let mut partitions = BTreeMap::new();
@@ -2468,6 +2782,19 @@ pub(crate) fn cycle_totals<'a>(
         };
         *target = sum(*target, quantity)?;
     }
+    for (assessment_id, figures) in settled {
+        let key = partitions
+            .get(assessment_id)
+            .ok_or_else(|| invalid("fiscal settled figures have no assessment in their book"))?;
+        let total = totals
+            .get_mut(key)
+            .ok_or_else(|| invalid("fiscal settled partition is unavailable"))?;
+        total.collected = sum(total.collected, figures.collected)?;
+        total.remitted = sum(total.remitted, figures.remitted)?;
+        total.disbursed = sum(total.disbursed, figures.disbursed)?;
+        total.reserved = sum(total.reserved, figures.reserved)?;
+        total.returned = sum(total.returned, figures.returned)?;
+    }
     totals
         .into_values()
         .map(|mut total| {
@@ -2495,6 +2822,8 @@ pub(crate) struct BookFigures<'a> {
     execution_requests: BTreeMap<&'a str, RequestFigures<'a>>,
     #[serde(default, borrow)]
     execution_receipts: BTreeMap<&'a str, ReceiptFigures<'a>>,
+    #[serde(default, borrow)]
+    settled: BTreeMap<&'a str, FiscalSettledFigures>,
 }
 
 #[derive(Deserialize)]
@@ -2550,6 +2879,9 @@ impl BookFigures<'_> {
             self.execution_receipts
                 .values()
                 .map(|receipt| (receipt.request_id, receipt.disposition, receipt.quantity)),
+            self.settled
+                .iter()
+                .map(|(assessment_id, figures)| (*assessment_id, figures)),
         )
     }
 }
@@ -2622,7 +2954,10 @@ impl FiscalScopeLedger {
             .find(|book| book.assessments.contains_key(assessment_id))
     }
 
-    /// The book that holds the execution request `request_id`.
+    /// The hot book that holds the execution request `request_id` in its
+    /// `execution_requests`. A settled request has left its book and is not
+    /// found here: use [`FiscalState::execution_request`], which finds a
+    /// request in its book or its settled bucket.
     #[must_use]
     pub fn book_of_request(&self, request_id: &str) -> Option<&FiscalCycleBook> {
         self.books
@@ -2630,8 +2965,10 @@ impl FiscalScopeLedger {
             .find(|book| book.execution_requests.contains_key(request_id))
     }
 
-    /// The book that holds the assessment, execution request, or receipt
-    /// `target_id`, looked up in that order.
+    /// The hot book that holds the assessment, execution request, or
+    /// receipt `target_id` in its own maps, looked up in that order. A
+    /// settled request or receipt is not found here, though an audit may
+    /// name it; settlement finds it in the scope's settled buckets.
     #[must_use]
     pub fn book_of_audit_target(&self, target_id: &str) -> Option<&FiscalCycleBook> {
         self.book_of_assessment(target_id)
@@ -3720,6 +4057,12 @@ pub struct FiscalState {
     /// payload of the `canwu.fiscal:report-schedule` record.
     #[serde(default, skip_serializing_if = "FiscalReportSchedule::is_empty")]
     pub report_schedule: FiscalReportSchedule,
+    /// The settled buckets, keyed by record identity (`{scope}/{bucket}`, see
+    /// [`crate::fiscal_settled_reference`]): the settled execution requests
+    /// of hot books, with their receipts. Each is the payload of a
+    /// `canwu.fiscal:settled` record. An empty one may be held.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settled: BTreeMap<String, FiscalSettledBucket>,
 }
 
 impl FiscalState {
@@ -3747,6 +4090,7 @@ impl FiscalState {
             observers: BTreeMap::new(),
             report_queue: BTreeMap::new(),
             report_schedule: FiscalReportSchedule::default(),
+            settled: BTreeMap::new(),
         }
     }
 
@@ -3851,9 +4195,7 @@ impl FiscalState {
         audit: FiscalAuditFinding,
     ) -> Result<(), CanwuError> {
         let cycle = self
-            .ledger(scope_binding_id)
-            .and_then(|ledger| ledger.book_of_audit_target(&audit.target_id))
-            .map(|book| book.accounting_cycle_id.clone())
+            .audit_target_cycle(scope_binding_id, &audit.target_id)
             .ok_or_else(|| invalid("fiscal audit target is not in its scope's books"))?;
         let book = self
             .ledger_mut(scope_binding_id)?
@@ -3998,16 +4340,174 @@ impl FiscalState {
         self.books().flat_map(|(_, book)| book.remissions.values())
     }
 
-    /// Every hot execution request.
+    /// Every execution request not archived: those of the hot books, then
+    /// the settled ones the state holds (see [`Self::settled_executions`]).
     pub fn execution_requests(&self) -> impl Iterator<Item = &FiscalExecutionRequest> {
         self.books()
             .flat_map(|(_, book)| book.execution_requests.values())
+            .chain(self.settled_executions().map(|entry| &entry.request))
     }
 
-    /// Every hot execution receipt.
+    /// Every execution receipt not archived: those of the hot books, then
+    /// those of the settled requests the state holds.
     pub fn execution_receipts(&self) -> impl Iterator<Item = &FiscalExecutionReceipt> {
         self.books()
             .flat_map(|(_, book)| book.execution_receipts.values())
+            .chain(
+                self.settled_executions()
+                    .flat_map(|entry| entry.receipts.values()),
+            )
+    }
+
+    /// Every settled execution request the state holds, with its receipts,
+    /// by settled bucket and then request ID.
+    pub fn settled_executions(&self) -> impl Iterator<Item = &FiscalSettledExecution> {
+        self.settled
+            .values()
+            .flat_map(|bucket| bucket.entries.values())
+    }
+
+    /// The settled execution request `request_id` of a scope, with its
+    /// receipts, if the state holds it.
+    #[must_use]
+    pub fn settled_execution(
+        &self,
+        scope_binding_id: &str,
+        request_id: &str,
+    ) -> Option<&FiscalSettledExecution> {
+        self.settled
+            .get(&crate::records::settled_bucket_of(
+                scope_binding_id,
+                request_id,
+            ))
+            .and_then(|bucket| bucket.entries.get(request_id))
+    }
+
+    /// The execution request `request_id` of a scope, hot or settled, with
+    /// the book it belongs to. [`FiscalScopeLedger::book_of_request`] finds
+    /// only a hot one.
+    #[must_use]
+    pub fn execution_request(
+        &self,
+        scope_binding_id: &str,
+        request_id: &str,
+    ) -> Option<(&FiscalCycleBook, &FiscalExecutionRequest)> {
+        let ledger = self.ledger(scope_binding_id)?;
+        if let Some(book) = ledger.book_of_request(request_id) {
+            return book
+                .execution_requests
+                .get(request_id)
+                .map(|request| (book, request));
+        }
+        let entry = self.settled_execution(scope_binding_id, request_id)?;
+        ledger
+            .books
+            .get(&entry.accounting_cycle_id)
+            .map(|book| (book, &entry.request))
+    }
+
+    /// The settled buckets of one scope the state holds.
+    pub(crate) fn scope_settled<'s>(
+        &'s self,
+        scope_binding_id: &str,
+    ) -> impl Iterator<Item = &'s FiscalSettledBucket> + use<'s> {
+        crate::records::settled_bucket_ids(scope_binding_id)
+            .into_iter()
+            .filter_map(|id| self.settled.get(&id))
+    }
+
+    /// The cycle of the book that holds the audit target `target_id` of a
+    /// scope, looked up by kind in the order 0.24.0 used, so an ID used by
+    /// two kinds resolves as it did: an assessment, then an execution
+    /// request (hot, then settled), then a receipt (hot, then settled).
+    /// Settled requests and receipts are found only in the buckets the
+    /// state holds.
+    pub(crate) fn audit_target_cycle(
+        &self,
+        scope_binding_id: &str,
+        target_id: &str,
+    ) -> Option<String> {
+        let ledger = self.ledger(scope_binding_id)?;
+        if let Some(book) = ledger
+            .book_of_assessment(target_id)
+            .or_else(|| ledger.book_of_request(target_id))
+        {
+            return Some(book.accounting_cycle_id.clone());
+        }
+        if let Some(entry) = self.settled_execution(scope_binding_id, target_id) {
+            return Some(entry.accounting_cycle_id.clone());
+        }
+        if let Some(book) = ledger
+            .books
+            .values()
+            .find(|book| book.execution_receipts.contains_key(target_id))
+        {
+            return Some(book.accounting_cycle_id.clone());
+        }
+        self.scope_settled(scope_binding_id)
+            .flat_map(|bucket| bucket.entries.values())
+            .find(|entry| entry.receipts.contains_key(target_id))
+            .map(|entry| entry.accounting_cycle_id.clone())
+    }
+
+    /// Moves the hot request `request_id` of a scope's book, with its
+    /// receipts, into its settled bucket, which the state must hold or have
+    /// none of. Nothing changes when it fails.
+    pub(crate) fn move_out(
+        &mut self,
+        scope_binding_id: &str,
+        accounting_cycle_id: &str,
+        request_id: &str,
+    ) -> Result<(), CanwuError> {
+        let number = crate::records::settled_bucket_number(request_id);
+        let id = crate::records::settled_bucket_id(scope_binding_id, number);
+        if self
+            .settled
+            .get(&id)
+            .is_some_and(|bucket| bucket.entries.contains_key(request_id))
+        {
+            return Err(invalid(format!(
+                "fiscal execution request {request_id} of scope {scope_binding_id} is used twice: \
+                 it is already settled"
+            )));
+        }
+        let entry = self
+            .ledger_mut(scope_binding_id)?
+            .books
+            .get_mut(accounting_cycle_id)
+            .ok_or_else(|| invalid("fiscal accounting cycle book is unavailable"))?
+            .take_settled(request_id)?;
+        self.settled
+            .entry(id)
+            .or_insert_with(|| FiscalSettledBucket::new(scope_binding_id, number))
+            .entries
+            .insert(request_id.to_owned(), entry);
+        Ok(())
+    }
+
+    /// Moves every hot request whose fulfilled quantity has reached its own
+    /// into its settled bucket, as settlement does when a receipt settles
+    /// it. [`Self::recompute_derived`] runs it, so an authored state is
+    /// partitioned as a run keeps it. All or nothing: the moves are made on a
+    /// copy, which replaces the state only when every one succeeds.
+    pub(crate) fn move_out_settled(&mut self) -> Result<(), CanwuError> {
+        let mut settled = Vec::new();
+        for (scope, ledger) in &self.ledgers {
+            for (cycle, book) in &ledger.books {
+                for request in book.settled_requests()? {
+                    settled.push((scope.clone(), cycle.clone(), request));
+                }
+            }
+        }
+        if settled.is_empty() {
+            return Ok(());
+        }
+        let mut next = self.clone();
+        for (scope, cycle, request) in settled {
+            next.move_out(&scope, &cycle, &request)?;
+        }
+        *self = next;
+        Ok(())
     }
 
     /// Every hot audit finding.
@@ -4387,6 +4887,7 @@ impl FiscalState {
                 )));
             }
         }
+        self.validate_settled()?;
         for (key, jurisdiction) in &self.jurisdictions {
             if *key != jurisdiction.region_id {
                 return Err(invalid(
@@ -4468,6 +4969,136 @@ impl FiscalState {
             return Err(invalid(
                 "a fiscal authority basis must be an application record, not a fiscal record",
             ));
+        }
+        Ok(())
+    }
+
+    /// Checks the settled buckets against the books: each bucket on its own
+    /// and keyed by its identity; each entry in a hot book of its scope, of an
+    /// assessment of that book, valid for it; each book's settled figures
+    /// exactly what its entries sum to; settled request and receipt IDs used
+    /// by no hot object of their kind in the scope; evidence and external
+    /// operations settling at most one receipt of the scope, hot or settled;
+    /// and every audit finding's target in its book, hot or settled.
+    #[allow(clippy::too_many_lines)]
+    fn validate_settled(&self) -> Result<(), CanwuError> {
+        type Figures = BTreeMap<(String, String), BTreeMap<String, FiscalSettledFigures>>;
+        let mut figures: Figures = BTreeMap::new();
+        let mut targets = BTreeSet::<(&str, &str, &str)>::new();
+        for (key, bucket) in &self.settled {
+            validate_settled_bucket(bucket)?;
+            if *key != crate::records::settled_bucket_id(&bucket.scope, bucket.bucket) {
+                return Err(invalid(
+                    "a fiscal settled bucket is not keyed by its identity",
+                ));
+            }
+            let ledger = self
+                .ledgers
+                .get(&bucket.scope)
+                .ok_or_else(|| invalid("a fiscal settled bucket names an unknown scope"))?;
+            for (request_id, entry) in &bucket.entries {
+                let book = ledger
+                    .books
+                    .get(&entry.accounting_cycle_id)
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "settled request {request_id} names no hot book of its scope"
+                        ))
+                    })?;
+                let assessment = book
+                    .assessments
+                    .get(&entry.request.assessment_id)
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "settled request {request_id} has no assessment in its book"
+                        ))
+                    })?;
+                validate_request(&entry.request, assessment, &ledger.scope)?;
+                figures
+                    .entry((bucket.scope.clone(), entry.accounting_cycle_id.clone()))
+                    .or_default()
+                    .entry(entry.request.assessment_id.clone())
+                    .or_default()
+                    .add(entry)?;
+                targets.insert((&bucket.scope, &entry.accounting_cycle_id, request_id));
+                for receipt in entry.receipts.keys() {
+                    targets.insert((&bucket.scope, &entry.accounting_cycle_id, receipt));
+                }
+            }
+        }
+        for (scope, ledger) in &self.ledgers {
+            for (cycle, book) in &ledger.books {
+                let expected = figures
+                    .remove(&(scope.clone(), cycle.clone()))
+                    .unwrap_or_default();
+                if book.settled != expected {
+                    return Err(invalid(format!(
+                        "the settled figures of book {cycle} of scope {scope} differ from its settled requests"
+                    )));
+                }
+                for audit in book.audits.values() {
+                    let target = audit.target_id.as_str();
+                    if !book.assessments.contains_key(target)
+                        && !book.execution_requests.contains_key(target)
+                        && !book.execution_receipts.contains_key(target)
+                        && !targets.contains(&(scope.as_str(), cycle.as_str(), target))
+                    {
+                        return Err(invalid(format!("audit {} has an unknown target", audit.id)));
+                    }
+                }
+            }
+            // IDs, evidence, and operations across the scope, hot and
+            // settled.
+            let settled: Vec<&FiscalSettledExecution> = self
+                .scope_settled(scope)
+                .flat_map(|bucket| bucket.entries.values())
+                .collect();
+            if settled.is_empty() {
+                continue;
+            }
+            let mut requests = BTreeSet::new();
+            let mut receipts = BTreeSet::new();
+            let mut evidence = BTreeSet::new();
+            let mut operations = BTreeSet::new();
+            let hot = ledger
+                .books
+                .values()
+                .flat_map(|book| book.execution_receipts.values());
+            let all_receipts = hot.chain(settled.iter().flat_map(|entry| entry.receipts.values()));
+            for receipt in all_receipts {
+                if !receipts.insert(receipt.id.as_str())
+                    || receipt
+                        .external_evidence
+                        .iter()
+                        .any(|version| !evidence.insert(version))
+                    || receipt
+                        .external_operations
+                        .iter()
+                        .any(|operation| !operations.insert(operation))
+                {
+                    return Err(invalid(format!(
+                        "fiscal receipt {} of scope {scope} repeats an ID, evidence, or an external operation",
+                        receipt.id
+                    )));
+                }
+            }
+            for id in ledger
+                .books
+                .values()
+                .flat_map(|book| book.execution_requests.keys())
+                .chain(settled.iter().map(|entry| &entry.request.id))
+            {
+                if !requests.insert(id.as_str()) {
+                    return Err(invalid(format!(
+                        "fiscal execution request ID {id} is used twice in scope {scope}"
+                    )));
+                }
+            }
+        }
+        if let Some(((scope, cycle), _)) = figures.into_iter().next() {
+            return Err(invalid(format!(
+                "settled requests of scope {scope} name book {cycle}, which is not hot"
+            )));
         }
         Ok(())
     }
@@ -4564,9 +5195,24 @@ impl FiscalState {
     /// its transition candidates as of `at`; the observers' rows; the report
     /// schedule's page due times and parked pages; and the root's earliest
     /// due time and parked flag. [`Self::into_records`] runs it. The first
-    /// report of each observer is queued by [`Self::add_observer`].
-    pub fn recompute_derived(&mut self, catalog: &CompiledFiscalCatalog, at: SimTime) {
+    /// report of each observer is queued by [`Self::add_observer`]. Every
+    /// hot request whose fulfilled quantity has reached its own moves, with
+    /// its receipts, into its scope's settled bucket, as settlement moves it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when a fulfilled request cannot be moved out: its
+    /// ID is already settled in its scope (an authored request ID used twice
+    /// across books), or its figures overflow. The state is then unchanged:
+    /// no request moves out and no derived field is recomputed.
+    pub fn recompute_derived(
+        &mut self,
+        catalog: &CompiledFiscalCatalog,
+        at: SimTime,
+    ) -> Result<(), CanwuError> {
+        self.move_out_settled()?;
         self.recompute_derived_fields(catalog, Some(at));
+        Ok(())
     }
 
     #[allow(clippy::too_many_lines)]
@@ -5156,8 +5802,8 @@ pub(crate) fn validate_ledger(
         if book.assessments.is_empty()
             || book.assessments.len() > MAX_FISCAL_PARTITION_KEYS
             || book.remissions.len() > MAX_FISCAL_REMISSIONS_PER_BOOK
-            || book.execution_requests.len() > MAX_FISCAL_EXECUTION_REQUESTS_PER_BOOK
-            || book.execution_receipts.len() > MAX_FISCAL_EXECUTION_RECEIPTS_PER_BOOK
+            || book.request_count() > MAX_FISCAL_EXECUTION_REQUESTS_PER_BOOK
+            || book.receipt_count() > MAX_FISCAL_EXECUTION_RECEIPTS_PER_BOOK
             || book.audits.len() > MAX_FISCAL_AUDITS_PER_BOOK
             || book.revision == 0
         {
@@ -5239,6 +5885,27 @@ pub(crate) fn validate_ledger(
             )?;
         }
         let mut collection_requested_by_assessment = BTreeMap::<&str, u64>::new();
+        // What moved out: figures of the book's own assessments, each of at
+        // least one request that settled with a fulfilling receipt, whose
+        // collection requests were collected in full.
+        for (assessment_id, figures) in &book.settled {
+            if !book.assessments.contains_key(assessment_id)
+                || figures.requests == 0
+                || figures.receipts < figures.requests
+                || figures.collected != figures.collection_requested
+            {
+                return Err(invalid(format!(
+                    "the settled figures of assessment {assessment_id} are invalid"
+                )));
+            }
+            checked_add(
+                collection_requested_by_assessment
+                    .entry(assessment_id)
+                    .or_default(),
+                figures.collection_requested,
+                "collection request total",
+            )?;
+        }
         for request in book.execution_requests.values() {
             let assessment = book
                 .assessments
@@ -5249,19 +5916,7 @@ pub(crate) fn validate_ledger(
                         request.id
                     ))
                 })?;
-            if request.quantity == 0
-                || request.unit != assessment.unit
-                || request.payment_form != assessment.payment_form
-                || request.resource.get() == 0
-                || request.source == request.target
-                || request.institution != scope.institution
-                || request.source != request.institution && request.target != request.institution
-            {
-                return Err(invalid(format!(
-                    "execution request {} is invalid",
-                    request.id
-                )));
-            }
+            validate_request(request, assessment, scope)?;
             if request.kind == FiscalExecutionKind::Collect {
                 checked_add(
                     collection_requested_by_assessment
@@ -5328,26 +5983,129 @@ pub(crate) fn validate_ledger(
             }
         }
         for request in book.execution_requests.values() {
-            if fulfilled_by_request
+            let fulfilled = fulfilled_by_request
                 .get(request.id.as_str())
                 .copied()
-                .unwrap_or_default()
-                > request.quantity
-            {
+                .unwrap_or_default();
+            if fulfilled > request.quantity {
                 return Err(invalid(format!(
                     "execution request {} was fulfilled more than once",
                     request.id
                 )));
             }
+            // A settled request leaves its book with the receipt that
+            // settles it, so the partition is canonical.
+            if fulfilled == request.quantity {
+                return Err(invalid(format!(
+                    "execution request {} is settled but still in its book",
+                    request.id
+                )));
+            }
         }
+        // A finding may name a settled request or receipt, which only its
+        // settled bucket holds: settlement and admission find it there, and
+        // the activation audit checks it.
         for audit in book.audits.values() {
             if audit.evidence.len() > MAX_FISCAL_EVIDENCE_PER_RECORD
                 || !book.assessments.contains_key(&audit.target_id)
                     && !book.execution_requests.contains_key(&audit.target_id)
                     && !book.execution_receipts.contains_key(&audit.target_id)
+                    && book.settled.is_empty()
             {
                 return Err(invalid(format!("audit {} has an unknown target", audit.id)));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Checks one execution request against its assessment and its scope.
+fn validate_request(
+    request: &FiscalExecutionRequest,
+    assessment: &FiscalAssessment,
+    scope: &FiscalScopeBinding,
+) -> Result<(), CanwuError> {
+    if request.quantity == 0
+        || request.unit != assessment.unit
+        || request.payment_form != assessment.payment_form
+        || request.resource.get() == 0
+        || request.source == request.target
+        || request.institution != scope.institution
+        || request.source != request.institution && request.target != request.institution
+    {
+        return Err(invalid(format!(
+            "execution request {} is invalid",
+            request.id
+        )));
+    }
+    Ok(())
+}
+
+/// Checks one receipt on its own: its evidence and operations, and that its
+/// quantity agrees with its disposition.
+fn validate_receipt(receipt: &FiscalExecutionReceipt) -> Result<(), CanwuError> {
+    if receipt.external_evidence.is_empty()
+        || receipt.external_evidence.len() > MAX_FISCAL_EVIDENCE_PER_RECORD
+        || receipt.external_operations.len() != receipt.external_evidence.len()
+        || receipt
+            .external_operations
+            .iter()
+            .any(|operation| operation.external_operation_id.trim().is_empty())
+        || receipt.disposition.counts_as_fulfillment() == (receipt.quantity == 0)
+    {
+        return Err(invalid(format!(
+            "execution receipt {} is invalid",
+            receipt.id
+        )));
+    }
+    Ok(())
+}
+
+/// Checks one settled bucket on its own: its identity, and each entry's
+/// request and receipts, keyed by their IDs, in the bucket the request's ID
+/// names, fulfilled exactly, with no evidence or external operation used
+/// twice. This is what every write of its record checks; the activation
+/// audit ([`FiscalState::validate`]) checks it against its scope's books.
+pub(crate) fn validate_settled_bucket(bucket: &FiscalSettledBucket) -> Result<(), CanwuError> {
+    validate_identifier(&bucket.scope, "scope binding")?;
+    if usize::try_from(bucket.bucket).map_or(true, |bucket| bucket >= FISCAL_SETTLED_BUCKETS) {
+        return Err(invalid("a fiscal settled bucket number is out of range"));
+    }
+    let mut evidence = BTreeSet::new();
+    let mut operations = BTreeSet::new();
+    for (request_id, entry) in &bucket.entries {
+        validate_identifier(request_id, "execution request")?;
+        validate_identifier(&entry.accounting_cycle_id, "fiscal accounting cycle")?;
+        if *request_id != entry.request.id
+            || crate::records::settled_bucket_number(request_id) != bucket.bucket
+        {
+            return Err(invalid(format!(
+                "settled request {request_id} is keyed or bucketed wrongly"
+            )));
+        }
+        validate_map(&entry.receipts, |value| &value.id, "execution receipt")?;
+        for receipt in entry.receipts.values() {
+            validate_receipt(receipt)?;
+            if receipt.request_id != *request_id
+                || receipt
+                    .external_evidence
+                    .iter()
+                    .any(|version| !evidence.insert(version))
+                || receipt
+                    .external_operations
+                    .iter()
+                    .any(|operation| !operations.insert(operation))
+            {
+                return Err(invalid(format!(
+                    "settled receipt {} names another request or reuses evidence",
+                    receipt.id
+                )));
+            }
+        }
+        if entry.fulfilled()? != entry.request.quantity {
+            return Err(invalid(format!(
+                "settled request {request_id} is not fulfilled exactly"
+            )));
         }
     }
     Ok(())

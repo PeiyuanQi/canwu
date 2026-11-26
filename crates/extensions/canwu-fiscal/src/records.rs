@@ -15,9 +15,10 @@ use crate::FiscalArchiveHeadV1;
 use crate::PLUGIN_NAME;
 use crate::model::{
     CompiledFiscalCatalog, FISCAL_DIRECTORY_BUCKETS, FISCAL_INDEX_PAGE_SCOPES,
-    FISCAL_REPORT_QUEUE_PAGES, FiscalCatalogRecord, FiscalJurisdiction, FiscalObserver,
-    FiscalOffice, FiscalReportQueueEntry, FiscalReportSchedule, FiscalRoot, FiscalScopeLedger,
-    FiscalState, ROOT_ID, fiscal_catalog_reference, fiscal_office_key, invalid, office_binding_ids,
+    FISCAL_REPORT_QUEUE_PAGES, FISCAL_SETTLED_BUCKETS, FiscalCatalogRecord, FiscalJurisdiction,
+    FiscalObserver, FiscalOffice, FiscalReportQueueEntry, FiscalReportSchedule, FiscalRoot,
+    FiscalScopeLedger, FiscalSettledBucket, FiscalState, ROOT_ID, fiscal_catalog_reference,
+    fiscal_office_key, invalid, office_binding_ids,
 };
 use canwu_api::{
     CanwuError, CanwuRun, DomainRecord, DomainRecordClass, DomainRecordDraft, DomainRecordKind,
@@ -120,6 +121,14 @@ fiscal_record_type!(
     FiscalReportSchedule,
     "report-schedule"
 );
+fiscal_record_type!(
+    /// `canwu.fiscal:settled`, identity `{scope}/{bucket}`: one settled
+    /// bucket of a scope (see [`FiscalSettledBucket`] and
+    /// [`fiscal_settled_reference`]).
+    FiscalSettledRecord,
+    FiscalSettledBucket,
+    "settled"
+);
 
 /// The kinds of the fiscal records, besides the create-only catalog.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -134,11 +143,12 @@ pub enum FiscalRecordKind {
     Index,
     ReportQueue,
     ReportSchedule,
+    Settled,
 }
 
 impl FiscalRecordKind {
     /// Every kind, in this order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Root,
         Self::Archive,
         Self::Office,
@@ -149,6 +159,7 @@ impl FiscalRecordKind {
         Self::Index,
         Self::ReportQueue,
         Self::ReportSchedule,
+        Self::Settled,
     ];
 
     /// The record kind.
@@ -165,6 +176,7 @@ impl FiscalRecordKind {
             Self::Index => DomainRecordKind::for_type::<FiscalIndexRecord>(),
             Self::ReportQueue => DomainRecordKind::for_type::<FiscalReportQueueRecord>(),
             Self::ReportSchedule => DomainRecordKind::for_type::<FiscalReportScheduleRecord>(),
+            Self::Settled => DomainRecordKind::for_type::<FiscalSettledRecord>(),
         }
     }
 
@@ -222,6 +234,51 @@ pub fn fiscal_observer_reference(
     TypedDomainRecordRef::new(observer_binding_id)
 }
 
+/// The settled bucket record of a scope's execution request `request_id`:
+/// identity `{scope}/{bucket}`, the bucket being the request ID's digest
+/// modulo [`FISCAL_SETTLED_BUCKETS`]. The request is there once it settled,
+/// until its book is archived.
+#[must_use]
+pub fn fiscal_settled_reference(
+    scope_binding_id: &str,
+    request_id: &str,
+) -> TypedDomainRecordRef<FiscalSettledRecord> {
+    TypedDomainRecordRef::new(settled_bucket_of(scope_binding_id, request_id))
+}
+
+pub(crate) fn settled_reference(id: &str) -> TypedDomainRecordRef<FiscalSettledRecord> {
+    TypedDomainRecordRef::new(id)
+}
+
+/// The settled bucket number of a request ID.
+#[must_use]
+pub(crate) fn settled_bucket_number(request_id: &str) -> u32 {
+    let digits = digest_prefix("canwu.fiscal.settled-bucket.v1", request_id, 2);
+    let value = u32::from_str_radix(&digits, 16).unwrap_or(0);
+    value % u32::try_from(FISCAL_SETTLED_BUCKETS).unwrap_or(1)
+}
+
+/// The identity of bucket `bucket` of a scope. A fiscal identifier has no
+/// `/`, so two scopes' buckets never share one.
+#[must_use]
+pub(crate) fn settled_bucket_id(scope_binding_id: &str, bucket: u32) -> String {
+    format!("{scope_binding_id}/{bucket}")
+}
+
+/// The identity of the settled bucket of a scope's request.
+#[must_use]
+pub(crate) fn settled_bucket_of(scope_binding_id: &str, request_id: &str) -> String {
+    settled_bucket_id(scope_binding_id, settled_bucket_number(request_id))
+}
+
+/// The identities of every settled bucket of a scope, in bucket order.
+#[must_use]
+pub(crate) fn settled_bucket_ids(scope_binding_id: &str) -> Vec<String> {
+    (0..u32::try_from(FISCAL_SETTLED_BUCKETS).unwrap_or(0))
+        .map(|bucket| settled_bucket_id(scope_binding_id, bucket))
+        .collect()
+}
+
 pub(crate) fn directory_reference(bucket: &str) -> TypedDomainRecordRef<FiscalDirectoryRecord> {
     TypedDomainRecordRef::new(bucket)
 }
@@ -250,6 +307,8 @@ const _: () = assert!(FISCAL_DIRECTORY_BUCKETS.is_power_of_two());
 const _: () = assert!(FISCAL_REPORT_QUEUE_PAGES.is_power_of_two());
 const _: () = assert!(FISCAL_DIRECTORY_BUCKETS.trailing_zeros().trailing_zeros() >= 2);
 const _: () = assert!(FISCAL_REPORT_QUEUE_PAGES.trailing_zeros().trailing_zeros() >= 2);
+// Two hexadecimal digits name a settled bucket evenly.
+const _: () = assert!(FISCAL_SETTLED_BUCKETS.is_power_of_two() && FISCAL_SETTLED_BUCKETS <= 256);
 
 /// The directory bucket of a binding, policy, or proposal ID.
 #[must_use]
@@ -372,17 +431,35 @@ pub(crate) fn office_draft(office: &FiscalOffice) -> Result<DomainRecordDraft, C
 
 /// The draft of a ledger record. Its payload declares, as required evidence,
 /// the versions its hot books cite that a boundary established: their
-/// commutation quotes and their receipts' evidence. An archived book's
-/// citations stop being declared; [`crate::prepare_fiscal_archive`] refuses
-/// a book whose citations a seal has not covered yet.
+/// commutation quotes and their hot receipts' evidence. A settled request's
+/// receipts are declared by its settled bucket ([`settled_draft`]). An
+/// archived book's citations stop being declared;
+/// [`crate::prepare_fiscal_archive`] refuses a book whose citations a seal
+/// has not covered yet.
 pub(crate) fn ledger_draft(ledger: &FiscalScopeLedger) -> Result<DomainRecordDraft, CanwuError> {
-    let mut draft =
-        DomainRecordDraft::from_typed(fiscal_ledger_reference(&ledger.scope.id), ledger)?;
-    let continuation = ledger_continuation(ledger);
+    let draft = DomainRecordDraft::from_typed(fiscal_ledger_reference(&ledger.scope.id), ledger)?;
+    with_continuation(draft, &ledger_continuation(ledger))
+}
+
+/// The draft of a settled bucket record. Like a ledger's, its payload
+/// declares, as required evidence, the boundary-established versions its
+/// receipts cite.
+pub(crate) fn settled_draft(
+    id: &str,
+    bucket: &FiscalSettledBucket,
+) -> Result<DomainRecordDraft, CanwuError> {
+    let draft = DomainRecordDraft::from_typed(settled_reference(id), bucket)?;
+    with_continuation(draft, &continuation_of(bucket.citations()))
+}
+
+fn with_continuation(
+    mut draft: DomainRecordDraft,
+    continuation: &PayloadRequiredEvidenceContinuationV1,
+) -> Result<DomainRecordDraft, CanwuError> {
     draft
         .payload
         .as_object_mut()
-        .ok_or_else(|| invalid("fiscal ledger payload is not an object"))?
+        .ok_or_else(|| invalid("fiscal record payload is not an object"))?
         .insert(
             PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD.to_owned(),
             serde_json::to_value(continuation).map_err(|error| {
@@ -399,21 +476,43 @@ pub(crate) fn ledger_draft(ledger: &FiscalScopeLedger) -> Result<DomainRecordDra
 /// field of its own. Settlement holds a ledger to its budget by this, and
 /// activation measures the stored payload, so the two agree.
 pub(crate) fn ledger_payload_bytes(ledger: &FiscalScopeLedger) -> Result<usize, CanwuError> {
-    let continuation = ledger_continuation(ledger);
-    // `,"<field>":<continuation>` inside the ledger's object.
-    Ok(crate::settle::json_len(ledger)?
+    payload_bytes(ledger, &ledger_continuation(ledger))
+}
+
+/// The serialized bytes of a settled bucket record's payload, exactly as
+/// [`settled_draft`] writes it.
+pub(crate) fn settled_payload_bytes(bucket: &FiscalSettledBucket) -> Result<usize, CanwuError> {
+    payload_bytes(bucket, &continuation_of(bucket.citations()))
+}
+
+fn payload_bytes(
+    value: &impl Serialize,
+    continuation: &PayloadRequiredEvidenceContinuationV1,
+) -> Result<usize, CanwuError> {
+    // `,"<field>":<continuation>` inside the value's object.
+    Ok(crate::settle::json_len(value)?
         + 2
         + crate::settle::json_len(&PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD)?
-        + crate::settle::json_len(&continuation)?)
+        + crate::settle::json_len(continuation)?)
 }
 
 /// The versions a ledger's hot books cite that a boundary established, as the
 /// evidence continuation its record declares.
 fn ledger_continuation(ledger: &FiscalScopeLedger) -> PayloadRequiredEvidenceContinuationV1 {
-    let dependencies = ledger
-        .books
-        .values()
-        .flat_map(crate::model::FiscalCycleBook::citations)
+    continuation_of(
+        ledger
+            .books
+            .values()
+            .flat_map(crate::model::FiscalCycleBook::citations),
+    )
+}
+
+/// The versions among `citations` that a boundary established, as an
+/// evidence continuation.
+fn continuation_of<'a>(
+    citations: impl Iterator<Item = &'a canwu_api::DomainRecordVersionRef>,
+) -> PayloadRequiredEvidenceContinuationV1 {
+    let dependencies = citations
         .filter(|reference| {
             matches!(
                 reference.established_by,
@@ -581,7 +680,7 @@ impl FiscalState {
         catalog: &CompiledFiscalCatalog,
     ) -> Result<Vec<DomainRecord>, CanwuError> {
         let at = self.root.historical_context.updated_at;
-        self.recompute_derived(catalog, at);
+        self.recompute_derived(catalog, at)?;
         self.validate(catalog)?;
         Ok(self.record_drafts()?.into_iter().map(record_of).collect())
     }
@@ -614,6 +713,11 @@ impl FiscalState {
         for (page, entries) in queue_pages(self) {
             drafts.push(queue_draft(&page, &entries)?);
         }
+        for (id, bucket) in &self.settled {
+            if !bucket.entries.is_empty() {
+                drafts.push(settled_draft(id, bucket)?);
+            }
+        }
         Ok(drafts)
     }
 
@@ -632,6 +736,7 @@ impl FiscalState {
         let mut jurisdictions = BTreeMap::new();
         let mut observers = BTreeMap::new();
         let mut report_queue = BTreeMap::new();
+        let mut settled = BTreeMap::new();
         for record in records {
             if record.lifecycle != DomainRecordLifecycle::Active {
                 continue;
@@ -678,6 +783,12 @@ impl FiscalState {
                         }
                     }
                 }
+                Some(FiscalRecordKind::Settled) => {
+                    settled.insert(
+                        record.reference.id.clone(),
+                        record.decode_payload::<FiscalSettledRecord>()?,
+                    );
+                }
                 Some(FiscalRecordKind::Directory | FiscalRecordKind::Index) | None => {}
             }
         }
@@ -691,6 +802,7 @@ impl FiscalState {
             report_queue,
             report_schedule: schedule
                 .ok_or_else(|| invalid("the fiscal report schedule record is missing"))?,
+            settled,
         })
     }
 }
@@ -698,9 +810,9 @@ impl FiscalState {
 /// Checks a set of fiscal records, the catalog among them: the catalog
 /// validates, the state they assemble to validates (every record on its own
 /// and every invariant across records, derived fields included), and the
-/// records are exactly the partition of that state. A directory bucket or
-/// report-queue page that is empty may be left over from an earlier
-/// partition; every other record must be one the partition holds, with its
+/// records are exactly the partition of that state. A directory bucket,
+/// report-queue page, or settled bucket that is empty may be left over from
+/// an earlier partition; every other record must be one the partition holds, with its
 /// payload and references. Returns the assembled state.
 ///
 /// It is `O(fiscal records)`. Activation runs it on every scenario and
@@ -757,6 +869,10 @@ pub fn audit_fiscal_record_set<'a>(
                 }
                 Some(FiscalRecordKind::ReportQueue) => record
                     .decode_payload::<FiscalReportQueueRecord>()?
+                    .entries
+                    .is_empty(),
+                Some(FiscalRecordKind::Settled) => record
+                    .decode_payload::<FiscalSettledRecord>()?
                     .entries
                     .is_empty(),
                 _ => false,
@@ -856,6 +972,78 @@ mod tests {
             let stored = crate::settle::json_len(&ledger_draft(&ledger).expect("draft").payload)
                 .expect("bytes");
             assert_eq!(ledger_payload_bytes(&ledger).expect("bytes"), stored);
+        }
+    }
+
+    /// A settled bucket with `entries` settled requests, each with one
+    /// receipt citing one long-named evidence version.
+    fn bucket(entries: usize) -> FiscalSettledBucket {
+        use crate::model::{
+            FiscalExecutionKind, FiscalExecutionReceipt, FiscalExecutionRequest,
+            FiscalReceiptDisposition, FiscalSettledExecution,
+        };
+        let mut bucket = FiscalSettledBucket::new("scope", 3);
+        for index in 0..entries {
+            let request_id = format!("request.{index}");
+            let receipt_id = format!("receipt.{index}");
+            let evidence = DomainRecordVersionRef {
+                record: DomainRecordRef {
+                    kind: DomainRecordKind::new("evidence.kind", "evidence"),
+                    id: format!("{index}.{}", "e".repeat(4_000)),
+                },
+                version: 1,
+                established_by: DomainRecordVersionSource::BoundaryChange {
+                    boundary: BoundaryId::new(2),
+                    change_index: 7,
+                },
+            };
+            let receipt = FiscalExecutionReceipt {
+                id: receipt_id.clone(),
+                request_id: request_id.clone(),
+                quantity: 1,
+                disposition: FiscalReceiptDisposition::Fulfilled,
+                external_evidence: std::iter::once(evidence).collect(),
+                external_operations: BTreeSet::new(),
+                accepted_ingress: canwu_api::IngressId::new(1),
+                observed_at: SimTime::EPOCH,
+            };
+            bucket.entries.insert(
+                request_id.clone(),
+                FiscalSettledExecution {
+                    accounting_cycle_id: "2026".to_owned(),
+                    request: FiscalExecutionRequest {
+                        id: request_id,
+                        assessment_id: "assessment.0".to_owned(),
+                        institution: EntityRef::Organization(OrganizationId::new(1)),
+                        kind: FiscalExecutionKind::Collect,
+                        quantity: 1,
+                        unit: "grain".to_owned(),
+                        payment_form: FiscalPaymentForm::Grain,
+                        resource: canwu_api::ResourceId::new(1),
+                        source: EntityRef::Organization(OrganizationId::new(2)),
+                        target: EntityRef::Organization(OrganizationId::new(1)),
+                        purpose: "collection".to_owned(),
+                        requested_at: SimTime::EPOCH,
+                        source_action_id: None,
+                    },
+                    receipts: BTreeMap::from([(receipt_id, receipt)]),
+                },
+            );
+        }
+        bucket
+    }
+
+    /// Settlement's measure of a settled bucket is likewise the byte length
+    /// of its record's payload, its evidence continuation included.
+    #[test]
+    fn a_settled_bucket_payload_is_measured_exactly() {
+        for entries in [0, 1, 3] {
+            let bucket = bucket(entries);
+            let id = settled_bucket_id(&bucket.scope, bucket.bucket);
+            let stored =
+                crate::settle::json_len(&settled_draft(&id, &bucket).expect("draft").payload)
+                    .expect("bytes");
+            assert_eq!(settled_payload_bytes(&bucket).expect("bytes"), stored);
         }
     }
 

@@ -316,6 +316,12 @@ pub fn validate_ming_fiscal_reference<R: canwu_api::CanwuRun + ?Sized>(
             validate_reference_receipt(canwu, request, receipt)?;
         }
     }
+    // A settled request keeps its receipts in its scope's settled bucket.
+    for entry in state.settled_executions() {
+        for receipt in entry.receipts.values() {
+            validate_reference_receipt(canwu, &entry.request, receipt)?;
+        }
+    }
     let cursor = canwu.evidence_cursor()?;
     for assessment in state.assessments() {
         if let Some(quote) = &assessment.commutation_quote

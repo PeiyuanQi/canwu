@@ -29,17 +29,17 @@ the same boundary. Each receipt of a packet settles or is refused on its own:
 | Reason | Constant | When |
 | --- | --- | --- |
 | `malformed_payload` | `FISCAL_INGRESS_MALFORMED_REJECTION` | the payload does not decode |
-| `request_unknown` | `FISCAL_RECEIPT_REQUEST_UNKNOWN` | the scope holds no hot request with the receipt's request ID (it never had one, or the request's book was archived) |
-| `cycle_closed` | `FISCAL_RECEIPT_CYCLE_CLOSED` | the request's book is closed |
+| `request_unknown` | `FISCAL_RECEIPT_REQUEST_UNKNOWN` | the scope holds no request with the receipt's request ID, in a hot book or in a settled bucket (it never had one, or the request's book was archived) |
+| `cycle_closed` | `FISCAL_RECEIPT_CYCLE_CLOSED` | the request's book is closed (for a settled request too) |
 | `evidence_count_invalid` | `FISCAL_RECEIPT_EVIDENCE_COUNT` | no evidence, or more than 32 versions |
 | `evidence_kind_unapproved` | `FISCAL_RECEIPT_EVIDENCE_KIND_UNAPPROVED` | a kind the state does not approve |
 | `evidence_not_current` | `FISCAL_RECEIPT_EVIDENCE_NOT_CURRENT` | a cited version is not its record's current version |
 | `claim_mismatch` | `FISCAL_RECEIPT_CLAIM_MISMATCH` | a claim differs from the scope, the request, or the other claims, or predates the request; aggregated evidence names no part for the scope or breaks its rules |
-| `quantity_exceeded` | `FISCAL_RECEIPT_QUANTITY_EXCEEDED` | the receipts would fulfil more than the request authorizes |
-| `operation_reused`, `evidence_reused` | `FISCAL_RECEIPT_OPERATION_REUSED`, `FISCAL_RECEIPT_EVIDENCE_REUSED` | already settled by a receipt of the scope's hot books |
-| `receipt_id_conflict` | `FISCAL_RECEIPT_ID_CONFLICT` | a hot receipt of the scope has the ID with other content |
+| `quantity_exceeded` | `FISCAL_RECEIPT_QUANTITY_EXCEEDED` | the receipts would fulfil more than the request authorizes (a settled request takes only `Rejected` or `Excused` receipts) |
+| `operation_reused`, `evidence_reused` | `FISCAL_RECEIPT_OPERATION_REUSED`, `FISCAL_RECEIPT_EVIDENCE_REUSED` | already settled by a receipt of the scope that is not archived: in a hot book or a settled bucket |
+| `receipt_id_conflict` | `FISCAL_RECEIPT_ID_CONFLICT` | a receipt of the scope that is not archived (in a hot book or a settled bucket) has the ID with other content |
 | `context_outside_pack` | `FISCAL_CONTEXT_OUTSIDE_PACK` | a context year outside the pack |
-| `state_budget_exhausted` | `FISCAL_INGRESS_BUDGET_REJECTION` | the result would not fit its record's byte budget (see [Records and byte budgets](#records-and-byte-budgets)) |
+| `state_budget_exhausted` | `FISCAL_INGRESS_BUDGET_REJECTION` | the result would not fit its record's byte budget, the scope ledger's or, for a receipt, its settled bucket's (see [Records and byte budgets](#records-and-byte-budgets)) |
 | `boundary_limit` | `FISCAL_RECEIPT_BOUNDARY_LIMIT` | the boundary already wrote `MAX_FISCAL_LEDGER_WRITES_PER_BOUNDARY` (65,536) ledgers; send it again |
 | `invalid_packet` | `FISCAL_INGRESS_INVALID_REJECTION` | anything else that leaves the state invalid, after the message that says why |
 
@@ -49,9 +49,10 @@ configured evidence-kind allowlist and the host integration's redundant
 semantic validator keep arbitrary world records from proving execution. An
 exact evidence version settles at most one receipt in each scope it names:
 its claim names the scope and request it settles, and a request's receipts
-are all hot while its book takes receipts. An
-`(evidence kind, external_operation_id)` pair settles at most one receipt
-among the receipts of one scope's hot books; across scopes (where one
+stay together, in its book or in its settled bucket, while its book is hot.
+An `(evidence kind, external_operation_id)` pair settles at most one receipt
+among the receipts of one scope that are not archived (its hot books and
+its settled buckets); across scopes (where one
 aggregated record settles a receipt in each scope it names), and after a
 book is archived, unique operation keys are the evidence domain's
 guarantee, as the resource extension's are. Evidence must not
@@ -69,7 +70,7 @@ sum to the record's `quantity`; every other field holds for every part. The
 host sends one receipt per part, each of its own scope and request and
 citing the one exact version, in one packet; each settles the part naming
 its scope, at the part's quantity, and is refused on its own as above: a
-part naming a scope or request with no hot request with `request_unknown`,
+part naming a scope or request with no request with `request_unknown`,
 a receipt of a scope the record has no part for, or whose part names
 another request, with `claim_mismatch`, and a part asking more than its
 request still authorizes with `quantity_exceeded`. A record with a top-level
@@ -325,7 +326,8 @@ makes the engine re-validate no other:
 | `root` | `primary` | the historical context and its revision, the approved evidence kinds, the earliest due time of the report queue, whether a queued entry is parked, and the parked rotation's cursor |
 | `archive` | `primary` | the fiscal archive head (`FiscalArchiveHeadV1`) |
 | `office` | `fiscal_office_key` of the institution | revision and outcome ring, authority and audit bindings, appointment policy and proposals, per hot cycle its hot-book count, partition keys, and archived totals, the cycle watermark, the scope count, the mechanisms of its scopes, the observers that see it with each one's first row, granularity, and cadence |
-| `ledger` | scope binding ID | the scope binding, its office key and rank, revision and outcome ring, adoptions, one `FiscalCycleBook` per hot accounting cycle, the cycle watermark |
+| `ledger` | scope binding ID | the scope binding, its office key and rank, revision and outcome ring, adoptions, one `FiscalCycleBook` per hot accounting cycle (with per-assessment figures of the requests that settled out of it), the cycle watermark |
+| `settled` | scope binding ID, `/`, and the bucket number | one settled bucket: the settled execution requests of hot books of the scope, each with all of its receipts, whose request ID's digest names the bucket (`FISCAL_SETTLED_BUCKETS`, 8, per scope) |
 | `jurisdiction` | catalog region ID | revision and outcome ring, scope counts per mechanism, adoption counts per rule, transition candidates |
 | `observer` | observer binding ID | the binding, revision and outcome ring, its row layout, and its report bookkeeping (cycle slots and a digest per part) |
 | `directory` | `dir.` and 3 hex digits | the office of every binding, policy, and proposal ID whose digest names the bucket |
@@ -353,7 +355,10 @@ a run's committed state for a host, at a cost proportional to the fiscal
 records. Read single records with `fiscal_root_reference`,
 `fiscal_office_reference`, `fiscal_ledger_reference`,
 `fiscal_jurisdiction_reference`, `fiscal_observer_reference`,
-`fiscal_archive_reference`, and `fiscal_report_schedule_reference`.
+`fiscal_settled_reference` (the bucket of a scope's request ID),
+`fiscal_archive_reference`, and `fiscal_report_schedule_reference`. A
+settled bucket emptied by an archive commit stays as an empty record and is
+accepted too.
 
 Every host helper takes either run handle, `Canwu` or a sealed
 `CompactedCanwu`, through `canwu_api::CanwuRun`: `fiscal_action_target`,
@@ -374,15 +379,33 @@ no queued entry parked, reads only the root.
 
 Every record has a byte budget, held at settlement less
 `FISCAL_RECORD_RING_RESERVE_BYTES` (4 KiB), which keeps room for the record's
-outcome ring: a ledger `MAX_FISCAL_LEDGER_RECORD_BYTES` (256 KiB, its record's
-payload measured exactly, the evidence continuation that names its citations
-included), an office or jurisdiction `MAX_FISCAL_RECORD_BYTES`
-(1 MiB); the others are bounded by their counts. An action whose result would
+outcome ring: a ledger or a settled bucket `MAX_FISCAL_LEDGER_RECORD_BYTES`
+(256 KiB, its record's payload measured exactly, the evidence continuation
+that names its citations included), an office or jurisdiction
+`MAX_FISCAL_RECORD_BYTES` (1 MiB); the others are bounded by their counts. An action whose result would
 not fit is rejected as its own outcome with `FISCAL_RECORD_BUDGET_EXHAUSTED`,
 and its rejection fits in the reserve; a receipt or historical-context change
-that would not fit is refused with `state_budget_exhausted`. A ledger with one
-hot annual book takes about 1 to 2.5 KiB, so a ledger reaches its budget only
-with years of books left unarchived: close and archive them. An office is held
+that would not fit, in its ledger or in its settled bucket, is refused with
+`state_budget_exhausted`. A ledger with one hot annual book takes about 1 to
+2.5 KiB, so a ledger reaches its budget only with years of books left
+unarchived: close and archive them.
+
+A ledger keeps only what is still open. The receipt that brings an execution
+request's fulfilled quantity to its own moves the request, with all of its
+receipts, out of its book into its scope's settled bucket, and the book keeps,
+per assessment, the figures of what moved out (`FiscalCycleBook::settled`:
+counts and fulfilled quantities by kind), which its totals, caps, and reports
+read. So a receipt or an action writes a ledger whose size follows the
+scope's open requests, not its settled history, and the settled bucket the
+receipt writes holds about `1 / FISCAL_SETTLED_BUCKETS` of the scope's
+settled requests not yet archived. That is the trade the bucket count makes:
+more buckets would mean more records and smaller bucket writes, fewer would
+mean fewer records and larger ones. A later `Rejected` or `Excused` receipt of
+a settled request joins it in its bucket. `FiscalState::execution_requests`
+and `execution_receipts` list hot and settled ones,
+`FiscalState::settled_executions` and `settled_execution` the settled ones,
+and `FiscalState::execution_request` finds one either way.
+`FiscalScopeLedger::book_of_request` finds only a hot one. An office is held
 to its bytes plus the room its hot cycles keep for what archive commits will
 merge into them (each cycle's bookkeeping at its largest, with a total of the
 largest amounts for every partition key it uses), so an archive commit never
@@ -395,9 +418,17 @@ besides its outcome ring, with an office's room and 2 KiB, pass its budget.
 Each scope's ledger holds one `FiscalCycleBook` for each hot accounting
 cycle, which holds the cycle's assessments, remissions, execution requests and
 receipts, and audit findings; each institution's office counts its hot books
-per cycle. Objects inside a scope have IDs unique among the scope's hot
-objects, and every reference to one names its scope: `GrantRemission`,
-`AuthorizeExecution`, and `RecordAudit` carry `scope_binding_id`.
+per cycle. A fulfilled execution request, with its receipts, is kept in its
+scope's settled bucket while its book is hot (see "Records and byte
+budgets"); it belongs to its book all the same. Objects inside a scope have
+IDs unique among the scope's hot objects, settled requests and receipts
+included, and every reference to one names its scope: `GrantRemission`,
+`AuthorizeExecution`, and `RecordAudit` carry `scope_binding_id`. A receipt's
+evidence and external operations are likewise unique among the scope's hot
+and settled receipts, and an audit finding may name a settled request or
+receipt. An audit's target resolves by kind as before (an assessment, then
+an execution request, then a receipt), settled ones included, so an ID two
+kinds share names the same object it did when everything was hot.
 
 - `OpenAssessment` opens its book. `CloseAccountingCycle` closes one book of
   one scope; a closed book takes audit findings and nothing else
@@ -406,11 +437,18 @@ objects, and every reference to one names its scope: `GrantRemission`,
   `MAX_FISCAL_HOT_BOOKS_PER_LEDGER` (64) books, and an institution's scopes
   hold books of at most `MAX_FISCAL_HOT_CYCLES_PER_OFFICE` (64) cycles
   (`FISCAL_HOT_BOOKS_EXHAUSTED`). A book holds at most 256 remissions, 256
-  execution requests, 1,024 receipts, and 256 audit findings, and one
+  execution requests, 1,024 receipts, and 256 audit findings, settled ones
+  counted, and one
   institution's books of one cycle and mechanism use at most
   `MAX_FISCAL_PARTITION_KEYS` (4) partition keys.
 - An archive commit takes closed books out of their ledgers into the fiscal
-  archive. It raises each scope's watermark to the greatest cycle it archived
+  archive, each as the whole book: its settled requests and their receipts
+  are merged back, so an archived book holds what it would have held hot,
+  and its scope's settled buckets let go of them (an emptied bucket stays as
+  a record). A book whose loaded settled entries do not add up to its
+  settled figures is refused (`Mismatch` at preparation, a refused commit at
+  settlement), never archived without them. Moving a settled request out of its book archives nothing and
+  raises no watermark: only an archive commit does. It raises each scope's watermark to the greatest cycle it archived
   and, in the commit that archives an institution's last hot book of a cycle,
   archives that institution's totals of the cycle once and raises the office
   watermark. No book is opened at or below either watermark
@@ -431,7 +469,9 @@ objects, and every reference to one names its scope: `GrantRemission`,
   `canwu_api::CanwuRun`) and read only the records a commit needs: preparing
   and enqueueing read the root, the archive head, every ledger only far
   enough to see whether it holds a closed book, and the ledgers and offices
-  of the books a commit may take; finalizing reads the archive head. On a
+  of the books a commit may take, with the settled buckets of a scope one of
+  whose closed books has settled requests; finalizing reads the archive
+  head. On a
   run that has sealed evidence (its `sealed_evidence_cursor` is `Some`), a
   book citing an evidence version established after the run's last seal
   ended is refused at preparation (`FiscalArchiveError::UnsealedCitations`)

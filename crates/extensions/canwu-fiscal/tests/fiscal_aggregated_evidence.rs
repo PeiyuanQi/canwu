@@ -94,7 +94,7 @@ fn receipt(canwu: &mut Canwu, receipts: &[FiscalExecutionReceiptPacket]) {
 }
 
 /// The state with each receipt's cited evidence set aside, and what each
-/// cited, in book order.
+/// cited, in book order and then in settled-bucket order.
 fn without_citations(
     mut state: FiscalState,
 ) -> (FiscalState, Vec<BTreeSet<DomainRecordVersionRef>>) {
@@ -102,6 +102,13 @@ fn without_citations(
     for ledger in state.ledgers.values_mut() {
         for book in ledger.books.values_mut() {
             for receipt in book.execution_receipts.values_mut() {
+                cited.push(std::mem::take(&mut receipt.external_evidence));
+            }
+        }
+    }
+    for bucket in state.settled.values_mut() {
+        for entry in bucket.entries.values_mut() {
+            for receipt in entry.receipts.values_mut() {
                 cited.push(std::mem::take(&mut receipt.external_evidence));
             }
         }
@@ -171,7 +178,9 @@ fn one_record_receipts_each_part_in_its_own_scope() {
         .execution_receipts()
         .map(|receipt| receipt.quantity)
         .collect();
-    assert_eq!(receipted, DAY);
+    // The second scope's part fulfils its request, which moves, with its
+    // receipt, to its settled bucket: listed after the hot books.
+    assert_eq!(receipted, [DAY[0], DAY[2], DAY[1]]);
     let (books, cited) = without_citations(fiscal_state(&canwu));
     assert!(
         cited
@@ -265,8 +274,8 @@ fn one_record_receipts_each_part_in_its_own_scope() {
         [
             ("receipt.0".to_owned(), 20),
             ("receipt.second.0".to_owned(), 5),
-            ("receipt.1".to_owned(), 30),
             ("receipt.2".to_owned(), 10),
+            ("receipt.1".to_owned(), 30),
         ]
     );
     assert_eq!(

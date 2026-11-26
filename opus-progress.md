@@ -40,7 +40,15 @@ No row filed by the downstream ledger is open.
 
 ## 3. Medium
 
-No row filed by the downstream ledger is open. The seven rows 0.24.0 closes carry no severity in the ledger rows as
+**G-118** (filed 2026-11-25, `canwu-fiscal`): a scope ledger keeps every settled execution request and receipt of
+its hot books, so each ledger write rewrites the scope's history (the downstream measured 1.6 KB to 15.8 KB per
+ledger over 14 months and 234.9 MB of boundary evidence). Built on branch `fix/g118` for 0.25.0, not released: a
+request fulfilled to its quantity moves, with its receipts, into one of `FISCAL_SETTLED_BUCKETS` (8) per-scope
+`canwu.fiscal:settled` records; the book keeps per-assessment settled figures; an archive commit merges the entries
+back into the archived book and empties the buckets (the 0.25.0 entry of `docs/versioning.md`). The downstream
+dropped the row's conditional part (b): `CloseAccountingCycle` already closes a book with an outstanding assessment.
+
+No other row filed by the downstream ledger is open. The seven rows 0.24.0 closes carry no severity in the ledger rows as
 copied for this run (each names the downstream wave it is wanted by, W5 to W7 or later), so they are recorded here:
 G-98 (a ticket a person in custody decides, filed 2026-11-13), G-99 (a facility's condition fall and a repair on a
 degraded or damaged facility, 2026-11-15), G-110 (an expansion project, 2026-11-18), G-111 (a capacity change on an
@@ -140,16 +148,20 @@ own leases) and E-37's publication-budget overshoot (the application's publisher
 
 ## 5. Next steps
 
-1. **The downstream's adoption of 0.24.0** follows its own plan (its ledger records the adoption of G-98 to G-102,
+1. **G-118 on the 0.25.0 line:** branch `fix/g118` is built, reviewed (two independent reviews and their delta
+   reviews), and tested (the workspace tests and the fiscal crates under the continuation gate); the downstream
+   proposes G-117 (`Retire` / `Delete` of a create-only domain record, `canwu-sim`) for the same line. Integration,
+   the release's full verification, and publication wait for the owner.
+2. **The downstream's adoption of 0.24.0** follows its own plan (its ledger records the adoption of G-98 to G-102,
    G-110, and G-111 at the `=0.24.0` pin) and the rows it files against 0.24.0. G-94's real check is still its
    `Daily` p99 past campaign month 22; if its clearing commits show E-59's re-hash, measure how old the cleared
    entries are before choosing anything.
-2. Then the §4.2 limits by downstream need: **E-50** first if the downstream runs cross-plugin completions through a
+3. Then the §4.2 limits by downstream need: **E-50** first if the downstream runs cross-plugin completions through a
    long campaign (the cap of 1,024 ended participants); **E-49** if a host wants malformed correspondence commands
    recorded rather than validated before sending; E-41's force-supply deferral if a host runs the reference economy
    near its byte cap; E-46 to E-47, the military limits (E-51), the 0.21.0 limits (E-52 to E-54), E-59, and the
    0.23.0 and 0.24.0 limits (E-60 to E-66) as the downstream's slices ask; §4.3 if the downstream asks.
-3. Each change set follows the 0.18.0 pattern: one worktree and branch per package under `.worktrees/`, a proposal,
+4. Each change set follows the 0.18.0 pattern: one worktree and branch per package under `.worktrees/`, a proposal,
    durable tests that bite, an independent code review (two for persistence-heavy packages) and a delta review of the
    fixes, integration on a release branch, the pre-release tests of the release skill (the continuation gate
    included), then one release commit with the shared docs, the website (with its accuracy and copy reviews), and the

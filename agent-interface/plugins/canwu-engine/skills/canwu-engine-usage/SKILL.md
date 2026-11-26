@@ -597,7 +597,7 @@ with a machine-validated payload and declared core/component access.
   cycle's figures from old records). These three knobs are plugin identity:
   choose them before the first boundary. Reports are `fiscal_report` schema
   version 6 (0.18.0, a compact part payload that `FiscalReportPart`
-  decodes); the plugin is `0.6.0-experimental`.
+  decodes); the plugin is `0.7.0-experimental`.
 
 ## Publish knowledge from a plugin (0.17.0)
 

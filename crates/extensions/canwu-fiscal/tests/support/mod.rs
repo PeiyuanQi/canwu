@@ -1197,7 +1197,10 @@ pub fn record_results(
 }
 
 /// Queues the recording of the execution results for the next boundary.
-pub fn enqueue_results(canwu: &mut Canwu, results: &[(bool, FiscalExecutionEvidence)]) {
+pub fn enqueue_results<R: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut R,
+    results: &[(bool, FiscalExecutionEvidence)],
+) {
     canwu
         .enqueue_plugin_ingress(PluginIngressRequest::new(
             COMMISSION_PLUGIN,
@@ -1210,8 +1213,8 @@ pub fn enqueue_results(canwu: &mut Canwu, results: &[(bool, FiscalExecutionEvide
 
 /// The current version of each recorded execution result, in order.
 #[must_use]
-pub fn result_versions(
-    canwu: &Canwu,
+pub fn result_versions<R: canwu_api::CanwuRun + ?Sized>(
+    canwu: &R,
     results: &[(bool, FiscalExecutionEvidence)],
 ) -> Vec<DomainRecordVersionRef> {
     results

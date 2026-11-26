@@ -10,18 +10,20 @@
 use crate::model::{
     CompiledFiscalCatalog, FISCAL_REPORT_QUEUE_CYCLES, FISCAL_REPORT_QUEUE_PARTS,
     FiscalActionTarget, FiscalMechanism, FiscalOffice, FiscalOfficeObserver, FiscalOutcomeRing,
-    FiscalReportQueueEntry, FiscalReportSchedule, FiscalState, MAX_FISCAL_REPORT_CYCLE_SLOTS,
-    fiscal_office_key, invalid, office_binding_ids,
+    FiscalReportQueueEntry, FiscalReportSchedule, FiscalSettledBucket, FiscalState,
+    MAX_FISCAL_REPORT_CYCLE_SLOTS, fiscal_office_key, invalid, office_binding_ids,
+    validate_settled_bucket,
 };
 use crate::records::{
     FiscalArchiveRecord, FiscalDirectoryBucket, FiscalDirectoryRecord, FiscalIndexOwner,
     FiscalIndexRecord, FiscalJurisdictionRecord, FiscalLedgerRecord, FiscalObserverRecord,
-    FiscalOfficeRecord, FiscalReportQueuePage, FiscalRootRecord, archive_draft, directory_bucket,
-    directory_draft, directory_reference, fiscal_archive_reference, fiscal_jurisdiction_reference,
-    fiscal_ledger_reference, fiscal_observer_reference, fiscal_report_schedule_reference,
-    fiscal_root_reference, index_reference, jurisdiction_draft, ledger_draft, observer_draft,
-    office_draft, office_reference, queue_draft, queue_reference, report_queue_page, root_draft,
-    schedule_draft,
+    FiscalOfficeRecord, FiscalReportQueuePage, FiscalRootRecord, FiscalSettledRecord,
+    archive_draft, directory_bucket, directory_draft, directory_reference,
+    fiscal_archive_reference, fiscal_jurisdiction_reference, fiscal_ledger_reference,
+    fiscal_observer_reference, fiscal_report_schedule_reference, fiscal_root_reference,
+    index_reference, jurisdiction_draft, ledger_draft, observer_draft, office_draft,
+    office_reference, queue_draft, queue_reference, report_queue_page, root_draft, schedule_draft,
+    settled_bucket_ids, settled_bucket_of, settled_draft, settled_reference,
 };
 use canwu_api::{
     CanwuError, DomainRecord, DomainRecordDraft, DomainRecordMutation, DomainRecordRef,
@@ -123,6 +125,8 @@ pub(crate) struct Touch {
     pub(crate) cycle_offices: BTreeSet<String>,
     pub(crate) jurisdictions: BTreeSet<String>,
     pub(crate) observers: BTreeSet<String>,
+    /// Settled buckets, by record identity.
+    pub(crate) settled: BTreeSet<String>,
     pub(crate) archive: bool,
 }
 
@@ -180,6 +184,7 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
                 observers: BTreeMap::new(),
                 report_queue: BTreeMap::new(),
                 report_schedule: FiscalReportSchedule::default(),
+                settled: BTreeMap::new(),
             },
             archive_loaded: false,
             entry_revisions: BTreeMap::new(),
@@ -297,6 +302,56 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
         );
         self.state.observers.insert(observer.to_owned(), record);
         Ok(true)
+    }
+
+    /// Loads a settled bucket by its identity, as an empty bucket when it
+    /// has no record yet. A bucket is loaded once per working set. A stored
+    /// bucket must be the one its identity names: its scope and number, and
+    /// every entry's request hashing to that number.
+    pub(crate) fn ensure_settled_bucket(&mut self, id: &str) -> Result<(), CanwuError> {
+        if self.state.settled.contains_key(id) {
+            return Ok(());
+        }
+        let (scope, number) = id
+            .rsplit_once('/')
+            .and_then(|(scope, number)| Some((scope, number.parse::<u32>().ok()?)))
+            .ok_or_else(|| invalid("a fiscal settled bucket identity is malformed"))?;
+        let bucket =
+            if let Some(bucket) = self.load::<FiscalSettledRecord>(&settled_reference(id))? {
+                if bucket.scope != scope || bucket.bucket != number {
+                    return Err(invalid(
+                        "a fiscal settled bucket is not keyed by its scope and number",
+                    ));
+                }
+                validate_settled_bucket(&bucket)?;
+                bucket
+            } else {
+                FiscalSettledBucket::new(scope, number)
+            };
+        self.state.settled.insert(id.to_owned(), bucket);
+        Ok(())
+    }
+
+    /// Loads every settled bucket of a scope, once per working set, and
+    /// returns their identities.
+    pub(crate) fn ensure_scope_settled(&mut self, scope: &str) -> Result<Vec<String>, CanwuError> {
+        let ids = settled_bucket_ids(scope);
+        for id in &ids {
+            self.ensure_settled_bucket(id)?;
+        }
+        Ok(ids)
+    }
+
+    /// Loads the settled bucket a scope's request ID names, and returns its
+    /// identity.
+    pub(crate) fn ensure_request_settled(
+        &mut self,
+        scope: &str,
+        request_id: &str,
+    ) -> Result<String, CanwuError> {
+        let id = settled_bucket_of(scope, request_id);
+        self.ensure_settled_bucket(&id)?;
+        Ok(id)
     }
 
     /// Loads the record of an action target; `false` when there is none.
@@ -524,6 +579,47 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
             }))
     }
 
+    /// Whether a scope's settled buckets hold a request or a receipt of this
+    /// ID, read without decoding them: a request is looked for in the bucket
+    /// its ID names, a receipt in every bucket of the scope.
+    pub(crate) fn settled_holds(&self, scope: &str, id: &str) -> Result<bool, CanwuError> {
+        let request_bucket = settled_bucket_of(scope, id);
+        for bucket in settled_bucket_ids(scope) {
+            let own = bucket == request_bucket;
+            if let Some(loaded) = self.state.settled.get(&bucket) {
+                if (own && loaded.entries.contains_key(id))
+                    || loaded
+                        .entries
+                        .values()
+                        .any(|entry| entry.receipts.contains_key(id))
+                {
+                    return Ok(true);
+                }
+                continue;
+            }
+            let Some(record) = active_record(self.source, &settled_reference(&bucket))? else {
+                continue;
+            };
+            let holds = record
+                .payload
+                .get("entries")
+                .and_then(Value::as_object)
+                .is_some_and(|entries| {
+                    (own && entries.contains_key(id))
+                        || entries.values().any(|entry| {
+                            entry
+                                .get("receipts")
+                                .and_then(|receipts| receipts.get(id))
+                                .is_some()
+                        })
+                });
+            if holds {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// The revision and recent outcomes of an action target, read without
     /// decoding it.
     pub(crate) fn target_head(
@@ -693,6 +789,14 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
                 .collect(),
             report_queue: BTreeMap::new(),
             report_schedule: FiscalReportSchedule::default(),
+            settled: pick(&touch.settled)
+                .filter_map(|key| {
+                    self.state
+                        .settled
+                        .get(&key)
+                        .map(|bucket| (key, bucket.clone()))
+                })
+                .collect(),
         }
     }
 
@@ -707,6 +811,7 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
             jurisdictions,
             observers,
             report_queue,
+            settled,
             ..
         } = copy;
         if touch.archive && archive != self.state.archive {
@@ -733,6 +838,17 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
                 self.dirty
                     .insert(fiscal_ledger_reference(&key).into_untyped());
                 self.state.ledgers.insert(key, ledger);
+            }
+        }
+        for (key, bucket) in settled {
+            if self.state.settled.get(&key) != Some(&bucket) {
+                if !touch.settled.contains(&key) {
+                    return Err(invalid(
+                        "a fiscal action changed a settled bucket it did not load",
+                    ));
+                }
+                self.dirty.insert(settled_reference(&key).into_untyped());
+                self.state.settled.insert(key, bucket);
             }
         }
         for (key, jurisdiction) in jurisdictions {
@@ -1019,52 +1135,63 @@ impl<'a, S: RecordSource + ?Sized> Working<'a, S> {
         self.update_schedule()?;
         let mut drafts: Vec<DomainRecordDraft> = Vec::new();
         for reference in &self.dirty {
-            let draft = if reference.kind.matches_type::<FiscalRootRecord>() {
-                crate::model::validate_root(&self.state.root, catalog)?;
-                root_draft(&self.state.root)?
-            } else if reference.kind.matches_type::<FiscalArchiveRecord>() {
-                self.state.archive.validate()?;
-                archive_draft(&self.state.archive)?
-            } else if reference
-                .kind
-                .matches_type::<crate::records::FiscalReportScheduleRecord>()
-            {
-                schedule_draft(&self.state.report_schedule)?
-            } else if reference.kind.matches_type::<FiscalOfficeRecord>() {
-                let office = self
-                    .state
-                    .offices
-                    .get(&reference.id)
-                    .ok_or_else(|| invalid("a changed fiscal office is not loaded"))?;
-                crate::model::validate_office(office)?;
-                office_draft(office)?
-            } else if reference.kind.matches_type::<FiscalLedgerRecord>() {
-                let ledger = self
-                    .state
-                    .ledgers
-                    .get(&reference.id)
-                    .ok_or_else(|| invalid("a changed fiscal ledger is not loaded"))?;
-                crate::model::validate_ledger(ledger, catalog)?;
-                ledger_draft(ledger)?
-            } else if reference.kind.matches_type::<FiscalJurisdictionRecord>() {
-                let jurisdiction = self
-                    .state
-                    .jurisdictions
-                    .get(&reference.id)
-                    .ok_or_else(|| invalid("a changed fiscal jurisdiction is not loaded"))?;
-                crate::model::validate_jurisdiction(jurisdiction, catalog)?;
-                jurisdiction_draft(jurisdiction)?
-            } else if reference.kind.matches_type::<FiscalObserverRecord>() {
-                let observer = self
-                    .state
-                    .observers
-                    .get(&reference.id)
-                    .ok_or_else(|| invalid("a changed fiscal observer is not loaded"))?;
-                crate::model::validate_observer(observer)?;
-                observer_draft(observer)?
-            } else {
-                return Err(invalid("a changed fiscal record has no writer"));
-            };
+            let draft =
+                if reference.kind.matches_type::<FiscalRootRecord>() {
+                    crate::model::validate_root(&self.state.root, catalog)?;
+                    root_draft(&self.state.root)?
+                } else if reference.kind.matches_type::<FiscalArchiveRecord>() {
+                    self.state.archive.validate()?;
+                    archive_draft(&self.state.archive)?
+                } else if reference
+                    .kind
+                    .matches_type::<crate::records::FiscalReportScheduleRecord>()
+                {
+                    schedule_draft(&self.state.report_schedule)?
+                } else if reference.kind.matches_type::<FiscalOfficeRecord>() {
+                    let office = self
+                        .state
+                        .offices
+                        .get(&reference.id)
+                        .ok_or_else(|| invalid("a changed fiscal office is not loaded"))?;
+                    crate::model::validate_office(office)?;
+                    office_draft(office)?
+                } else if reference.kind.matches_type::<FiscalLedgerRecord>() {
+                    let ledger = self
+                        .state
+                        .ledgers
+                        .get(&reference.id)
+                        .ok_or_else(|| invalid("a changed fiscal ledger is not loaded"))?;
+                    crate::model::validate_ledger(ledger, catalog)?;
+                    ledger_draft(ledger)?
+                } else if reference.kind.matches_type::<FiscalJurisdictionRecord>() {
+                    let jurisdiction =
+                        self.state.jurisdictions.get(&reference.id).ok_or_else(|| {
+                            invalid("a changed fiscal jurisdiction is not loaded")
+                        })?;
+                    crate::model::validate_jurisdiction(jurisdiction, catalog)?;
+                    jurisdiction_draft(jurisdiction)?
+                } else if reference.kind.matches_type::<FiscalObserverRecord>() {
+                    let observer = self
+                        .state
+                        .observers
+                        .get(&reference.id)
+                        .ok_or_else(|| invalid("a changed fiscal observer is not loaded"))?;
+                    crate::model::validate_observer(observer)?;
+                    observer_draft(observer)?
+                } else if reference.kind.matches_type::<FiscalSettledRecord>() {
+                    let bucket =
+                        self.state.settled.get(&reference.id).ok_or_else(|| {
+                            invalid("a changed fiscal settled bucket is not loaded")
+                        })?;
+                    // A bucket that has no record and holds nothing needs none.
+                    if bucket.entries.is_empty() && !self.versions.contains_key(reference) {
+                        continue;
+                    }
+                    crate::model::validate_settled_bucket(bucket)?;
+                    settled_draft(&reference.id, bucket)?
+                } else {
+                    return Err(invalid("a changed fiscal record has no writer"));
+                };
             drafts.push(draft);
         }
         for (bucket, (version, entries)) in directory {

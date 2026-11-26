@@ -26,6 +26,170 @@ Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
 
+**Unreleased / 0.25.0.** The workspace version stays `0.24.0` until the
+release. Settled fiscal executions leave the hot book (`canwu-fiscal`, with
+the `canwu-ming-fiscal-reference` adapter: downstream gap G-118). There is
+no proposal of its own: this entry, the rustdoc of the new items, and the
+`canwu-fiscal` README ("Records and byte budgets", "Accounting cycles and
+the archive") are the contract.
+
+What changed:
+
+- **A settled request moves out of its book.** The receipt that brings an
+  execution request's fulfilled quantity (its `Fulfilled` and `Partial`
+  receipts) to its own quantity moves the request, with all of its receipts,
+  out of its `FiscalCycleBook` into its scope's settled bucket: a new record
+  kind, `canwu.fiscal:settled` (`FiscalSettledRecord`, payload
+  `FiscalSettledBucket`), with identity `{scope}/{n}`, where `n` is the
+  first two hex digits of the `canwu.fiscal.settled-bucket.v1` digest of the
+  request ID modulo `FISCAL_SETTLED_BUCKETS` (8). The book keeps, per
+  assessment, the figures of what moved out (`FiscalCycleBook::settled`, a
+  map of `FiscalSettledFigures`: request and receipt counts, the requested
+  collection, and the fulfilled quantity by kind), which its totals, the
+  per-book caps, and the reports read. A ledger write therefore costs the
+  scope's open requests, not its settled history. A later `Rejected` or
+  `Excused` receipt of a settled request joins it in its bucket and counts
+  in its book's figures; a receipt past its quantity is refused as before.
+- **The rules are unchanged.** Receipt IDs, evidence versions, and external
+  operations are unique among the scope's hot and settled receipts, and
+  request IDs among its hot and settled requests, while the book is hot: a
+  scope that has settled requests has all of its buckets loaded once per
+  boundary for its receipts and audits. A resend of a settled receipt
+  changes nothing, an `AuthorizeExecution` that reuses a settled request's
+  ID is rejected (`fiscal execution request identity already exists`), and
+  an audit finding may name a settled request or receipt. Totals, report
+  facts, closing, and every receipt refusal read as when the request was
+  hot.
+- **The archive takes the whole book.** An archive commit merges a book's
+  settled requests and their receipts back into the archived book
+  (`FiscalCycleBook::merged`), so the archive blob format
+  (`FISCAL_ARCHIVE_BLOB_FORMAT_VERSION` 1) and an archived book's content do
+  not change, and the commit empties those entries from the buckets. An
+  emptied bucket stays as an empty record. Moving a request out archives
+  nothing and raises no ledger or office watermark; only an archive commit
+  does, as before. `prepare_fiscal_archive` also reads the buckets of a
+  scope one of whose closed books has settled requests, and the citations
+  check before a seal covers the settled receipts.
+- **A bucket's budget.** A settled bucket declares the evidence versions its
+  receipts cite as payload-required evidence, as a ledger does, and is held
+  to `MAX_FISCAL_LEDGER_RECORD_BYTES` less `FISCAL_RECORD_RING_RESERVE_BYTES`
+  at settlement; a receipt that would put its bucket past that is refused
+  with `state_budget_exhausted` (`the receipt would put its settled bucket
+  past its byte budget`). Activation holds every bucket to that budget as it
+  does a ledger.
+- **New public items.** `FISCAL_SETTLED_BUCKETS`, `FiscalSettledRecord`,
+  `FiscalSettledBucket`, `FiscalSettledExecution`, `FiscalSettledFigures`,
+  `FiscalRecordKind::Settled`, `fiscal_settled_reference(scope, request_id)`,
+  `FiscalState::settled` (the buckets by record identity),
+  `FiscalState::settled_executions`, `FiscalState::settled_execution`,
+  `FiscalState::execution_request` (hot or settled, with its book),
+  `FiscalCycleBook::settled`, `request_count`, `receipt_count`, and
+  `merged` (the whole book; it matches entries by cycle only, so pass only
+  the book's scope's entries, and it refuses entries that do not add up to
+  the book's settled figures), `FiscalSettledBucket::new`, and
+  `FiscalSettledExecution::fulfilled`. `FiscalState::execution_requests` and
+  `execution_receipts` now list the settled ones after the hot ones.
+- **Audit targets.** An audit's target resolves by kind in the order 0.24.0
+  used, settled objects included: an assessment, then an execution request
+  (in its book, then settled), then a receipt (in its book, then settled), so
+  an ID that two kinds share names the object it named when everything was
+  hot.
+- **Archive refusal.** An archive whose loaded settled entries of a book do
+  not add up to the book's settled figures is refused
+  (`FiscalArchiveError::Mismatch` at preparation, a refused commit at
+  settlement) rather than archive the book without them.
+- **Reference adapter.** `canwu-ming-fiscal-reference` reads a request that
+  settled from its bucket when it records an execution result, so it
+  declares a read of `canwu.fiscal:settled`, and
+  `validate_ming_fiscal_reference` checks settled receipts too.
+
+Formats and hashes that change:
+
+| Item | 0.24.0 | 0.25.0 | What changed |
+| --- | --- | --- | --- |
+| `FISCAL_RUNTIME_SCHEMA_VERSION` | 6 | 7 | the new record kind `settled`; `FiscalCycleBook::settled`, written only when non-empty; a fulfilled request is never in its book |
+| `canwu-fiscal` plugin identity | `0.6.0-experimental`, semantic hash `8b370085…9afe` | `0.7.0-experimental`, semantic hash `c0ec6a49…1475` | BLAKE3 of `canwu-fiscal plugin semantic hash 0.7.0-experimental: settled executions leave the hot book`; the settle and report systems write, and every fiscal command and system reads, the new kind |
+| `canwu.ming-fiscal-reference` plugin identity | `1`, semantic hash `67cba604…0862` | `2`, semantic hash `e5bde20a…2855` | BLAKE3 of `canwu.ming-fiscal-reference plugin semantic hash 2: settled executions are read from their bucket`; its system reads the new kind |
+| Fiscal archive blob format | 1 | 1 | unchanged: an archived book is the whole book |
+
+Every checkpoint hash of a run that registers the fiscal plugin changes,
+and a ledger with settled requests has different bytes and hashes. The
+source-incompatible changes are the new public fields `FiscalState::settled`
+and `FiscalCycleBook::settled`, which break a struct literal outside the
+workspace, the new variant `FiscalRecordKind::Settled`, which breaks an
+exhaustive match (`FiscalRecordKind::ALL` has 11 kinds), and
+`FiscalState::recompute_derived`, which now returns
+`Result<(), CanwuError>`.
+
+Upgrading from 0.24.0, for hosts and plugin authors:
+
+- **Pin `=0.25.0`** for `canwu-api` and every extension. There is no
+  migration: nothing written by 0.24.0 loads, and a 0.24.0 run would be
+  refused by the fiscal plugin's semantic hash too.
+- **Struct literals and matches.** Add `settled: BTreeMap::new()` to
+  `FiscalState` and `FiscalCycleBook` literals (or build books with
+  `FiscalCycleBook::open`), and a `Settled` arm to exhaustive matches on
+  `FiscalRecordKind`.
+- **Finding a request.** `FiscalScopeLedger::book_of_request` and a book's
+  `execution_requests` and `execution_receipts` hold only open requests now.
+  Use `FiscalState::execution_request(scope, request_id)` to find one hot or
+  settled, `settled_execution` for a settled one, and `execution_requests` /
+  `execution_receipts` to list them all. Book totals and report facts need
+  no change.
+- **A plugin that reads requests from records.** Read the ledger first; if
+  the request is not hot, read the bucket record
+  `fiscal_settled_reference(scope, request_id)` and its entry, and declare a
+  read of `StateKey::new(FiscalSettledRecord::NAMESPACE,
+  FiscalSettledRecord::NAME)`, as the reference adapter does.
+- **Authored states.** `FiscalState::into_records` moves an authored
+  request whose receipts fulfil it into its bucket, so author receipts with
+  the `add_*` helpers as before. A record set that keeps a fulfilled request
+  in its book, or whose book figures differ from its buckets, is refused.
+  `FiscalState::recompute_derived` (which `into_records` runs) now moves
+  requests between records as well as recomputing derived fields, and
+  returns the reason a fulfilled request cannot move: its ID is already
+  settled in its scope (one request ID authored in two books), or its
+  figures overflow; handle its `Result`. `FiscalState::validate` and
+  `FiscalScopeLedger::validate` refuse a state that holds a request fulfilled
+  to its quantity in its book, so validate after `recompute_derived` or
+  `into_records`, not before. `FiscalState::add_execution_receipt` adds only
+  to a request still in its book: on a state read with `load_fiscal_state`, a
+  settled request takes no authored receipt (send one through
+  `enqueue_execution_receipts`).
+- **Saves.** Write fresh saves and start new fiscal archives with 0.25.0.
+
+Known limits carried by this release:
+
+- The bucket a receipt writes holds every settled request of its bucket not
+  yet archived, about `1 / FISCAL_SETTLED_BUCKETS` of the scope's settled
+  history, so its write still grows with that history between archives,
+  eight times slower than the ledger did; close and archive books as
+  before. The number of buckets is fixed for a run (a constant, so changing
+  it is a new plugin version) and trades records against write size: each
+  bucket is a record whose sealed receipt is kept for good.
+- A scope with settled requests has all eight of its buckets read and
+  decoded at the first receipt, or the first audit of a target that is
+  neither a hot assessment nor a hot request, of a boundary; the buckets an
+  audit reads are copied for that action.
+- Each receipt of such a scope scans the scope's settled entries: it finds
+  its request among them and rebuilds the sets of consumed evidence and
+  operations over the scope's hot and settled receipts, once per receipt.
+  That is O(receipts in the packet times receipts of the scope not yet
+  archived), as before, but the receipts scanned now include the settled
+  history held in the buckets, up to about nine times what one ledger held.
+- An archived book is the whole book, so it is no longer bounded by one
+  ledger record: at worst the ledger's 256 KiB plus its share of eight
+  buckets of up to 252 KiB each, about 2.25 MiB. Archive blobs are limited
+  by record count (`MAX_FISCAL_ARCHIVE_RECORDS_PER_BLOB`, 64), so a
+  worst-case blob grows about nine times (from about 16 MiB to about
+  144 MiB), and `apply_fiscal_archive_commit` rebuilds those pages inside
+  the boundary. Archive books in smaller commits when they are large.
+- An emptied bucket is never retired, so a scope keeps up to eight bucket
+  records once it has settled requests.
+- Only full fulfilment moves a request out: a request whose receipts are
+  `Rejected` or `Excused` and never fulfilled stays hot until its book is
+  archived.
+
 Version 0.24.0 is a pre-1.0 minor release. Its changes come from four
 packages. None has a proposal of its own: this entry, the rustdoc of the new
 items, and the crate READMEs are the contract.

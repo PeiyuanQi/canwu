@@ -25,7 +25,8 @@ use crate::projection::committed_fiscal_catalog;
 use crate::records::{
     FiscalArchiveRecord, FiscalJurisdictionRecord, FiscalLedgerRecord, FiscalObserverRecord,
     FiscalOfficeRecord, FiscalRecordKind, FiscalReportQueueRecord, FiscalRootRecord,
-    OBSERVER_HOLDER_ROLE, ROOT_CATALOG_ROLE, audit_fiscal_record_set, fiscal_archive_reference,
+    FiscalSettledRecord, OBSERVER_HOLDER_ROLE, ROOT_CATALOG_ROLE, audit_fiscal_record_set,
+    fiscal_archive_reference,
 };
 use crate::report::{fiscal_report_knowledge_schema, materialize_reports};
 use crate::settle::{
@@ -110,10 +111,10 @@ pub const FISCAL_ACTION_SETTLED_EVENT: &str = "canwu.fiscal.action_settled.v1";
 /// Event recorded for every settled archive commit, applied or stale.
 pub const FISCAL_ARCHIVE_MAINTENANCE_EVENT: &str = "canwu.fiscal.archive_maintenance.v1";
 
-const PLUGIN_VERSION: &str = "0.6.0-experimental";
-/// BLAKE3 of `canwu-fiscal plugin semantic hash 0.6.0-experimental: batch
-/// sets and aggregated execution evidence`.
-const SEMANTIC_HASH: &str = "8b37008533b60bd6b891617475e601a797b3645d4dc2c448b4ffc8bd139c9afe";
+const PLUGIN_VERSION: &str = "0.7.0-experimental";
+/// BLAKE3 of `canwu-fiscal plugin semantic hash 0.7.0-experimental: settled
+/// executions leave the hot book`.
+const SEMANTIC_HASH: &str = "c0ec6a495b2679dd773d182eb3bf796bca2b9332b56f9052d4b188f540581475";
 
 static ARCHIVE_COMMIT_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static ARCHIVE_RETENTION_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
@@ -397,7 +398,9 @@ impl SimulationPlugin for FiscalPlugin {
         // its ring, with half the reserve, pass its budget.
         for record in &fiscal {
             let kind = &record.reference.kind;
-            let (budget, room) = if kind.matches_type::<FiscalLedgerRecord>() {
+            let (budget, room) = if kind.matches_type::<FiscalLedgerRecord>()
+                || kind.matches_type::<FiscalSettledRecord>()
+            {
                 (MAX_FISCAL_LEDGER_RECORD_BYTES, 0)
             } else if kind.matches_type::<FiscalOfficeRecord>() {
                 let office = state
@@ -571,6 +574,17 @@ fn register_fiscal_record_schemas(registrar: &mut PluginRegistrar<'_>) -> Result
         allow_additional: true,
     };
     registrar.register_record_schema(ledger)?;
+    // A settled bucket declares the evidence its receipts cite, as a ledger
+    // does for its hot receipts.
+    let mut settled = DomainRecordSchema::for_record::<FiscalSettledRecord>();
+    settled.payload_schema = PayloadSchema::Object {
+        properties: BTreeMap::from([(
+            PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD.to_owned(),
+            payload_required_evidence_continuation_property_v1(),
+        )]),
+        allow_additional: true,
+    };
+    registrar.register_record_schema(settled)?;
     registrar
         .register_record_schema(DomainRecordSchema::for_record::<FiscalJurisdictionRecord>())?;
     // The engine checks these against its entity registry, so an observer
@@ -1686,7 +1700,7 @@ fn validate_action_scope_authority(
                 scope_id,
                 id,
                 &["assessments", "execution_requests", "execution_receipts"],
-            )? =>
+            )? && !working.settled_holds(scope_id, id)? =>
         {
             Err(not_found("fiscal audit target is unavailable"))
         }
@@ -2246,8 +2260,10 @@ pub struct FiscalArchiveIngressReceiptV1 {
 /// The records of a run that an archive commit of up to `book_limit` books
 /// is prepared from, as a partial state: the root, the archive head, the
 /// ledgers that hold the first `book_limit` closed books in (scope, cycle)
-/// order, and those ledgers' offices. Every other ledger is read only far
-/// enough to see that its hot books are open, and no other record is read.
+/// order, those ledgers' offices, and the settled buckets of each of those
+/// scopes that has a closed book with settled requests. Every other ledger
+/// is read only far enough to see that its hot books are open, and no other
+/// record is read.
 fn archive_candidates<H: CanwuRun + ?Sized>(
     runtime: &H,
     book_limit: usize,
@@ -2298,6 +2314,17 @@ fn archive_candidates<H: CanwuRun + ?Sized>(
             .map(|ledger| ledger.office.clone())
             .ok_or_else(|| missing("a fiscal ledger is not loaded"))?;
         working.ensure_office_key(&office)?;
+        // A closed book with settled requests is archived whole, so its
+        // scope's settled buckets are read.
+        let has_settled = working.state.ledgers.get(scope).is_some_and(|ledger| {
+            ledger
+                .books
+                .values()
+                .any(|book| !book.is_open() && !book.settled.is_empty())
+        });
+        if has_settled {
+            working.ensure_scope_settled(scope)?;
+        }
         taken += books;
     }
     Ok(working.state)
@@ -2311,7 +2338,8 @@ fn archive_candidates<H: CanwuRun + ?Sized>(
 ///
 /// It reads only the records the commit is prepared from: the root and the
 /// archive head, every ledger far enough to see whether it holds a closed
-/// book, and the ledgers of the books it may select with their offices, so
+/// book, and the ledgers of the books it may select with their offices and,
+/// for a book with settled requests, its scope's settled buckets, so
 /// its cost follows the number of ledgers and the books selected, not the
 /// size of the fiscal state.
 ///

@@ -612,7 +612,7 @@ fn fiscal_history(
             removed: None,
         });
     }
-    state.recompute_derived(catalog, SimTime::EPOCH);
+    state.recompute_derived(catalog, SimTime::EPOCH)?;
     Ok(state)
 }
 

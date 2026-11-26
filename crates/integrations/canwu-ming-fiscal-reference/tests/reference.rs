@@ -158,6 +158,11 @@ fn a_ledger_at_its_book_capacity_validates_and_totals_linearly() {
             .expect("capacity receipt");
     }
 
+    // Each receipt fulfils its request, so the requests move out to their
+    // settled buckets before the state is in its canonical form.
+    state
+        .recompute_derived(&catalog, SimTime::EPOCH)
+        .expect("capacity derived");
     state.validate(&catalog).expect("capacity state");
     let totals = totals(&state);
     assert_eq!(totals.len(), assessments);

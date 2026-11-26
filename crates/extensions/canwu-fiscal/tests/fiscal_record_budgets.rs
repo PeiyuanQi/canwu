@@ -65,7 +65,10 @@ fn padded_state(padding: usize, filler: usize) -> FiscalState {
                 assessment_id: ASSESSMENT.to_owned(),
                 institution: treasury(),
                 kind: FiscalExecutionKind::Collect,
-                quantity: 10,
+                // Twice what a receipt of these tests fulfils, so the
+                // request stays in its book and the receipt grows the
+                // ledger: a receipt that settles it would move it out.
+                quantity: 20,
                 unit: "grain".to_owned(),
                 payment_form: FiscalPaymentForm::Grain,
                 resource: ResourceId::new(1),
