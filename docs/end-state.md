@@ -732,7 +732,8 @@ fiscal actions settle in one boundary in admission order, and an observer's
 report is published as a summary and parts so that only what changed is
 republished. Since 0.16.0 the fiscal state is partitioned into records (a
 root, offices, one scope ledger per scope binding with one book per hot
-accounting cycle, jurisdictions, observers, a directory, index pages, and a
+accounting cycle and, since 0.25.0, eight settled buckets per scope for the
+requests its receipts have fulfilled, jurisdictions, observers, a directory, index pages, and a
 report queue) so that a boundary reads and writes only the records its
 packets name; actions arrive in batches, each against its target's own
 revision; closed cycles leave the hot records through an archive with the

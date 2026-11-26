@@ -1671,8 +1671,11 @@ institution (its authority bindings, audit bindings, appointment policy, hot
 cycle totals, its scopes' mechanisms, and the observers that see it), one
 scope ledger per scope binding (its adoptions and one accounting cycle book
 per hot cycle, which holds that cycle's assessments, remissions, execution
-requests, receipts, and audits), jurisdiction records, observer records, the
-binding directory, scope index pages, report queue pages, and the report
+requests, receipts, and audits), since 0.25.0 up to `FISCAL_SETTLED_BUCKETS`
+(8) settled buckets per scope (an execution request fulfilled to its quantity
+moves there with its receipts while its book stays hot, and the book keeps the
+figures of what moved out, until the archive merges them back), jurisdiction
+records, observer records, the binding directory, scope index pages, report queue pages, and the report
 schedule (`FiscalRecordKind`). `FiscalState` remains the model a host authors and
 reads; `into_records` partitions it and `load_fiscal_state` assembles it. A
 fiscal command is a `FiscalActionBatch` of up to `MAX_FISCAL_BATCH_ENTRIES`
@@ -1699,7 +1702,7 @@ them `MAX_FISCAL_ACTIONS_PER_BOUNDARY` (65,536) actions and
 `MAX_FISCAL_ACTIONS_PER_RECORD_PER_BOUNDARY` (64) per target in one boundary,
 `MAX_FISCAL_PARTITION_KEYS` (4) partition keys per scope ledger, 64 hot books
 per ledger and hot cycles per office, and the record byte budgets, 256 KiB
-for a ledger and 1 MiB for an office or jurisdiction, each held at settlement
+for a ledger or a settled bucket and 1 MiB for an office or jurisdiction, each held at settlement
 less a 4 KiB reserve for the outcome ring. Execution receipts arrive in
 packets of up to `MAX_FISCAL_RECEIPTS_PER_PACKET` (4,096) through
 `enqueue_execution_receipts`. Aggregated `FiscalExecutionEvidence` lists one

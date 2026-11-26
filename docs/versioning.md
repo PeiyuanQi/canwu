@@ -8,7 +8,7 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.24.0`. A live `SimulationSnapshot` has:
+The workspace version is `0.25.0`. A live `SimulationSnapshot` has:
 
 - snapshot format `9`;
 - commitment format `9`;
@@ -26,10 +26,10 @@ Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
 
-**Unreleased / 0.25.0.** The workspace version stays `0.24.0` until the
-release. Settled fiscal executions leave the hot book (`canwu-fiscal`, with
-the `canwu-ming-fiscal-reference` adapter: downstream gap G-118). There is
-no proposal of its own: this entry, the rustdoc of the new items, and the
+Version 0.25.0 is a pre-1.0 minor release. Its change comes from one
+package: settled fiscal executions leave the hot book (`canwu-fiscal`, with
+the `canwu-ming-fiscal-reference` adapter: downstream gap G-118). It has no
+proposal of its own: this entry, the rustdoc of the new items, and the
 `canwu-fiscal` README ("Records and byte budgets", "Accounting cycles and
 the archive") are the contract.
 
