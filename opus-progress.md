@@ -20,7 +20,8 @@
 > G-102** (2026-11-19: one engagement per command group, a garrison's surrender, order confusion by step length);
 > 0.24.0 closes all seven. It then filed **G-118** (2026-11-25: a scope ledger rewrites its settled history at every
 > write); 0.25.0 closes it. It also proposed **G-117** (`Retire` / `Delete` of a create-only record, `canwu-sim`), not
-> yet built. Also open: the known limits the 0.18.0 to
+> yet built, and filed **G-119** and **G-120** (2026-11-26, the retained boundary history and the whole-root resource
+> write behind its memory peak), being built for 0.26.0. Also open: the known limits the 0.18.0 to
 > 0.24.0 packages left on purpose (§4.2, engine findings E-34 to E-54, E-56, E-58, E-59, and E-60 to E-66; E-55 and
 > E-57 are fixed), two limits the downstream met and worked around (§4.3), and the decisions this run took for the
 > owner to confirm (§6).
@@ -42,7 +43,26 @@ No row filed by the downstream ledger is open.
 
 ## 3. Medium
 
-No row filed by the downstream ledger is open. G-118 (filed 2026-11-25, `canwu-fiscal`: a scope ledger kept every
+**G-119** (filed 2026-11-26, `canwu-sim` / `canwu-api`, High for the downstream's first chapter): a run keeps every
+settled boundary's record changes until it seals, and the one release, `CompactedCanwu::seal_evidence`, builds a
+segment and an archive index that a host whose saves are continuation checkpoints drops (the downstream measured the
+boundary history at 546–592 MB of a 694–748 MB engine state at campaign month 14, and a 7.33–7.48 GB peak against
+its 4 GB line). Contract: (a) a `CompactedCanwu` release that drops the retained evidence to the settled cut as a
+seal does, pins the continuation closure, and builds no index and returns no segment; (b) the seal and release docs
+say a continuation-checkpoint host keeps no segment; (c) after a release `sealed_evidence_cursor` reads as after a
+continuation restore, so `canwu-fiscal` refuses no book with `UnsealedCitations`. Being built on branch `fix/g119`
+for 0.26.0 (owner's go-ahead relayed 2026-11-26).
+
+**G-120** (filed 2026-11-26, `canwu-resource`, High while the root's copies are retained, Medium after a release):
+every resource write rewrites the whole live root `resource:runtime:v1`, run budget and admission epochs included
+(the downstream measured 1,396 writes of about 133 KB by month 14, 186.4 MB of record changes), and nothing retires
+an ended authority's partition or adds one for a new authority. Contract: (a) a write costs the state it changed:
+the run budget is not rewritten with the root, and an authority's admission epoch is written with that authority's
+lease only; (b) a budget revision after lease admission may retire an idle authority's partition and epoch and add a
+new authority's, within the V1 bounds. Being built on branch `fix/g120` for 0.26.0 (owner's go-ahead relayed
+2026-11-26).
+
+G-118 (filed 2026-11-25, `canwu-fiscal`: a scope ledger kept every
 settled execution request and receipt of its hot books, so each ledger write rewrote the scope's history) is closed
 by 0.25.0 (the 0.25.0 entry of `docs/versioning.md`); the downstream dropped the row's conditional part (b), since
 `CloseAccountingCycle` already closes a book with an outstanding assessment. G-117 (`Retire` / `Delete` of a
@@ -148,8 +168,9 @@ own leases) and E-37's publication-budget overshoot (the application's publisher
 
 ## 5. Next steps
 
-1. **G-117** (`Retire` / `Delete` of a create-only domain record, `canwu-sim`), proposed by the downstream for the
-   next release, when the owner asks for it.
+1. **G-119 and G-120 on the 0.26.0 line:** built on branches `fix/g119` and `fix/g120` (owner's go-ahead relayed by
+   the downstream on 2026-11-26); integration, the release's full verification, and publication wait for the owner.
+   G-117 (`Retire` / `Delete` of a create-only domain record, `canwu-sim`) can join the line when the owner asks.
 2. **The downstream's adoption of 0.24.0 and 0.25.0** follows its own plan (its ledger records the adoption of G-98 to
    G-102, G-110, G-111, and G-118 at their pins) and the rows it files against them. G-94's real check is still its
    `Daily` p99 past campaign month 22; if its clearing commits show E-59's re-hash, measure how old the cleared
