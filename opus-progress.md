@@ -47,7 +47,7 @@ No row filed by the downstream ledger is open.
 settled boundary's record changes until it seals, and the one release, `CompactedCanwu::seal_evidence`, builds a
 segment and an archive index that a host whose saves are continuation checkpoints drops (the downstream measured the
 boundary history at 546–592 MB of a 694–748 MB engine state at campaign month 14, and a 7.33–7.48 GB peak against
-its 4 GB line). Contract: (a) a `CompactedCanwu` release that drops the retained evidence to the settled cut as a
+its own 4 GB memory target). Contract: (a) a `CompactedCanwu` release that drops the retained evidence to the settled cut as a
 seal does, pins the continuation closure, and builds no index and returns no segment; (b) the seal and release docs
 say a continuation-checkpoint host keeps no segment; (c) after a release `sealed_evidence_cursor` reads as after a
 continuation restore, so `canwu-fiscal` refuses no book with `UnsealedCitations`. Being built on branch `fix/g119`
