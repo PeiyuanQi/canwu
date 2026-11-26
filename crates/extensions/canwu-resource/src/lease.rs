@@ -313,6 +313,40 @@ impl EligibilityEnvelopeV1 {
     }
 }
 
+/// The most partitions one run budget holds: every partition reserves at
+/// least one pending slot ([`CompletionCapacityPartitionV1::reserved_pending_slots`]),
+/// and the shared and reserved slots together are at most
+/// [`MAX_PENDING_LEASE_ACQUISITIONS_GLOBAL`].
+pub const MAX_RUN_BUDGET_PARTITIONS: usize = MAX_PENDING_LEASE_ACQUISITIONS_GLOBAL;
+
+/// The most partitions one run budget revision retires and adds together
+/// ([`crate::ResourceReviseRunBudgetRequestV1`]), which bounds the live
+/// buckets one revision writes.
+pub const MAX_RUN_BUDGET_REVISION_CHANGES: usize = 256;
+
+/// The longest operation namespace a partition may name, in bytes.
+pub const MAX_COMPLETION_OPERATION_NAMESPACE_BYTES: usize = 160;
+
+/// The identity of one run budget partition, and of its admission epoch: an
+/// authority and the operation namespace its leases take capacity from.
+/// Ordered by authority, then namespace.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct CompletionPartitionKeyV1 {
+    pub authority: KnowledgeHolderRef,
+    pub operation_namespace: String,
+}
+
+impl CompletionPartitionKeyV1 {
+    /// The key of `authority`'s partition for `operation_namespace`.
+    #[must_use]
+    pub fn new(authority: KnowledgeHolderRef, operation_namespace: impl Into<String>) -> Self {
+        Self {
+            authority,
+            operation_namespace: operation_namespace.into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CompletionCapacityPartitionV1 {
     pub authority: KnowledgeHolderRef,
@@ -328,8 +362,21 @@ pub struct CompletionCapacityPartitionV1 {
 }
 
 impl CompletionCapacityPartitionV1 {
+    /// The partition's identity: its authority and operation namespace.
+    #[must_use]
+    pub fn key(&self) -> CompletionPartitionKeyV1 {
+        CompletionPartitionKeyV1::new(self.authority.clone(), self.operation_namespace.clone())
+    }
+
+    /// Whether this partition's identity is `key`.
+    #[must_use]
+    pub fn has_key(&self, key: &CompletionPartitionKeyV1) -> bool {
+        self.authority == key.authority && self.operation_namespace == key.operation_namespace
+    }
+
     pub fn validate(&self) -> Result<(), ResourceError> {
         if self.operation_namespace.is_empty()
+            || self.operation_namespace.len() > MAX_COMPLETION_OPERATION_NAMESPACE_BYTES
             || self.reserved_pending_slots == 0
             || self.reserved_pending_slots > MAX_RESERVED_PENDING_SLOTS_PER_AUTHORITY
             || self.request_token_capacity == 0
@@ -349,6 +396,20 @@ impl CompletionCapacityPartitionV1 {
     }
 }
 
+/// The completion capacity of a run: global totals and one partition per
+/// authority and operation namespace.
+///
+/// Its partitions are in ascending key order
+/// ([`CompletionPartitionKeyV1`]); [`Self::seal`] sorts them. In the resource
+/// root each partition, with its admission epoch, persists as a live record
+/// of its own (`ResourceLiveRecordKeyV1::Partition`), so the root's
+/// `run_budget` holds the attached partitions only: all of them in a whole
+/// state, the ones a boundary attached in a partial one. Read one partition
+/// with [`crate::ResourceState::partition`] rather than from `partitions`.
+///
+/// `semantic_digest` covers the header (`revision`, `total_completion_units`,
+/// `shared_pending_slots`) under the domain `canwu.resource.run-budget.v2`,
+/// not the partitions, so a partial budget checks it too.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RunBudgetRevisionV1 {
     pub revision: ResourceRevision,
@@ -358,7 +419,19 @@ pub struct RunBudgetRevisionV1 {
     pub semantic_digest: String,
 }
 
+/// The header a run budget's digest covers.
+#[derive(Serialize)]
+struct RunBudgetHeaderV2 {
+    revision: ResourceRevision,
+    total_completion_units: u64,
+    shared_pending_slots: u16,
+}
+
 impl RunBudgetRevisionV1 {
+    /// Checks the budget's totals, each partition it holds, their order, and
+    /// the digest of its header. On the budget of a partial resource root,
+    /// whose `partitions` hold the attached ones only, the totals are checked
+    /// over those; the resource state checks them over every partition.
     pub fn validate(&self) -> Result<(), ResourceError> {
         if self.total_completion_units == 0
             || usize::from(self.shared_pending_slots) > MAX_PENDING_LEASE_ACQUISITIONS_GLOBAL
@@ -367,19 +440,18 @@ impl RunBudgetRevisionV1 {
                 "run budget has invalid global completion capacity".to_owned(),
             ));
         }
-        let mut keys = BTreeSet::new();
         let mut reserved_slots = usize::from(self.shared_pending_slots);
         let mut guaranteed_units = 0_u64;
+        let mut previous: Option<CompletionPartitionKeyV1> = None;
         for partition in &self.partitions {
             partition.validate()?;
-            if !keys.insert((
-                partition.authority.clone(),
-                partition.operation_namespace.clone(),
-            )) {
+            let key = partition.key();
+            if previous.as_ref().is_some_and(|previous| previous >= &key) {
                 return Err(ResourceError::InvalidDefinition(
-                    "run budget contains a duplicate authority partition".to_owned(),
+                    "run budget partitions are duplicated or not in ascending key order".to_owned(),
                 ));
             }
+            previous = Some(key);
             reserved_slots = reserved_slots
                 .checked_add(usize::from(partition.reserved_pending_slots))
                 .ok_or(ResourceError::Overflow)?;
@@ -387,17 +459,15 @@ impl RunBudgetRevisionV1 {
                 .checked_add(partition.guaranteed_units)
                 .ok_or(ResourceError::Overflow)?;
         }
-        if reserved_slots > MAX_PENDING_LEASE_ACQUISITIONS_GLOBAL
+        if self.partitions.len() > MAX_RUN_BUDGET_PARTITIONS
+            || reserved_slots > MAX_PENDING_LEASE_ACQUISITIONS_GLOBAL
             || guaranteed_units > self.total_completion_units
         {
             return Err(ResourceError::LimitExceeded(
                 "run budget reserved slots or guaranteed units exceed the global pool".to_owned(),
             ));
         }
-        let mut detached = self.clone();
-        detached.semantic_digest.clear();
-        let digest = canonical_digest("canwu.resource.run-budget.v1", &detached)?;
-        if !self.semantic_digest.is_empty() && self.semantic_digest != digest {
+        if !self.semantic_digest.is_empty() && self.semantic_digest != self.header_digest()? {
             return Err(ResourceError::InvalidDefinition(
                 "run budget semantic digest is invalid".to_owned(),
             ));
@@ -405,11 +475,49 @@ impl RunBudgetRevisionV1 {
         Ok(())
     }
 
+    /// Sorts the partitions into key order, validates the budget, and sets
+    /// its digest.
     pub fn seal(mut self) -> Result<Self, ResourceError> {
         self.semantic_digest.clear();
+        self.partitions
+            .sort_by_key(CompletionCapacityPartitionV1::key);
         self.validate()?;
-        self.semantic_digest = canonical_digest("canwu.resource.run-budget.v1", &self)?;
+        self.semantic_digest = self.header_digest()?;
         Ok(self)
+    }
+
+    /// The attached partition `key`, if this budget holds it.
+    #[must_use]
+    pub fn attached_partition(
+        &self,
+        key: &CompletionPartitionKeyV1,
+    ) -> Option<&CompletionCapacityPartitionV1> {
+        self.partitions
+            .binary_search_by(|partition| {
+                (&partition.authority, partition.operation_namespace.as_str())
+                    .cmp(&(&key.authority, key.operation_namespace.as_str()))
+            })
+            .ok()
+            .map(|index| &self.partitions[index])
+    }
+
+    pub(crate) fn header_digest(&self) -> Result<String, ResourceError> {
+        canonical_digest(
+            "canwu.resource.run-budget.v2",
+            &RunBudgetHeaderV2 {
+                revision: self.revision,
+                total_completion_units: self.total_completion_units,
+                shared_pending_slots: self.shared_pending_slots,
+            },
+        )
+    }
+
+    /// The slots the partitions this budget holds reserve.
+    pub(crate) fn attached_reserved_slots(&self) -> usize {
+        self.partitions
+            .iter()
+            .map(|partition| usize::from(partition.reserved_pending_slots))
+            .sum()
     }
 }
 
@@ -800,9 +908,29 @@ impl ExternalCompletionParticipantBookV1 {
             .or_else(|| self.terminal_grants.get(acquisition))
     }
 
+    /// Grants the external participant `request` names, taking its capacity
+    /// from the partition of its holder and operation namespace in `budget`,
+    /// which must hold every partition (a whole budget).
     pub fn grant(
         &mut self,
         budget: &RunBudgetRevisionV1,
+        request: RequestExternalCompletionParticipantGrantV1,
+    ) -> Result<ExternalCompletionParticipantGrantV1, ResourceError> {
+        let partition = budget
+            .attached_partition(&CompletionPartitionKeyV1::new(
+                request.holder.clone(),
+                request.operation_namespace.clone(),
+            ))
+            .cloned();
+        self.grant_in(budget, partition.as_ref(), request)
+    }
+
+    /// [`Self::grant`] with the request's partition, `None` when the run
+    /// budget holds none for it, resolved by the caller.
+    pub(crate) fn grant_in(
+        &mut self,
+        budget: &RunBudgetRevisionV1,
+        partition: Option<&CompletionCapacityPartitionV1>,
         request: RequestExternalCompletionParticipantGrantV1,
     ) -> Result<ExternalCompletionParticipantGrantV1, ResourceError> {
         budget.validate()?;
@@ -824,19 +952,11 @@ impl ExternalCompletionParticipantBookV1 {
                 "external completion participant targets are not canonical".to_owned(),
             ));
         }
-        let partition = budget
-            .partitions
-            .iter()
-            .find(|partition| {
-                partition.authority == request.holder
-                    && partition.operation_namespace == request.operation_namespace
-            })
-            .ok_or_else(|| {
-                ResourceError::Authority(
-                    "external completion participant has no resource run-budget partition"
-                        .to_owned(),
-                )
-            })?;
+        let partition = partition.ok_or_else(|| {
+            ResourceError::Authority(
+                "external completion participant has no resource run-budget partition".to_owned(),
+            )
+        })?;
         let units = request.recipe.canonical_units()?;
         if (request.policy_class == CompletionPolicyClassV1::Guaranteed
             && units > partition.guaranteed_units)
@@ -1245,9 +1365,10 @@ impl ExternalCompletionParticipantBookV1 {
         let mut reserved = 0_u64;
         for (acquisition, participant) in &self.grants {
             participant.recipe.validate()?;
+            // A grant admitted under an earlier budget revision stays valid.
             if acquisition != &participant.grant.acquisition
                 || participant.grant.owner_plugin != crate::PLUGIN_NAME
-                || participant.grant.run_budget_revision != budget.revision
+                || participant.grant.run_budget_revision > budget.revision
                 || participant.grant.recipe_digest != participant.recipe.digest()?
                 || participant.eligibility_envelope_digest.is_empty()
             {
@@ -1278,7 +1399,7 @@ impl ExternalCompletionParticipantBookV1 {
             participant.recipe.validate()?;
             if acquisition != &participant.grant.acquisition
                 || participant.grant.owner_plugin != crate::PLUGIN_NAME
-                || participant.grant.run_budget_revision != budget.revision
+                || participant.grant.run_budget_revision > budget.revision
                 || participant.grant.recipe_digest != participant.recipe.digest()?
                 || participant.eligibility_envelope_digest.is_empty()
                 || participant.grant.state != CompletionGrantStateV1::Completed
@@ -1341,10 +1462,36 @@ impl Default for CompletionLeaseBookV1 {
 }
 
 impl CompletionLeaseBookV1 {
-    #[allow(clippy::too_many_lines)]
+    /// Admits the acquisition `request` names under the partition of its
+    /// holder and operation namespace in `budget`, which must hold every
+    /// partition (a whole budget), and starts or advances that partition's
+    /// admission epoch.
     pub fn request_acquisition(
         &mut self,
         budget: &RunBudgetRevisionV1,
+        request: RequestCompletionLeaseV1,
+    ) -> Result<CompletionLeaseAcquisitionV1, ResourceError> {
+        let partition = budget
+            .attached_partition(&CompletionPartitionKeyV1::new(
+                request.holder.clone(),
+                request.operation_namespace.clone(),
+            ))
+            .cloned();
+        let configured_pending =
+            usize::from(budget.shared_pending_slots) + budget.attached_reserved_slots();
+        self.request_acquisition_in(budget, partition.as_ref(), configured_pending, request)
+    }
+
+    /// [`Self::request_acquisition`] with the request's partition (`None`
+    /// when the run budget holds none for it) and the budget's configured
+    /// pending slots (shared and every partition's reserved ones), resolved
+    /// by the caller, which may hold only part of the budget.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn request_acquisition_in(
+        &mut self,
+        budget: &RunBudgetRevisionV1,
+        partition: Option<&CompletionCapacityPartitionV1>,
+        configured_pending: usize,
         request: RequestCompletionLeaseV1,
     ) -> Result<CompletionLeaseAcquisitionV1, ResourceError> {
         budget.validate()?;
@@ -1384,18 +1531,11 @@ impl CompletionLeaseBookV1 {
                 "completion lease operation key was reused by another acquisition".to_owned(),
             ));
         }
-        let partition = budget
-            .partitions
-            .iter()
-            .find(|partition| {
-                partition.authority == request.holder
-                    && partition.operation_namespace == request.operation_namespace
-            })
-            .ok_or_else(|| {
-                ResourceError::Authority(
-                    "completion lease authority/namespace has no run-budget partition".to_owned(),
-                )
-            })?;
+        let partition = partition.ok_or_else(|| {
+            ResourceError::Authority(
+                "completion lease authority/namespace has no run-budget partition".to_owned(),
+            )
+        })?;
         let global_pending = self
             .acquisitions
             .values()
@@ -1423,12 +1563,6 @@ impl CompletionLeaseBookV1 {
                     && is_pending(value.state)
             })
             .count();
-        let configured_pending = usize::from(budget.shared_pending_slots)
-            + budget
-                .partitions
-                .iter()
-                .map(|value| usize::from(value.reserved_pending_slots))
-                .sum::<usize>();
         if global_pending >= MAX_PENDING_LEASE_ACQUISITIONS_GLOBAL
             || global_pending >= configured_pending
             || authority_pending >= MAX_PENDING_LEASE_ACQUISITIONS_PER_AUTHORITY
@@ -2450,9 +2584,10 @@ impl CompletionLeaseBookV1 {
         budget.validate()?;
         let mut computed_reserved = 0_u64;
         for (id, grant) in &self.grants {
+            // A grant admitted under an earlier budget revision stays valid.
             if id != &grant.id
                 || !self.acquisitions.contains_key(&grant.acquisition)
-                || grant.run_budget_revision != budget.revision
+                || grant.run_budget_revision > budget.revision
             {
                 return Err(ResourceError::InvalidDefinition(
                     "completion grant identity, acquisition, or budget revision is invalid"

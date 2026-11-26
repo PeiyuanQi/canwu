@@ -52,12 +52,17 @@ pub const RESOURCE_ACCOUNT_RESCOPE_INGRESS: &str = "resource_account_rescope_v1"
 /// handed out only through [`enqueue_resource_account_capacity`]; a packet
 /// another plugin's boundary system schedules on it settles nothing.
 pub const RESOURCE_ACCOUNT_CAPACITY_INGRESS: &str = "resource_account_capacity_v1";
+/// Internal ingress of the host application's run budget revision
+/// ([`crate::ResourceOperationRequestV1::ReviseRunBudget`]). Its permit is
+/// handed out only through [`enqueue_resource_run_budget_revision`]; a packet
+/// another plugin's boundary system schedules on it settles nothing.
+pub const RESOURCE_RUN_BUDGET_REVISION_INGRESS: &str = "resource_run_budget_revision_v1";
 pub const RESOURCE_REPORT_KNOWLEDGE: &str = "resource_report";
-/// BLAKE3, lowercase hex, of `canwu-resource plugin semantic hash 0.24.0:
-/// host account capacity change, a lowering keeps room for open transfer
-/// escrow` (one line, one space after each comma and colon).
+/// BLAKE3, lowercase hex, of `canwu-resource plugin semantic hash 0.26.0:
+/// run budget partitions in live buckets, host run budget revision` (one
+/// line, one space after each comma and colon).
 pub const RESOURCE_SEMANTIC_HASH: &str =
-    "a5286b07e7cc18174b5c9609e8f198613347a765b0c53f0549a15ca0f7aac018";
+    "94e4ce5a732d7dd5c586c09df7914491308b7a55d22d6a55c1d2763ef189ebb2";
 
 const RESOURCE_REPORT_SCHEMA_HASH: &str =
     "2e271b9ea79404e662ba51360ce8061421ae896c1e70b09e99feb8d0de01a007";
@@ -68,6 +73,7 @@ static RESOURCE_ARCHIVE_INGRESS_PERMIT: OnceLock<PluginIngressPermit> = OnceLock
 static RESOURCE_ARCHIVE_RETENTION_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static RESOURCE_ACCOUNT_RESCOPE_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static RESOURCE_ACCOUNT_CAPACITY_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
+static RESOURCE_RUN_BUDGET_REVISION_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceArchiveIngressReceiptV1 {
@@ -840,6 +846,24 @@ impl SimulationPlugin for ResourcePlugin {
                 "resource account capacity permit changed across registrations",
             ));
         }
+        let revision_permit = registrar.register_internal_ingress(PluginIngressDescriptor {
+            name: RESOURCE_RUN_BUDGET_REVISION_INGRESS.to_owned(),
+            description:
+                "Retire and add resource run budget partitions as the host application names"
+                    .to_owned(),
+            class: IngressClass::ScheduledSystem,
+            payload_schema: PayloadSchema::Any,
+        })?;
+        if RESOURCE_RUN_BUDGET_REVISION_PERMIT
+            .set(revision_permit.clone())
+            .is_err()
+            && RESOURCE_RUN_BUDGET_REVISION_PERMIT.get() != Some(&revision_permit)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                "resource run budget revision permit changed across registrations",
+            ));
+        }
         registrar.register_ingress(PluginIngressDescriptor {
             name: RESOURCE_ADAPTER_INGRESS.to_owned(),
             description: "Accept one exact adapter-bound resource operation".to_owned(),
@@ -1023,8 +1047,18 @@ fn admit_resource_command(
         value.request.operation_key(),
     )])?;
     work.attach_named(payload)?;
+    work.attach_live(
+        value
+            .request
+            .partition_keys()
+            .into_iter()
+            .map(crate::ResourceLiveRecordKeyV1::Partition),
+    )?;
     let admitted =
         archive_reads::recording(|| admit_resource_command_on(view, context, &value, &work.state));
+    // A lookup of a partition admission did not attach fails the command in
+    // every build, not only where the whole root checks it.
+    work.state.partition_probes.check_resolved()?;
     #[cfg(debug_assertions)]
     {
         let mut whole = crate::ResourceRootWork::new(view, live)?;
@@ -1638,8 +1672,55 @@ fn packet_operation_keys(packet_type: &str, payload: &Value) -> Vec<crate::Resou
                 .map(|request| vec![request.operation_key])
                 .unwrap_or_default()
         }
+        RESOURCE_RUN_BUDGET_REVISION_INGRESS => {
+            decoded::<crate::ResourceReviseRunBudgetRequestV1>(payload)
+                .map(|request| vec![request.operation_key])
+                .unwrap_or_default()
+        }
         RESOURCE_DEFERRED_INGRESS => decoded::<ResourceDeferredPacketV1>(payload)
             .map(|deferred| packet_operation_keys(&deferred.packet_type, &deferred.payload))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// The run budget partitions a resource packet of `packet_type` reads, as
+/// far as its payload decodes ([`ResourceOperationRequestV1::partition_keys`]),
+/// through every carrier [`packet_operation_keys`] reads: a tracked command,
+/// an adapter packet, a completion operation, a budget revision, and the
+/// deferred wrapper of any of them.
+fn packet_partition_keys(
+    packet_type: &str,
+    payload: &Value,
+) -> Vec<crate::CompletionPartitionKeyV1> {
+    fn decoded<T: serde::de::DeserializeOwned>(payload: &Value) -> Option<T> {
+        T::deserialize(payload).ok()
+    }
+    match packet_type {
+        RESOURCE_COMMAND_INGRESS => decoded::<AdmittedResourceCommandV1>(payload)
+            .map(|admitted| admitted.value.request.partition_keys())
+            .unwrap_or_default(),
+        RESOURCE_ADAPTER_INGRESS => decoded::<ResourceAdapterOperationV1>(payload)
+            .map(|packet| packet.request.partition_keys())
+            .unwrap_or_default(),
+        RESOURCE_COMPLETION_INGRESS => decoded::<crate::ResourceCompletionOperationV1>(payload)
+            .map(|operation| ResourceOperationRequestV1::Completion(operation).partition_keys())
+            .unwrap_or_default(),
+        // A revision past the change bound is refused before it reads a
+        // partition, so it attaches none.
+        RESOURCE_RUN_BUDGET_REVISION_INGRESS => {
+            decoded::<crate::ResourceReviseRunBudgetRequestV1>(payload)
+                .filter(|request| {
+                    request.retire.len().saturating_add(request.add.len())
+                        <= crate::MAX_RUN_BUDGET_REVISION_CHANGES
+                })
+                .map(|request| {
+                    ResourceOperationRequestV1::ReviseRunBudget(request).partition_keys()
+                })
+                .unwrap_or_default()
+        }
+        RESOURCE_DEFERRED_INGRESS => decoded::<ResourceDeferredPacketV1>(payload)
+            .map(|deferred| packet_partition_keys(&deferred.packet_type, &deferred.payload))
             .unwrap_or_default(),
         _ => Vec::new(),
     }
@@ -1690,6 +1771,13 @@ fn settle_lifecycle_on<'s, S: crate::HotTerminalSource<'s>>(
         if packet_type != RESOURCE_ARCHIVE_COMMIT_INGRESS {
             work.attach_named(payload)?;
         }
+        // The run budget partitions it admits a lease under, or that a
+        // budget revision retires or adds, with their admission epochs.
+        work.attach_live(
+            packet_partition_keys(packet_type, payload)
+                .into_iter()
+                .map(crate::ResourceLiveRecordKeyV1::Partition),
+        )?;
         match packet_type.as_str() {
             // An archive commit settles on the work: the records it selects
             // leave their buckets without being decoded.
@@ -1802,6 +1890,16 @@ fn settle_lifecycle_on<'s, S: crate::HotTerminalSource<'s>>(
             RESOURCE_ACCOUNT_CAPACITY_INGRESS => {
                 settle_capacity_packet(view, context, ingress, payload, state, &mut settlement)?;
             }
+            RESOURCE_RUN_BUDGET_REVISION_INGRESS => {
+                settle_run_budget_revision_packet(
+                    view,
+                    context,
+                    ingress,
+                    payload,
+                    state,
+                    &mut settlement,
+                )?;
+            }
             RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS => {
                 settle_expiry_tick(view, context, ingress.id, state, &mut settlement)?;
             }
@@ -1824,6 +1922,9 @@ fn settle_lifecycle_on<'s, S: crate::HotTerminalSource<'s>>(
             _ => {}
         }
     }
+    // A lookup of a partition no packet attached fails the boundary in
+    // every build, whether or not the root changed.
+    work.state.partition_probes.check_resolved()?;
     let LifecycleSettlement {
         changed,
         affected,
@@ -2617,11 +2718,41 @@ fn settle_capacity_packet(
     )
 }
 
-/// How a host-only account operation is named in its skip details and
-/// evidence refusals.
+/// Settles the host application's run budget revision as
+/// [`settle_rescope_packet`] settles a rescope: only the host application
+/// revises the budget, through [`enqueue_resource_run_budget_revision`].
+fn settle_run_budget_revision_packet(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    ingress: &IngressRecord,
+    payload: &Value,
+    state: &mut crate::ResourceState,
+    out: &mut LifecycleSettlement,
+) -> Result<(), CanwuError> {
+    let Ok(request) =
+        decode::<crate::ResourceReviseRunBudgetRequestV1>(payload, "resource run budget revision")
+    else {
+        out.skip_undecodable(ingress.id, "resource run budget revision");
+        return Ok(());
+    };
+    let evidence = request.evidence.clone();
+    settle_host_account_operation(
+        view,
+        context,
+        ingress,
+        &ResourceOperationRequestV1::ReviseRunBudget(request),
+        &evidence,
+        HostAccountOperation::BUDGET_REVISION,
+        state,
+        out,
+    )
+}
+
+/// How a host-only operation is named in its skip details and evidence
+/// refusals.
 #[derive(Clone, Copy)]
 struct HostAccountOperation {
-    /// The operation, as in "resource account {name} evidence".
+    /// The operation, as in "{name} evidence".
     name: &'static str,
     /// The skip detail of a packet another plugin scheduled.
     foreign_detail: &'static str,
@@ -2629,12 +2760,16 @@ struct HostAccountOperation {
 
 impl HostAccountOperation {
     const RESCOPE: Self = Self {
-        name: "rescope",
+        name: "resource account rescope",
         foreign_detail: "an account rescope is the host application's; one another plugin scheduled settles nothing",
     };
     const CAPACITY: Self = Self {
-        name: "capacity change",
+        name: "resource account capacity change",
         foreign_detail: "an account capacity change is the host application's; one another plugin scheduled settles nothing",
+    };
+    const BUDGET_REVISION: Self = Self {
+        name: "resource run budget revision",
+        foreign_detail: "a run budget revision is the host application's; one another plugin scheduled settles nothing",
     };
 }
 
@@ -2714,7 +2849,8 @@ fn settle_host_account_operation(
 }
 
 /// What the simulation view holds against the evidence of a host-only
-/// account operation (a rescope or a capacity change), or `None`: a version
+/// operation (an account rescope or capacity change, or a run budget
+/// revision), or `None`: a version
 /// that is not its record's current version, or a record that is not of a
 /// declared adapter evidence kind. Only the current-version index is read,
 /// never retained evidence, so a sealed run and its exact replay find the
@@ -2734,17 +2870,17 @@ fn host_account_evidence_refusal(
         || (kind.namespace == "canwu.production" && kind.name == "runtime")
     {
         return Ok(Some(crate::ResourceError::Authority(format!(
-            "resource account {name} evidence must be a record of a declared adapter evidence kind"
+            "{name} evidence must be a record of a declared adapter evidence kind"
         ))));
     }
     match is_current_version(view, evidence) {
         Ok(true) => Ok(None),
         Ok(false) => Ok(Some(crate::ResourceError::VersionConflict(format!(
-            "resource account {name} evidence is not its record's current version"
+            "{name} evidence is not its record's current version"
         )))),
         Err(error) if error.code == ErrorCode::UndeclaredStateRead => {
             Ok(Some(crate::ResourceError::Authority(format!(
-                "resource account {name} evidence is of a record kind the resource plugin does not read"
+                "{name} evidence is of a record kind the resource plugin does not read"
             ))))
         }
         Err(error) => Err(error),
@@ -3479,8 +3615,9 @@ fn validate_adapter_packet(
 /// settle only through [`RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS`], which
 /// binds every output leg of one execution to the source version production
 /// pinned on it, an account rescope only through the host application's
-/// [`RESOURCE_ACCOUNT_RESCOPE_INGRESS`], and an account capacity change only
-/// through its [`RESOURCE_ACCOUNT_CAPACITY_INGRESS`].
+/// [`RESOURCE_ACCOUNT_RESCOPE_INGRESS`], an account capacity change only
+/// through its [`RESOURCE_ACCOUNT_CAPACITY_INGRESS`], and a run budget
+/// revision only through its [`RESOURCE_RUN_BUDGET_REVISION_INGRESS`].
 fn reject_adapter_production_credit(
     request: &ResourceOperationRequestV1,
 ) -> Result<(), CanwuError> {
@@ -3502,6 +3639,12 @@ fn reject_adapter_production_credit(
         return Err(CanwuError::new(
             ErrorCode::InvalidAuthority,
             "an account's capacity is changed only by the host application",
+        ));
+    }
+    if matches!(request, ResourceOperationRequestV1::ReviseRunBudget(_)) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "the run budget is revised only by the host application",
         ));
     }
     Ok(())
@@ -4812,7 +4955,8 @@ fn adapter_source_matches(packet: &ResourceAdapterOperationV1) -> bool {
         | ResourceOperationRequestV1::IssueAccessGrant(_)
         | ResourceOperationRequestV1::RevokeAccessGrant(_)
         | ResourceOperationRequestV1::RescopeAccount(_)
-        | ResourceOperationRequestV1::SetAccountCapacity(_) => false,
+        | ResourceOperationRequestV1::SetAccountCapacity(_)
+        | ResourceOperationRequestV1::ReviseRunBudget(_) => false,
     }
 }
 
@@ -4933,6 +5077,12 @@ fn validate_resource_authority(
             return Err(CanwuError::new(
                 ErrorCode::InvalidAuthority,
                 "an account's capacity is changed only by the host application",
+            ));
+        }
+        ResourceOperationRequestV1::ReviseRunBudget(_) => {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "the run budget is revised only by the host application",
             ));
         }
         ResourceOperationRequestV1::CancelTransfer(request) => {
@@ -5383,6 +5533,80 @@ pub fn enqueue_resource_account_capacity<H: canwu_api::CanwuRun + ?Sized>(
         PluginIngressRequest::new(
             PLUGIN_NAME,
             RESOURCE_ACCOUNT_CAPACITY_INGRESS,
+            due_at,
+            encode(request)?,
+        ),
+        permit,
+    )
+}
+
+/// Queues the host application's revision of the run budget
+/// ([`crate::ResourceReviseRunBudgetRequestV1`]). Takes either runtime
+/// handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+///
+/// This is the only way to change the run budget after the first lease
+/// admission: a tracked command, an adapter packet, or a packet another
+/// plugin's boundary system schedules cannot carry the operation. The call
+/// refuses (`invalid_payload`) a request that retires and adds more than
+/// [`crate::MAX_RUN_BUDGET_REVISION_CHANGES`] keys or whose `add` is not in
+/// strictly ascending key order; settlement checks both again. The evidence
+/// must be its record's current version now, read from the current-version
+/// index, or the call refuses it; settlement reads it again.
+/// Every refusal at settlement (a stale budget revision, a retired partition
+/// in use or not held, an added partition already held, totals below what
+/// the budget's partitions and books need, too many changes, evidence that is
+/// no longer current or not of one of the plugin's adapter evidence kinds) is
+/// the operation's recorded rejection, and a result that does not fit the
+/// root is skipped with a [`crate::RESOURCE_INGRESS_SKIPPED_EVENT`].
+pub fn enqueue_resource_run_budget_revision<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
+    due_at: SimTime,
+    request: &crate::ResourceReviseRunBudgetRequestV1,
+) -> Result<canwu_api::IngressReceipt, CanwuError> {
+    reject_reserved_operation_key(&ResourceOperationRequestV1::ReviseRunBudget(
+        request.clone(),
+    ))?;
+    if request.retire.len().saturating_add(request.add.len())
+        > crate::MAX_RUN_BUDGET_REVISION_CHANGES
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPayload,
+            format!(
+                "a resource run budget revision retires and adds at most {} keys",
+                crate::MAX_RUN_BUDGET_REVISION_CHANGES
+            ),
+        ));
+    }
+    if request
+        .add
+        .windows(2)
+        .any(|pair| pair[0].key() >= pair[1].key())
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPayload,
+            "a resource run budget revision adds its partitions in strictly ascending key order",
+        ));
+    }
+    if canwu
+        .current_domain_record_version(&request.evidence.record)?
+        .as_ref()
+        != Some(&request.evidence)
+    {
+        return Err(CanwuError::new(
+            ErrorCode::EvidenceUnavailable,
+            "resource run budget revision evidence is not its record's current version",
+        ));
+    }
+    let permit = RESOURCE_RUN_BUDGET_REVISION_PERMIT.get().ok_or_else(|| {
+        CanwuError::new(
+            ErrorCode::PluginNotActive,
+            "resource plugin must be active before run budget revision ingress",
+        )
+    })?;
+    canwu.enqueue_permitted_plugin_ingress(
+        PluginIngressRequest::new(
+            PLUGIN_NAME,
+            RESOURCE_RUN_BUDGET_REVISION_INGRESS,
             due_at,
             encode(request)?,
         ),

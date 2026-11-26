@@ -2289,7 +2289,9 @@ fn validate_facility_project_archive_record(
         || participant.grant.operation_key != project.operation_key
         || participant.grant.owner_plugin != canwu_resource::PLUGIN_NAME
         || participant.grant.state != canwu_resource::CompletionGrantStateV1::Completed
-        || participant.grant.run_budget_revision != local.run_budget_revision
+        // The resource participant grant names the resource root's run
+        // budget revision, which the host may revise while the project runs;
+        // it is not production's own budget revision.
         || participant.grant.recipe_digest != acquisition.recipe_digest
         || participant.grant.reserved_units != completion_units
         || participant.grant.rejection.is_some()

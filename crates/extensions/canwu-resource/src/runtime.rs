@@ -20,12 +20,16 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Format of the resource root ([`ResourceState`]). 7 since 0.24.0: an
+/// Format of the resource root ([`ResourceState`]). 8 since 0.26.0: run
+/// budget partitions and their admission epochs persist in live buckets
+/// (`ResourceLiveRecordKeyV1::Partition`), the live ledger counts them, the
+/// run budget's digest covers only its header, and an outcome may be of kind
+/// [`crate::ResourceOperationKind::ReviseRunBudget`]. 7 (0.24.0): an
 /// outcome may be of kind [`crate::ResourceOperationKind::SetAccountCapacity`],
 /// and an account's capacity may change after it is created. 6 (0.20.0): the
 /// live root declares identity-only evidence dependencies
 /// (`canwu_identity_evidence_dependencies`), and so does each bucket.
-pub const RESOURCE_STATE_FORMAT_VERSION: u32 = 7;
+pub const RESOURCE_STATE_FORMAT_VERSION: u32 = 8;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceAllocationRequestV1 {
@@ -616,6 +620,81 @@ pub struct ResourceSetAccountCapacityRequestV1 {
     pub evidence: DomainRecordVersionRef,
 }
 
+/// Revises the run budget of a running root: the host application retires
+/// the partitions of authorities that no longer take completion leases, adds
+/// partitions for new ones, and may change the global totals.
+///
+/// Only the host application sends it, through
+/// [`crate::enqueue_resource_run_budget_revision`]; a tracked command, an
+/// adapter packet, or a packet another plugin schedules cannot carry it. Like
+/// [`ResourceSetAccountCapacityRequestV1`], it needs no completion lease and
+/// leaves one `ReviseRunBudget` outcome that keeps `evidence` as its exact
+/// evidence (the record of the authority that ended or began, or the host's
+/// own policy record); the evidence must be its record's current version when
+/// the operation settles, read from the current-version index, and of one of
+/// the adapter evidence kinds the resource plugin was configured with.
+///
+/// It settles all or nothing. Every key in `retire` leaves the root with its
+/// admission epoch; then every partition in `add` enters with no epoch. A key
+/// both retired and added is replaced, with a fresh epoch: a full token
+/// bucket, no cooldown, and no earlier instant to stay after. The budget
+/// takes `total_completion_units` and `shared_pending_slots` (send the
+/// current values to keep them), its revision advances by one, and its digest
+/// is recomputed. The outcome's quantity is the number of keys retired and
+/// added. A completion grant admitted under an earlier revision stays valid.
+///
+/// Recorded rejections, each leaving the root as it was:
+///
+/// - `version_conflict`: `expected_budget_revision` is not the budget's
+///   revision.
+/// - `limit_exceeded`: more than [`crate::MAX_RUN_BUDGET_REVISION_CHANGES`]
+///   keys retired and added; an added partition that fails its V1 bounds;
+///   `total_completion_units` 0, or `shared_pending_slots` above
+///   [`crate::MAX_PENDING_LEASE_ACQUISITIONS_GLOBAL`]; after the change, the
+///   shared and reserved pending slots above
+///   [`crate::MAX_PENDING_LEASE_ACQUISITIONS_GLOBAL`], more than
+///   [`crate::MAX_RUN_BUDGET_PARTITIONS`] partitions, guaranteed units above
+///   `total_completion_units`, or `total_completion_units` below the units
+///   the lease book holds or below those the external participant book holds
+///   (each book on its own, as each is bounded).
+/// - `invalid_definition`: nothing retired or added and the totals
+///   unchanged; `add` not in ascending key order or naming a key twice.
+/// - `not_found`: a retired key the budget does not hold.
+/// - `invalid_lifecycle`: a retired key in use: an acquisition of that
+///   authority and namespace in the lease book (requested, granted,
+///   preparing, active, aborting, or ended and waiting for its report
+///   reservation to publish); an external participant grant of it that is
+///   held, prepared, or consumed (a released, expired, or rejected one does
+///   not count); or a completion report reservation of an acquisition or
+///   participant of it.
+/// - `idempotency_conflict`: an added key the budget holds and the request
+///   does not retire.
+/// - evidence that is not current or not of an adapter evidence kind, as
+///   for a capacity change.
+///
+/// A retired authority's later lease, or its external participant request,
+/// is refused as one that never had a partition (`invalid_authority`), and so
+/// is an `Acquire` queued before the revision that settles after it. A
+/// coordinating plugin's acquisition that has not yet asked for its resource
+/// participant does not hold the partition: retiring an authority while
+/// another plugin still coordinates its work is the host's responsibility.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceReviseRunBudgetRequestV1 {
+    pub operation_key: ResourceOperationKey,
+    /// The run budget revision the host read.
+    pub expected_budget_revision: ResourceRevision,
+    /// The budget's total completion units after the revision.
+    pub total_completion_units: u64,
+    /// The budget's shared pending slots after the revision.
+    pub shared_pending_slots: u16,
+    /// The partitions that leave the root, with their admission epochs.
+    pub retire: BTreeSet<crate::CompletionPartitionKeyV1>,
+    /// The partitions that enter the root, in ascending key order.
+    pub add: Vec<crate::CompletionCapacityPartitionV1>,
+    /// The record that justifies the revision, at its current version.
+    pub evidence: DomainRecordVersionRef,
+}
+
 /// Points one account at a protected-floor policy revision, or at none.
 ///
 /// A tracked command must come from the account's custodian; an access grant
@@ -912,6 +991,9 @@ pub enum ResourceOperationRequestV1 {
     /// The host application's change of an account's capacity; see
     /// [`ResourceSetAccountCapacityRequestV1`].
     SetAccountCapacity(ResourceSetAccountCapacityRequestV1),
+    /// The host application's revision of the run budget; see
+    /// [`ResourceReviseRunBudgetRequestV1`].
+    ReviseRunBudget(ResourceReviseRunBudgetRequestV1),
 }
 
 impl ResourceOperationRequestV1 {
@@ -922,6 +1004,7 @@ impl ResourceOperationRequestV1 {
             Self::RecordTransferLoss(value) => value.operation_key.clone(),
             Self::RescopeAccount(value) => value.operation_key.clone(),
             Self::SetAccountCapacity(value) => value.operation_key.clone(),
+            Self::ReviseRunBudget(value) => value.operation_key.clone(),
             Self::BeginExchange(value) => value.operation_key.clone(),
             Self::IssueAccessGrant(value) => value.operation_key.clone(),
             Self::RevokeAccessGrant(value) => value.operation_key.clone(),
@@ -965,6 +1048,7 @@ impl ResourceOperationRequestV1 {
             Self::RecordLoss(_) | Self::RecordTransferLoss(_) => ResourceOperationKind::Loss,
             Self::RescopeAccount(_) => ResourceOperationKind::RescopeAccount,
             Self::SetAccountCapacity(_) => ResourceOperationKind::SetAccountCapacity,
+            Self::ReviseRunBudget(_) => ResourceOperationKind::ReviseRunBudget,
             Self::BeginExchange(_) => ResourceOperationKind::BeginExchange,
             Self::IssueAccessGrant(_) => ResourceOperationKind::IssueAccessGrant,
             Self::RevokeAccessGrant(_) => ResourceOperationKind::RevokeAccessGrant,
@@ -1060,7 +1144,8 @@ impl ResourceOperationRequestV1 {
             | Self::IssueAccessGrant(_)
             | Self::RevokeAccessGrant(_)
             | Self::RescopeAccount(_)
-            | Self::SetAccountCapacity(_) => Vec::new(),
+            | Self::SetAccountCapacity(_)
+            | Self::ReviseRunBudget(_) => Vec::new(),
         }
     }
 
@@ -1101,6 +1186,43 @@ impl ResourceOperationRequestV1 {
                 .as_str()
                 .starts_with(RESOURCE_COMPLETION_OPERATION_KEY_PREFIX))
             || is_batch_item_key(key.as_str())
+    }
+
+    /// The run budget partitions this request reads: the partition of a
+    /// lease acquisition, a single-step lease, or an external participant
+    /// grant, and every partition a budget revision retires or adds. A
+    /// partial root attaches them before the request settles.
+    #[must_use]
+    pub fn partition_keys(&self) -> Vec<crate::CompletionPartitionKeyV1> {
+        let key = |holder: &canwu_api::KnowledgeHolderRef, namespace: &str| {
+            crate::CompletionPartitionKeyV1::new(holder.clone(), namespace)
+        };
+        match self {
+            Self::Completion(ResourceCompletionOperationV1::Acquire(request)) => {
+                vec![key(&request.holder, &request.operation_namespace)]
+            }
+            Self::Completion(ResourceCompletionOperationV1::SingleStepLease(request)) => {
+                vec![key(
+                    &request.lease.holder,
+                    &request.lease.operation_namespace,
+                )]
+            }
+            Self::Completion(ResourceCompletionOperationV1::GrantExternalParticipant(request)) => {
+                vec![key(&request.holder, &request.operation_namespace)]
+            }
+            Self::ReviseRunBudget(request) => request
+                .retire
+                .iter()
+                .cloned()
+                .chain(
+                    request
+                        .add
+                        .iter()
+                        .map(crate::CompletionCapacityPartitionV1::key),
+                )
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// Transfer identities an outcome of this request must cite. Only an
@@ -1303,13 +1425,28 @@ impl ResourceState {
             hot_terminal: crate::ResourceHotTerminalLedgerV1::default(),
             live: crate::ResourceLiveLedgerV1::default(),
             custodian_accounts: BTreeMap::new(),
+            partition_probes: crate::root::PartitionProbes::default(),
         })
     }
 
+    /// Installs the run budget of a whole state before its run: refused once
+    /// the lease book holds an acquisition or an external participant grant,
+    /// and for a state with partitions not attached (a partial state over a
+    /// root that holds partitions). Its partitions are sorted into key order.
+    /// Its digest is checked only when it is not empty: a sealed budget's
+    /// digest must be the digest of its header
+    /// ([`crate::RunBudgetRevisionV1::seal`]), and an unsealed budget with an
+    /// empty digest installs and persists as it is.
+    /// The admission epochs of partitions the new budget drops leave with
+    /// them. A running root revises its budget with
+    /// [`crate::ResourceOperationRequestV1::ReviseRunBudget`] instead.
     pub fn install_run_budget(
         &mut self,
-        budget: crate::RunBudgetRevisionV1,
+        mut budget: crate::RunBudgetRevisionV1,
     ) -> Result<(), ResourceError> {
+        budget
+            .partitions
+            .sort_by_key(crate::CompletionCapacityPartitionV1::key);
         budget.validate()?;
         if !self.completion_leases.acquisitions.is_empty()
             || !self.external_completion_participants.grants.is_empty()
@@ -1318,7 +1455,57 @@ impl ResourceState {
                 "resource run budget cannot change after lease admission".to_owned(),
             ));
         }
+        if self.live.partitions != 0 {
+            return Err(ResourceError::InvalidLifecycle(
+                "a resource run budget is installed on a whole state".to_owned(),
+            ));
+        }
+        self.completion_leases
+            .epochs
+            .retain(|(authority, namespace), _| {
+                budget
+                    .attached_partition(&crate::CompletionPartitionKeyV1::new(
+                        authority.clone(),
+                        namespace.clone(),
+                    ))
+                    .is_some()
+            });
         self.run_budget = budget;
+        Ok(())
+    }
+
+    /// Checks the run budget's totals over every partition, attached or
+    /// not, and that every attached admission epoch belongs to an attached
+    /// partition (one record holds both).
+    fn validate_run_budget_totals(&self) -> Result<(), ResourceError> {
+        let reserved = self.configured_pending_slots();
+        if self.partition_count() > crate::MAX_RUN_BUDGET_PARTITIONS
+            || reserved > crate::MAX_PENDING_LEASE_ACQUISITIONS_GLOBAL
+            || self.guaranteed_partition_units()? > self.run_budget.total_completion_units
+        {
+            return Err(ResourceError::LimitExceeded(
+                "run budget partitions exceed the global completion pool".to_owned(),
+            ));
+        }
+        if usize::try_from(self.live.admission_epochs).unwrap_or(usize::MAX)
+            > usize::try_from(self.live.partitions).unwrap_or(usize::MAX)
+            || self
+                .completion_leases
+                .epochs
+                .keys()
+                .any(|(authority, namespace)| {
+                    self.run_budget
+                        .attached_partition(&crate::CompletionPartitionKeyV1::new(
+                            authority.clone(),
+                            namespace.clone(),
+                        ))
+                        .is_none()
+                })
+        {
+            return Err(ResourceError::InvalidDefinition(
+                "a completion admission epoch names no run budget partition".to_owned(),
+            ));
+        }
         Ok(())
     }
 
@@ -2029,6 +2216,15 @@ impl ResourceState {
     /// not certify must also leave the room admitted leases reserve. The
     /// resource plugin skips a packet whose result does not fit instead of
     /// failing its boundary.
+    ///
+    /// Apply operations to a whole state ([`crate::resource_state`],
+    /// [`crate::ResourceRootReader::attach_all`], or a detached state built
+    /// with the `install_*` methods). On a partial state, attach first every
+    /// record the operation reads, the run budget partition of a lease
+    /// admission or an external participant grant included: a partition that
+    /// is neither attached nor attached as absent reads as absent here, so a
+    /// lease of its authority is refused `invalid_authority`, where a
+    /// boundary would fail instead.
     pub fn apply_operation(
         &mut self,
         request: &ResourceOperationRequestV1,
@@ -2425,7 +2621,11 @@ impl ResourceState {
         self.outcomes
             .insert(outcome.operation_key.clone(), outcome.clone());
         if status == ResourceOperationStatus::Applied
-            && !matches!(request, ResourceOperationRequestV1::RecordObservation(_))
+            && !matches!(
+                request,
+                ResourceOperationRequestV1::RecordObservation(_)
+                    | ResourceOperationRequestV1::ReviseRunBudget(_)
+            )
         {
             self.report_dirty_grants
                 .extend(self.report_grants.keys().cloned());
@@ -2611,6 +2811,9 @@ impl ResourceState {
             ResourceOperationRequestV1::SetAccountCapacity(value) => {
                 self.set_account_capacity(value, external_refusal)
             }
+            ResourceOperationRequestV1::ReviseRunBudget(value) => {
+                self.revise_run_budget(value, external_refusal)
+            }
         }
     }
 
@@ -2675,9 +2878,7 @@ impl ResourceState {
                     return Err(lease_identity_taken());
                 }
                 let exact_evidence = request.eligibility_envelope.exact_evidence.clone();
-                let acquisition = self
-                    .completion_leases
-                    .request_acquisition(&self.run_budget, request.clone())?;
+                let acquisition = self.admit_lease_acquisition(request)?;
                 self.reserve_completion_reports(&acquisition.id, &request.holder, &request.recipe)?;
                 (
                     acquisition.id.clone(),
@@ -2879,6 +3080,25 @@ impl ResourceState {
         })
     }
 
+    /// Admits a lease acquisition under its partition, which the root
+    /// resolves whether or not it holds every partition.
+    fn admit_lease_acquisition(
+        &mut self,
+        request: &crate::RequestCompletionLeaseV1,
+    ) -> Result<crate::CompletionLeaseAcquisitionV1, ResourceError> {
+        let partition = self.resolve_partition(&crate::CompletionPartitionKeyV1::new(
+            request.holder.clone(),
+            request.operation_namespace.clone(),
+        ));
+        let configured_pending = self.configured_pending_slots();
+        self.completion_leases.request_acquisition_in(
+            &self.run_budget,
+            partition.as_ref(),
+            configured_pending,
+            request.clone(),
+        )
+    }
+
     fn apply_external_completion_participant(
         &mut self,
         operation: &ResourceCompletionOperationV1,
@@ -2886,9 +3106,15 @@ impl ResourceState {
         match operation {
             ResourceCompletionOperationV1::GrantExternalParticipant(request) => {
                 self.validate_completion_locked_targets(&request.target_versions)?;
-                let participant = self
-                    .external_completion_participants
-                    .grant(&self.run_budget, request.clone())?;
+                let partition = self.resolve_partition(&crate::CompletionPartitionKeyV1::new(
+                    request.holder.clone(),
+                    request.operation_namespace.clone(),
+                ));
+                let participant = self.external_completion_participants.grant_in(
+                    &self.run_budget,
+                    partition.as_ref(),
+                    request.clone(),
+                )?;
                 self.reserve_completion_reports(
                     &request.acquisition,
                     &request.holder,
@@ -3040,9 +3266,7 @@ impl ResourceState {
             ));
         }
         // Acquire.
-        let acquisition = self
-            .completion_leases
-            .request_acquisition(&self.run_budget, lease.clone())?;
+        let acquisition = self.admit_lease_acquisition(lease)?;
         self.reserve_completion_reports(&acquisition.id, &lease.holder, &lease.recipe)?;
         // Grant.
         self.validate_completion_locked_targets(&request.target_versions)?;
@@ -4992,6 +5216,178 @@ impl ResourceState {
         })
     }
 
+    /// The run budget partitions in use: those an acquisition in the lease
+    /// book, a held, prepared, or consumed external participant grant, or a
+    /// completion report reservation names.
+    ///
+    /// The test reads only books the live root holds: the lease book and the
+    /// participant book's `grants` and `terminal_grants`. A partial root
+    /// needs nothing else, because a completed participant becomes a hot
+    /// terminal candidate (the only kind a live bucket holds) only after its
+    /// last report reservation is gone, so every reservation's holder is in
+    /// the live root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResourceError::InvalidDefinition`], the error the state
+    /// validation gives an orphaned reservation, when a report reservation
+    /// names an acquisition held by neither book. Skipping it would let a
+    /// broken invariant retire a partition still in use.
+    fn partitions_in_use(
+        &self,
+    ) -> Result<BTreeSet<crate::CompletionPartitionKeyV1>, ResourceError> {
+        let mut in_use = BTreeSet::new();
+        for acquisition in self.completion_leases.acquisitions.values() {
+            in_use.insert(crate::CompletionPartitionKeyV1::new(
+                acquisition.holder.clone(),
+                acquisition.operation_namespace.clone(),
+            ));
+        }
+        for participant in self.external_completion_participants.grants.values() {
+            if matches!(
+                participant.grant.state,
+                CompletionGrantStateV1::Held
+                    | CompletionGrantStateV1::Prepared
+                    | CompletionGrantStateV1::Consumed
+            ) {
+                in_use.insert(crate::CompletionPartitionKeyV1::new(
+                    participant.holder.clone(),
+                    participant.operation_namespace.clone(),
+                ));
+            }
+        }
+        for acquisition in self.completion_report_reservations.keys() {
+            if let Some(local) = self.completion_leases.acquisitions.get(acquisition) {
+                in_use.insert(crate::CompletionPartitionKeyV1::new(
+                    local.holder.clone(),
+                    local.operation_namespace.clone(),
+                ));
+            } else if let Some(participant) = self
+                .external_completion_participants
+                .participant(acquisition)
+            {
+                in_use.insert(crate::CompletionPartitionKeyV1::new(
+                    participant.holder.clone(),
+                    participant.operation_namespace.clone(),
+                ));
+            } else {
+                return Err(ResourceError::InvalidDefinition(
+                    "completion report reservation is orphaned".to_owned(),
+                ));
+            }
+        }
+        Ok(in_use)
+    }
+
+    /// Revises the run budget: the host application's operation
+    /// ([`ResourceReviseRunBudgetRequestV1`]). `external_refusal` is what the
+    /// plugin found against the simulation view about the evidence, checked
+    /// after the root's own refusals; a detached caller passes none.
+    fn revise_run_budget(
+        &mut self,
+        request: &ResourceReviseRunBudgetRequestV1,
+        external_refusal: Option<&ResourceError>,
+    ) -> Result<AppliedOperation, ResourceError> {
+        if self.run_budget.revision != request.expected_budget_revision {
+            return Err(ResourceError::VersionConflict(
+                "resource run budget revision expected a stale budget revision".to_owned(),
+            ));
+        }
+        let changes = request.retire.len().saturating_add(request.add.len());
+        if changes > crate::MAX_RUN_BUDGET_REVISION_CHANGES {
+            return Err(ResourceError::LimitExceeded(
+                "resource run budget revision retires and adds too many partitions".to_owned(),
+            ));
+        }
+        if changes == 0
+            && request.total_completion_units == self.run_budget.total_completion_units
+            && request.shared_pending_slots == self.run_budget.shared_pending_slots
+        {
+            return Err(ResourceError::InvalidDefinition(
+                "resource run budget revision changes nothing".to_owned(),
+            ));
+        }
+        let mut previous: Option<crate::CompletionPartitionKeyV1> = None;
+        for partition in &request.add {
+            let key = partition.key();
+            if previous.as_ref().is_some_and(|previous| previous >= &key) {
+                return Err(ResourceError::InvalidDefinition(
+                    "resource run budget revision adds partitions out of key order or twice"
+                        .to_owned(),
+                ));
+            }
+            previous = Some(key);
+            partition.validate()?;
+        }
+        for key in &request.retire {
+            if self.resolve_partition(key).is_none() {
+                return Err(ResourceError::NotFound(
+                    "resource run budget revision retires a partition the budget does not hold"
+                        .to_owned(),
+                ));
+            }
+        }
+        if !request.retire.is_empty() {
+            let in_use = self.partitions_in_use()?;
+            if request.retire.iter().any(|key| in_use.contains(key)) {
+                return Err(ResourceError::InvalidLifecycle(
+                    "resource run budget revision retires a partition a completion lease, participant, or report reservation still uses"
+                        .to_owned(),
+                ));
+            }
+        }
+        for partition in &request.add {
+            let key = partition.key();
+            if !request.retire.contains(&key) && self.resolve_partition(&key).is_some() {
+                return Err(ResourceError::IdempotencyConflict(
+                    "resource run budget revision adds a partition the budget holds".to_owned(),
+                ));
+            }
+        }
+        for key in &request.retire {
+            self.run_budget
+                .partitions
+                .retain(|partition| !partition.has_key(key));
+            self.completion_leases
+                .epochs
+                .remove(&(key.authority.clone(), key.operation_namespace.clone()));
+            self.note_partition_absent(key.clone());
+        }
+        for partition in &request.add {
+            let key = partition.key();
+            let index = self
+                .run_budget
+                .partitions
+                .binary_search_by(|held| held.key().cmp(&key))
+                .unwrap_or_else(|index| index);
+            self.run_budget.partitions.insert(index, partition.clone());
+        }
+        self.run_budget.total_completion_units = request.total_completion_units;
+        self.run_budget.shared_pending_slots = request.shared_pending_slots;
+        self.run_budget.revision = self.run_budget.revision.next()?;
+        self.run_budget.semantic_digest = self.run_budget.header_digest()?;
+        self.run_budget.validate()?;
+        self.validate_run_budget_totals()?;
+        if self.completion_leases.reserved_units > self.run_budget.total_completion_units
+            || self.external_completion_participants.reserved_units
+                > self.run_budget.total_completion_units
+        {
+            return Err(ResourceError::LimitExceeded(
+                "resource run budget revision leaves fewer completion units than leases hold"
+                    .to_owned(),
+            ));
+        }
+        if let Some(refusal) = external_refusal {
+            return Err(refusal.clone());
+        }
+        Ok(AppliedOperation {
+            quantity: u64::try_from(changes).map_err(|_| ResourceError::Overflow)?,
+            remainder: 0,
+            result_ref: None,
+            exact_evidence: vec![request.evidence.clone()],
+        })
+    }
+
     fn credit(
         &mut self,
         request: &ResourceCreditRequestV1,
@@ -5785,7 +6181,8 @@ impl ResourceState {
             | ResourceOperationRequestV1::IssueAccessGrant(_)
             | ResourceOperationRequestV1::RevokeAccessGrant(_)
             | ResourceOperationRequestV1::RescopeAccount(_)
-            | ResourceOperationRequestV1::SetAccountCapacity(_) => false,
+            | ResourceOperationRequestV1::SetAccountCapacity(_)
+            | ResourceOperationRequestV1::ReviseRunBudget(_) => false,
         }
     }
 
@@ -7284,6 +7681,7 @@ impl ResourceState {
             self.validate_observation_head_authority(head, grant)?;
         }
         self.run_budget.validate()?;
+        self.validate_run_budget_totals()?;
         self.completion_leases.validate(&self.run_budget)?;
         self.external_completion_participants
             .validate(&self.run_budget)?;
@@ -7675,7 +8073,8 @@ fn request_remainder(state: &ResourceState, request: &ResourceOperationRequestV1
         | ResourceOperationRequestV1::BeginExchange(_)
         | ResourceOperationRequestV1::RevokeAccessGrant(_)
         | ResourceOperationRequestV1::RescopeAccount(_)
-        | ResourceOperationRequestV1::SetAccountCapacity(_) => 0,
+        | ResourceOperationRequestV1::SetAccountCapacity(_)
+        | ResourceOperationRequestV1::ReviseRunBudget(_) => 0,
         ResourceOperationRequestV1::IssueAccessGrant(value) => value.grant.cap_quantity,
     }
 }
@@ -7803,5 +8202,166 @@ mod tests {
             state.completion_leases.acquisitions[&acquisition].state,
             crate::CompletionLeaseAcquisitionStateV1::Aborting
         );
+    }
+
+    /// The records of a persisted root, by reference text, read as a bucket
+    /// source.
+    struct RecordSource<'s>(&'s BTreeMap<String, canwu_api::DomainRecord>);
+
+    impl<'s> crate::root::HotTerminalSource<'s> for RecordSource<'s> {
+        fn hot_terminal_record(
+            &self,
+            reference: &DomainRecordRef,
+        ) -> Result<Option<&'s canwu_api::DomainRecord>, canwu_api::CanwuError> {
+            Ok(self.0.get(&reference.to_string()))
+        }
+
+        fn bucket_references(&self) -> Result<Vec<DomainRecordRef>, canwu_api::CanwuError> {
+            let kind = canwu_api::DomainRecordKind::for_type::<crate::ResourceBucketRecord>();
+            Ok(self
+                .0
+                .values()
+                .filter(|record| record.reference.kind == kind)
+                .map(|record| record.reference.clone())
+                .collect())
+        }
+    }
+
+    fn probe_holder(value: u64) -> KnowledgeHolderRef {
+        KnowledgeHolderRef::Person(PersonId::new(value))
+    }
+
+    fn probe_acquire(holder: u64, suffix: &str) -> ResourceOperationRequestV1 {
+        let target = DomainRecordVersionRef {
+            record: DomainRecordRef::new("test.provider", "record", "target"),
+            version: 1,
+            established_by: DomainRecordVersionSource::InitialScenario,
+        };
+        ResourceOperationRequestV1::Completion(ResourceCompletionOperationV1::Acquire(
+            crate::RequestCompletionLeaseV1 {
+                id: crate::CompletionLeaseAcquisitionId::new(format!("test:lease:{suffix}"))
+                    .expect("acquisition"),
+                operation_key: ResourceOperationKey::new(format!("test:operation:{suffix}"))
+                    .expect("operation"),
+                holder: probe_holder(holder),
+                operation_namespace: "test.resource".to_owned(),
+                eligibility_time: SimTime::EPOCH,
+                eligibility_envelope: crate::EligibilityEnvelopeV1::new(
+                    vec![target],
+                    BTreeMap::new(),
+                    BTreeSet::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .expect("envelope"),
+                recipe: crate::CompletionCapacityRecipeV1 {
+                    receipts: crate::MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE,
+                    mutations: 1,
+                    reports_per_holder: 0,
+                    holders: 0,
+                    bytes: 1_024,
+                },
+                expected_participants: BTreeSet::from([crate::PLUGIN_NAME.to_owned()]),
+                policy_class: crate::CompletionPolicyClassV1::Guaranteed,
+            },
+        ))
+    }
+
+    /// The release-build backstop for a missed partition attachment: a
+    /// lease admission over a partial root that reads a partition it did not
+    /// attach answers as if the partition were absent, and the work then
+    /// refuses to persist with `invalid_boundary`. A partition attached as
+    /// absent is a recorded refusal that persists, and an attached one is
+    /// admitted.
+    #[test]
+    fn a_partition_read_without_its_attachment_fails_the_boundary() {
+        let mut whole = ResourceState::empty(ResourceLimitsV1::canonical()).expect("state");
+        let partition = |holder: u64| crate::CompletionCapacityPartitionV1 {
+            authority: probe_holder(holder),
+            operation_namespace: "test.resource".to_owned(),
+            guaranteed_units: 100_000,
+            reserved_pending_slots: 1,
+            maximum_burst_units: 0,
+            request_token_capacity: 4,
+            request_token_refill_minutes: 1,
+            reacquire_cooldown_minutes: 1,
+            root_acquisition_cap_per_sim_time: 4,
+            guaranteed_max_wait_boundaries: 1,
+        };
+        whole
+            .install_run_budget(
+                crate::RunBudgetRevisionV1 {
+                    revision: ResourceRevision::INITIAL,
+                    total_completion_units: 400_000,
+                    shared_pending_slots: 1,
+                    partitions: vec![partition(1), partition(2)],
+                    semantic_digest: String::new(),
+                }
+                .seal()
+                .expect("budget"),
+            )
+            .expect("install budget");
+        let records: BTreeMap<String, canwu_api::DomainRecord> = whole
+            .into_records()
+            .expect("the root persists")
+            .into_iter()
+            .map(|record| (record.reference.to_string(), record))
+            .collect();
+        let live = records
+            .values()
+            .find(|record| record.reference.id == "resource:runtime:v1")
+            .expect("the live root")
+            .clone();
+
+        // Nothing attached: the admission reads the keeper's partition
+        // without it, records a refusal, and the work does not persist.
+        let mut missed =
+            crate::root::ResourceRootWork::new(RecordSource(&records), &live).expect("work");
+        let outcome = missed
+            .state
+            .apply_operation(&probe_acquire(1, "missed"))
+            .expect("a recorded outcome");
+        assert_eq!(outcome.status, ResourceOperationStatus::Rejected);
+        let error = missed
+            .persist("missed attachment")
+            .expect_err("a boundary that read an unattached partition fails");
+        assert_eq!(error.code, canwu_api::ErrorCode::InvalidBoundary);
+
+        // The keeper's partition attached and a third authority's attached
+        // as absent: the keeper is admitted, the third is refused as one
+        // with no partition, and the work persists.
+        let mut attached =
+            crate::root::ResourceRootWork::new(RecordSource(&records), &live).expect("work");
+        attached
+            .attach_live([
+                crate::ResourceLiveRecordKeyV1::Partition(crate::CompletionPartitionKeyV1::new(
+                    probe_holder(1),
+                    "test.resource",
+                )),
+                crate::ResourceLiveRecordKeyV1::Partition(crate::CompletionPartitionKeyV1::new(
+                    probe_holder(3),
+                    "test.resource",
+                )),
+            ])
+            .expect("attach partitions");
+        let admitted = attached
+            .state
+            .apply_operation(&probe_acquire(1, "admitted"))
+            .expect("an outcome");
+        assert_eq!(
+            admitted.status,
+            ResourceOperationStatus::Applied,
+            "{:?}",
+            admitted.rejection_reason
+        );
+        let absent = attached
+            .state
+            .apply_operation(&probe_acquire(3, "absent"))
+            .expect("a recorded outcome");
+        assert_eq!(absent.status, ResourceOperationStatus::Rejected);
+        assert_eq!(absent.rejection_code.as_deref(), Some("invalid_authority"));
+        attached
+            .persist("attached partitions")
+            .expect("a boundary that attached what it read persists");
     }
 }

@@ -32,8 +32,11 @@ const APPLY_SYSTEM: &str = "force_supply_lifecycle_apply_v1";
 const RESOURCE_DISPATCH_SYSTEM: &str = "force_supply_resource_dispatch_v1";
 const DUE_EVALUATION_SYSTEM: &str = "force_supply_due_evaluation_v1";
 const VALIDATE_SYSTEM: &str = "force_supply_lifecycle_validate_v1";
+/// BLAKE3, lowercase hex, of `canwu-force-supply-reference 0.26.0 semantics:
+/// run budget partitions in ascending key order, run budget digest of its
+/// header` (one line, one space after each comma and colon).
 pub const FORCE_SUPPLY_SEMANTIC_HASH: &str =
-    "41e410dbebb9e35fee72aaf24da0995a85c7237ed054f9f4af10a54d56d5f18e";
+    "2130b3d490b847cf62d39d1e60e01ffafa0626c8fdcd674803f787d653186548";
 /// The event of an operation skipped because the root had no room for its
 /// result; [`force_operation_skip`] reads it back.
 pub const FORCE_OPERATION_SKIPPED_EVENT: &str = "canwu.force-supply.operation_skipped.v1";

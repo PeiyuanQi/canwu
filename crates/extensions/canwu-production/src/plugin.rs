@@ -59,13 +59,18 @@ const INCIDENT_COMMIT_AUDIT_SYSTEM: &str = "production_incident_commit_audit_v1"
 const OUTPUT_DISPATCH_SYSTEM: &str = "production_output_dispatch_v1";
 const REPORT_SYSTEM: &str = "production_holder_report_publish_v1";
 const PRODUCTION_REPORT_KNOWLEDGE: &str = "holder_report";
-/// BLAKE3, lowercase hex, of `canwu-production 0.24.0 semantics: facility
-/// condition falls recorded on current provider evidence, repair projects
-/// admitted on degraded and damaged facilities, expansion projects raise an
-/// operational facility's capacity` (one line, one space after each comma and
-/// colon).
+/// BLAKE3, lowercase hex, of `canwu-production 0.26.0 semantics: a resource
+/// participant grant may be of an earlier run budget revision than
+/// production's own grant` (one line, one space after each comma and colon).
+/// The bump also covers production's own run budget, which validates under
+/// the 0.26.0 resource rules: the digest of its header, partitions in
+/// ascending key order, and at most 160 bytes of operation namespace.
+/// 0.24.0 hashed `canwu-production 0.24.0 semantics: facility condition falls
+/// recorded on current provider evidence, repair projects admitted on degraded
+/// and damaged facilities, expansion projects raise an operational facility's
+/// capacity`.
 pub const PRODUCTION_SEMANTIC_HASH: &str =
-    "c9cdf79722ec253f014c2a7862c35159d012b10d851fe6aa262d1803412b7afc";
+    "2d49d7b5e797c38a2b5f16abc5b1de1b9f469eca5fdb7d08a52c29cba41530d0";
 const REPORT_SCHEMA_HASH: &str = "2e84d66c85841a251a94aa15fa4fd477d29136ed31c8434c5dd61dc92156fdf8";
 static PRODUCTION_ARCHIVE_COMMIT_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static PRODUCTION_ARCHIVE_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();

@@ -1351,6 +1351,33 @@ fn facility_project(
     kind: FacilityProjectKind,
     at: SimTime,
 ) -> FacilityProject {
+    facility_project_under(
+        state,
+        holder,
+        site,
+        facility,
+        process_id,
+        suffix,
+        kind,
+        at,
+        resource_revision(),
+    )
+}
+
+/// [`facility_project`] whose resource participant grant was admitted under
+/// the resource root's run budget revision `resource_budget_revision`.
+#[allow(clippy::too_many_arguments)]
+fn facility_project_under(
+    state: &mut ProductionState,
+    holder: &KnowledgeHolderRef,
+    site: &ProductionSiteId,
+    facility: &FacilityAssetId,
+    process_id: &ProcessRevisionId,
+    suffix: &str,
+    kind: FacilityProjectKind,
+    at: SimTime,
+    resource_budget_revision: ResourceRevision,
+) -> FacilityProject {
     let process = state.processes[process_id].clone();
     let operation_key = ResourceOperationKey::new(format!("resource:project:{suffix}"))
         .expect("project operation key");
@@ -1438,7 +1465,7 @@ fn facility_project(
         acquisition: acquisition.clone(),
         operation_key: operation_key.clone(),
         owner_plugin: canwu_resource::PLUGIN_NAME.to_owned(),
-        run_budget_revision: resource_revision(),
+        run_budget_revision: resource_budget_revision,
         target_versions: vec![
             CompletionLockedTargetV1::AllocationLeg {
                 id: input.allocation_leg.id.clone(),
@@ -1562,6 +1589,19 @@ fn resource_state_for_project(
     production: &ProductionState,
     project: &FacilityProject,
 ) -> ResourceState {
+    resource_state_for_project_under(production, project, false)
+}
+
+/// [`resource_state_for_project`] whose run budget, when `revised`, the host
+/// revised once before the project's resource participant grant: it adds a
+/// partition for another authority, so the grant is admitted under the
+/// budget's second revision while production's own grant stays under its
+/// first.
+fn resource_state_for_project_under(
+    production: &ProductionState,
+    project: &FacilityProject,
+    revised: bool,
+) -> ResourceState {
     let acquisition =
         &production.completion_acquisitions[&project.completion_certificate.acquisition];
     let input = &project.inputs[0];
@@ -1574,6 +1614,37 @@ fn resource_state_for_project(
                 .expect("project run budget"),
         )
         .expect("resource project run budget");
+    if revised {
+        let budget = resource.run_budget.clone();
+        let mut newcomer = budget.partitions[0].clone();
+        newcomer.authority = KnowledgeHolderRef::Person(canwu_api::PersonId::new(9_999));
+        newcomer.guaranteed_units = 0;
+        newcomer.reserved_pending_slots = 1;
+        let revised = resource
+            .apply_operation(&ResourceOperationRequestV1::ReviseRunBudget(
+                canwu_resource::ResourceReviseRunBudgetRequestV1 {
+                    operation_key: ResourceOperationKey::new("resource:project-budget-revision")
+                        .expect("revision operation key"),
+                    expected_budget_revision: budget.revision,
+                    total_completion_units: budget.total_completion_units,
+                    shared_pending_slots: budget.shared_pending_slots,
+                    retire: BTreeSet::new(),
+                    add: vec![newcomer],
+                    evidence: version::<ProductionRuntimeRecord>(PRODUCTION_RUNTIME_ID),
+                },
+            ))
+            .expect("resource project budget revision");
+        assert_eq!(
+            revised.status,
+            ResourceOperationStatus::Applied,
+            "resource project budget revision rejected: {:?}",
+            revised.rejection_reason
+        );
+        assert_eq!(
+            resource.run_budget.revision,
+            ResourceRevision::new(2).expect("second budget revision")
+        );
+    }
     let report_grant_id =
         ResourceReportGrantId::new("resource:project-report-grant").expect("report grant ID");
     resource
@@ -3471,6 +3542,135 @@ fn canonical_commissioning_closes_resource_and_local_grants_before_project_archi
             .operation_outcomes
             .contains_key(&commission_outcome_id)
     );
+    validate_production_archive(&store, &archived).expect("project archive provider authenticates");
+}
+
+/// Downstream gap G-120: the host revised the resource root's run budget
+/// before the project's resource participant grant, so that grant names the
+/// resource budget's second revision while production's own grant names its
+/// first. The project still completes, and its archive record authenticates:
+/// the archive no longer requires the two revisions to be equal.
+#[test]
+fn gap_g120_project_completed_after_a_resource_budget_revision_archives() {
+    let (mut state, holder, site_id, facility_id) = base_state();
+    let facility = state.facilities.get_mut(&facility_id).expect("facility");
+    facility.lifecycle = FacilityLifecycle::Planned;
+    facility.condition_per_mille = 400;
+    let process_id = ProcessRevisionId::new("production:household-process:v1").expect("process");
+    let project = facility_project_under(
+        &mut state,
+        &holder,
+        &site_id,
+        &facility_id,
+        &process_id,
+        "revised-budget",
+        FacilityProjectKind::Construction,
+        SimTime::EPOCH,
+        ResourceRevision::new(2).expect("second budget revision"),
+    );
+    let project_id = project.id.clone();
+    let acquisition = project.completion_certificate.acquisition.clone();
+    let local_grant = project.production_completion_grant.clone();
+    for (label, operation) in [
+        (
+            "create",
+            ProductionOperation::CreateFacilityProject {
+                project: project.clone(),
+            },
+        ),
+        (
+            "authorize",
+            ProductionOperation::AuthorizeFacilityProject {
+                project: project_id.clone(),
+            },
+        ),
+        (
+            "advance",
+            ProductionOperation::AdvanceFacilityProject {
+                project: project_id.clone(),
+                completed_units: 10,
+            },
+        ),
+    ] {
+        state
+            .apply_operation(
+                &command(
+                    &state,
+                    &holder,
+                    &format!("production:revised-budget-project:{label}"),
+                    operation,
+                ),
+                SimTime::EPOCH,
+            )
+            .expect("revised-budget project fixture");
+    }
+    let resource =
+        resource_state_for_project_under(&state, &state.facility_projects[&project_id], true);
+    let mut scenario = scenario_with_production(state);
+    scenario
+        .domain_records
+        .extend(resource.into_records().expect("resource project root"));
+    let production_plugin = ProductionPlugin;
+    let resource_plugin = ResourcePlugin::default();
+    let mut canwu = Canwu::new_with_plugins(214, scenario, &[&production_plugin, &resource_plugin])
+        .expect("revised-budget project runtime");
+    enqueue_tracked_production_operation(
+        &mut canwu,
+        &holder,
+        1,
+        "production:revised-budget-project:commission",
+        ProductionOperation::AcceptFacilityCommissioning {
+            project: project_id.clone(),
+        },
+    );
+    for boundary in 0..8 {
+        settle_at_epoch(
+            &mut canwu,
+            &format!("revised-budget project boundary {boundary}"),
+        );
+        if production_state(&canwu)
+            .facility_projects
+            .get(&project_id)
+            .is_some_and(|project| project.lifecycle == FacilityProjectLifecycle::Completed)
+        {
+            break;
+        }
+    }
+    let completed = production_state(&canwu);
+    assert_eq!(
+        completed.facility_projects[&project_id].lifecycle,
+        FacilityProjectLifecycle::Completed
+    );
+    let participant =
+        &completed.completion_participant_grants[&acquisition][canwu_resource::PLUGIN_NAME].grant;
+    assert_eq!(participant.state, CompletionGrantStateV1::Completed);
+    assert_eq!(
+        participant.run_budget_revision,
+        ResourceRevision::new(2).expect("second budget revision")
+    );
+    assert_eq!(
+        completed.production_completion_grants[&local_grant].run_budget_revision,
+        resource_revision(),
+        "production's own grant stays under production's own budget"
+    );
+    let seeded = cite_seeded_versions(&completed);
+    let prepared = seeded
+        .prepare_production_archive(1, &())
+        .expect("the project archives after a resource budget revision");
+    assert_eq!(prepared.selected_projects, vec![project_id.clone()]);
+    let store = TestProductionArchiveStore::default();
+    let archive_plugin = ProductionPlugin;
+    let mut archive_runtime =
+        Canwu::new_with_plugins(215, scenario_with_production(seeded), &[&archive_plugin])
+            .expect("project archive runtime");
+    enqueue_production_archive(&mut archive_runtime, &prepared, &store)
+        .expect("verified project archive");
+    archive_runtime
+        .step_canonical()
+        .expect("project archive commit")
+        .expect("project archive boundary");
+    let archived = production_state(&archive_runtime);
+    assert!(!archived.facility_projects.contains_key(&project_id));
     validate_production_archive(&store, &archived).expect("project archive provider authenticates");
 }
 

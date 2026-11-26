@@ -61,6 +61,8 @@ sidebar:
 | [请求结果保留期](/developer/persistence/#版本与存档兼容) | request outcome retention | `RunConfiguration::request_outcome_retention`、`with_request_outcome_retention`、`DEFAULT_REQUEST_OUTCOME_RETENTION`、`MAX_REQUEST_OUTCOME_RETENTION` | 带请求标识的命令请求结算之后，其精确结果和排队回执还保留多久模拟时间，用来回答完全相同的重试：默认 30 天，可取 0 到 366 天，在创建模拟运行时定下。规则只看模拟时间，所以现实时间的暂停不会让任何结果退役，模拟速度越快、按现实时间算退役得越早，而未封存、封存过、恢复后和重放的运行回答一致。 |
 | [已退役请求结果](/developer/persistence/#版本与存档兼容) | retired request outcome | `ErrorCode::RequestOutcomeRetired`、`RetiredRequestRange`、`RequestIndex::retired_commands` | 带请求标识的命令请求超过保留期之后的状态：结果不再保留，请求 ID 在整个运行期内仍算已使用（记在规范化的已退役 ID 区间里），之后再用这个 ID 提交任何请求，不论是否完全相同的重试，都以 `RequestOutcomeRetired` 被拒绝，不留下尝试、修订号或事件。把 `IdempotencyConflict` 当作“换一个 ID”的上层应用，对它也应如此处理。不是退休目标（文化术语），也不是已清退条目（知识术语）。 |
 
+{/* Owner to confirm: the 0.26.0 terms 运行预算 (run budget), 运行预算修订 (run budget revision), and 运行预算分区 (run budget partition). */}
+
 ## 插件与扩展
 
 | 中文规范写法 | English | 代码或 API | 含义与使用位置 |
@@ -158,6 +160,9 @@ sidebar:
 | [地点范围](/developer/production-economy/) | place scope | `ResourceAccount::place_scope` | 由上层应用在场景安装账户时声明的账户存量地点标识，此后只有上层应用可以更改（`RescopeAccount`）；引擎从不推断它，未声明时不能本地验收。 |
 | [账户改换地点](/developer/production-economy/#本地验收) | account rescope | `ResourceOperationRequestV1::RescopeAccount`、`enqueue_resource_account_rescope` | 上层应用对账户地点范围的更改，须引用记载这次搬迁的那条记录的当前版本；持有人永远不能设置地点范围。 |
 | [账户容量变更](/developer/production-economy/#更改账户容量) | account capacity change | `ResourceOperationRequestV1::SetAccountCapacity`、`enqueue_resource_account_capacity` | 上层应用对未关闭账户容量的更改，须引用记载这次仓储变化的那条记录的当前版本。新容量必须装得下账户余额，调低时还要为以该账户为来源或目的地的未完结转移留出在途数量；账户创建之后，持有人不能更改容量。 |
+| [运行预算](/developer/production-economy/#修订运行预算) | run budget | `RunBudgetRevisionV1`、`ResourceState::install_run_budget` | 一个资源根的完成容量：全局总量（完成单位和共享的待处理名额），以及每个权限主体和操作命名空间各一个运行预算分区，带修订号和覆盖其头部的摘要。上层应用在运行开始前安装，之后通过运行预算修订修改。 |
+| [运行预算修订](/developer/production-economy/#修订运行预算) | run budget revision | `ResourceOperationRequestV1::ReviseRunBudget`、`ResourceReviseRunBudgetRequestV1`、`enqueue_resource_run_budget_revision`、`RESOURCE_RUN_BUDGET_REVISION_INGRESS` | 上层应用对正在运行的根的运行预算的修订，须引用记载这次变化的那条记录的当前版本：停用不再被任何租约、外部参与方或报告预留使用的分区，新增分区，设定总量，要么全部生效，要么全不生效，并让预算修订号前进。按较早修订号准入的授权仍然有效。 |
+| [运行预算分区](/developer/production-economy/#修订运行预算) | run budget partition | `CompletionCapacityPartitionV1`、`CompletionPartitionKeyV1`、`ResourceLiveRecordKeyV1::Partition`、`ResourceRunBudgetPartitionEntryV1` | 运行预算中属于一个权限主体和操作命名空间的份额（预留的待处理名额、保证量和准入速率），连同它的准入时段作为一个活动桶条目保存，所以一次租约准入只读写它自己的分区。一份预算最多 1,024 个。 |
 | [动用授权](/developer/production-economy/) | access grant | `ResourceAccessGrantV1`, `ResourceDemandSourcePolicyV1::Granted` | 授权保管人引用精确权限证据作出的记录化同意：被授权方可在有效期内、在上限以内动用授权方某一精确资源与单位版本的存量。每次扣减都由被授权方自己的完成租约授权，不会回退到其他账户。 |
 | [活动根](/architecture/resources-production/#随机性持久化与重放) | live root | `ResourceLiveRootV1`、`resource:runtime:v1` | 持久化资源根时不含分桶记录的那条领域记录：未关闭的需求及其分配、进行中的转移、租约、报告授权、观察头，以及分别计数常驻终态记录和活动记录的两本账。每个结算资源工作的边界都会读它。 |
 | [常驻终态记录](/architecture/resources-production/#归档终态记录) | hot terminal record | `ResourceHotTerminalEntryV1`、`ResourceState::hot_terminal_records` | 还没有通过归档提交离开资源根的终态记录（操作结果、已关闭的需求及其预留、已结算的转移、凭证）。它占用归档候选预算，每次恢复都要校验它。 |

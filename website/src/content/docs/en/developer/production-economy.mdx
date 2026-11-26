@@ -306,6 +306,38 @@ enqueue_resource_account_capacity(
 
 The operation needs no completion lease and advances the account revision. Reservations, demands, access grants, and the protected floor carry over, and its outcome keeps the evidence. Unlike a rescope, it is admitted while a transfer that is not terminal names the account.
 
+## Revising the run budget
+
+The run budget (`RunBudgetRevisionV1`) sets the global totals for completion leases (`total_completion_units`, `shared_pending_slots`) and one [run budget partition](/en/reference/terminology/) per authority and operation namespace (`CompletionCapacityPartitionV1`, identified by its `CompletionPartitionKeyV1`), in strictly ascending key order. Your host installs it with `install_run_budget` before the run, which refuses once the lease book holds an acquisition or an external grant. When a government falls or an office opens or closes, your host revises the budget of the running root with a [run budget revision](/en/reference/terminology/):
+
+```rust
+enqueue_resource_run_budget_revision(
+    &mut canwu,
+    due_at,
+    &ResourceReviseRunBudgetRequestV1 {
+        operation_key,
+        expected_budget_revision,
+        total_completion_units, // the totals after the revision; send the current ones to keep them
+        shared_pending_slots,
+        retire, // the partition keys to retire
+        add,    // the partitions to add, in ascending key order
+        evidence, // the current version of your record of the change
+    },
+)?;
+```
+
+- **Only the host sends it.** A tracked command or an adapter packet that carries `ReviseRunBudget` is refused.
+- **Evidence.** As for a capacity change: the current version of a record of a kind passed to `ResourcePlugin::new`.
+- **All or nothing.** Retired keys leave with their admission epochs; added partitions enter with none (a key retired and added again starts a fresh epoch, and its backward-time guard starts again); the totals change, the budget revision advances by one, and its digest is recomputed. A grant admitted under an earlier budget revision stays valid.
+- **A partition in use is not retired.** Retiring is a recorded `invalid_lifecycle` rejection while the lease book holds an acquisition of that authority and namespace, while it has an external participant grant that is held, prepared, or consumed, or while a completion report is reserved for one of its acquisitions or participants. A coordinating plugin's own acquisition does not hold the resource partition until it asks for its resource participant, so retire an authority only once no plugin still coordinates its work.
+- **Refusals** are recorded rejections that leave the budget as it was: `version_conflict` for a stale budget revision; `limit_exceeded` for more than 256 keys, an added partition outside its V1 bounds, a total of 0, more than 1,024 shared slots, or, after the change, more than 1,024 pending slots or partitions, guaranteed units above the total, or a total below the units the lease book or the external participant book holds, each on its own; `invalid_definition` for nothing to change or `add` out of key order; `not_found` for a retired key the budget does not hold; and `idempotency_conflict` for an added key the budget holds and the request does not retire.
+- **Refused when queued.** `enqueue_resource_run_budget_revision` itself refuses (`InvalidPayload`) a request with more than 256 keys, or with an `add` out of key order or naming a key twice, so it is never queued.
+- **After a refused retirement**, send it again once the authority's lease or participant has finished and its report has published. Send additions in a revision of their own when one busy key should not hold them back. Lowering `total_completion_units` can make the later grant of an acquisition that is requested but not yet granted fail `limit_exceeded`.
+
+The operation needs no completion lease, leaves one `ReviseRunBudget` outcome that keeps the evidence, with the number of keys retired and added as its quantity, and marks no report grant dirty. A retired authority's later lease or external participant request is refused as one that never had a partition (`invalid_authority`), and so is an `Acquire` queued before the revision that settles after it.
+
+Since 0.26.0 each partition persists with its admission epoch as one live record (`ResourceLiveRecordKeyV1::Partition`) in a live bucket, so a lease admission writes the live root and one live bucket whatever the number of authorities. A partial state holds only the attached partitions in `run_budget.partitions` and `completion_leases.epochs`, so read a partition with `ResourceState::partition`, `holds_partition`, `admission_epoch`, and `partition_count`; your host reads one authority's partition by attaching `ResourceLiveRecordKeyV1::Partition(key)` with `ResourceRootReader::attach_live`.
+
 ## External inflow
 
 `Credit` with `ResourceCreditSourceV1::ExternalInflow(DomainRecordVersionRef)` books value from outside the modelled accounts, such as tribute or a purchase from abroad, the counterpart of `ExternalOutflow`. It counts in `ConservationTotalsV1::external_inflow`, and its applied outcome keeps the cited record version as evidence.

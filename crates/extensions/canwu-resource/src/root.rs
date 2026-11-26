@@ -40,7 +40,8 @@
 //! before it settles the packet.
 
 use crate::{
-    CompletionCapacityGrantId, CompletionLeaseAcquisitionId, CompletionLockedTargetV1,
+    AdmissionEpochV1, CompletionCapacityGrantId, CompletionCapacityPartitionV1,
+    CompletionLeaseAcquisitionId, CompletionLockedTargetV1, CompletionPartitionKeyV1,
     PLUGIN_NAMESPACE, ProtectedFloorPolicyRevisionId, ResourceAccessGrantId,
     ResourceAccessGrantRecordV1, ResourceAccount, ResourceAccountId, ResourceDefinitionRevision,
     ResourceDefinitionRevisionId, ResourceError, ResourceLimitsV1, ResourceReservationId,
@@ -63,10 +64,12 @@ use std::sync::Arc;
 /// 0.20.0: the bucket declares its entries' exact evidence identity-only.
 pub const RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION: u32 = 2;
 
-/// Format of a live bucket ([`ResourceLiveBucketV1`]). 2 since 0.20.0: the
-/// bucket carries the identity-only declaration its record kind requires,
-/// always empty.
-pub const RESOURCE_LIVE_BUCKET_FORMAT_VERSION: u32 = 2;
+/// Format of a live bucket ([`ResourceLiveBucketV1`]). 3 since 0.26.0: a
+/// bucket may hold run budget partitions with their admission epochs
+/// ([`ResourceLiveRecordKeyV1::Partition`]), and the canonical bucket count
+/// counts them. 2 (0.20.0): the bucket carries the identity-only declaration
+/// its record kind requires, always empty.
+pub const RESOURCE_LIVE_BUCKET_FORMAT_VERSION: u32 = 3;
 
 /// Hot terminal records one bucket holds, on average, at a full candidate
 /// budget ([`resource_hot_terminal_bucket_count`]). An archive commit
@@ -296,6 +299,20 @@ pub enum ResourceLiveRecordKeyV1 {
     Unit(ResourceUnitRevisionId),
     /// The accounts one custodian holds ([`ResourceCustodianAccountsV1`]).
     Custodian(KnowledgeHolderRef),
+    /// One run budget partition with its admission epoch
+    /// ([`ResourceRunBudgetPartitionEntryV1`]).
+    Partition(CompletionPartitionKeyV1),
+}
+
+/// One run budget partition and its admission epoch, as a live bucket holds
+/// them: the record a lease admission of the partition's authority reads and
+/// writes, and the only one. A budget revision adds or removes it whole.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceRunBudgetPartitionEntryV1 {
+    /// The partition.
+    pub partition: CompletionCapacityPartitionV1,
+    /// Its admission epoch, `None` until the authority's first lease.
+    pub epoch: Option<AdmissionEpochV1>,
 }
 
 /// The accounts one custodian holds: the index a reader of a holder's stock
@@ -319,6 +336,7 @@ pub enum ResourceLivePayloadV1 {
     Definition(ResourceDefinitionRevision),
     Unit(ResourceUnitRevision),
     Custodian(ResourceCustodianAccountsV1),
+    Partition(ResourceRunBudgetPartitionEntryV1),
 }
 
 /// One live record as its bucket holds it.
@@ -352,12 +370,14 @@ pub struct ResourceLiveBucketV1 {
 /// in live buckets, persisted in its live root.
 ///
 /// In a persisted live root it counts every account, access grant,
-/// definition, and unit revision, and `bytes` is the encoded size of every
-/// live entry. In memory it counts only the records that are not attached to
+/// definition, unit revision, run budget partition, and admission epoch,
+/// totals the partitions' reserved pending slots and guaranteed units, and
+/// `bytes` is the encoded size of every live entry. In memory it counts only the records that are not attached to
 /// the state: a whole state, with every record attached, holds the default.
 /// Every rule that counts these records, or totals account balances (the
 /// conservation check), or asks whether an account names a protected-floor
-/// policy, reads the attached records and this ledger together.
+/// policy, or totals the run budget's pending slots and guaranteed units,
+/// reads the attached records and this ledger together.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceLiveLedgerV1 {
     pub accounts: u64,
@@ -370,6 +390,14 @@ pub struct ResourceLiveLedgerV1 {
     pub units: u64,
     /// Custodian account indexes ([`ResourceCustodianAccountsV1`]).
     pub custodians: u64,
+    /// Run budget partitions ([`ResourceRunBudgetPartitionEntryV1`]).
+    pub partitions: u64,
+    /// The admission epochs the counted partitions hold.
+    pub admission_epochs: u64,
+    /// The pending slots the counted partitions reserve.
+    pub partition_reserved_pending_slots: u64,
+    /// The completion units the counted partitions guarantee.
+    pub partition_guaranteed_units: u64,
     /// Encoded bytes of the counted live entries.
     pub bytes: u64,
 }
@@ -401,6 +429,22 @@ impl ResourceLiveLedgerV1 {
             ResourceLivePayloadV1::Definition(_) => step(&mut self.definitions, add)?,
             ResourceLivePayloadV1::Unit(_) => step(&mut self.units, add)?,
             ResourceLivePayloadV1::Custodian(_) => step(&mut self.custodians, add)?,
+            ResourceLivePayloadV1::Partition(entry) => {
+                step(&mut self.partitions, add)?;
+                if entry.epoch.is_some() {
+                    step(&mut self.admission_epochs, add)?;
+                }
+                step_amount(
+                    &mut self.partition_reserved_pending_slots,
+                    u64::from(entry.partition.reserved_pending_slots),
+                    add,
+                )?;
+                step_amount(
+                    &mut self.partition_guaranteed_units,
+                    entry.partition.guaranteed_units,
+                    add,
+                )?;
+            }
         }
         Ok(())
     }
@@ -408,6 +452,80 @@ impl ResourceLiveLedgerV1 {
     /// Whether the ledger counts no record: every live record is attached.
     fn is_empty(&self) -> bool {
         self == &Self::default()
+    }
+}
+
+/// The run budget partitions a partial state has resolved without holding
+/// them, and the lookups it could not resolve. Never persisted, and ignored
+/// by equality.
+///
+/// A boundary attaches the partition of every lease admission, external
+/// participant grant, and budget revision before it settles the packet. A key
+/// the root does not hold is noted absent when it is probed, and a revision
+/// notes each partition it retires. A lookup of a key that is neither
+/// attached nor noted, in a state whose ledger counts unattached partitions,
+/// is a missing attachment rule: it answers like an absent partition, so the
+/// operation's own result is unchanged, but it is noted, and the boundary
+/// fails with `invalid_boundary` before it writes anything
+/// ([`ResourceRootWork::persist`]). The notes are shared by every clone of
+/// the state, so an operation taken back keeps them.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PartitionProbes(Arc<std::sync::Mutex<PartitionProbeNotes>>);
+
+#[derive(Debug, Default)]
+struct PartitionProbeNotes {
+    absent: BTreeSet<CompletionPartitionKeyV1>,
+    unresolved: BTreeSet<CompletionPartitionKeyV1>,
+}
+
+impl PartialEq for PartitionProbes {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for PartitionProbes {}
+
+impl PartitionProbes {
+    fn with<T>(&self, read: impl FnOnce(&mut PartitionProbeNotes) -> T) -> T {
+        let mut notes = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        read(&mut notes)
+    }
+
+    /// Notes that the root holds no partition `key`.
+    pub(crate) fn note_absent(&self, key: CompletionPartitionKeyV1) {
+        self.with(|notes| {
+            notes.absent.insert(key);
+        });
+    }
+
+    fn is_absent(&self, key: &CompletionPartitionKeyV1) -> bool {
+        self.with(|notes| notes.absent.contains(key))
+    }
+
+    fn note_unresolved(&self, key: CompletionPartitionKeyV1) {
+        self.with(|notes| {
+            notes.unresolved.insert(key);
+        });
+    }
+
+    /// Fails with `invalid_boundary` when a lookup named a partition that
+    /// was neither attached nor resolved as absent.
+    pub(crate) fn check_resolved(&self) -> Result<(), CanwuError> {
+        let unresolved = self.with(|notes| notes.unresolved.iter().next().cloned());
+        match unresolved {
+            None => Ok(()),
+            Some(key) => Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                format!(
+                    "a resource boundary read the run budget partition of {:?} in {} without attaching it",
+                    key.authority, key.operation_namespace
+                ),
+            )),
+        }
     }
 }
 
@@ -538,6 +656,7 @@ impl ResourceLiveEntryV1 {
             (Key::Definition(id), Payload::Definition(value)) => &value.id == id,
             (Key::Unit(id), Payload::Unit(value)) => &value.id == id,
             (Key::Custodian(holder), Payload::Custodian(value)) => &value.holder == holder,
+            (Key::Partition(key), Payload::Partition(value)) => value.partition.has_key(key),
             _ => false,
         }
     }
@@ -579,7 +698,9 @@ fn live_payload_references(payload: &ResourceLivePayloadV1) -> Vec<RootKey> {
             vec![RootKey::Live(Key::Unit(value.canonical_unit.clone()))]
         }
         // The accounts an index lists are attached only when asked for.
-        ResourceLivePayloadV1::Unit(_) | ResourceLivePayloadV1::Custodian(_) => Vec::new(),
+        ResourceLivePayloadV1::Unit(_)
+        | ResourceLivePayloadV1::Custodian(_)
+        | ResourceLivePayloadV1::Partition(_) => Vec::new(),
     }
 }
 
@@ -758,8 +879,9 @@ pub fn resource_hot_terminal_bucket_count(limits: &ResourceLimitsV1) -> u32 {
 }
 
 /// How many live buckets a root with `limits` uses: every account, access
-/// grant, definition, unit revision, and custodian index the root may hold
-/// (one custodian per account at most), divided by
+/// grant, definition, unit revision, custodian index (one custodian per
+/// account at most), and run budget partition
+/// ([`crate::MAX_RUN_BUDGET_PARTITIONS`]) the root may hold, divided by
 /// [`RESOURCE_LIVE_RECORDS_PER_BUCKET`], rounded up to a power of two. Fixed
 /// for the life of a root. A bucket is a domain record only once it holds a
 /// record, so an unused budget costs nothing.
@@ -771,7 +893,8 @@ pub fn resource_live_bucket_count(limits: &ResourceLimitsV1) -> u32 {
             .saturating_add(crate::MAX_RESOURCE_ACCESS_GRANTS)
             .saturating_add(limits.max_definitions)
             .saturating_add(limits.max_unit_revisions)
-            .saturating_add(limits.max_accounts),
+            .saturating_add(limits.max_accounts)
+            .saturating_add(crate::MAX_RUN_BUDGET_PARTITIONS),
         RESOURCE_LIVE_RECORDS_PER_BUCKET,
     )
 }
@@ -838,8 +961,27 @@ pub fn resource_live_bucket(key: &ResourceLiveRecordKeyV1, buckets: u32) -> u32 
             "custodian",
             serde_json::to_string(holder).unwrap_or_default().into(),
         ),
+        // Built without encoding, so it cannot fail. Placement only needs
+        // to be deterministic: two keys with the same text share a bucket.
+        ResourceLiveRecordKeyV1::Partition(key) => (
+            "partition",
+            format!(
+                "{}\0{}",
+                holder_text(&key.authority),
+                key.operation_namespace
+            )
+            .into(),
+        ),
     };
     text_bucket(b"canwu.resource.live-bucket.v1", kind, &text, buckets)
+}
+
+/// A holder's text for bucket placement.
+fn holder_text(holder: &KnowledgeHolderRef) -> String {
+    match holder {
+        KnowledgeHolderRef::Person(id) => format!("person\0{id}"),
+        KnowledgeHolderRef::Entity(entity) => format!("entity\0{entity}"),
+    }
 }
 
 /// The two bucket spaces: what parsing a stored bucket of either needs.
@@ -1021,6 +1163,103 @@ impl ResourceState {
         self.units
             .len()
             .saturating_add(usize::try_from(self.live.units).unwrap_or(usize::MAX))
+    }
+
+    /// Run budget partitions of this root, attached or not.
+    #[must_use]
+    pub fn partition_count(&self) -> usize {
+        self.run_budget
+            .partitions
+            .len()
+            .saturating_add(usize::try_from(self.live.partitions).unwrap_or(usize::MAX))
+    }
+
+    /// The run budget partition `key`, or `None` when the root holds none.
+    ///
+    /// A partial state holds only the partitions attached to it
+    /// (`ResourceLiveRecordKeyV1::Partition`); a key that is neither attached
+    /// nor read and found absent is refused, never answered `None`. A whole
+    /// state answers every key. The refusal is
+    /// [`ResourceError::NotFound`] and always means the key was never
+    /// attached, never that the root lacks the partition.
+    pub fn partition(
+        &self,
+        key: &CompletionPartitionKeyV1,
+    ) -> Result<Option<&CompletionCapacityPartitionV1>, ResourceError> {
+        if let Some(partition) = self.run_budget.attached_partition(key) {
+            return Ok(Some(partition));
+        }
+        if self.live.partitions == 0 || self.partition_probes.is_absent(key) {
+            return Ok(None);
+        }
+        Err(ResourceError::NotFound(
+            "the run budget partition is not attached to this partial resource root".to_owned(),
+        ))
+    }
+
+    /// Whether the root holds the run budget partition `key`; refused, as
+    /// [`Self::partition`] is, for a key a partial state has not resolved.
+    pub fn holds_partition(&self, key: &CompletionPartitionKeyV1) -> Result<bool, ResourceError> {
+        self.partition(key).map(|partition| partition.is_some())
+    }
+
+    /// The admission epoch of the run budget partition `key`: `None` before
+    /// its authority's first lease, or when the root holds no such
+    /// partition. Refused, as [`Self::partition`] is, for a key a partial
+    /// state has not resolved.
+    pub fn admission_epoch(
+        &self,
+        key: &CompletionPartitionKeyV1,
+    ) -> Result<Option<&AdmissionEpochV1>, ResourceError> {
+        self.partition(key)?;
+        Ok(self
+            .completion_leases
+            .epochs
+            .get(&(key.authority.clone(), key.operation_namespace.clone())))
+    }
+
+    /// The partition `key` for an operation that reads it: like
+    /// [`Self::partition`], but a key the state has not resolved answers
+    /// `None` and is noted, which fails the boundary before it writes
+    /// ([`PartitionProbes`]).
+    pub(crate) fn resolve_partition(
+        &self,
+        key: &CompletionPartitionKeyV1,
+    ) -> Option<CompletionCapacityPartitionV1> {
+        if let Ok(partition) = self.partition(key) {
+            partition.cloned()
+        } else {
+            self.partition_probes.note_unresolved(key.clone());
+            None
+        }
+    }
+
+    /// The pending slots the run budget configures: its shared slots and
+    /// every partition's reserved ones, attached or not.
+    pub(crate) fn configured_pending_slots(&self) -> usize {
+        usize::from(self.run_budget.shared_pending_slots)
+            .saturating_add(self.run_budget.attached_reserved_slots())
+            .saturating_add(
+                usize::try_from(self.live.partition_reserved_pending_slots).unwrap_or(usize::MAX),
+            )
+    }
+
+    /// The units every partition guarantees, attached or not.
+    pub(crate) fn guaranteed_partition_units(&self) -> Result<u64, ResourceError> {
+        self.run_budget.partitions.iter().try_fold(
+            self.live.partition_guaranteed_units,
+            |total, partition| {
+                total
+                    .checked_add(partition.guaranteed_units)
+                    .ok_or(ResourceError::Overflow)
+            },
+        )
+    }
+
+    /// Notes that the root no longer holds the partition `key`: a revision
+    /// retired it in this boundary.
+    pub(crate) fn note_partition_absent(&self, key: CompletionPartitionKeyV1) {
+        self.partition_probes.note_absent(key);
     }
 
     /// The balances of every account of this root, attached or not.
@@ -1308,6 +1547,9 @@ impl ResourceState {
             ResourceLiveRecordKeyV1::Custodian(holder) => {
                 self.custodian_accounts.contains_key(holder)
             }
+            ResourceLiveRecordKeyV1::Partition(key) => {
+                self.run_budget.attached_partition(key).is_some()
+            }
         }
     }
 
@@ -1338,6 +1580,20 @@ impl ResourceState {
                         .get(holder)
                         .cloned()
                         .ok_or_else(missing)?,
+                })
+            }
+            ResourceLiveRecordKeyV1::Partition(key) => {
+                ResourceLivePayloadV1::Partition(ResourceRunBudgetPartitionEntryV1 {
+                    partition: self
+                        .run_budget
+                        .attached_partition(key)
+                        .cloned()
+                        .ok_or_else(missing)?,
+                    epoch: self
+                        .completion_leases
+                        .epochs
+                        .get(&(key.authority.clone(), key.operation_namespace.clone()))
+                        .cloned(),
                 })
             }
         };
@@ -1378,6 +1634,25 @@ impl ResourceState {
                 self.custodian_accounts
                     .insert(value.holder, value.accounts)
                     .is_some()
+            }
+            ResourceLivePayloadV1::Partition(value) => {
+                let key = value.partition.key();
+                let index = self
+                    .run_budget
+                    .partitions
+                    .binary_search_by(|partition| partition.key().cmp(&key));
+                match index {
+                    Ok(_) => true,
+                    Err(index) => {
+                        if let Some(epoch) = value.epoch {
+                            self.completion_leases
+                                .epochs
+                                .insert((key.authority, key.operation_namespace), epoch);
+                        }
+                        self.run_budget.partitions.insert(index, value.partition);
+                        false
+                    }
+                }
             }
         };
         if replaced {
@@ -1463,6 +1738,25 @@ impl ResourceState {
                     }),
                 }),
         );
+        // A partition persists with its epoch; an epoch without its partition
+        // is not a root this state can be.
+        let mut epochs = std::mem::take(&mut self.completion_leases.epochs);
+        for partition in std::mem::take(&mut self.run_budget.partitions) {
+            let key = partition.key();
+            let epoch = epochs.remove(&(key.authority.clone(), key.operation_namespace.clone()));
+            live.push(ResourceLiveEntryV1 {
+                key: ResourceLiveRecordKeyV1::Partition(key),
+                payload: ResourceLivePayloadV1::Partition(ResourceRunBudgetPartitionEntryV1 {
+                    partition,
+                    epoch,
+                }),
+            });
+        }
+        if !epochs.is_empty() {
+            return Err(ResourceError::InvalidDefinition(
+                "a completion admission epoch names no run budget partition".to_owned(),
+            ));
+        }
         for entry in &live {
             let size = encoded_len(entry)?;
             self.live.count(&entry.payload, size, true)?;
@@ -1702,8 +1996,9 @@ fn invalid(message: impl Into<String>) -> CanwuError {
 
 /// The payload of the live root `resource:runtime:v1`: the resource state
 /// without the bodies of its hot terminal records and of its accounts, access
-/// grants, definitions, and unit revisions, which its ledgers count and its
-/// buckets hold.
+/// grants, definitions, unit revisions, custodian indexes, and run budget
+/// partitions with their admission epochs, which its ledgers count and its
+/// buckets hold. It keeps the run budget's header.
 ///
 /// It encodes as that state does. Read a root through a
 /// [`ResourceRootReader`] ([`ResourceRootReader::load_run`] in a host
@@ -1739,6 +2034,8 @@ pub(crate) fn decode_live_root(record: &DomainRecord) -> Result<ResourceState, C
         || !state.definitions.is_empty()
         || !state.units.is_empty()
         || !state.custodian_accounts.is_empty()
+        || !state.run_budget.partitions.is_empty()
+        || !state.completion_leases.epochs.is_empty()
     {
         return Err(invalid(
             "a resource live root holds no bucketed records itself",
@@ -2527,6 +2824,11 @@ impl<'s, S: HotTerminalSource<'s>> ResourceRootWork<'s, S> {
         }
         let bucket = resource_live_bucket(key, self.live_bucket_count);
         let Some(value) = self.live_bucket(bucket)?.entries.get(key).copied() else {
+            // A partition the root does not hold is resolved as absent, so a
+            // lookup of it answers "none" instead of failing as unresolved.
+            if let ResourceLiveRecordKeyV1::Partition(partition) = key {
+                self.state.partition_probes.note_absent(partition.clone());
+            }
             return Ok(Vec::new());
         };
         let kept = self
@@ -2835,6 +3137,7 @@ impl<'s, S: HotTerminalSource<'s>> ResourceRootWork<'s, S> {
     /// the settlement read past a stored record: it fails with
     /// `invalid_boundary`, an engine invariant, instead of writing over it.
     pub(crate) fn persist(&mut self, summary: &str) -> Result<Vec<BoundaryDirective>, CanwuError> {
+        self.state.partition_probes.check_resolved()?;
         let empty = ResourceState::empty(self.state.limits).map_err(resource_canwu_error)?;
         let state = std::mem::replace(&mut self.state, empty);
         let (live, entries, live_entries) = state.split_parts().map_err(resource_canwu_error)?;
@@ -2962,9 +3265,15 @@ impl<'s, S: HotTerminalSource<'s>> ResourceRootWork<'s, S> {
             };
             let attached = &self.live_attached;
             for key in keys {
-                let entry = live_present
-                    .get(&key)
-                    .ok_or_else(|| invalid("a resource live record left the root"))?;
+                let Some(entry) = live_present.get(&key) else {
+                    // Only a run budget revision removes a live record: the
+                    // partition it retired, which it attached first.
+                    if !matches!(key, ResourceLiveRecordKeyV1::Partition(_)) {
+                        return Err(invalid("a resource live record left the root"));
+                    }
+                    entries.remove(&key);
+                    continue;
+                };
                 if !attached.contains_key(&key) && entries.contains_key(&key) {
                     return Err(read_past());
                 }
@@ -3014,13 +3323,42 @@ fn bucket_directive(
 /// reservation, allocation leg, consumption, fulfillment, transfer, or loss
 /// belongs to, and the accounts, access grants, definitions, and units they
 /// name). [`Self::attach_live`] attaches accounts, access grants,
-/// definitions, and unit revisions by identity. The state then answers every
+/// definitions, unit revisions, and run budget partitions with their
+/// admission epochs by identity. The state then answers every
 /// question about its live root and about the attached records exactly as the
 /// whole root would; a bucketed record it was not asked for is absent from
 /// its maps. Its ledgers ([`ResourceState::hot_terminal_records`],
 /// [`ResourceState::account_count`], [`ResourceState::total_account_balance`])
 /// count every record. Reading in a boundary needs the `canwu.resource`
 /// `runtime` and `bucket` state keys ([`crate::resource_hot_terminal_state_key`]).
+///
+/// A partial state holds only the run budget partitions attached to it, so
+/// read one through [`ResourceState::partition`],
+/// [`ResourceState::holds_partition`], or [`ResourceState::admission_epoch`]
+/// after attaching its key, never by scanning `run_budget.partitions`:
+///
+/// ```
+/// # use canwu_api::{Canwu, DomainRecordKind, EntityRef, KnowledgeHolderRef, PersonId};
+/// # use canwu_api::{Scenario, SimTime, SimulationPlugin};
+/// # use canwu_resource::*;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let root = ResourceState::empty(ResourceLimitsV1::canonical())?;
+/// # let plugin = ResourcePlugin::new(Vec::<DomainRecordKind>::new());
+/// # let plugins: [&dyn SimulationPlugin; 1] = [&plugin];
+/// # let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))])
+/// #     .with_domain_records(root.into_records()?);
+/// # let run = Canwu::new_with_plugins(1, scenario, &plugins)?;
+/// # let mut reader = ResourceRootReader::load_run(&run)?.expect("a resource root");
+/// # let authority = KnowledgeHolderRef::Person(PersonId::new(1));
+/// let key = CompletionPartitionKeyV1::new(authority, "host.namespace");
+/// reader.attach_live([ResourceLiveRecordKeyV1::Partition(key.clone())])?;
+/// // `Ok(false)` when the root holds no such partition; an error when the
+/// // key was never attached (an integration mistake, not an answer).
+/// let holds = reader.state().holds_partition(&key)?;
+/// # assert!(!holds);
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// A host reads the same way from a run handle with [`Self::load_run`]: for
 /// the same committed state and the same requests, the reader holds exactly
@@ -3089,9 +3427,15 @@ impl<'v, 'a> ResourceRootReader<'v, 'a> {
         self.note(attached)
     }
 
-    /// Attaches the accounts, access grants, definitions, and unit revisions
-    /// `keys` name, with the definitions and units they name. A key that
-    /// names no record is ignored.
+    /// Attaches the accounts, access grants, definitions, unit revisions,
+    /// and run budget partitions `keys` name, with the definitions and units
+    /// they name; a [`ResourceLiveRecordKeyV1::Partition`] key attaches the
+    /// partition with its admission epoch. A key that names no account,
+    /// grant, definition, or unit is ignored. A `Partition` key the root does
+    /// not hold is recorded as absent: [`ResourceState::partition`],
+    /// [`ResourceState::holds_partition`], and
+    /// [`ResourceState::admission_epoch`] then answer `Ok(None)` or
+    /// `Ok(false)` for it, and refuse a key that was never attached.
     pub fn attach_live(
         &mut self,
         keys: impl IntoIterator<Item = ResourceLiveRecordKeyV1>,

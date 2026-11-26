@@ -1081,7 +1081,8 @@ its `ResourceHotTerminalLedgerV1` and (since 0.18.0) `ResourceLiveLedgerV1`,
 what it does not hold: each hot terminal record (the root's archive
 candidates) is an entry of a hot terminal bucket `resource:hot-terminal:{n}`
 (`ResourceHotTerminalBucketV1`, about two records per bucket), and each
-account, access grant, definition, unit revision, and custodian index entry is
+account, access grant, definition, unit revision, custodian index entry, and
+(since 0.26.0) run budget partition with its admission epoch is
 an entry of a live bucket `resource:live:{n}` (`ResourceLiveBucketV1`, about
 four records per bucket), each chosen by a domain-separated hash of its
 identity among a bucket count fixed for the life of the root. Both bucket
@@ -1103,13 +1104,16 @@ or live records, so a scenario installs opening accounts with
 settles a packet the resource plugin attaches the outcome under every key
 the packet settles under, every hot terminal and live record the payload
 names (a leg's account, a demand's source accounts and access grant, an
-account's definition and unit), and their closures, and every rule that
+account's definition and unit, and since 0.26.0 the run budget partition a
+lease admission or an external participant grant names), and their closures, and every rule that
 counts records, totals balances, or asks whether a floor policy is in use
 reads the attached records and the ledgers together, so a partial root
 settles as the whole root would (every debug build settles each boundary
 again on the whole root and asserts the same proposal). It then writes the
 live root and the buckets whose entries changed: settling one operation
-writes the same records whatever the number of accounts, creating an
+writes the same records whatever the number of accounts, a lease admission
+writes the live root and its partition's bucket whatever the number of
+authorities, creating an
 account writes its bucket and its custodian's index, and a pooled demand's
 allocation pass attaches every account. A boundary with nothing for the
 resource plugin reads nothing of the root, and one that would write over a

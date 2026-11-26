@@ -1133,6 +1133,9 @@ pub enum ResourceOperationKind {
     /// The host application changes an account's capacity
     /// ([`crate::ResourceOperationRequestV1::SetAccountCapacity`]).
     SetAccountCapacity,
+    /// The host application revises the run budget
+    /// ([`crate::ResourceOperationRequestV1::ReviseRunBudget`]).
+    ReviseRunBudget,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1248,10 +1251,13 @@ impl ResourceOperationOutcome {
                 ResourceOperationKind::AdvanceTransfer => evidence_count == 1,
                 // A production credit keeps its source and an external
                 // inflow its evidence; a rescope keeps the evidence of the
-                // move, and a capacity change the evidence of the works.
+                // move, a capacity change the evidence of the works, and a
+                // budget revision the evidence of the authority that ended
+                // or began.
                 ResourceOperationKind::Credit
                 | ResourceOperationKind::RescopeAccount
-                | ResourceOperationKind::SetAccountCapacity => evidence_count == 1,
+                | ResourceOperationKind::SetAccountCapacity
+                | ResourceOperationKind::ReviseRunBudget => evidence_count == 1,
                 ResourceOperationKind::Loss => evidence_count <= 1,
                 ResourceOperationKind::BeginExchange | ResourceOperationKind::RevokeAccessGrant => {
                     evidence_count == 0
@@ -1354,7 +1360,8 @@ fn result_ref_matches_kind(
         | ResourceOperationKind::IssueAccessGrant
         | ResourceOperationKind::RevokeAccessGrant
         | ResourceOperationKind::RescopeAccount
-        | ResourceOperationKind::SetAccountCapacity => result_ref.is_none(),
+        | ResourceOperationKind::SetAccountCapacity
+        | ResourceOperationKind::ReviseRunBudget => result_ref.is_none(),
         ResourceOperationKind::Credit | ResourceOperationKind::ExternalOutflow => {
             result_ref.is_none()
         }
@@ -1531,8 +1538,9 @@ pub struct ResourceState {
     /// Counts and aggregates over every hot terminal record, attached or
     /// not. Every rule that counts hot terminal records reads it.
     pub hot_terminal: crate::ResourceHotTerminalLedgerV1,
-    /// Counts and totals over the accounts, access grants, definitions, and
-    /// unit revisions that are not attached. Every rule that counts or
+    /// Counts and totals over the accounts, access grants, definitions, unit
+    /// revisions, custodian indexes, and run budget partitions and their
+    /// admission epochs that are not attached. Every rule that counts or
     /// totals them reads it beside the attached records.
     pub live: crate::ResourceLiveLedgerV1,
     /// The accounts each custodian holds, for the attached custodians
@@ -1544,6 +1552,10 @@ pub struct ResourceState {
         with = "custodian_account_sets"
     )]
     pub custodian_accounts: BTreeMap<KnowledgeHolderRef, BTreeSet<ResourceAccountId>>,
+    /// The run budget partitions this partial state resolved without holding
+    /// them. Never persisted; see [`Self::partition`].
+    #[serde(skip)]
+    pub(crate) partition_probes: crate::root::PartitionProbes,
 }
 
 // A holder is not a JSON object key: persist the index as entries in
@@ -1606,8 +1618,8 @@ pub fn resource_runtime_reference() -> canwu_api::TypedDomainRecordRef<ResourceR
 
 impl ResourceState {
     /// The live root record of a state that holds no bucketed record: no
-    /// hot terminal record, account, access grant, definition, or unit
-    /// revision. Any other root persists as several records
+    /// hot terminal record, account, access grant, definition, unit
+    /// revision, run budget partition, or admission epoch. Any other root persists as several records
     /// ([`Self::into_records`]); this refuses it.
     pub fn into_record(self) -> Result<DomainRecord, canwu_api::CanwuError> {
         if self.hot_terminal.records != 0
@@ -1618,6 +1630,8 @@ impl ResourceState {
             || !self.definitions.is_empty()
             || !self.units.is_empty()
             || !self.custodian_accounts.is_empty()
+            || !self.run_budget.partitions.is_empty()
+            || !self.completion_leases.epochs.is_empty()
         {
             return Err(canwu_api::CanwuError::new(
                 canwu_api::ErrorCode::InvalidDomainRecord,

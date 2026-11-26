@@ -503,6 +503,11 @@ a host expires grants only through the expiry tick. Since 0.24.0 the host
 application may change an open account's capacity, citing the current record
 of what changed the store: a capacity must hold the balance, and a lowering
 must also leave room for the stock of open transfers that name the account.
+Since 0.26.0 each run budget partition persists with its admission epoch in a
+live bucket, so a lease admission writes one bucket whatever the number of
+authorities, and the host application revises the run budget of a running
+root, retiring and adding partitions and changing its totals, citing the
+current record of the change; a partition still in use is not retired.
 The production archive keeps the same lookup index, its receipts leave the
 root, and a production output batch the resource plugin deferred still
 settles.

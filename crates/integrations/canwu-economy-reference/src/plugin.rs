@@ -34,8 +34,11 @@ pub const ECONOMY_COMMAND: &str = "apply_economy_reference_operation_v1";
 pub const ECONOMY_COMMAND_INGRESS: &str = "economy_reference_operation_v1";
 pub const ECONOMY_ARCHIVE_COMMIT_INGRESS: &str = "economy_archive_commit_v1";
 pub const ECONOMY_ARCHIVE_RETENTION_ACK_INGRESS: &str = "economy_archive_retention_ack_v1";
+/// BLAKE3, lowercase hex, of `canwu-economy-reference 0.26.0 semantics: run
+/// budget partitions in ascending key order, run budget digest of its header`
+/// (one line, one space after each comma and colon).
 pub const ECONOMY_SEMANTIC_HASH: &str =
-    "acba44da66a33cfa1950f4f1439796785e177e33dab5da9bcb989e9223690c7b";
+    "036367795b30cb4717d33573d156add68bea1d172cec7b49032d5574c2b1420a";
 /// The event of an operation skipped because the root had no room for its
 /// result; [`economy_operation_skip`] reads it back.
 pub const ECONOMY_OPERATION_SKIPPED_EVENT: &str = "canwu.economy-reference.operation_skipped.v1";

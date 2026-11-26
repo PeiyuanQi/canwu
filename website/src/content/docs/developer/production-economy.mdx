@@ -306,6 +306,38 @@ enqueue_resource_account_capacity(
 
 这个操作不需要完成租约，会让账户修订号前进。引用该账户的资源预留、需求、动用授权和受保护存量底线都保持不变，操作结果会保留证据。与更改地点范围不同，有未完结的转移以该账户为来源或目的地时，它仍然可以进行。
 
+## 修订运行预算
+
+运行预算（`RunBudgetRevisionV1`）为完成租约定下全局总量（`total_completion_units`、`shared_pending_slots`），并为每个权限主体和操作命名空间各设一个[运行预算分区](/reference/terminology/)（`CompletionCapacityPartitionV1`，以 `CompletionPartitionKeyV1` 标识），分区按键严格升序排列。上层应用在运行开始前用 `install_run_budget` 安装预算；一旦租约账簿里有申请或外部授权，它就拒绝。政权更替、官署新设或裁撤时，上层应用通过[运行预算修订](/reference/terminology/)修订正在运行的根的预算：
+
+```rust
+enqueue_resource_run_budget_revision(
+    &mut canwu,
+    due_at,
+    &ResourceReviseRunBudgetRequestV1 {
+        operation_key,
+        expected_budget_revision,
+        total_completion_units, // 修订后的总量；保持不变就传入现值
+        shared_pending_slots,
+        retire, // 要停用的分区键
+        add,    // 要新增的分区，按键升序
+        evidence, // 记载这次变化的那条记录的当前版本
+    },
+)?;
+```
+
+- **只有上层应用可以发送。** 带请求标识的命令或适配器数据包如果携带 `ReviseRunBudget`，会被拒绝。
+- **证据。** 与更改账户容量相同：证据必须是某条记录的当前版本，记录种类必须是传给 `ResourcePlugin::new` 的种类之一。
+- **要么全部生效，要么全不生效。** 停用的键连同它的准入时段一起离开；新增的分区没有准入时段（停用后再新增的键从新的时段开始，它的时间回退检查也重新开始）；总量随之改变，预算修订号前进一，摘要重新计算。按较早修订号准入的授权仍然有效。
+- **使用中的分区不能停用。** 租约账簿里有该权限主体和命名空间的申请、它有处于持有、已准备或已消耗状态的外部参与方授权，或者有为它的申请或参与方预留的完成报告时，停用记为 `invalid_lifecycle` 拒绝。协调方插件自己的申请在它为资源参与方提出请求之前并不占用资源分区，所以要等不再有插件协调某个权限主体的工作时再停用它。
+- **拒绝**都会记录在案，预算保持原样：预算修订号已过时记为 `version_conflict`；超过 256 个键、新增的分区超出 V1 的界限、总量为 0、共享名额超过 1,024，或修订后待处理名额或分区超过 1,024 个、保证量超过总量、总量低于租约账簿或外部参与方账簿各自持有的数量，记为 `limit_exceeded`；没有任何改动或 `add` 未按键排序，记为 `invalid_definition`；停用的键不在预算中记为 `not_found`；新增的键已在预算中且没有同时停用，记为 `idempotency_conflict`。
+- **排入时就拒绝。** `enqueue_resource_run_budget_revision` 本身会拒绝（`InvalidPayload`）超过 256 个键、`add` 未按键排序或重复同一个键的请求，不会排入。
+- **停用被拒绝之后**：等这个权限主体的租约或参与方结束、报告发布之后再发一次。不想让一个忙碌的键拖住新增的分区时，把新增单独放在一次修订里。调低 `total_completion_units` 可能让已申请、尚未授权的申请在之后授权时记为 `limit_exceeded`。
+
+这个操作不需要完成租约，留下一条保留证据的 `ReviseRunBudget` 操作结果，数量为停用和新增的键数，不会让任何报告授权变脏。已停用的权限主体之后的租约或外部参与方申请会被当作从没有分区的申请，记为 `invalid_authority` 拒绝；修订之前排入、修订之后才结算的 `Acquire` 也是如此。
+
+自 0.26.0 起，每个分区连同它的准入时段作为一条活动记录（`ResourceLiveRecordKeyV1::Partition`）存放在活动桶中，所以一次租约准入只写活动根和一个活动桶，与权限主体数无关。部分读取的状态在 `run_budget.partitions` 和 `completion_leases.epochs` 中只有挂载了的分区，所以请用 `ResourceState::partition`、`holds_partition`、`admission_epoch` 和 `partition_count` 读取分区；上层应用用 `ResourceRootReader::attach_live` 挂载 `ResourceLiveRecordKeyV1::Partition(key)` 来读一个权限主体的分区。
+
 ## 外部流入入账
 
 来源为 `ResourceCreditSourceV1::ExternalInflow(DomainRecordVersionRef)` 的 `Credit` 把来自模型账户之外的价值记入账户，例如贡赋或从外地购入的物资，它与 `ExternalOutflow` 相对应。它计入 `ConservationTotalsV1::external_inflow`，已应用的结果把所引用的记录版本保留为证据。

@@ -42,6 +42,26 @@
 //! allocation pass over that many due demands, each on an account of its
 //! own; `--boundary-batch` settles one consumption batch of that many items
 //! through a provider's adapter ingress, under one four-step lease.
+//!
+//! `--partitions` adds the run budget dimension (0.26.0): each size installs
+//! that many run budget partitions, one per authority, of which the first
+//! `--epochs` (capped at the size) already hold an admission epoch, and
+//! measures one lease admission: an `Acquire` of the first authority, whose
+//! partition guarantees the lease's units, through the completion ingress
+//! (`--warmup` plus `--samples` fresh roots per size; the case fails unless
+//! every admission is applied and writes its partition's live bucket). It
+//! reports the boundary, the live root's encoded bytes, and the resource
+//! records the boundary wrote: the live root, the outcome's hot terminal
+//! bucket, and the one live bucket the partition is in, whatever the number
+//! of partitions.
+//!
+//! The case uses 0.26.0 items, so it does not build against 0.25.0. For the
+//! 0.25.0 number, take the same admission at the 0.25.0 tag, where the live
+//! root holds every partition and epoch inline: build this binary there with
+//! `admission_case` reduced to its 0.25.0 form (drop the
+//! `CompletionPartitionKeyV1` bucket check and report the live root's bytes
+//! and the records written). No other case gives that number: `--partitions`
+//! drives only `lease_admission`, and 0.25.0 has no such option.
 
 use canwu_api::{
     BoundaryRequest, Canwu, CanwuError, DomainRecord, DomainRecordClass, DomainRecordKind,
@@ -55,6 +75,10 @@ use canwu_resource::{
     ResourceAdapterOperationV1, ResourceConsumptionIntentId, ResourceConsumptionIntentStatusV1,
     ResourceConsumptionIntentV1, enqueue_resource_adapter_operation,
     enqueue_resource_completion_operation, resource_consumption_batch_item_key,
+};
+use canwu_resource::{
+    AdmissionEpochV1, CompletionPartitionKeyV1, ResourceLiveRecordKeyV1, resource_live_bucket,
+    resource_live_bucket_count, resource_live_bucket_reference,
 };
 use canwu_resource::{
     CompletionCapacityGrantId, CompletionCapacityPartitionV1, CompletionCapacityRecipeV1,
@@ -1245,6 +1269,144 @@ fn due_case(demands: usize, options: &Options) -> Result<Value, Box<dyn Error>> 
     }))
 }
 
+/// A partition of profile authority `index` that reserves one pending slot,
+/// so that the largest number of partitions fits the global pool. Only the
+/// first, whose authority takes the measured lease, guarantees units: enough
+/// for the lease recipe's canonical units.
+fn admission_partition(index: usize) -> CompletionCapacityPartitionV1 {
+    CompletionCapacityPartitionV1 {
+        guaranteed_units: if index == 0 { 40_000 } else { 0 },
+        reserved_pending_slots: 1,
+        request_token_capacity: 4,
+        root_acquisition_cap_per_sim_time: 4,
+        ..partition(household(index))
+    }
+}
+
+/// One lease admission beside `partitions` run budget partitions, `epochs`
+/// of which hold an admission epoch (placed in the root directly).
+fn admission_case(
+    partitions: usize,
+    epochs: usize,
+    options: &Options,
+) -> Result<Value, Box<dyn Error>> {
+    let partitions = partitions.max(1);
+    let epochs = epochs.min(partitions);
+    let mut admissions = Series::new();
+    let mut live_root_bytes = 0;
+    let mut written = Vec::new();
+    let partition_bucket = resource_live_bucket_reference(resource_live_bucket(
+        &ResourceLiveRecordKeyV1::Partition(CompletionPartitionKeyV1::new(
+            household(0),
+            HOUSEHOLD_NAMESPACE,
+        )),
+        resource_live_bucket_count(&ResourceLimitsV1::canonical()),
+    ))
+    .into_untyped()
+    .to_string();
+    for sample in 0..options.warmup + options.samples {
+        let keep = sample >= options.warmup;
+        let mut state = ResourceState::empty(ResourceLimitsV1::canonical())?;
+        install_catalog(&mut state)?;
+        state.install_run_budget(
+            RunBudgetRevisionV1 {
+                revision: ResourceRevision::INITIAL,
+                total_completion_units: 4_000_000,
+                shared_pending_slots: 0,
+                partitions: (0..partitions).map(admission_partition).collect(),
+                semantic_digest: String::new(),
+            }
+            .seal()?,
+        )?;
+        for index in 0..epochs {
+            state.completion_leases.epochs.insert(
+                (household(index), HOUSEHOLD_NAMESPACE.to_owned()),
+                AdmissionEpochV1 {
+                    at: SimTime::EPOCH,
+                    token_balance: 4,
+                    last_refill_minute: 0,
+                    next_eligible_minute: 0,
+                    root_acquisition_count: 0,
+                },
+            );
+        }
+        let holders = u64::try_from(partitions)?;
+        let mut canwu = run_of(state, Vec::new(), holders)?;
+        let at = SimTime::EPOCH + SimDuration::minutes(1);
+        let admission_key = operation_key("admission", sample)?;
+        let lease = RequestCompletionLeaseV1 {
+            id: CompletionLeaseAcquisitionId::new(format!("profile:admission:{sample}"))?,
+            operation_key: admission_key.clone(),
+            holder: household(0),
+            operation_namespace: HOUSEHOLD_NAMESPACE.to_owned(),
+            eligibility_time: at,
+            eligibility_envelope: EligibilityEnvelopeV1::new(
+                Vec::new(),
+                BTreeMap::new(),
+                std::collections::BTreeSet::new(),
+                Vec::new(),
+                Vec::new(),
+            )?,
+            recipe: lease_recipe(),
+            expected_participants: std::collections::BTreeSet::from([
+                canwu_resource::PLUGIN_NAME.to_owned()
+            ]),
+            policy_class: CompletionPolicyClassV1::Guaranteed,
+        };
+        enqueue_resource_completion_operation(
+            &mut canwu,
+            at,
+            &ResourceCompletionOperationV1::Acquire(lease),
+        )?;
+        let before: BTreeMap<String, DomainRecord> = canwu
+            .domain_records()
+            .filter(|record| record.owner == canwu_resource::PLUGIN_NAME)
+            .map(|record| (record.reference.to_string(), record.clone()))
+            .collect();
+        let cursor = canwu.evidence_cursor()?;
+        let meter = Meter::start();
+        canwu.settle_boundary(BoundaryRequest::at(at))?;
+        let measured = meter.finish();
+        let journal = serde_json::to_vec(&canwu.journal_segment_since(cursor)?)?.len();
+        let status = canwu_resource::resource_operation_outcome(&canwu, &admission_key)
+            .map(|outcome| outcome.status);
+        if status != Some(canwu_resource::ResourceOperationStatus::Applied) {
+            return Err(format!(
+                "the measured lease admission beside {partitions} partitions was not applied: {status:?}"
+            )
+            .into());
+        }
+        if keep {
+            admissions.push((measured, journal));
+        }
+        written = canwu
+            .domain_records()
+            .filter(|record| record.owner == canwu_resource::PLUGIN_NAME)
+            .filter(|record| before.get(&record.reference.to_string()) != Some(*record))
+            .map(|record| record.reference.to_string())
+            .collect();
+        if !written.contains(&partition_bucket) {
+            return Err(format!(
+                "the measured lease admission did not write its partition's bucket {partition_bucket}"
+            )
+            .into());
+        }
+        live_root_bytes = canwu
+            .domain_record(resource_runtime_reference().as_untyped())
+            .map(|record| serde_json::to_vec(&record.payload).map(|bytes| bytes.len()))
+            .transpose()?
+            .unwrap_or_default();
+    }
+    Ok(json!({
+        "partitions": partitions,
+        "epochs": epochs,
+        "admission": admissions.report(options.count_allocations),
+        "live_root_bytes_after": live_root_bytes,
+        "records_written": written,
+        "partition_bucket": partition_bucket,
+    }))
+}
+
 /// Settles one completion step at the epoch.
 fn completion_step(
     canwu: &mut Canwu,
@@ -1462,6 +1624,8 @@ struct Options {
     pooled: Vec<usize>,
     due: Vec<usize>,
     boundary_batch: Vec<usize>,
+    partitions: Vec<usize>,
+    epochs: usize,
     samples: usize,
     warmup: usize,
     machine: String,
@@ -1479,6 +1643,8 @@ fn options() -> Result<Options, Box<dyn Error>> {
         pooled: Vec::new(),
         due: Vec::new(),
         boundary_batch: Vec::new(),
+        partitions: Vec::new(),
+        epochs: 0,
         samples: 5,
         warmup: 1,
         machine: "local-machine".to_owned(),
@@ -1537,6 +1703,13 @@ fn options() -> Result<Options, Box<dyn Error>> {
                     .map(str::parse)
                     .collect::<Result<_, _>>()?;
             }
+            "--partitions" => {
+                options.partitions = value("--partitions")?
+                    .split(',')
+                    .map(str::parse)
+                    .collect::<Result<_, _>>()?;
+            }
+            "--epochs" => options.epochs = value("--epochs")?.parse()?,
             "--samples" => options.samples = value("--samples")?.parse()?,
             "--warmup" => options.warmup = value("--warmup")?.parse()?,
             "--machine" => options.machine = value("--machine")?,
@@ -1549,6 +1722,7 @@ fn options() -> Result<Options, Box<dyn Error>> {
                      --mode elapsed|allocations --backlogs 0,256,1024,4000\n\
                      --accounts 0,16384 --households 500\n\
                      --pooled 65536 --due 2048,8192 --boundary-batch 256\n\
+                     --partitions 1,256,1024 --epochs 1024\n\
                      --samples ODD --warmup N --label TEXT\n\
                      --machine LABEL --recorded-on DATE --output PATH"
                 );
@@ -1621,7 +1795,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             "batch": batch_case(*households)?,
         }));
     }
-    let mut scale_cases = json!({ "pooled": [], "due": [], "boundary_batch": [] });
+    let mut scale_cases =
+        json!({ "pooled": [], "due": [], "boundary_batch": [], "lease_admission": [] });
     for accounts in &options.pooled {
         eprintln!("scale case: pooled pass beside {accounts} accounts");
         scale_cases["pooled"]
@@ -1642,6 +1817,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             .as_array_mut()
             .expect("array")
             .push(boundary_batch_case(*items, &options)?);
+    }
+    for partitions in &options.partitions {
+        eprintln!(
+            "scale case: lease admission beside {partitions} partitions, {} with epochs",
+            options.epochs
+        );
+        scale_cases["lease_admission"]
+            .as_array_mut()
+            .expect("array")
+            .push(admission_case(*partitions, options.epochs, &options)?);
     }
     let report = json!({
         "benchmark": "resource-root-profile",

@@ -56,14 +56,14 @@ Create scenario state with `ResourceState::empty`, install immutable
 definitions/units and opening accounts, then use `ResourceState::into_records`
 to obtain the records that persist the authoritative root: its live root
 `resource:runtime:v1`, one record per live bucket that holds accounts, access
-grants, definitions, unit revisions, or custodian indexes, and one record per
-hot terminal bucket when the root already holds terminal records.
-`ResourceState::into_record` returns the live root of a root that holds none of
-these, and refuses any other root. Activate
+grants, definitions, unit revisions, custodian indexes, or run budget
+partitions, and one record per hot terminal bucket when the root already holds
+terminal records. `ResourceState::into_record` returns the live root of a root
+that holds none of these, and refuses any other root. Activate
 `ResourcePlugin::new(adapter_evidence_kinds)` with the exact external record
 kinds allowed to prove adapter consumption, external-inflow credit, loss, or
-outflow, and those a completion lease, an account rescope, or an account
-capacity change cites. Production output credits do not use adapter ingress;
+outflow, and those a completion lease, an account rescope, an account
+capacity change, or a run budget revision cites. Production output credits do not use adapter ingress;
 they settle through the production output batch ingress.
 
 Player and institution decisions use tracked command ingress:
@@ -85,6 +85,9 @@ Player and institution decisions use tracked command ingress:
 - `enqueue_resource_account_capacity` queues the host application's change of
   an open account's capacity on `RESOURCE_ACCOUNT_CAPACITY_INGRESS` (see
   "Changing an account's capacity").
+- `enqueue_resource_run_budget_revision` queues the host application's
+  revision of the run budget on `RESOURCE_RUN_BUDGET_REVISION_INGRESS` (see
+  "Revising the run budget").
 
 The plugin has one Phase 7 lifecycle writer, Phase 8 conservation/exact-version
 validation, bounded Phase 12 summary validation, and Phase 13 holder-relative
@@ -436,6 +439,96 @@ already-certified debit or terminal settlement consume those reserved slots.
 Consequently a full hot archive skips the next lifecycle before player cost
 (see "Skipped packets") but keeps the room an accepted transfer or certified
 consumption reserved.
+
+### Run budget partitions
+
+`RunBudgetRevisionV1` holds the global totals (`total_completion_units`,
+`shared_pending_slots`) and one `CompletionCapacityPartitionV1` per authority
+and operation namespace, identified by its `CompletionPartitionKeyV1`
+(`CompletionCapacityPartitionV1::key`). The partitions are in strictly
+ascending key order: `RunBudgetRevisionV1::seal` and
+`ResourceState::install_run_budget` sort them, and `validate` refuses any
+other order. A budget holds at most `MAX_RUN_BUDGET_PARTITIONS` (1,024)
+partitions, and a partition's operation namespace at most
+`MAX_COMPLETION_OPERATION_NAMESPACE_BYTES` (160). Since 0.26.0 the budget's
+`semantic_digest` covers its header only (revision, totals, and shared slots,
+domain `canwu.resource.run-budget.v2`), so a partial budget can be checked.
+
+Since 0.26.0 each partition persists with its admission epoch (the
+authority's token bucket, cooldown, and last admission instant, `None` until
+its first lease) as one live record, `ResourceLiveRecordKeyV1::Partition`,
+whose payload is a `ResourceRunBudgetPartitionEntryV1`. The live root keeps
+the budget's header, and its `ResourceLiveLedgerV1` counts the partitions and
+epochs not attached and totals their reserved slots and guaranteed units. A
+lease admission (`Acquire`, `SingleStepLease`) reads and writes its own
+partition's entry, and an external participant grant reads it; no other step
+reads a partition, so a lease writes one live bucket whatever the number of
+authorities. The resource plugin attaches the partitions a packet names
+(`ResourceOperationRequestV1::partition_keys`) before it settles it, and a
+boundary that would read a partition it attached neither as present nor as
+absent fails with `invalid_boundary` before it writes.
+
+A whole state (`resource_state`, `ResourceRootReader::attach_all`) holds every
+partition and epoch in `run_budget.partitions` and `completion_leases.epochs`.
+A partial state holds only the attached ones there, so read a partition
+through `ResourceState::partition`, `holds_partition`, `admission_epoch`, and
+`partition_count`, which answer for the whole root and return an error for a
+partition that was never attached. A host reads one authority's partition
+with `ResourceRootReader::attach_live([ResourceLiveRecordKeyV1::Partition(key)])`.
+
+### Revising the run budget
+
+Before the run the host installs the budget with `install_run_budget`, which
+refuses once the lease book holds an acquisition or an external grant.
+Since 0.26.0 the host revises the budget of a running root:
+`enqueue_resource_run_budget_revision` queues
+`ResourceOperationRequestV1::ReviseRunBudget(ResourceReviseRunBudgetRequestV1)`
+with the expected budget revision, the totals after the revision (send the
+current ones to keep them), the keys to `retire`, the partitions to `add` (in
+ascending key order), and the evidence of the change, an exact record
+version such as the record of the government that ended or the office that
+began. Like a capacity change, it needs no completion lease and leaves one
+`ReviseRunBudget` outcome that keeps the evidence, with the number of keys
+retired and added as its quantity. It settles all or nothing: retired keys
+leave with their epochs, added partitions enter with none (a key retired and
+added again starts with a fresh epoch), the totals change, the budget
+revision advances by one, and its digest is recomputed. A grant admitted
+under an earlier budget revision stays valid.
+
+Its recorded rejections leave the budget as it was: a stale budget revision
+(`version_conflict`); more than `MAX_RUN_BUDGET_REVISION_CHANGES` (256) keys,
+an added partition outside its V1 bounds, a total of 0, or more than 1,024
+shared slots (`limit_exceeded`); nothing to
+change, or `add` out of key order (`invalid_definition`); a retired key the
+budget does not hold (`not_found`); a retired key in use (`invalid_lifecycle`):
+an acquisition of that authority and namespace in the lease book, an
+external participant grant of it that is held, prepared, or consumed, or a
+completion report reservation of an acquisition or participant of it; an
+added key the budget holds and the request does not retire
+(`idempotency_conflict`); after the change, more than 1,024 pending slots or
+partitions, guaranteed units above the total, or a total below the units the
+lease book holds or below the units the external participant book holds,
+each book on its own (`limit_exceeded`); and evidence that is not current or
+not of an adapter evidence kind. The enqueue function itself refuses
+(`InvalidPayload`) a request with more than 256 keys or an `add` out of key
+order. No holder revises the budget: a tracked command or adapter packet
+that carries the operation is refused with `InvalidAuthority`, and a packet
+another plugin schedules on the ingress settles nothing. A revision marks no
+report grant dirty.
+
+A retired authority's later lease or external participant request is
+refused as one that never had a partition (`invalid_authority`), and so is an
+`Acquire` queued before the revision that settles after it. A coordinating
+plugin's own acquisition does not hold the resource partition until it asks
+for its resource participant, so retire an authority only once no plugin
+still coordinates its work.
+
+A retirement refused `invalid_lifecycle` succeeds once the authority's
+lease or participant has finished and its report has published, so send it
+again then. Send additions in a revision of their own when one busy key
+should not hold them back. Lowering `total_completion_units` can make the
+later grant of an acquisition that is requested but not yet granted fail
+`limit_exceeded`.
 
 ### Single-step lease
 
@@ -799,8 +892,9 @@ The root persists in parts. Its live root, the domain record
 reservations and allocation legs, active transfers, leases, report grants, and
 observation heads. It does not hold the hot terminal records, the root's
 archive candidates, which it counts in a `ResourceHotTerminalLedgerV1`, nor the
-accounts, access grants, definitions, unit revisions, and custodian indexes,
-which it counts and totals in a `ResourceLiveLedgerV1`. Each hot terminal
+accounts, access grants, definitions, unit revisions, custodian indexes, and
+run budget partitions with their admission epochs, which it counts and totals
+in a `ResourceLiveLedgerV1`. Each hot terminal
 record lies in a bucket record `resource:hot-terminal:{bucket}`
 (`ResourceHotTerminalBucketV1`), chosen by a hash of its identity
 (`resource_hot_terminal_bucket`) among the candidate budget divided by two,
@@ -841,8 +935,8 @@ nothing of the root. `resource_state` reads the whole root, every bucket
 included. A boundary system or command handler of another plugin reads it
 with `resource_root_in_view` or `ResourceRootReader`, which attach the hot
 terminal records it names with their closures, accounts included;
-`ResourceRootReader::attach_live` attaches accounts, grants, definitions, and
-units by identity, and `attach_custodian_accounts` every account of one
+`ResourceRootReader::attach_live` attaches accounts, grants, definitions,
+units, and run budget partitions by identity, and `attach_custodian_accounts` every account of one
 holder through its index. A holder's index is one entry that lists every
 account it holds, so a holder with many accounts rewrites a large entry when
 it gains one (some 250 KB for 10,000 accounts). It declares the read of

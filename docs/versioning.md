@@ -157,6 +157,195 @@ Known limits:
 - Outbox delivery identities and retained-evidence reads of the released
   boundaries are gone for good; there is no segment to read them from.
 
+**G-120: run budget partitions in live buckets, and the host revises the
+run budget** (`canwu-resource`, with `canwu-production` and the economy and
+force-supply reference integrations). The design is
+`docs/proposals/resource-live-root-split.md`; this entry, the rustdoc of the
+new items, and the `canwu-resource` README ("Run budget partitions",
+"Revising the run budget") are the contract.
+
+What changed:
+
+- **Each partition is a live record.** A run budget partition
+  (`CompletionCapacityPartitionV1`, one per authority and operation
+  namespace, identified by the new `CompletionPartitionKeyV1`) persists with
+  its admission epoch as one entry of a live bucket `resource:live:{n}`:
+  key `ResourceLiveRecordKeyV1::Partition`, payload
+  `ResourceLivePayloadV1::Partition(ResourceRunBudgetPartitionEntryV1)`. The
+  live root keeps the budget's header (revision, totals, shared slots,
+  digest), and `ResourceLiveLedgerV1` counts the partitions and admission
+  epochs not attached and totals their reserved pending slots and
+  guaranteed units. A lease admission (`Acquire`, `SingleStepLease`) reads
+  and writes only its own partition, and an external participant grant
+  reads only its own, so a lease writes the live root and one live bucket
+  whatever the number of authorities; before 0.26.0 the live root held every
+  partition and epoch, and its bytes grew with the number of authorities.
+  The resource plugin attaches the partitions a packet names
+  (`ResourceOperationRequestV1::partition_keys`, and the completion and
+  revision packets) before it settles it; a boundary that would read a
+  partition it attached neither as present nor as absent fails with
+  `invalid_boundary` before it writes, in release builds too.
+- **The canonical live bucket count doubles,** from 16,384 to 32,768, since
+  the canonical limits now place up to 1,024 partitions in live buckets
+  beside the accounts, grants, definitions, units, and custodian indexes.
+- **Partial and whole states.** A whole state (`resource_state`,
+  `ResourceRootReader::attach_all`, `from_records`) holds every partition in
+  `run_budget.partitions` and every epoch in `completion_leases.epochs`, as
+  before. A partial state holds only the attached ones there; the new
+  `ResourceState::partition`, `holds_partition`, `admission_epoch`, and
+  `partition_count` answer for the whole root and return an error for a
+  partition that was never attached. In every state the epochs name only
+  partitions the state holds.
+- **The host revises the run budget.**
+  `enqueue_resource_run_budget_revision` queues
+  `ResourceOperationRequestV1::ReviseRunBudget(ResourceReviseRunBudgetRequestV1)`
+  on the new host-only ingress `RESOURCE_RUN_BUDGET_REVISION_INGRESS`
+  (`resource_run_budget_revision_v1`). It names the expected budget
+  revision, the totals after the revision, the keys to retire (at most
+  `MAX_RUN_BUDGET_REVISION_CHANGES`, 256, retired and added together), the
+  partitions to add in ascending key order, and current evidence of an
+  adapter evidence kind. It settles all or nothing: retired keys leave with
+  their epochs, added partitions enter with none, the totals change, the
+  budget revision advances by one, and the digest is recomputed; it leaves
+  one `ReviseRunBudget` outcome (`ResourceOperationKind::ReviseRunBudget`)
+  that keeps the evidence, with the number of keys as its quantity, and marks
+  no report grant dirty. A key in use is not retired (`invalid_lifecycle`): an
+  acquisition of that authority and namespace in the lease book, an external
+  participant grant of it that is held, prepared, or consumed, or a
+  completion report reservation of one of its acquisitions or participants.
+  The other refusals: `version_conflict` (stale revision or evidence),
+  `limit_exceeded` (too many keys, an added partition outside its V1 bounds,
+  a total of 0, more than 1,024 shared slots, or after the change more than
+  1,024 pending slots or partitions, guarantees above the total, or a total
+  below the units the lease book or the external participant book holds,
+  each on its own), `invalid_definition` (nothing to change, or `add` out of
+  order), `not_found` (a retired key the budget lacks), and `idempotency_conflict`
+  (an added key the budget holds and the request does not retire). A tracked
+  command or adapter packet that carries the operation is refused
+  (`InvalidAuthority`), and a packet another plugin schedules on the ingress
+  settles nothing. `enqueue_resource_run_budget_revision` refuses
+  (`InvalidPayload`) a request with more than 256 keys or an `add` out of
+  key order before it is queued. Grants admitted under an earlier budget
+  revision stay valid.
+- **The budget digest covers the header only.** `RunBudgetRevisionV1`'s
+  `semantic_digest` is now the BLAKE3 of the domain
+  `canwu.resource.run-budget.v2` over the revision, the totals, and the
+  shared slots, so a partial state checks it; partitions are checked one by
+  one. `RunBudgetRevisionV1::validate` now requires the partitions in
+  strictly ascending key order (`seal` and `install_run_budget` sort them)
+  and an operation namespace of at most
+  `MAX_COMPLETION_OPERATION_NAMESPACE_BYTES` (160) bytes; a budget holds at
+  most `MAX_RUN_BUDGET_PARTITIONS` (1,024) partitions.
+- **`install_run_budget`** refuses a partial state, and drops the epochs of
+  partitions the new budget does not hold.
+- **Live root decoding.** `decode_live_root` and `into_record` refuse a root
+  that holds partitions or epochs inline; `into_records` places them in
+  their buckets.
+- **Production archives across a revision.** The production archive no
+  longer requires a resource participant grant's run budget revision to
+  equal production's own grant's: a project completed after a revision
+  archives. Production's own run budget (`production_run_budget`) now
+  validates under the 0.26.0 rules too: the header-only digest, partitions
+  in ascending key order, and the 160-byte namespace bound. Its semantic
+  hash line names the archive rule only; the hash covers both.
+
+Formats and hashes that change:
+
+| Item | 0.25.0 | 0.26.0 | What changed |
+| --- | --- | --- | --- |
+| `RESOURCE_STATE_FORMAT_VERSION` | 7 | 8 | the live root holds the run budget header only; partitions and epochs are counted in its live ledger; the new operation and outcome kind `ReviseRunBudget` |
+| `RESOURCE_LIVE_BUCKET_FORMAT_VERSION` | 2 | 3 | the new entry kind `Partition` (`ResourceRunBudgetPartitionEntryV1`); the ledger's four new counts |
+| `RESOURCE_HOT_TERMINAL_BUCKET_FORMAT_VERSION` | 2 | 2 | unchanged |
+| Run budget digest domain | `canwu.resource.run-budget.v1` (header and every partition) | `canwu.resource.run-budget.v2` (header only) | a partial state checks the digest |
+| Canonical live bucket count | 16,384 | 32,768 | room for 1,024 partitions |
+| `RESOURCE_SEMANTIC_HASH` | `a5286b07…c018` | `94e4ce5a…ebb2` | BLAKE3 of `canwu-resource plugin semantic hash 0.26.0: run budget partitions in live buckets, host run budget revision`; the descriptor gains the ingress `resource_run_budget_revision_v1` |
+| `PRODUCTION_SEMANTIC_HASH` | `c9cdf797…7afc` | `2d49d7b5…30d0` | BLAKE3 of `canwu-production 0.26.0 semantics: a resource participant grant may be of an earlier run budget revision than production's own grant`; the hash also covers production's own run budget validating under the 0.26.0 rules (header digest, key order, namespace bound) |
+| `canwu-economy-reference` semantic hash | `acba44da…0c7b` | `03636779…420a` | BLAKE3 of `canwu-economy-reference 0.26.0 semantics: run budget partitions in ascending key order, run budget digest of its header` |
+| `canwu-force-supply-reference` semantic hash | `41e410db…f18e` | `2130b3d4…6548` | BLAKE3 of `canwu-force-supply-reference 0.26.0 semantics: run budget partitions in ascending key order, run budget digest of its header` |
+
+Every checkpoint hash of a run that registers the resource plugin changes.
+The source-incompatible changes are the new variants
+`ResourceOperationRequestV1::ReviseRunBudget`,
+`ResourceOperationKind::ReviseRunBudget`,
+`ResourceLiveRecordKeyV1::Partition`, and `ResourceLivePayloadV1::Partition`,
+which break an exhaustive match; the new public fields of
+`ResourceLiveLedgerV1` (`partitions`, `admission_epochs`,
+`partition_reserved_pending_slots`, `partition_guaranteed_units`), which
+break a struct literal; a crate-private field of `ResourceState` (the
+partition probes a partial state keeps), so a `ResourceState` can no longer
+be built with a struct literal or destructured exhaustively outside
+`canwu-resource`; and, in behaviour, that a partial reader no longer
+sees every partition and epoch in `run_budget.partitions` and
+`completion_leases.epochs`, that a budget whose partitions are out of key
+order no longer validates unsealed, and that a live root with partitions
+inline no longer decodes.
+
+Upgrading from 0.25.0, for hosts and plugin authors:
+
+- **Pin `=0.26.0`** for `canwu-api` and every extension. There is no
+  migration: nothing written by 0.25.0 loads.
+- **Matches and literals.** Add arms for the new variants, and the four new
+  counts to `ResourceLiveLedgerV1` literals (or build them with `default()`
+  and the persistence helpers). Build a `ResourceState` with
+  `ResourceState::empty` and the `install_*` methods, `from_records`, or a
+  reader, not a struct literal.
+- **Detached operations.** `ResourceState::apply_operation` on a partial
+  state reads a partition it did not attach as absent, so a lease of its
+  authority is refused `invalid_authority`; apply operations to a whole
+  state, or attach every partition the operation names first.
+- **Reading partitions.** A reader of a partial root (`resource_root_in_view`,
+  `ResourceRootReader` with named records) that read
+  `run_budget.partitions` or `completion_leases.epochs` reads
+  `ResourceState::partition`, `holds_partition`, `admission_epoch`, or
+  `partition_count` instead, and attaches the partitions it needs with
+  `attach_live([ResourceLiveRecordKeyV1::Partition(key)])`. A whole-root
+  reader needs no change.
+- **Authored budgets.** Build a budget with `RunBudgetRevisionV1::seal` or
+  install it with `install_run_budget`, which sort the partitions; keep each
+  operation namespace within 160 bytes. Install the budget before
+  `into_records`, as before; `into_record` refuses a root with partitions.
+- **Revising.** Revise a running root's budget only through
+  `enqueue_resource_run_budget_revision`, citing a record kind passed to
+  `ResourcePlugin::new`. A retirement refused `invalid_lifecycle` succeeds
+  once the authority's lease or participant has finished and its report
+  has published: send it again then. Send additions in a revision of their
+  own when one busy key should not hold them back. Lowering
+  `total_completion_units` can make the later grant of an acquisition that
+  is requested but not yet granted fail `limit_exceeded`. Order the revision after the coordinating plugin
+  has finished an authority's work: a coordinator's own acquisition holds
+  nothing in the resource book until it asks for its resource participant,
+  so a revision can retire the partition beneath it, and that participant
+  request is then refused (`invalid_authority`), as is an `Acquire` queued
+  before the revision that settles after it.
+- **A re-added key starts afresh.** A key retired and added again gets a
+  fresh admission epoch, so its token bucket refills and its backward-time
+  guard restarts.
+- **Saves.** Write fresh saves with 0.26.0.
+
+Known limits carried by this change:
+
+- External participant grants that end without completing (released,
+  expired, or rejected) are never pruned: they stay in the live root for the
+  run and count against the 1,024-grant bound, so a long run eventually
+  refuses new external participants. They no longer hold their partition in
+  use. This predates 0.26.0 and is not fixed here.
+- The rest of the live root (open demands, transfers, leases in flight,
+  report grants, observation heads, external participants) is still decoded
+  whole and copied per operation; it no longer grows with the number of
+  partitions.
+- A budget holds at most 1,024 partitions, as before; a host with more
+  authorities shares partitions among them or revises the budget as
+  authorities come and go.
+- Partition and epoch persistence is one entry per key: a key's partition
+  and epoch are written together whenever either changes.
+- The canonical live bucket count doubles for every root at canonical
+  limits, with or without partitions: the 1,024 partitions are under 2 % of
+  the canonical live record budget, but adding them crosses the power of
+  two. Live buckets are about half as full on average, so a root with many
+  accounts stores somewhat more bucket records, and a pooled demand's
+  allocation pass, which reads every account, lists and reads more
+  buckets.
+
 Version 0.25.0 is a pre-1.0 minor release. Its change comes from one
 package: settled fiscal executions leave the hot book (`canwu-fiscal`, with
 the `canwu-ming-fiscal-reference` adapter: downstream gap G-118). It has no

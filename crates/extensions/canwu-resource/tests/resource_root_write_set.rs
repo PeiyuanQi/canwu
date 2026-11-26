@@ -16,7 +16,8 @@
 //! splits that closure, settles operations that read the remaining part, and
 //! seals in between: a sealed run, an unsealed fork, a run restored from the
 //! sealed segments, and an exact replay agree, and the archived records are
-//! gone from their buckets.
+//! gone from their buckets. Its run budget has a partition, persisted in a
+//! live bucket, and a lease admitted after the seal writes its epoch there.
 //!
 //! The third tampers with the persisted split: an entry in another bucket, a
 //! ledger that does not count the entries, and an entry that is not in its
@@ -540,6 +541,11 @@ fn the_split_root_agrees_across_a_seal_a_fork_a_restore_and_an_exact_replay() {
     limits.max_archive_candidates = 64;
     limits.max_archive_maintenance_receipts = 64;
     let mut state = world(limits);
+    // A partitioned run budget: its partition persists in a live bucket,
+    // and the lease each run admits below writes it.
+    state
+        .install_run_budget(seal_budget())
+        .expect("install budget");
     for index in 0..12 {
         reject(&mut state, "opening", index);
     }
@@ -613,6 +619,12 @@ fn the_split_root_agrees_across_a_seal_a_fork_a_restore_and_an_exact_replay() {
             .expect("tracked command");
         run.enqueue_command(at, 0, open_account(2, revision + 1, at))
             .expect("tracked command");
+        enqueue_resource_completion_operation(
+            run,
+            at,
+            &ResourceCompletionOperationV1::Acquire(seal_lease(at)),
+        )
+        .expect("completion ingress");
         for _ in 0..2 {
             run.settle_boundary(BoundaryRequest::at(at))
                 .expect("boundary");
@@ -655,9 +667,23 @@ fn the_split_root_agrees_across_a_seal_a_fork_a_restore_and_an_exact_replay() {
         "the commit leaves the first demand hot"
     );
     // The opening candidates, less the fifteen archived, plus the commit's
-    // receipt and the outcomes of five operations: two passes before the
-    // commit, one after it, the cancellation, and the new account.
-    assert_eq!(root.hot_terminal_records(), opening_candidates - 15 + 1 + 5);
+    // receipt, the outcomes of six operations (two passes before the
+    // commit, one after it, the cancellation, the new account, and the
+    // lease acquisition), and the acquisition's lease receipt.
+    assert_eq!(
+        root.hot_terminal_records(),
+        opening_candidates - 15 + 1 + 6 + 1
+    );
+    // The acquisition admitted under the partition, whose admission epoch
+    // the restored and replayed runs read from its live bucket.
+    let lease_key = CompletionPartitionKeyV1::new(holder(), SEAL_NAMESPACE);
+    assert!(
+        root.completion_leases
+            .acquisitions
+            .contains_key(&seal_lease(SimTime::EPOCH).id)
+    );
+    assert!(root.admission_epoch(&lease_key).expect("whole").is_some());
+    assert_eq!(root.partition_count(), 1);
     let buckets = resource_hot_terminal_bucket_count(&limits);
     for key in &archived {
         let bucket = replayed
@@ -683,6 +709,61 @@ fn the_split_root_agrees_across_a_seal_a_fork_a_restore_and_an_exact_replay() {
         "the hot terminal demand was read from its bucket, not missed"
     );
     assert!(root.accounts.contains_key(&account("opened")));
+}
+
+const SEAL_NAMESPACE: &str = "fixture.resource";
+
+/// A run budget with one partition, the custodian's.
+fn seal_budget() -> RunBudgetRevisionV1 {
+    RunBudgetRevisionV1 {
+        revision: ResourceRevision::INITIAL,
+        total_completion_units: 1_000_000,
+        shared_pending_slots: 4,
+        partitions: vec![CompletionCapacityPartitionV1 {
+            authority: holder(),
+            operation_namespace: SEAL_NAMESPACE.to_owned(),
+            guaranteed_units: 400_000,
+            reserved_pending_slots: 8,
+            maximum_burst_units: 100_000,
+            request_token_capacity: 16,
+            request_token_refill_minutes: 1,
+            reacquire_cooldown_minutes: 1,
+            root_acquisition_cap_per_sim_time: 4,
+            guaranteed_max_wait_boundaries: 4,
+        }],
+        semantic_digest: String::new(),
+    }
+    .seal()
+    .expect("budget")
+}
+
+/// The custodian's lease acquisition at `at`, which admits under its
+/// partition and leaves the acquisition requested.
+fn seal_lease(at: SimTime) -> RequestCompletionLeaseV1 {
+    RequestCompletionLeaseV1 {
+        id: CompletionLeaseAcquisitionId::new("fixture:lease:seal").expect("acquisition"),
+        operation_key: key("fixture:operation:seal"),
+        holder: holder(),
+        operation_namespace: SEAL_NAMESPACE.to_owned(),
+        eligibility_time: at,
+        eligibility_envelope: EligibilityEnvelopeV1::new(
+            Vec::new(),
+            BTreeMap::new(),
+            BTreeSet::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("envelope"),
+        recipe: CompletionCapacityRecipeV1 {
+            receipts: MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE,
+            mutations: 1,
+            reports_per_holder: 0,
+            holders: 0,
+            bytes: 1_024,
+        },
+        expected_participants: BTreeSet::from([PLUGIN_NAME.to_owned()]),
+        policy_class: CompletionPolicyClassV1::Guaranteed,
+    }
 }
 
 /// Seals a compacted fork of `canwu`. Neither the live root nor a bucket
