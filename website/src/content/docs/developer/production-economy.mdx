@@ -308,7 +308,7 @@ enqueue_resource_account_capacity(
 
 ## 修订运行预算
 
-运行预算（`RunBudgetRevisionV1`）为完成租约定下全局总量（`total_completion_units`、`shared_pending_slots`），并为每个权限主体和操作命名空间各设一个[运行预算分区](/reference/terminology/)（`CompletionCapacityPartitionV1`，以 `CompletionPartitionKeyV1` 标识），分区按键严格升序排列。上层应用在运行开始前用 `install_run_budget` 安装预算；一旦租约账簿里有申请或外部授权，它就拒绝。政权更替、官署新设或裁撤时，上层应用通过[运行预算修订](/reference/terminology/)修订正在运行的根的预算：
+运行预算（`RunBudgetRevisionV1`）为完成租约定下全局总量（`total_completion_units`、`shared_pending_slots`），并为每个权限主体和操作命名空间各设一个[运行预算分区](/reference/terminology/)（`CompletionCapacityPartitionV1`，以 `CompletionPartitionKeyV1` 标识），分区按键严格升序排列。上层应用在运行开始前用 `install_run_budget` 安装预算；一旦租约账簿里有申请，或运行中有外部参与方授权，它就拒绝。政权更替、官署新设或裁撤时，上层应用通过[运行预算修订](/reference/terminology/)修订正在运行的根的预算：
 
 ```rust
 enqueue_resource_run_budget_revision(
@@ -328,13 +328,13 @@ enqueue_resource_run_budget_revision(
 
 - **只有上层应用可以发送。** 带请求标识的命令或适配器数据包如果携带 `ReviseRunBudget`，会被拒绝。
 - **证据。** 与更改账户容量相同：证据必须是某条记录的当前版本，记录种类必须是传给 `ResourcePlugin::new` 的种类之一。
-- **要么全部生效，要么全不生效。** 停用的键连同它的准入时段一起离开；新增的分区没有准入时段（停用后再新增的键从新的时段开始，它的时间回退检查也重新开始）；总量随之改变，预算修订号前进一，摘要重新计算。按较早修订号准入的授权仍然有效。
-- **使用中的分区不能停用。** 租约账簿里有该权限主体和命名空间的申请、它有处于持有、已准备或已消耗状态的外部参与方授权，或者有为它的申请或参与方预留的完成报告时，停用记为 `invalid_lifecycle` 拒绝。协调方插件自己的申请在它为资源参与方提出请求之前并不占用资源分区，所以要等不再有插件协调某个权限主体的工作时再停用它。
-- **拒绝**都会记录在案，预算保持原样：预算修订号已过时记为 `version_conflict`；超过 256 个键、新增的分区超出 V1 的界限、总量为 0、共享名额超过 1,024，或修订后待处理名额或分区超过 1,024 个、保证量超过总量、总量低于租约账簿或外部参与方账簿各自持有的数量，记为 `limit_exceeded`；没有任何改动或 `add` 未按键排序，记为 `invalid_definition`；停用的键不在预算中记为 `not_found`；新增的键已在预算中且没有同时停用，记为 `idempotency_conflict`。
-- **排入时就拒绝。** `enqueue_resource_run_budget_revision` 本身会拒绝（`InvalidPayload`）超过 256 个键、`add` 未按键排序或重复同一个键的请求，不会排入。
-- **停用被拒绝之后**：等这个权限主体的租约或参与方结束、报告发布之后再发一次。不想让一个忙碌的键拖住新增的分区时，把新增单独放在一次修订里。调低 `total_completion_units` 可能让已申请、尚未授权的申请在之后授权时记为 `limit_exceeded`。
+- **要么全部生效，要么全不生效。** 停用的键连同它的准入时段（该分区的请求额度、冷却时间和最近一次准入时间）一起离开；新增的分区没有准入时段（停用后再新增的键从新的时段开始，它的时间回退检查也重新开始）；总量随之改变，预算修订号加一，摘要重新计算。按较早修订号准入的授权仍然有效。
+- **使用中的分区不能停用。** 租约账簿里有该权限主体和命名空间的申请、该分区有处于持有、已准备或已消耗状态的外部参与方授权，或者有为它的申请或参与方预留的完成报告时，停用记为 `invalid_lifecycle` 拒绝。协调方插件自己的申请在它为资源参与方提出请求之前并不占用资源分区，所以要等不再有插件协调某个权限主体的工作时再停用它。
+- **拒绝**都会记录在案，预算保持原样：预算修订号已过时或证据不再是当前版本，记为 `version_conflict`；证据的记录种类不是传给 `ResourcePlugin::new` 的种类之一，记为 `invalid_authority`；停用和新增合计超过 256 个键、新增的分区超出 V1 的界限、总量为 0、共享名额超过 1,024，或修订后待处理名额或分区超过 1,024 个、保证量超过总量、总量低于租约账簿或外部参与方账簿各自持有的数量，记为 `limit_exceeded`；没有任何改动或 `add` 未按键排序，记为 `invalid_definition`；停用的键不在预算中记为 `not_found`；新增的键已在预算中且没有同时停用，记为 `idempotency_conflict`。
+- **排入时就拒绝。** `enqueue_resource_run_budget_revision` 本身会拒绝（`InvalidPayload`）超过 256 个键、`add` 未按键排序或重复同一个键的请求，也会拒绝（`EvidenceUnavailable`）不是当前版本的证据，这样的请求不会排入。
+- **停用被拒绝之后**：等这个权限主体的租约或参与方结束、报告发布之后再发一次。不想让一个忙碌的键拖住新增的分区时，把新增单独放在一次修订里。调低 `total_completion_units` 可能让已提出但尚未授权的申请在之后授权时记为 `limit_exceeded`。
 
-这个操作不需要完成租约，留下一条保留证据的 `ReviseRunBudget` 操作结果，数量为停用和新增的键数，不会让任何报告授权变脏。已停用的权限主体之后的租约或外部参与方申请会被当作从没有分区的申请，记为 `invalid_authority` 拒绝；修订之前排入、修订之后才结算的 `Acquire` 也是如此。
+这个操作不需要完成租约，留下一条保留证据的 `ReviseRunBudget` 操作结果，数量为停用和新增的键数，也不会触发任何持有人报告。已停用的权限主体之后的租约或外部参与方申请会被当作从没有分区的申请，记为 `invalid_authority` 拒绝；修订之前排入、修订之后才结算的 `Acquire` 也是如此。
 
 自 0.26.0 起，每个分区连同它的准入时段作为一条活动记录（`ResourceLiveRecordKeyV1::Partition`）存放在活动桶中，所以一次租约准入只写活动根和一个活动桶，与权限主体数无关。部分读取的状态在 `run_budget.partitions` 和 `completion_leases.epochs` 中只有挂载了的分区，所以请用 `ResourceState::partition`、`holds_partition`、`admission_epoch` 和 `partition_count` 读取分区；上层应用用 `ResourceRootReader::attach_live` 挂载 `ResourceLiveRecordKeyV1::Partition(key)` 来读一个权限主体的分区。
 
@@ -377,6 +377,6 @@ enqueue_resource_run_budget_revision(
 
 ## 版本与存档
 
-请从同一发布线精确固定 `canwu-api`、`canwu-resource`、`canwu-production` 的版本和插件语义哈希。加载时恢复存档中的参伍快照，并按你传入的插件重新验证扩展记录。0.24.0 的资源状态格式为 7、两类资源桶的格式为 2；在完成租约进行中写出的接续检查点或封存可以加载。另见[存档兼容性](/developer/persistence/#版本与存档兼容)。
+请从同一发布线精确固定 `canwu-api`、`canwu-resource`、`canwu-production` 的版本和插件语义哈希。加载时恢复存档中的参伍快照，并按你传入的插件重新验证扩展记录。0.26.0 的资源状态格式为 8，常驻终态桶的格式为 2，活动桶的格式为 3；在完成租约进行中写出的接续检查点或封存可以加载。另见[存档兼容性](/developer/persistence/#版本与存档兼容)。
 
 继续阅读[粮食、生产与军事补给案例](/tutorials/cases/production-economy/)与[机制决议](/proposals/production-economy-mechanism/)。

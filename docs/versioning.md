@@ -8,7 +8,7 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.25.0`. A live `SimulationSnapshot` has:
+The workspace version is `0.26.0`. A live `SimulationSnapshot` has:
 
 - snapshot format `9`;
 - commitment format `9`;
@@ -26,7 +26,15 @@ Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
 
-**Unreleased / 0.26.0.**
+Version 0.26.0 is a pre-1.0 minor release. Its changes come from two
+packages, each described below under its own lead: the evidence release
+without a segment (`canwu-sim`, `canwu-api`: downstream gap G-119), which
+changes no persisted format or semantic hash, and run budget partitions in
+live buckets with a host revision of the run budget (`canwu-resource`, with
+`canwu-production` and two reference integrations: downstream gap G-120),
+which changes the resource state and live bucket formats and four plugin
+semantic hashes. Both are source-incompatible, so pin `=0.26.0` and write
+fresh saves; nothing written by 0.25.0 loads.
 
 **Evidence release without a segment (`canwu-sim`, `canwu-api`: downstream
 gap G-119).** It has no proposal of its own: this entry and the rustdoc of
@@ -157,9 +165,9 @@ Known limits:
 - Outbox delivery identities and retained-evidence reads of the released
   boundaries are gone for good; there is no segment to read them from.
 
-**G-120: run budget partitions in live buckets, and the host revises the
-run budget** (`canwu-resource`, with `canwu-production` and the economy and
-force-supply reference integrations). The design is
+**Run budget partitions in live buckets, and the host revises the run
+budget (`canwu-resource`, with `canwu-production` and the economy and
+force-supply reference integrations: downstream gap G-120).** The design is
 `docs/proposals/resource-live-root-split.md`; this entry, the rustdoc of the
 new items, and the `canwu-resource` README ("Run budget partitions",
 "Revising the run budget") are the contract.
